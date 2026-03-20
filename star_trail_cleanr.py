@@ -16,6 +16,14 @@ import glob
 import time
 import subprocess
 
+# Windows frozen app has no console: sys.stdout/stderr are None.
+# uvicorn crashes calling sys.stdout.isatty() — redirect to devnull.
+if sys.platform == 'win32' and getattr(sys, 'frozen', False):
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, 'w')
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, 'w')
+
 if getattr(sys, 'frozen', False):
     _base = sys._MEIPASS
 else:
