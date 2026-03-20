@@ -1,6 +1,14 @@
 import sys
 import os
 
+# Windows frozen app (--windowed) has no console: sys.stdout/stderr are None.
+# Must fix before anything else — both the GUI and worker subprocess need this.
+if sys.platform == 'win32' and getattr(sys, 'frozen', False):
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, 'w')
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, 'w')
+
 # Worker mode: when the frozen app is re-invoked as a subprocess to run the algorithm.
 # sys.executable in a frozen app is the app binary, not a Python interpreter —
 # so we re-invoke ourselves with this flag and run the algorithm script instead of the GUI.
@@ -15,14 +23,6 @@ import gradio as gr
 import glob
 import time
 import subprocess
-
-# Windows frozen app has no console: sys.stdout/stderr are None.
-# uvicorn crashes calling sys.stdout.isatty() — redirect to devnull.
-if sys.platform == 'win32' and getattr(sys, 'frozen', False):
-    if sys.stdout is None:
-        sys.stdout = open(os.devnull, 'w')
-    if sys.stderr is None:
-        sys.stderr = open(os.devnull, 'w')
 
 if getattr(sys, 'frozen', False):
     _base = sys._MEIPASS
