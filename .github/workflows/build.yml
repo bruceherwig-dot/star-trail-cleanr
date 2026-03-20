@@ -6,73 +6,47 @@ on:
       - 'v*'
 
 jobs:
-  build-mac-arm:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: Install dependencies
-        run: pip install gradio pyinstaller
-      - name: Build (Apple Silicon)
-        run: |
-          pyinstaller --onedir --windowed star_trail_cleanr.py \
-            --add-data "astro_clean_v4.py:." \
-            --add-data "$(python -c 'import gradio; import os; print(os.path.dirname(gradio.__file__))'):gradio" \
-            --add-data "$(python -c 'import gradio_client; import os; print(os.path.dirname(gradio_client.__file__))'):gradio_client" \
-            --name "StarTrailCleanR"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: mac-arm
-          path: dist/StarTrailCleanR.app
-
-  build-mac-intel:
-    runs-on: macos-13
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: Install dependencies
-        run: pip install gradio pyinstaller
-      - name: Build (Intel)
-        run: |
-          pyinstaller --onedir --windowed star_trail_cleanr.py \
-            --add-data "astro_clean_v4.py:." \
-            --add-data "$(python -c 'import gradio; import os; print(os.path.dirname(gradio.__file__))'):gradio" \
-            --add-data "$(python -c 'import gradio_client; import os; print(os.path.dirname(gradio_client.__file__))'):gradio_client" \
-            --name "StarTrailCleanR"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: mac-intel
-          path: dist/StarTrailCleanR.app
-
   merge-mac:
-    needs: [build-mac-arm, build-mac-intel]
     runs-on: macos-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          name: mac-arm
-          path: arm/StarTrailCleanR.app
-      - uses: actions/download-artifact@v4
-        with:
-          name: mac-intel
-          path: intel/StarTrailCleanR.app
-      - name: Merge into Universal Binary
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install gradio pyinstaller
+      - name: Build Apple Silicon
         run: |
-          cp -R arm/StarTrailCleanR.app universal/StarTrailCleanR.app
-          find intel/StarTrailCleanR.app/Contents/MacOS -type f | while read f; do
-            rel="${f#intel/StarTrailCleanR.app/}"
-            arm_f="arm/StarTrailCleanR.app/$rel"
-            out_f="universal/StarTrailCleanR.app/$rel"
-            if file "$f" | grep -q "Mach-O"; then
+          pyinstaller --onedir --windowed star_trail_cleanr.py \
+            --add-data "astro_clean_v4.py:." \
+            --add-data "$(python -c 'import gradio; import os; print(os.path.dirname(gradio.__file__))'):gradio" \
+            --add-data "$(python -c 'import gradio_client; import os; print(os.path.dirname(gradio_client.__file__))'):gradio_client" \
+            --target-arch arm64 \
+            --name "StarTrailCleanR"
+          cp -R dist/StarTrailCleanR.app dist/StarTrailCleanR-arm64.app
+          rm -rf dist/StarTrailCleanR.app build
+      - name: Build Intel (via Rosetta)
+        run: |
+          pyinstaller --onedir --windowed star_trail_cleanr.py \
+            --add-data "astro_clean_v4.py:." \
+            --add-data "$(python -c 'import gradio; import os; print(os.path.dirname(gradio.__file__))'):gradio" \
+            --add-data "$(python -c 'import gradio_client; import os; print(os.path.dirname(gradio_client.__file__))'):gradio_client" \
+            --target-arch x86_64 \
+            --name "StarTrailCleanR"
+          cp -R dist/StarTrailCleanR.app dist/StarTrailCleanR-x86_64.app
+      - name: Merge Universal Binary
+        run: |
+          cp -R dist/StarTrailCleanR-arm64.app dist/StarTrailCleanR.app
+          find dist/StarTrailCleanR-x86_64.app -type f | while read f; do
+            rel="${f#dist/StarTrailCleanR-x86_64.app/}"
+            arm_f="dist/StarTrailCleanR-arm64.app/$rel"
+            out_f="dist/StarTrailCleanR.app/$rel"
+            if [ -f "$arm_f" ] && file "$f" | grep -q "Mach-O"; then
               lipo -create "$arm_f" "$f" -output "$out_f" 2>/dev/null || true
             fi
           done
       - name: Zip universal app
-        run: cd universal && zip -r ../StarTrailCleanR-Mac-Universal.zip StarTrailCleanR.app
+        run: cd dist && zip -r ../StarTrailCleanR-Mac-Universal.zip StarTrailCleanR.app
       - uses: actions/upload-artifact@v4
         with:
           name: StarTrailCleanR-Mac
