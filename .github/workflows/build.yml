@@ -15,23 +15,30 @@ jobs:
           python-version: '3.11'
       - name: Install dependencies
         run: pip install gradio pyinstaller
+      - name: Install x86_64 Python via Rosetta
+        run: |
+          curl -L "https://www.python.org/ftp/python/3.11.9/python-3.11.9-macos11.pkg" -o /tmp/python-intel.pkg
+          sudo installer -pkg /tmp/python-intel.pkg -target /
+          arch -x86_64 /usr/local/bin/python3.11 -m pip install gradio pyinstaller
       - name: Build Apple Silicon
         run: |
+          GRADIO=$(python -c 'import gradio, os; print(os.path.dirname(gradio.__file__))')
+          GCLIENT=$(python -c 'import gradio_client, os; print(os.path.dirname(gradio_client.__file__))')
           pyinstaller --onedir --windowed star_trail_cleanr.py \
             --add-data "astro_clean_v4.py:." \
-            --add-data "$(python -c 'import gradio; import os; print(os.path.dirname(gradio.__file__))'):gradio" \
-            --add-data "$(python -c 'import gradio_client; import os; print(os.path.dirname(gradio_client.__file__))'):gradio_client" \
-            --target-arch arm64 \
+            --add-data "$GRADIO:gradio" \
+            --add-data "$GCLIENT:gradio_client" \
             --name "StarTrailCleanR"
           cp -R dist/StarTrailCleanR.app dist/StarTrailCleanR-arm64.app
           rm -rf dist/StarTrailCleanR.app build
-      - name: Build Intel (via Rosetta)
+      - name: Build Intel (x86_64 via Rosetta)
         run: |
-          pyinstaller -y --onedir --windowed star_trail_cleanr.py \
+          GRADIO=$(arch -x86_64 /usr/local/bin/python3.11 -c 'import gradio, os; print(os.path.dirname(gradio.__file__))')
+          GCLIENT=$(arch -x86_64 /usr/local/bin/python3.11 -c 'import gradio_client, os; print(os.path.dirname(gradio_client.__file__))')
+          arch -x86_64 /usr/local/bin/python3.11 -m PyInstaller -y --onedir --windowed star_trail_cleanr.py \
             --add-data "astro_clean_v4.py:." \
-            --add-data "$(python -c 'import gradio; import os; print(os.path.dirname(gradio.__file__))'):gradio" \
-            --add-data "$(python -c 'import gradio_client; import os; print(os.path.dirname(gradio_client.__file__))'):gradio_client" \
-            --target-arch x86_64 \
+            --add-data "$GRADIO:gradio" \
+            --add-data "$GCLIENT:gradio_client" \
             --name "StarTrailCleanR"
           cp -R dist/StarTrailCleanR.app dist/StarTrailCleanR-x86_64.app
       - name: Merge Universal Binary
