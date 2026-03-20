@@ -51,6 +51,8 @@ cmd = [
     sys.executable, '-m', 'PyInstaller',
     '--onedir', '--windowed', '--noupx', 'star_trail_cleanr.py',
     '--name', 'StarTrailCleanR',
+    '--collect-all', 'cv2',
+    '--collect-all', 'numpy',
 ]
 for d in add_data:
     cmd += ['--add-data', d]
