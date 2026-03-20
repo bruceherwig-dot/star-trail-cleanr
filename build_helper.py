@@ -49,7 +49,7 @@ for site_dir in site_dirs:
 
 cmd = [
     sys.executable, '-m', 'PyInstaller',
-    '--onedir', '--windowed', 'star_trail_cleanr.py',
+    '--onedir', '--windowed', '--noupx', 'star_trail_cleanr.py',
     '--name', 'StarTrailCleanR',
 ]
 for d in add_data:
