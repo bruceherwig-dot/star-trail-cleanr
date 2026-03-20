@@ -215,4 +215,4 @@ with gr.Blocks(title="Star Trail CleanR", css=css) as demo:
     browse_out_btn.click(fn=pick_folder, inputs=[], outputs=output_input)
     run_btn.click(fn=run_cleaner, inputs=[folder_input, output_input, frame_limit], outputs=[status_out, progress_bar])
 
-demo.launch(inbrowser=True)
+demo.launch(inbrowser=True, server_port=0)
