@@ -1,0 +1,77 @@
+name: Build Mac & Windows
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install gradio pyinstaller
+      - name: Build
+        run: |
+          pyinstaller --onedir --windowed star_trail_cleanr.py \
+            --add-data "astro_clean_v4.py:." \
+            --add-data "$(python -c 'import gradio; import os; print(os.path.dirname(gradio.__file__))'):gradio" \
+            --add-data "$(python -c 'import gradio_client; import os; print(os.path.dirname(gradio_client.__file__))'):gradio_client" \
+            --name "StarTrailCleanR"
+      - name: Zip app
+        run: cd dist && zip -r ../StarTrailCleanR-Mac.zip StarTrailCleanR.app
+      - uses: actions/upload-artifact@v4
+        with:
+          name: StarTrailCleanR-Mac
+          path: StarTrailCleanR-Mac.zip
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install gradio pyinstaller
+      - name: Build
+        run: |
+          $gradio = python -c "import gradio, os; print(os.path.dirname(gradio.__file__))"
+          $gradio_client = python -c "import gradio_client, os; print(os.path.dirname(gradio_client.__file__))"
+          pyinstaller --onedir --windowed star_trail_cleanr.py `
+            --add-data "astro_clean_v4.py;." `
+            --add-data "${gradio};gradio" `
+            --add-data "${gradio_client};gradio_client" `
+            --name "StarTrailCleanR"
+        shell: pwsh
+      - name: Zip app
+        run: Compress-Archive -Path dist\StarTrailCleanR -DestinationPath StarTrailCleanR-Windows.zip
+        shell: pwsh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: StarTrailCleanR-Windows
+          path: StarTrailCleanR-Windows.zip
+
+  release:
+    needs: [build-mac, build-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            StarTrailCleanR-Mac/StarTrailCleanR-Mac.zip
+            StarTrailCleanR-Windows/StarTrailCleanR-Windows.zip
+          body: |
+            ## Star Trail CleanR ${{ github.ref_name }}
+
+            ### Download
+            - **Mac**: StarTrailCleanR-Mac.zip — unzip and run StarTrailCleanR.app (right-click → Open first time)
+            - **Windows**: StarTrailCleanR-Windows.zip — unzip and run StarTrailCleanR.exe
