@@ -27,7 +27,7 @@ jobs:
           rm -rf dist/StarTrailCleanR.app build
       - name: Build Intel (via Rosetta)
         run: |
-          pyinstaller --onedir --windowed star_trail_cleanr.py \
+          pyinstaller -y --onedir --windowed star_trail_cleanr.py \
             --add-data "astro_clean_v4.py:." \
             --add-data "$(python -c 'import gradio; import os; print(os.path.dirname(gradio.__file__))'):gradio" \
             --add-data "$(python -c 'import gradio_client; import os; print(os.path.dirname(gradio_client.__file__))'):gradio_client" \
