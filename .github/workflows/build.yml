@@ -16,16 +16,7 @@ jobs:
       - name: Install dependencies
         run: pip install gradio pyinstaller
       - name: Build (Apple Silicon)
-        run: |
-          GRADIO=$(python -c 'import gradio, os; print(os.path.dirname(gradio.__file__))')
-          GCLIENT=$(python -c 'import gradio_client, os; print(os.path.dirname(gradio_client.__file__))')
-          SAFEHTTPX=$(python -c 'import safehttpx, os; print(os.path.dirname(safehttpx.__file__))')
-          pyinstaller --onedir --windowed star_trail_cleanr.py \
-            --add-data "astro_clean_v4.py:." \
-            --add-data "$GRADIO:gradio" \
-            --add-data "$GCLIENT:gradio_client" \
-            --add-data "$SAFEHTTPX:safehttpx" \
-            --name "StarTrailCleanR"
+        run: python build_helper.py
       - name: Zip app
         run: cd dist && zip -r ../StarTrailCleanR-Mac-AppleSilicon.zip StarTrailCleanR.app
       - uses: actions/upload-artifact@v4
@@ -43,17 +34,7 @@ jobs:
       - name: Install dependencies
         run: pip install gradio pyinstaller
       - name: Build
-        run: |
-          $gradio = python -c "import gradio, os; print(os.path.dirname(gradio.__file__))"
-          $gradio_client = python -c "import gradio_client, os; print(os.path.dirname(gradio_client.__file__))"
-          $safehttpx = python -c "import safehttpx, os; print(os.path.dirname(safehttpx.__file__))"
-          pyinstaller --onedir --windowed star_trail_cleanr.py `
-            --add-data "astro_clean_v4.py;." `
-            --add-data "${gradio};gradio" `
-            --add-data "${gradio_client};gradio_client" `
-            --add-data "${safehttpx};safehttpx" `
-            --name "StarTrailCleanR"
-        shell: pwsh
+        run: python build_helper.py
       - name: Zip app
         run: Compress-Archive -Path dist\StarTrailCleanR -DestinationPath StarTrailCleanR-Windows.zip
         shell: pwsh
