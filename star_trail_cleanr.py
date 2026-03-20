@@ -1,9 +1,20 @@
-import gradio as gr
+import sys
 import os
+
+# Worker mode: when the frozen app is re-invoked as a subprocess to run the algorithm.
+# sys.executable in a frozen app is the app binary, not a Python interpreter —
+# so we re-invoke ourselves with this flag and run the algorithm script instead of the GUI.
+if len(sys.argv) > 1 and sys.argv[1] == '--cleanr-worker':
+    script = sys.argv[2]
+    sys.argv = [script] + sys.argv[3:]
+    import runpy
+    runpy.run_path(script, run_name='__main__')
+    sys.exit(0)
+
+import gradio as gr
 import glob
 import time
 import subprocess
-import sys
 
 if getattr(sys, 'frozen', False):
     _base = sys._MEIPASS
@@ -115,9 +126,14 @@ def run_cleaner(folder, output_folder, frame_limit, progress=gr.Progress()):
         status_lines[-1] = f"Batch {i+1}/{n_batches} — ~{fmt_hms(remaining)} remaining"
         yield "\n".join(status_lines), make_bar(pct, fmt_hms(remaining), frames_done, total)
 
+        if getattr(sys, 'frozen', False):
+            cmd = [sys.executable, '--cleanr-worker', SCRIPT, folder,
+                   "-o", output_folder, "--start", str(start), "--batch", "20"]
+        else:
+            cmd = [sys.executable, SCRIPT, folder,
+                   "-o", output_folder, "--start", str(start), "--batch", "20"]
         proc = subprocess.Popen(
-            [sys.executable, SCRIPT, folder, "-o", output_folder,
-             "--start", str(start), "--batch", "20"],
+            cmd,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, bufsize=1
         )
