@@ -116,7 +116,7 @@ def run_cleaner(folder, output_folder, frame_limit, progress=gr.Progress()):
         yield "\n".join(status_lines), make_bar(pct, fmt_hms(remaining), frames_done, total)
 
         proc = subprocess.Popen(
-            ["python3", SCRIPT, folder, "-o", output_folder,
+            [sys.executable, SCRIPT, folder, "-o", output_folder,
              "--start", str(start), "--batch", "20"],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, bufsize=1
