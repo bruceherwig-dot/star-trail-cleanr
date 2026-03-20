@@ -6,7 +6,7 @@ on:
       - 'v*'
 
 jobs:
-  build-mac:
+  build-mac-arm:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -15,19 +15,68 @@ jobs:
           python-version: '3.11'
       - name: Install dependencies
         run: pip install gradio pyinstaller
-      - name: Build
+      - name: Build (Apple Silicon)
         run: |
           pyinstaller --onedir --windowed star_trail_cleanr.py \
             --add-data "astro_clean_v4.py:." \
             --add-data "$(python -c 'import gradio; import os; print(os.path.dirname(gradio.__file__))'):gradio" \
             --add-data "$(python -c 'import gradio_client; import os; print(os.path.dirname(gradio_client.__file__))'):gradio_client" \
             --name "StarTrailCleanR"
-      - name: Zip app
-        run: cd dist && zip -r ../StarTrailCleanR-Mac.zip StarTrailCleanR.app
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac-arm
+          path: dist/StarTrailCleanR.app
+
+  build-mac-intel:
+    runs-on: macos-13
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install gradio pyinstaller
+      - name: Build (Intel)
+        run: |
+          pyinstaller --onedir --windowed star_trail_cleanr.py \
+            --add-data "astro_clean_v4.py:." \
+            --add-data "$(python -c 'import gradio; import os; print(os.path.dirname(gradio.__file__))'):gradio" \
+            --add-data "$(python -c 'import gradio_client; import os; print(os.path.dirname(gradio_client.__file__))'):gradio_client" \
+            --name "StarTrailCleanR"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac-intel
+          path: dist/StarTrailCleanR.app
+
+  merge-mac:
+    needs: [build-mac-arm, build-mac-intel]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: mac-arm
+          path: arm/StarTrailCleanR.app
+      - uses: actions/download-artifact@v4
+        with:
+          name: mac-intel
+          path: intel/StarTrailCleanR.app
+      - name: Merge into Universal Binary
+        run: |
+          cp -R arm/StarTrailCleanR.app universal/StarTrailCleanR.app
+          find intel/StarTrailCleanR.app/Contents/MacOS -type f | while read f; do
+            rel="${f#intel/StarTrailCleanR.app/}"
+            arm_f="arm/StarTrailCleanR.app/$rel"
+            out_f="universal/StarTrailCleanR.app/$rel"
+            if file "$f" | grep -q "Mach-O"; then
+              lipo -create "$arm_f" "$f" -output "$out_f" 2>/dev/null || true
+            fi
+          done
+      - name: Zip universal app
+        run: cd universal && zip -r ../StarTrailCleanR-Mac-Universal.zip StarTrailCleanR.app
       - uses: actions/upload-artifact@v4
         with:
           name: StarTrailCleanR-Mac
-          path: StarTrailCleanR-Mac.zip
+          path: StarTrailCleanR-Mac-Universal.zip
 
   build-windows:
     runs-on: windows-latest
@@ -57,7 +106,7 @@ jobs:
           path: StarTrailCleanR-Windows.zip
 
   release:
-    needs: [build-mac, build-windows]
+    needs: [merge-mac, build-windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -67,11 +116,11 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            StarTrailCleanR-Mac/StarTrailCleanR-Mac.zip
+            StarTrailCleanR-Mac/StarTrailCleanR-Mac-Universal.zip
             StarTrailCleanR-Windows/StarTrailCleanR-Windows.zip
           body: |
             ## Star Trail CleanR ${{ github.ref_name }}
 
             ### Download
-            - **Mac**: StarTrailCleanR-Mac.zip — unzip and run StarTrailCleanR.app (right-click → Open first time)
+            - **Mac**: StarTrailCleanR-Mac-Universal.zip — works on both Apple Silicon and Intel Macs. Unzip and run StarTrailCleanR.app (right-click → Open first time)
             - **Windows**: StarTrailCleanR-Windows.zip — unzip and run StarTrailCleanR.exe
