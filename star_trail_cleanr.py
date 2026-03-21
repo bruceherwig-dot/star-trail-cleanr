@@ -94,9 +94,11 @@ def run_cleaner(folder, output_folder, frame_limit, progress=gr.Progress()):
     output_folder = output_folder.strip()
     os.makedirs(output_folder, exist_ok=True)
 
-    frames = sorted(glob.glob(os.path.join(folder, "IMG_*.jpg")))
+    exts = ["*.jpg", "*.jpeg", "*.png", "*.tif", "*.tiff",
+            "*.JPG", "*.JPEG", "*.PNG", "*.TIF", "*.TIFF"]
+    frames = sorted(set(f for e in exts for f in glob.glob(os.path.join(folder, e))))
     if not frames:
-        raise gr.Error(f"No IMG_*.jpg files found in: {folder}")
+        raise gr.Error(f"No image files found in: {folder}")
 
     total = len(frames)
     if frame_limit != "All Trails":
