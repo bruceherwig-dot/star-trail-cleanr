@@ -248,9 +248,49 @@ with gr.Blocks(title=f"Star Trail CleanR (Beta {VERSION})", css=css) as demo:
     run_btn.click(fn=run_cleaner, inputs=[folder_input, output_input, frame_limit], outputs=[status_out, progress_bar])
 
 import socket as _socket
+import atexit as _atexit
+import webbrowser as _webbrowser
+
 def _free_port():
     with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
         s.bind(('', 0))
         return s.getsockname()[1]
 
-demo.launch(inbrowser=True, server_port=_free_port())
+# Single-instance guard: if a prior instance is still running, reopen its
+# browser tab and exit rather than launching a second copy (which macOS blocks).
+_PID_FILE = os.path.expanduser("~/.startrailcleanr.pid")
+
+def _check_existing():
+    """Return port of running instance, or None."""
+    try:
+        with open(_PID_FILE) as f:
+            pid, port = f.read().strip().split(":")
+            pid, port = int(pid), int(port)
+        os.kill(pid, 0)   # raises if process is gone
+        return port
+    except Exception:
+        try:
+            os.remove(_PID_FILE)
+        except Exception:
+            pass
+        return None
+
+def _write_pid(port):
+    with open(_PID_FILE, "w") as f:
+        f.write(f"{os.getpid()}:{port}")
+
+def _cleanup_pid():
+    try:
+        os.remove(_PID_FILE)
+    except Exception:
+        pass
+
+existing_port = _check_existing()
+if existing_port:
+    _webbrowser.open(f"http://localhost:{existing_port}")
+    sys.exit(0)
+
+port = _free_port()
+_write_pid(port)
+_atexit.register(_cleanup_pid)
+demo.launch(inbrowser=True, server_port=port)
