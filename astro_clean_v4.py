@@ -1020,20 +1020,46 @@ def main():
     print(f"\nLoading {len(frame_files)} frames...", end=" ", flush=True)
     frames = []
     for fp in frame_files:
-        img = cv2.imread(str(fp))
+        img = cv2.imread(str(fp), cv2.IMREAD_UNCHANGED)
         if img is None:
             print(f"\nERROR: cannot read {fp.name}"); sys.exit(1)
         frames.append(img)
     print("done")
     h, w = frames[0].shape[:2]
-    sc      = w / 5472.0
-    band_px = max(10, int(args.band_width * sc))
-    print(f"Image: {w}×{h}  scale={sc:.3f}  band={band_px}px")
+
+    # 16-bit TIF support: all detection runs on 8-bit copies; originals kept for repair.
+    # cv2.imread with IMREAD_UNCHANGED returns uint16 for 16-bit TIFs.
+    # Thresholds (thresh, motion_thresh, hough_residual) are calibrated for 8-bit (0–255).
+    # Shifting right 8 bits maps 16-bit values to the same 0–255 range without losing detail
+    # needed for detection — airplane trails are bright relative to dark-sky background.
+    is_16bit = frames[0].dtype == np.uint16
+    if is_16bit:
+        frames_8bit = [(f >> 8).astype(np.uint8) for f in frames]
+        print(f"  16-bit TIF detected — using 8-bit copies for detection, originals for repair")
+    else:
+        frames_8bit = frames
+
+    # Resolution scale factors.
+    # Reference: 5472×3648 ≈ 20MP (original dataset camera).
+    # sc_linear: scales pixel distances (radii, margins, line lengths).
+    # sc_area:   scales pixel-count thresholds (min_px).
+    # Old formula (w/5472) only accounted for width; cameras with same width but
+    # different height (portrait mode, higher-MP sensors) were under-scaled, causing
+    # min_px to pass far more noise components → false-detection explosion.
+    REF_PIXELS  = 5472 * 3648
+    sc_linear   = float(np.sqrt((w * h) / REF_PIXELS))
+    sc_area     = (w * h) / REF_PIXELS
+    sc          = sc_linear
+    band_px     = max(10, int(args.band_width * sc))
+    min_px_scaled      = max(args.min_px, int(args.min_px * sc_area))
+    edge_margin_detect = max(5, int(args.edge_margin * sc))
+    print(f"Image: {w}×{h}  sc_linear={sc:.3f}  sc_area={sc_area:.3f}  "
+          f"band={band_px}px  min_px={min_px_scaled}  edge_margin={edge_margin_detect}px")
     t_total = time.time()
 
     # ── Step 1: Align ──────────────────────────────────────────────────────────
     print("\nStep 1 — aligning frames")
-    aligned, star_angle_deg = align_batch(frames)
+    aligned, star_angle_deg = align_batch(frames_8bit)
 
     # ── Step 2: Clean sky (for repair) ────────────────────────────────────────
     print("\nStep 2 — building clean-sky background")
@@ -1050,10 +1076,12 @@ def main():
               f"(detection batch={args.batch})")
         med_frames = []
         for fp in med_files:
-            img = cv2.imread(str(fp))
+            img = cv2.imread(str(fp), cv2.IMREAD_UNCHANGED)
             if img is None:
                 print(f"\nWARN: cannot read {fp.name} — skipping")
                 continue
+            if is_16bit:
+                img = (img >> 8).astype(np.uint8)
             med_frames.append(img)
         med_aligned, _ = align_batch(med_frames)
         clean_rgb = build_clean_sky(med_aligned, args.pct)
@@ -1080,7 +1108,7 @@ def main():
         prev1 = aligned[i - 1] if i > 0   else None
         next1 = aligned[i + 1] if i < n-1 else None
         cc, gc = detect_candidates(aligned[i], prev1, next1,
-                                   args.thresh, args.min_px, args.edge_margin,
+                                   args.thresh, min_px_scaled, edge_margin_detect,
                                    bg_norm)
         color_cents_all.append(cc)
         gray_cents_all.append(gc)
@@ -1311,7 +1339,7 @@ def main():
     if not args.no_hough:
         print("\nStep 6b — detecting continuous trails (Hough on background residual)")
         cont_cents, hough_dirs = detect_continuous_trails(
-            frames, clean_rgb, n, h, w, sc,
+            frames_8bit, clean_rgb, n, h, w, sc,
             residual_thresh = args.hough_residual,
             hough_votes     = args.hough_votes,
             min_line_len    = args.hough_min_len,
@@ -1362,6 +1390,15 @@ def main():
     snap_rad_px = max(0, int(args.snap_rad * sc))
     print(f"\nStep 7 — repairing frames (skipping first/last {sb} from output)"
           + (f"  snap_rad={snap_rad_px}px" if snap_rad_px > 0 else "  snap disabled"))
+
+    # For 16-bit: scale uint8 clean_rgb (0-255) to uint16 (0-65535) for native-depth
+    # repair. Factor 257 = 65535/255 maps full range correctly (255*257 = 65535).
+    # Detection and Hough used the uint8 clean_rgb; repair uses originals.
+    if is_16bit:
+        clean_rgb_repair = (clean_rgb.astype(np.uint16) * 257)
+    else:
+        clean_rgb_repair = clean_rgb
+
     n_repaired  = 0
     total_trail = 0
 
@@ -1382,14 +1419,14 @@ def main():
         skip = (sb > 0) and (i < sb or i >= n - sb)
 
         if not skip:
-            cleaned = repair_frame(img, mask, clean_rgb)
+            cleaned = repair_frame(img, mask, clean_rgb_repair)
             cv2.imwrite(str(cleaned_dir / fp.name), cleaned)
             if trail_px > 0:
                 n_repaired += 1
 
         if debug_dir:
             label = f"{fp.name}{'  [boundary-skipped]' if skip else ''}"
-            dbg = draw_debug(img, mask, tc, label)
+            dbg = draw_debug(frames_8bit[i], mask, tc, label)
             cv2.imwrite(str(debug_dir / fp.name), dbg)
 
         sys.stdout.write(
