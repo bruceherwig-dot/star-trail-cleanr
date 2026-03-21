@@ -22,8 +22,8 @@ try:
 except Exception:
     pass
 
-# Always include the algorithm script
-add_data = [f'astro_clean_v4.py{sep}.']
+# Always include the algorithm script and version file
+add_data = [f'astro_clean_v4.py{sep}.', f'version.txt{sep}.']
 seen = set()
 
 for site_dir in site_dirs:

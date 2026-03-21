@@ -23,6 +23,8 @@ import gradio as gr
 import glob
 import time
 import subprocess
+from collections import Counter
+from PIL import Image
 
 if getattr(sys, 'frozen', False):
     _base = sys._MEIPASS
@@ -30,6 +32,12 @@ else:
     _base = "/Users/bruceherwig/Claude_Code_Projects"
 
 SCRIPT = os.path.join(_base, "astro_clean_v4.py")
+
+try:
+    with open(os.path.join(_base, "version.txt")) as _f:
+        VERSION = _f.read().strip()
+except Exception:
+    VERSION = "dev"
 
 def default_output(folder):
     if folder and folder.strip():
@@ -105,11 +113,34 @@ def run_cleaner(folder, output_folder, frame_limit, progress=gr.Progress()):
         total = min(total, int(frame_limit))
         frames = frames[:total]
 
+    # Majority-vote resolution: sample 10 evenly-spaced files, find dominant size,
+    # then filter out any files that don't match.
+    def _img_size(path):
+        try:
+            with Image.open(path) as img:
+                return img.size  # (width, height)
+        except Exception:
+            return None
+
+    sample_step = max(1, total // 10)
+    sample = [frames[i] for i in range(0, total, sample_step)][:10]
+    sizes = [s for s in (_img_size(f) for f in sample) if s is not None]
+    if not sizes:
+        raise gr.Error("Could not read any image files to determine resolution.")
+    dominant = Counter(sizes).most_common(1)[0][0]
+    filtered = [f for f in frames if _img_size(f) == dominant]
+    skipped = total - len(filtered)
+    frames = filtered
+    total = len(frames)
+    if not frames:
+        raise gr.Error("No image files matched the dominant resolution.")
+
     est_batches = max(1, (total - 20) // 16 + 1)
     est_seconds = est_batches * 40
 
     status_lines = [
-        f"Found {total} frames to process",
+        f"Found {total} frames to process ({dominant[0]}×{dominant[1]})"
+        + (f" — skipped {skipped} file(s) with wrong resolution" if skipped else ""),
         f"Est. batches: {est_batches}  |  Est. time: {fmt_hms(est_seconds)}",
         "Starting...",
     ]
@@ -176,13 +207,12 @@ css = """
 #run-btn { background: #1a6fc4; border-color: #1a6fc4; color: white; }
 """
 
-with gr.Blocks(title="Star Trail CleanR", css=css) as demo:
-    gr.Markdown("# **Star Trail CleanR**")
+with gr.Blocks(title=f"Star Trail CleanR (Beta {VERSION})", css=css) as demo:
+    gr.Markdown(f"# **Star Trail CleanR (Beta {VERSION})**")
     gr.Markdown("#### Easily remove airplane trails from your star trail images at the touch of a button!")
-    gr.Markdown("<small style='color:gray'>v0.1 beta</small>")
     gr.Markdown("<br>")
 
-    gr.Markdown("### **Original Star Trail Images Live Here**")
+    gr.Markdown("### **Original Star Trail Images Live Here** *(all images must be the same resolution)*")
     with gr.Row():
         folder_input = gr.Textbox(label="", placeholder="/Users/bruceherwig/Documents/frames/extra/", scale=4)
         browse_in_btn = gr.Button("Browse…", scale=1)
