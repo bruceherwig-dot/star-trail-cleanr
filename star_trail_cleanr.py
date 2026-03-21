@@ -247,4 +247,10 @@ with gr.Blocks(title=f"Star Trail CleanR (Beta {VERSION})", css=css) as demo:
     browse_out_btn.click(fn=pick_folder, inputs=[], outputs=output_input)
     run_btn.click(fn=run_cleaner, inputs=[folder_input, output_input, frame_limit], outputs=[status_out, progress_bar])
 
-demo.launch(inbrowser=True, server_port=0)
+import socket as _socket
+def _free_port():
+    with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
+        s.bind(('', 0))
+        return s.getsockname()[1]
+
+demo.launch(inbrowser=True, server_port=_free_port())
