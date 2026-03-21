@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+import sys
+try:
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8')
+except Exception:
+    pass
 """
 astro_clean_v4.py — Astrophotography airplane trail removal
 

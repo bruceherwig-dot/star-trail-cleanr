@@ -29,7 +29,7 @@ from PIL import Image
 if getattr(sys, 'frozen', False):
     _base = sys._MEIPASS
 else:
-    _base = "/Users/bruceherwig/Claude_Code_Projects"
+    _base = os.path.dirname(os.path.abspath(__file__))
 
 SCRIPT = os.path.join(_base, "astro_clean_v4.py")
 
@@ -214,12 +214,12 @@ with gr.Blocks(title=f"Star Trail CleanR (Beta {VERSION})", css=css) as demo:
 
     gr.Markdown("### **Original Star Trail Images Live Here** *(all images must be the same resolution)*")
     with gr.Row():
-        folder_input = gr.Textbox(label="", placeholder="/Users/bruceherwig/Documents/frames/extra/", scale=4)
+        folder_input = gr.Textbox(label="", placeholder="Select folder using Browse…", scale=4)
         browse_in_btn = gr.Button("Browse…", scale=1)
 
     gr.Markdown("### **Output Folder**")
     with gr.Row():
-        output_input = gr.Textbox(label="", placeholder="/Users/bruceherwig/Documents/frames_cleaned/", scale=4)
+        output_input = gr.Textbox(label="", placeholder="Select folder using Browse… (auto-fills from input folder)", scale=4)
         browse_out_btn = gr.Button("Browse…", scale=1)
 
     gr.Markdown("### **Number of Images to Process** <span style='font-size:0.85em; font-weight:normal'>(highly recommended to do a small batch before a full run)</span>")
