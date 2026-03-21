@@ -135,21 +135,19 @@ def run_cleaner(folder, output_folder, frame_limit, progress=gr.Progress()):
     if not frames:
         raise gr.Error("No image files matched the dominant resolution.")
 
-    est_batches = max(1, (total - 20) // 16 + 1)
-    est_seconds = est_batches * 40
-
-    status_lines = [
-        f"Found {total} frames to process ({dominant[0]}×{dominant[1]})"
-        + (f" — skipped {skipped} file(s) with wrong resolution" if skipped else ""),
-        f"Est. batches: {est_batches}  |  Est. time: {fmt_hms(est_seconds)}",
-        "Starting...",
-    ]
-    yield "\n".join(status_lines), make_bar(0, fmt_hms(est_seconds), 0, total)
-
     starts = list(range(0, total - 20 + 1, 16))
     if not starts or starts[-1] + 20 < total:
         starts.append(total - 20)
     n_batches = len(starts)
+    est_seconds = n_batches * 40
+
+    status_lines = [
+        f"Found {total} frames to process ({dominant[0]}×{dominant[1]})"
+        + (f" — skipped {skipped} file(s) with wrong resolution" if skipped else ""),
+        f"Est. batches: {n_batches}  |  Est. time: {fmt_hms(est_seconds)}",
+        "Starting...",
+    ]
+    yield "\n".join(status_lines), make_bar(0, fmt_hms(est_seconds), 0, total)
 
     t0 = time.time()
     frames_done = 0
