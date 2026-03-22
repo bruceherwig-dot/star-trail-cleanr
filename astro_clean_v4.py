@@ -996,13 +996,17 @@ def main():
     parser.add_argument("--median-batch",    type=int, default=DEFAULT_MEDIAN_BATCH,
                         help=f"Wider frame window for clean-sky median (0=same as --batch, e.g. 40 fixes "
                              f"contamination when a trail spans >50%% of --batch frames; default {DEFAULT_MEDIAN_BATCH})")
+    parser.add_argument("--save-masks",      type=str, default=None, metavar="DIR",
+                        help="Save binary repair masks (255=trail, 0=sky) as PNG files to this directory. "
+                             "Use for training data generation — exact pixel-accurate masks, no JPEG noise.")
     args = parser.parse_args()
 
     input_dir   = Path(args.input_dir)
     output_dir  = Path(args.output_dir)
     debug_dir   = output_dir / "debug" if not args.no_debug else None
     cleaned_dir = output_dir / "cleaned_photos"
-    for d in [d for d in [debug_dir, cleaned_dir] if d]:
+    masks_dir   = Path(args.save_masks) if args.save_masks else None
+    for d in [d for d in [debug_dir, cleaned_dir, masks_dir] if d]:
         d.mkdir(parents=True, exist_ok=True)
 
     frame_files = load_frame_files(input_dir, args.start, args.batch)
@@ -1423,6 +1427,9 @@ def main():
             cv2.imwrite(str(cleaned_dir / fp.name), cleaned)
             if trail_px > 0:
                 n_repaired += 1
+
+        if masks_dir:
+            cv2.imwrite(str(masks_dir / (fp.stem + ".png")), mask)
 
         if debug_dir:
             label = f"{fp.name}{'  [boundary-skipped]' if skip else ''}"

@@ -139,7 +139,11 @@ def run_cleaner(folder, output_folder, frame_limit, progress=gr.Progress()):
     if not starts or starts[-1] + 20 < total:
         starts.append(total - 20)
     n_batches = len(starts)
-    est_seconds = n_batches * 40
+    # Scale time estimate by image resolution relative to 20MP reference camera
+    ref_pixels  = 5472 * 3648
+    img_pixels  = dominant[0] * dominant[1]
+    res_scale   = img_pixels / ref_pixels
+    est_seconds = int(n_batches * 40 * res_scale)
 
     status_lines = [
         f"Found {total} frames to process ({dominant[0]}×{dominant[1]})"
@@ -210,7 +214,7 @@ with gr.Blocks(title=f"Star Trail CleanR (Beta {VERSION})", css=css) as demo:
     gr.Markdown("#### Easily remove airplane trails from your star trail images at the touch of a button!")
     gr.Markdown("<br>")
 
-    gr.Markdown("### **Original Star Trail Images Live Here** *(all images must be the same resolution)*")
+    gr.Markdown("### **Original Star Trail Images Live Here** (.JPG, .TIF 8 & 16 bit files accepted)")
     with gr.Row():
         folder_input = gr.Textbox(label="", placeholder="Select folder using Browse…", scale=4)
         browse_in_btn = gr.Button("Browse…", scale=1)
@@ -286,6 +290,9 @@ def _cleanup_pid():
 existing_port = _check_existing()
 if existing_port:
     _webbrowser.open(f"http://localhost:{existing_port}")
+    # Sleep before exiting so macOS doesn't show "not open anymore" —
+    # the dialog appears when an app quits within ~1s of launch.
+    time.sleep(2)
     sys.exit(0)
 
 port = _free_port()

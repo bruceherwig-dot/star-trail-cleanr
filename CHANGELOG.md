@@ -2,6 +2,11 @@
 
 ---
 
+## v0.19-beta
+- Fixed "not open anymore" error on Mac when relaunching after closing the browser tab
+- Improved time estimate accuracy for high-resolution cameras — a 36MP camera now shows a realistic estimate instead of the 20MP reference time
+- Updated accepted file types label in the interface (.JPG, .TIF 8 & 16 bit)
+
 ## v0.18-beta
 - Fixed batch count estimate — the "Est. batches" number now always matches the actual number of batches processed
 
