@@ -1,6 +1,11 @@
 import sys
 import os
 
+# Prevent torch-on-Windows crash when another Python install has its own
+# libiomp5md.dll on PATH. Must be set BEFORE any torch-touching import so it
+# also propagates to the worker subprocess that re-runs this script.
+os.environ.setdefault('KMP_DUPLICATE_LIB_OK', 'TRUE')
+
 # Windows frozen app (--windowed) has no console: sys.stdout/stderr are None.
 if sys.platform == 'win32' and getattr(sys, 'frozen', False):
     if sys.stdout is None:
