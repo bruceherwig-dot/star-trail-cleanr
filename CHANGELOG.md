@@ -1,6 +1,23 @@
-# Star Trail CleanR — Version History
+# Star Trail CleanR, Version History
 
 ---
+
+## v1.0-beta
+A full rewrite. Everything below is new since v0.19-beta.
+
+- Native desktop app (macOS and Windows), no more browser window
+- New AI trail detector trained on thousands of real astrophotography frames, including a community dataset from gkyle
+- Star Bridge repair that borrows clean pixels from the frames before and after, so removed trails blend in seamlessly
+- Silent ground-only hot-pixel fix, cleans stuck and dead pixels on the landscape without touching the sky
+- Dark mode and a proper tabbed interface
+- Logo and banner across the top
+- Mask Painter tool for editing the ground mask when you want manual control
+- "Scrubbing the stars" run screen with live progress, time elapsed, trails swept, and an estimated time to finish
+- End-of-run stats: total trails removed, total frames cleaned, total time, and an estimate of how much manual editing you just skipped
+- JPG or TIF output with a JPEG quality slider
+- Live frame count when you pick a folder
+- All labels are selectable so you can copy paths, values, and numbers
+- Have a suggestion? There's a mailto link in the About tab
 
 ## v0.19-beta
 - Fixed "not open anymore" error on Mac when relaunching after closing the browser tab

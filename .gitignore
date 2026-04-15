@@ -1,0 +1,34 @@
+# macOS
+.DS_Store
+
+# Claude Code workspace
+.claude/
+
+# Large data / experiment dirs (never committed)
+runs/
+backups/
+datasets/
+v5_star_bridge_backup_*/
+claude-skills-video/
+
+# Internal / diagnostic scripts (not shipped)
+tools/
+
+# Generic pretrained models (we only ship trail_detector.pt)
+yolov8n-seg.pt
+yolov8s-seg.pt
+
+# Archived old pipeline scripts (superseded by astro_clean_v5.py)
+astro_clean.py
+astro_clean_v2.py
+astro_clean_v3.py
+
+# Python / PyInstaller
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+build/
+dist/
+*.spec

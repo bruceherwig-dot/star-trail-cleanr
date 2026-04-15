@@ -23,7 +23,8 @@ except Exception:
     pass
 
 # Always include the algorithm script and version file
-add_data = [f'astro_clean_v4.py{sep}.', f'version.txt{sep}.']
+add_data = [f'astro_clean_v5.py{sep}.', f'version.txt{sep}.',
+            f'modules{sep}modules']
 seen = set()
 
 for site_dir in site_dirs:
@@ -53,6 +54,9 @@ cmd = [
     '--name', 'StarTrailCleanR',
     '--collect-all', 'cv2',
     '--collect-all', 'numpy',
+    '--collect-all', 'PySide6',
+    '--collect-all', 'sahi',
+    '--collect-all', 'ultralytics',
 ]
 for d in add_data:
     cmd += ['--add-data', d]

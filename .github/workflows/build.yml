@@ -14,9 +14,7 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install dependencies
-        run: pip install gradio pyinstaller opencv-python numpy
-      - name: Write version
-        run: echo "${{ github.ref_name }}" > version.txt
+        run: pip install pyinstaller opencv-python numpy pillow PySide6 ultralytics sahi
       - name: Build (Apple Silicon)
         run: python build_helper.py
       - name: Zip app
@@ -34,9 +32,7 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install dependencies
-        run: pip install gradio pyinstaller opencv-python numpy
-      - name: Write version
-        run: echo "${{ github.ref_name }}" > version.txt
+        run: pip install pyinstaller opencv-python numpy pillow PySide6 ultralytics sahi
       - name: Build
         run: python build_helper.py
       - name: Zip app
@@ -64,5 +60,5 @@ jobs:
             ## Star Trail CleanR ${{ github.ref_name }}
 
             ### Download
-            - **Mac (Apple Silicon M1/M2/M3/M4)**: StarTrailCleanR-Mac-AppleSilicon.zip — unzip and run StarTrailCleanR.app (right-click → Open first time)
-            - **Windows**: StarTrailCleanR-Windows.zip — unzip and run StarTrailCleanR.exe
+            - **Mac (Apple Silicon M1/M2/M3/M4)**: StarTrailCleanR-Mac-AppleSilicon.zip, unzip and run StarTrailCleanR.app (right-click then Open first time)
+            - **Windows**: StarTrailCleanR-Windows.zip, unzip and run StarTrailCleanR.exe
