@@ -66,4 +66,60 @@ for pkg in sorted(seen):
     print(f'  {pkg}')
 
 result = subprocess.run(cmd)
-sys.exit(result.returncode)
+if result.returncode != 0:
+    sys.exit(result.returncode)
+
+import shutil
+
+def dir_size_mb(path):
+    total = 0
+    for root, _, files in os.walk(path):
+        for f in files:
+            fp = os.path.join(root, f)
+            try:
+                total += os.path.getsize(fp)
+            except OSError:
+                pass
+    return total / 1024 / 1024
+
+if sys.platform == 'darwin':
+    dist_root = os.path.join('dist', 'StarTrailCleanR.app', 'Contents', 'Frameworks')
+else:
+    dist_root = os.path.join('dist', 'StarTrailCleanR', '_internal')
+
+# Fallback: older PyInstaller layouts put bundled packages next to the exe
+if not os.path.isdir(dist_root):
+    dist_root = os.path.join('dist', 'StarTrailCleanR')
+
+print(f'\nPost-build cleanup in: {dist_root}')
+before = dir_size_mb(os.path.join('dist'))
+print(f'Before cleanup: {before:.1f} MB')
+
+CLEANUP_PATHS = [
+    ('torch', 'include'),
+    ('torch', 'test'),
+    ('torch', 'testing'),
+    ('ultralytics', 'assets'),
+    ('ultralytics', 'cfg', 'datasets'),
+]
+
+removed = []
+for root, dirs, _ in os.walk(dist_root):
+    for d in list(dirs):
+        full = os.path.join(root, d)
+        rel_parts = os.path.relpath(full, dist_root).split(os.sep)
+        for pattern in CLEANUP_PATHS:
+            if len(rel_parts) >= len(pattern) and tuple(rel_parts[-len(pattern):]) == pattern:
+                size = dir_size_mb(full)
+                shutil.rmtree(full, ignore_errors=True)
+                removed.append((os.path.relpath(full, 'dist'), size))
+                dirs.remove(d)
+                break
+
+for path, size in removed:
+    print(f'  removed {path}  ({size:.1f} MB)')
+
+after = dir_size_mb(os.path.join('dist'))
+print(f'After cleanup:  {after:.1f} MB  (saved {before - after:.1f} MB)')
+
+sys.exit(0)
