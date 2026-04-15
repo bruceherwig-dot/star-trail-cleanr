@@ -10,6 +10,27 @@ sep = ';' if sys.platform == 'win32' else ':'
 # Extensions PyInstaller handles natively — exclude from --add-data
 SKIP_EXT = {'.py', '.pyc', '.pyo', '.pyd', '.so', '.dylib', '.dll'}
 
+# Packages that must NEVER be bundled, even if they're present in the local
+# site-packages. These are NOT runtime deps of Star Trail CleanR. The GitHub
+# CI environment never installs them, so excluding them is a no-op on CI and
+# prevents local-environment pollution (especially PyQt5, which conflicts
+# with PySide6 at runtime if both are bundled).
+SKIP_PACKAGES = {
+    'PyQt5', 'PyQt6', 'PySide2',   # competing Qt bindings — we use PySide6
+    'gradio', 'gradio_client',      # old v0.x GUI lib, replaced by PySide6
+    'borb',                         # PDF lib, not used
+    'transformers', 'tokenizers',   # Hugging Face, not used at runtime
+    'astropy',                      # wrong astronomy library, not used
+    'onnxruntime',                  # optional ultralytics export format, not runtime
+    'tensorboard', 'tensorboardX',  # training-time only
+    'grpc',                         # not used
+    'polars', '_polars_runtime_32', '_polars_runtime_64',  # DataFrame lib, not used
+    'sympy',                        # symbolic math, not used at runtime
+    'streamlit',                    # alternative GUI, not used
+    'flask', 'fastapi',             # web frameworks, not used
+    'jupyter', 'ipykernel', 'ipython', 'notebook',  # notebook stack, not used
+}
+
 site_dirs = []
 try:
     site_dirs += site.getsitepackages()
@@ -32,6 +53,8 @@ for site_dir in site_dirs:
         continue
     for pkg_name in sorted(os.listdir(site_dir)):
         if pkg_name in seen:
+            continue
+        if pkg_name in SKIP_PACKAGES:
             continue
         if pkg_name.endswith(('.dist-info', '.egg-info', '.egg-link', '__pycache__')):
             continue
@@ -58,6 +81,11 @@ cmd = [
     '--collect-all', 'sahi',
     '--collect-all', 'ultralytics',
 ]
+# Force PyInstaller to exclude the same skip list at the module-analysis level,
+# not just the data-file walker. This stops transitive imports from pulling
+# them back in.
+for pkg in sorted(SKIP_PACKAGES):
+    cmd += ['--exclude-module', pkg]
 for d in add_data:
     cmd += ['--add-data', d]
 
@@ -108,6 +136,60 @@ CLEANUP_PATHS = [
     ('torch', 'testing'),
     ('ultralytics', 'assets'),
     ('ultralytics', 'cfg', 'datasets'),
+    # PySide6 Qt frameworks not used by a widget-only app. Biggest target is
+    # QtWebEngineCore (full Chromium engine, ~280 MB uncompressed on Mac).
+    ('Qt', 'lib', 'QtWebEngineCore.framework'),
+    ('Qt', 'lib', 'QtWebEngineQuick.framework'),
+    ('Qt', 'lib', 'QtWebEngineWidgets.framework'),
+    ('Qt', 'lib', 'QtQuick.framework'),
+    ('Qt', 'lib', 'QtQuick3D.framework'),
+    ('Qt', 'lib', 'QtQuick3DRuntimeRender.framework'),
+    ('Qt', 'lib', 'QtQuickControls2.framework'),
+    ('Qt', 'lib', 'QtQuickControls2Imagine.framework'),
+    ('Qt', 'lib', 'QtQuickDialogs2.framework'),
+    ('Qt', 'lib', 'QtQuickDialogs2QuickImpl.framework'),
+    ('Qt', 'lib', 'QtQml.framework'),
+    ('Qt', 'lib', 'QtQmlCompiler.framework'),
+    ('Qt', 'lib', 'QtQmlModels.framework'),
+    ('Qt', 'lib', 'QtQmlWorkerScript.framework'),
+    ('Qt', 'lib', 'QtDesigner.framework'),
+    ('Qt', 'lib', 'QtDesignerComponents.framework'),
+    ('Qt', 'lib', 'QtShaderTools.framework'),
+    ('Qt', 'lib', 'QtPdf.framework'),
+    ('Qt', 'lib', 'Qt3DCore.framework'),
+    ('Qt', 'lib', 'Qt3DRender.framework'),
+    ('Qt', 'lib', 'Qt3DAnimation.framework'),
+    ('Qt', 'lib', 'Qt3DExtras.framework'),
+    ('Qt', 'lib', 'Qt3DInput.framework'),
+    ('Qt', 'lib', 'Qt3DLogic.framework'),
+    ('Qt', 'lib', 'Qt3DQuick.framework'),
+    ('Qt', 'lib', 'Qt3DQuickAnimation.framework'),
+    ('Qt', 'lib', 'Qt3DQuickExtras.framework'),
+    ('Qt', 'lib', 'Qt3DQuickInput.framework'),
+    ('Qt', 'lib', 'Qt3DQuickRender.framework'),
+    ('Qt', 'lib', 'Qt3DQuickScene2D.framework'),
+    ('Qt', 'lib', 'QtGraphs.framework'),
+    ('Qt', 'lib', 'QtCharts.framework'),
+    ('Qt', 'lib', 'QtDataVisualization.framework'),
+    ('Qt', 'lib', 'QtMultimedia.framework'),
+    ('Qt', 'lib', 'QtMultimediaWidgets.framework'),
+    ('Qt', 'lib', 'QtMultimediaQuick.framework'),
+    ('Qt', 'lib', 'QtVirtualKeyboard.framework'),
+    ('Qt', 'lib', 'QtWebChannel.framework'),
+    ('Qt', 'lib', 'QtWebSockets.framework'),
+    ('Qt', 'lib', 'QtWebView.framework'),
+    ('Qt', 'lib', 'QtLocation.framework'),
+    ('Qt', 'lib', 'QtPositioning.framework'),
+    ('Qt', 'lib', 'QtBluetooth.framework'),
+    ('Qt', 'lib', 'QtNfc.framework'),
+    ('Qt', 'lib', 'QtSensors.framework'),
+    ('Qt', 'lib', 'QtSerialBus.framework'),
+    ('Qt', 'lib', 'QtSerialPort.framework'),
+    ('Qt', 'lib', 'QtRemoteObjects.framework'),
+    ('Qt', 'lib', 'QtTextToSpeech.framework'),
+    ('Qt', 'lib', 'QtSpatialAudio.framework'),
+    ('Qt', 'lib', 'QtTest.framework'),
+    # Windows equivalents (DLLs, not frameworks). Handled by a separate pass below.
 ]
 
 removed = []
