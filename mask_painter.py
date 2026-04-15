@@ -143,7 +143,10 @@ class MaskGraphicsView(QGraphicsView):
         self._zoom_overlay.raise_()
 
     def _zoom_by(self, factor):
+        old_anchor = self.transformationAnchor()
+        self.setTransformationAnchor(QGraphicsView.AnchorViewCenter)
         self.scale(factor, factor)
+        self.setTransformationAnchor(old_anchor)
         self._update_zoom_label()
 
     def _zoom_to_fit(self):
@@ -369,9 +372,26 @@ class MaskGraphicsView(QGraphicsView):
             self._last_paint_pos = scene_pos
             self._last_click_pos = scene_pos
 
+    def _pos_in_image(self, scene_pos):
+        if self._photo_item is None:
+            return False
+        return self._photo_item.boundingRect().contains(scene_pos)
+
+    def _hide_cursor_circle(self):
+        if self._cursor_circle is not None:
+            self.scene().removeItem(self._cursor_circle)
+            self._cursor_circle = None
+
     def mouseMoveEvent(self, event):
         scene_pos = self.mapToScene(event.position().toPoint())
-        self._move_cursor_circle(scene_pos)
+        if self._panning:
+            pass
+        elif self._pos_in_image(scene_pos):
+            self._move_cursor_circle(scene_pos)
+            self.setCursor(Qt.CrossCursor)
+        else:
+            self._hide_cursor_circle()
+            self.setCursor(Qt.ArrowCursor)
 
         if self._panning and self._last_pan_pos is not None:
             delta = event.position().toPoint() - self._last_pan_pos
@@ -404,12 +424,19 @@ class MaskGraphicsView(QGraphicsView):
 
         if event.modifiers() & Qt.ControlModifier:
             factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
-            self.scale(factor, factor)
-            self._update_zoom_label()
+            self._zoom_by(factor)
         else:
-            # Scale step with brush size, capped at 15 for smooth feel
-            step = min(15, max(5, self._brush_radius // 10))
-            delta = step if event.angleDelta().y() > 0 else -step
+            # Accumulate fractional trackpad deltas so brush grows smoothly.
+            # One full wheel click == angleDelta 120. Trackpad fires many small
+            # deltas — we accumulate and only apply when >= 1 unit of change.
+            step_per_click = max(6, min(25, self._brush_radius // 8))
+            self._brush_scroll_accum = getattr(self, '_brush_scroll_accum', 0.0)
+            self._brush_scroll_accum += (event.angleDelta().y() / 120.0) * step_per_click
+            delta = int(self._brush_scroll_accum)
+            if delta == 0:
+                event.accept()
+                return
+            self._brush_scroll_accum -= delta
             self.set_brush_radius(self._brush_radius + delta)
             scene_pos = self.mapToScene(event.position().toPoint())
             self._move_cursor_circle(scene_pos)
@@ -457,8 +484,7 @@ class MaskGraphicsView(QGraphicsView):
                 if pinch.changeFlags() & QPinchGesture.ScaleFactorChanged:
                     f = pinch.scaleFactor()
                     if f and f > 0:
-                        self.scale(f, f)
-                        self._update_zoom_label()
+                        self._zoom_by(f)
                 event.accept()
                 return True
         return super().event(event)
@@ -508,9 +534,12 @@ class MaskPainterWidget(QWidget):
 
         # Back button
         back_btn = QPushButton("\u2190 Back")
+        back_btn.setFixedHeight(30)
+        back_btn.setCursor(Qt.PointingHandCursor)
         back_btn.setStyleSheet(
-            "QPushButton { color: #ccc; background: transparent; border: none; font-size: 13px; }"
-            "QPushButton:hover { color: white; }")
+            "QPushButton { color: #ddd; background: #333; border: 1px solid #555; "
+            "border-radius: 4px; padding: 4px 12px; font-size: 13px; }"
+            "QPushButton:hover { color: white; background: #555; border-color: #777; }")
         back_btn.clicked.connect(self.go_back.emit)
         tb_layout.addWidget(back_btn)
 

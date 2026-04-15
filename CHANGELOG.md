@@ -5,6 +5,14 @@
 ## v1.0-beta
 A full rewrite. Everything below is new since v0.19-beta.
 
+**Release-testing fixes (v1.006–v1.009):**
+- Fixed a crash on first cleaning run caused by a missing math library in the frozen app
+- Mask Painter: Back button now looks and behaves like a real button
+- Mask Painter: cursor switches back to a normal arrow when you move off the image into the gray margin
+- Mask Painter: zoom now anchors to the center of the view instead of the top
+- Mask Painter: brush-size scroll step smoothed out so the brush grows at a sensible pace on trackpads and mice
+
+**Main v1.0-beta features:**
 - Native desktop app (macOS and Windows), no more browser window
 - New AI trail detector trained on thousands of real astrophotography frames, including a community dataset from gkyle
 - Star Bridge repair that borrows clean pixels from the frames before and after, so removed trails blend in seamlessly

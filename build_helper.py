@@ -25,7 +25,7 @@ SKIP_PACKAGES = {
     'tensorboard', 'tensorboardX',  # training-time only
     'grpc',                         # not used
     'polars', '_polars_runtime_32', '_polars_runtime_64',  # DataFrame lib, not used
-    'sympy',                        # symbolic math, not used at runtime
+    # NOTE: sympy is a torch runtime dep via torch._dynamo — do NOT skip
     'streamlit',                    # alternative GUI, not used
     'flask', 'fastapi',             # web frameworks, not used
     'jupyter', 'ipykernel', 'ipython', 'notebook',  # notebook stack, not used
