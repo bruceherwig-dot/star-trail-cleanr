@@ -83,17 +83,24 @@ def dir_size_mb(path):
     return total / 1024 / 1024
 
 if sys.platform == 'darwin':
-    dist_root = os.path.join('dist', 'StarTrailCleanR.app', 'Contents', 'Frameworks')
+    dist_root = os.path.join('dist', 'StarTrailCleanR.app')
 else:
-    dist_root = os.path.join('dist', 'StarTrailCleanR', '_internal')
-
-# Fallback: older PyInstaller layouts put bundled packages next to the exe
-if not os.path.isdir(dist_root):
     dist_root = os.path.join('dist', 'StarTrailCleanR')
 
-print(f'\nPost-build cleanup in: {dist_root}')
+print(f'\nPost-build cleanup, walking: {dist_root}')
 before = dir_size_mb(os.path.join('dist'))
 print(f'Before cleanup: {before:.1f} MB')
+
+# Ground-truth diagnostic: print every torch/ and ultralytics/ directory found,
+# so the build log shows the real layout even if cleanup misses something.
+print('\nDiagnostic: torch/ and ultralytics/ directories found:')
+for pkg in ('torch', 'ultralytics'):
+    for root, dirs, _ in os.walk(dist_root):
+        if pkg in dirs:
+            full = os.path.join(root, pkg)
+            size = dir_size_mb(full)
+            rel = os.path.relpath(full, 'dist')
+            print(f'  {rel}  ({size:.1f} MB)')
 
 CLEANUP_PATHS = [
     ('torch', 'include'),
@@ -116,10 +123,13 @@ for root, dirs, _ in os.walk(dist_root):
                 dirs.remove(d)
                 break
 
+print('\nCleanup removed:')
+if not removed:
+    print('  (nothing matched — check the diagnostic above)')
 for path, size in removed:
-    print(f'  removed {path}  ({size:.1f} MB)')
+    print(f'  {path}  ({size:.1f} MB)')
 
 after = dir_size_mb(os.path.join('dist'))
-print(f'After cleanup:  {after:.1f} MB  (saved {before - after:.1f} MB)')
+print(f'\nAfter cleanup: {after:.1f} MB  (saved {before - after:.1f} MB)')
 
 sys.exit(0)

@@ -596,7 +596,7 @@ class MainWindow(QMainWindow):
         )
         browser.setHtml(f"""
         <html><body style='font-family: -apple-system, sans-serif; line-height: 1.5;'>
-        <h2 style='color:#1a6fc4; margin-bottom:2px;'>Why Star Trail CleanR?</h2>
+        <h2 style='color:#1a6fc4; margin-top:0; margin-bottom:2px;'>Why Star Trail CleanR?</h2>
         <p style='margin-top:2px;'>Star Trail CleanR removes airplane and satellite trails
         from astrophotography sequences while preserving the real stars. The result is a
         clean set of frames you can stack into a perfect star trail composite.</p>
