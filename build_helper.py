@@ -71,10 +71,14 @@ for site_dir in site_dirs:
             if pkg_name in seen:
                 break
 
+icon_ext = '.ico' if sys.platform == 'win32' else '.icns'
+icon_path = os.path.join(os.path.dirname(__file__), 'assets', 'StarTrailCleanR' + icon_ext)
+
 cmd = [
     sys.executable, '-m', 'PyInstaller',
     '--onedir', '--windowed', '--noupx', 'star_trail_cleanr.py',
     '--name', 'StarTrailCleanR',
+    '--icon', icon_path,
     '--collect-all', 'cv2',
     '--collect-all', 'numpy',
     '--collect-all', 'PySide6',
@@ -88,6 +92,14 @@ for pkg in sorted(SKIP_PACKAGES):
     cmd += ['--exclude-module', pkg]
 for d in add_data:
     cmd += ['--add-data', d]
+
+# Bundle the YOLO model so the frozen app doesn't depend on a local path
+model_pt = os.path.join(os.path.dirname(__file__), 'assets', 'best.pt')
+if os.path.isfile(model_pt):
+    cmd += ['--add-data', model_pt + sep + '.']
+    print(f'Bundling YOLO model: {model_pt}')
+else:
+    print(f'WARNING: YOLO model not found at {model_pt} — build will lack model')
 
 print(f'Bundling data from {len(seen)} packages:')
 for pkg in sorted(seen):

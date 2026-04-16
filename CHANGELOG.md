@@ -2,6 +2,9 @@
 
 ---
 
+## v1.1-beta
+- Fixed a crash on Windows where the app tried to load the AI model from a local folder that doesn't exist on the tester's machine. The model is now bundled inside the app itself.
+
 ## v1.0-beta
 A full rewrite. Everything below is new since v0.19-beta.
 

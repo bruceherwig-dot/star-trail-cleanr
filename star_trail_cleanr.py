@@ -89,8 +89,10 @@ def _apply_theme():
 
 
 SCRIPT = os.path.join(_base, "astro_clean_v5.py")
-MODEL = os.path.join(os.path.expanduser("~"),
-                     "Documents/yolo_runs/trail_detector_v11s_tiled/weights/best.pt")
+_bundled_model = os.path.join(_base, "best.pt")
+MODEL = _bundled_model if os.path.isfile(_bundled_model) else os.path.join(
+    os.path.expanduser("~"),
+    "Documents/yolo_runs/trail_detector_v11s_tiled/weights/best.pt")
 
 try:
     with open(os.path.join(_base, "version.txt")) as _f:
@@ -594,13 +596,19 @@ class MainWindow(QMainWindow):
     # ── FAQ tab ──────────────────────────────────────────────────────────────
 
     def _build_faq_tab(self):
+        wrap = QWidget()
+        wrap_layout = QVBoxLayout(wrap)
+        wrap_layout.setContentsMargins(24, 24, 24, 24)
+        wrap_layout.setSpacing(0)
         browser = QTextBrowser()
         browser.setOpenExternalLinks(True)
+        browser.document().setDocumentMargin(0)
         browser.setStyleSheet(
-            "QTextBrowser { background: palette(window); border: none; padding: 24px; font-size: 14px; }"
+            "QTextBrowser { background: palette(window); border: none; font-size: 14px; }"
         )
         browser.setHtml(f"""
-        <html><body style='font-family: -apple-system, sans-serif; line-height: 1.5;'>
+        <html><body style='font-family: -apple-system, sans-serif; line-height: 1.5; margin:0; padding:0;'>
+        <p style='margin:0; padding:0; line-height:0; font-size:1px; height:0;'></p>
         <h2 style='color:#1a6fc4; margin-top:0; margin-bottom:2px;'>Why Star Trail CleanR?</h2>
         <p style='margin-top:2px;'>Star Trail CleanR removes airplane and satellite trails
         from astrophotography sequences while preserving the real stars. The result is a
@@ -634,7 +642,6 @@ class MainWindow(QMainWindow):
 
         <h2 style='color:#1a6fc4; margin-bottom:2px;'>Limitations</h2>
         <ul style='margin-top:2px;'>
-        <li>Designed for wide-field star trail sequences, not deep-sky tracked exposures.</li>
         <li><b>Trail variety is bounded by the AI's training data.</b> If a type of
         trail isn't being detected well in your sequences, you can help train the next
         version: zip 300+ frames from that scene and send them to
@@ -642,12 +649,16 @@ class MainWindow(QMainWindow):
         For large folders, share a Dropbox, Google Drive, or WeTransfer link instead
         of attaching directly. The model gets smarter every time the community
         contributes.</li>
+        <li><b>Meteors will be removed too.</b> Their streaks look similar to airplane
+        and satellite trails, so the detector can't tell them apart. If you want to
+        keep them, use your originals to mask them back in.</li>
         <li><b>RAW files (.CR2, .NEF, .ARW, etc.) are not yet supported.</b> Convert
         your sequence to JPG or TIFF first, then run Star Trail CleanR on the converted
         frames.</li>
         <li><b>Not a one-click fix.</b> You'll still want to touch up the final
         composite in Photoshop or your editor of choice &mdash; but if we did our job
         right, it's a fraction of the time you used to spend.</li>
+        <li><b>Designed for wide-field star trail sequences,</b> not deep-sky tracked exposures.</li>
         </ul>
 
         <p style='color:{HINT_TEXT}; margin-top:24px;'>Star Trail CleanR is free and offered as
@@ -655,7 +666,8 @@ class MainWindow(QMainWindow):
         <a href='mailto:bruceherwig@gmail.com?subject=Star%20Trail%20CleanR%20feedback'>Feedback welcome.</a></p>
         </body></html>
         """)
-        return browser
+        wrap_layout.addWidget(browser)
+        return wrap
 
     # ── About tab ────────────────────────────────────────────────────────────
 
@@ -680,8 +692,10 @@ class MainWindow(QMainWindow):
         bio.setStyleSheet(
             "QTextBrowser { background: palette(window); border: none; font-size: 14px; }"
         )
+        bio.document().setDocumentMargin(0)
         bio.setHtml(f"""
-        <html><body style='font-family: -apple-system, sans-serif; line-height: 1.5;'>
+        <html><body style='font-family: -apple-system, sans-serif; line-height: 1.5; margin:0; padding:0;'>
+        <p style='margin:0; padding:0; line-height:0; font-size:1px; height:0;'></p>
         <h2 style='color:#1a6fc4; margin-top:0; margin-bottom:2px;'>About the Authors</h2>
         <p style='margin-top:2px;'>Star Trail CleanR is a passion project. I've been
         shooting star trails for over a decade, and the whole time I kept thinking
@@ -697,24 +711,24 @@ class MainWindow(QMainWindow):
         <p>Star Trail CleanR is a free gift to the astrophotography community that
         has taught me so much.</p>
 
-        <h3 style='color:#1a6fc4;'>Links</h3>
-        <ul>
+        <h3 style='color:#1a6fc4; margin:12px 0 2px 0;'>Links</h3>
+        <ul style='margin-top:2px;'>
         <li>Photos for sale: <a href='https://bruceherwig.com'>bruceherwig.com</a></li>
         <li>Blog: <a href='https://bruceherwig.wordpress.com'>bruceherwig.wordpress.com</a></li>
         </ul>
 
-        <h3 style='color:#1a6fc4;'>Acknowledgments</h3>
-        <p>Star Trail CleanR exists because of the generosity of fellow astrophotographers
+        <h3 style='color:#1a6fc4; margin:12px 0 2px 0;'>Acknowledgments</h3>
+        <p style='margin-top:2px;'>Star Trail CleanR exists because of the generosity of fellow astrophotographers
         who shared their image sequences for AI training, tested early builds, and offered
         feedback. Every detected trail is a thank-you to them.</p>
         <p><a href='https://bruceherwig.wordpress.com/star-trail-cleanr/#Thanks'>See the
         full list of contributors &rarr;</a></p>
 
-        <h3 style='color:#1a6fc4;'>Version History</h3>
-        <p>See the full <a href='https://github.com/bruceherwig-dot/star-trail-cleanr/blob/main/CHANGELOG.md'>version history on GitHub</a>.</p>
+        <h3 style='color:#1a6fc4; margin:12px 0 2px 0;'>Version History</h3>
+        <p style='margin-top:2px;'>See the full <a href='https://github.com/bruceherwig-dot/star-trail-cleanr/blob/main/CHANGELOG.md'>version history on GitHub</a>.</p>
 
-        <h3 style='color:#1a6fc4;'>Share Your Work&hellip; Have a Suggestion?</h3>
-        <p>Got a before-and-after you'd like to share? I would love to see it!<br>
+        <h3 style='color:#1a6fc4; margin:12px 0 2px 0;'>Share Your Work&hellip; Have a Suggestion?</h3>
+        <p style='margin-top:2px;'>Got a before-and-after you'd like to share? I would love to see it!<br>
         Have an idea or feedback to make Star Trail CleanR even better? I want to hear it!<br>
         Email me at <a href='mailto:bruceherwig@gmail.com?subject=Star%20Trail%20CleanR'>bruceherwig@gmail.com</a></p>
 
@@ -732,20 +746,42 @@ class MainWindow(QMainWindow):
         banner.setFixedHeight(80)
         banner.setStyleSheet("background-color: #0a1e3f;")
         outer = QHBoxLayout(banner)
-        outer.setContentsMargins(24, 10, 16, 10)
+        outer.setContentsMargins(0, 0, 16, 0)
         outer.setSpacing(12)
 
-        # Left: title block
-        text_col = QVBoxLayout()
+        # Left: icon
+        icon_lbl = QLabel()
+        icon_path = os.path.join(_base, "assets", "icon_1024.png")
+        if os.path.exists(icon_path):
+            pix = QPixmap(icon_path)
+            icon_lbl.setPixmap(pix.scaled(80, 80, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        icon_lbl.setFixedSize(80, 80)
+        icon_lbl.setStyleSheet("background: transparent;")
+        outer.addWidget(icon_lbl)
+
+        # Title block (vertically centered next to icon)
+        text_wrap = QWidget()
+        text_wrap.setStyleSheet("background: transparent;")
+        text_col = QVBoxLayout(text_wrap)
+        text_col.setContentsMargins(0, 0, 0, 0)
         text_col.setSpacing(2)
+        text_col.addStretch()
         title = QLabel("Star Trail CleanR")
         title.setStyleSheet("color: white; font-size: 26px; font-weight: bold; background: transparent;")
         text_col.addWidget(title)
         sub = QLabel(f"Beta v{VERSION}")
         sub.setStyleSheet("color: #a8c0e0; font-size: 12px; background: transparent;")
         text_col.addWidget(sub)
-        outer.addLayout(text_col)
+        text_col.addStretch()
+        outer.addWidget(text_wrap)
         outer.addStretch()
+
+        # Hidden relaunch button (invisible, to the left of Support)
+        relaunch_btn = QPushButton("")
+        relaunch_btn.setFixedSize(32, 32)
+        relaunch_btn.setStyleSheet("QPushButton { background: transparent; border: none; }")
+        relaunch_btn.clicked.connect(self._relaunch)
+        outer.addWidget(relaunch_btn)
 
         # Right: Support button
         support_btn = QPushButton("\u2764  Support")
@@ -774,6 +810,15 @@ class MainWindow(QMainWindow):
         outer.addWidget(quit_btn)
 
         return banner
+
+    def _relaunch(self):
+        """Close and reopen the app."""
+        import subprocess
+        if getattr(sys, 'frozen', False):
+            subprocess.Popen([sys.executable])
+        else:
+            subprocess.Popen([sys.executable, os.path.abspath(__file__)])
+        self.close()
 
     # ── Setup page ───────────────────────────────────────────────────────────
 
@@ -945,7 +990,7 @@ class MainWindow(QMainWindow):
         step6.setFont(lbl_font)
         layout.addWidget(step6)
 
-        hint6 = QLabel("Processing time depends on image count and resolution")
+        hint6 = QLabel("Processing time depends on image count, resolution, and computer speed")
         hint6.setFont(step_font)
         hint6.setStyleSheet(f"color: {MUTED_TEXT};")
         layout.addWidget(hint6)
