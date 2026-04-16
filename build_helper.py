@@ -45,7 +45,7 @@ except Exception:
 
 # Always include the algorithm script and version file
 add_data = [f'astro_clean_v5.py{sep}.', f'version.txt{sep}.',
-            f'modules{sep}modules']
+            f'modules{sep}modules', f'assets{sep}assets']
 seen = set()
 
 for site_dir in site_dirs:
