@@ -33,10 +33,12 @@ from modules.detect_trails import (
 from modules.repair import repair_frame
 
 
-def _filter_by_resolution(files: List[Path]) -> List[Path]:
-    """Keep only files matching the dominant resolution, skip outliers.
-    When a folder has both JPG and TIFF of the same frame, keep only
-    the higher-quality format (TIFF) to avoid mixed-dtype batches.
+def _filter_by_resolution(files: List[Path],
+                          expected_width: int = None,
+                          expected_height: int = None) -> List[Path]:
+    """Keep only files matching the expected (or dominant) resolution.
+    Uses PIL header-only reads, no full image decode. Silent (no per-file output).
+    When a folder has both JPG and TIFF of the same frame, keep the TIFF.
     """
     if len(files) <= 1:
         return files
@@ -49,7 +51,6 @@ def _filter_by_resolution(files: List[Path]) -> List[Path]:
         ext = fp.suffix.lower()
         if stem in stems_seen:
             prev_ext = stems_seen[stem].suffix.lower()
-            # Prefer TIFF over JPG/PNG
             if ext in tif_exts and prev_ext not in tif_exts:
                 stems_seen[stem] = fp
         else:
@@ -60,43 +61,45 @@ def _filter_by_resolution(files: List[Path]) -> List[Path]:
         print(f"  De-duplicated {n_dupes} file(s) (JPG+TIFF pairs \u2192 kept TIFF)")
     files = deduped
 
-    # Filter by dominant resolution (use IMREAD_COLOR for EXIF rotation)
-    sample = files[:min(10, len(files))]
-    sizes = []
-    for fp in sample:
-        flag = cv2.IMREAD_COLOR if fp.suffix.lower() in {'.jpg', '.jpeg'} else cv2.IMREAD_UNCHANGED
-        img = cv2.imread(str(fp), flag)
-        if img is not None:
-            sizes.append((img.shape[1], img.shape[0]))  # (w, h)
-    if not sizes:
-        return files
-    from collections import Counter
-    dominant = Counter(sizes).most_common(1)[0][0]
-    filtered = []
-    skipped = 0
-    n_files = len(files)
-    for fi, fp in enumerate(files):
-        print(f"  scanning {fi+1}/{n_files}: {fp.name}", flush=True)
-        flag = cv2.IMREAD_COLOR if fp.suffix.lower() in {'.jpg', '.jpeg'} else cv2.IMREAD_UNCHANGED
-        img = cv2.imread(str(fp), flag)
-        if img is not None and (img.shape[1], img.shape[0]) == dominant:
-            filtered.append(fp)
-        else:
-            skipped += 1
+    from PIL import Image as _PILImage
+
+    def _hdr_size(fp):
+        try:
+            with _PILImage.open(str(fp)) as im:
+                return im.size  # (w, h)
+        except Exception:
+            return None
+
+    if expected_width and expected_height:
+        target = (expected_width, expected_height)
+    else:
+        sample = files[:min(10, len(files))]
+        sizes = [s for s in (_hdr_size(fp) for fp in sample) if s is not None]
+        if not sizes:
+            return files
+        from collections import Counter
+        target = Counter(sizes).most_common(1)[0][0]
+
+    filtered = [fp for fp in files if _hdr_size(fp) == target]
+    skipped = len(files) - len(filtered)
     if skipped:
-        print(f"  Skipped {skipped} file(s) with wrong resolution "
-              f"(keeping {dominant[0]}\u00d7{dominant[1]})")
+        word = "frame" if skipped == 1 else "frames"
+        print(f"  Skipped {skipped} {word} with different resolution")
     return filtered
 
 
-def load_frame_files(frame_dir: Path, start: int, batch: int) -> List[Path]:
+def load_frame_files(frame_dir: Path, start: int, batch: int,
+                     expected_width: int = None,
+                     expected_height: int = None) -> List[Path]:
     exts = {'.jpg', '.jpeg', '.png', '.tif', '.tiff'}
     files = sorted(p for p in frame_dir.iterdir() if p.suffix.lower() in exts)
     sliced = files[start:start + batch] if batch > 0 else files[start:]
-    return _filter_by_resolution(sliced)
+    return _filter_by_resolution(sliced, expected_width, expected_height)
 
 
-def load_with_neighbors(frame_dir: Path, start: int, batch: int):
+def load_with_neighbors(frame_dir: Path, start: int, batch: int,
+                        expected_width: int = None,
+                        expected_height: int = None):
     """Load batch frames plus one neighbor on each side for repair context.
 
     Returns (all_files, core_start, core_end) where all_files includes
@@ -115,7 +118,7 @@ def load_with_neighbors(frame_dir: Path, start: int, batch: int):
     ext_end = min(total, end + 1)
 
     sliced = all_sorted[ext_start:ext_end]
-    sliced = _filter_by_resolution(sliced)
+    sliced = _filter_by_resolution(sliced, expected_width, expected_height)
 
     core_start = start - ext_start
     core_end = core_start + (end - start)
@@ -151,8 +154,12 @@ def main():
     parser.add_argument("--output-format", choices=["jpg", "tif8", "tif16"],
                         default="jpg",
                         help="Output file format (default jpg)")
-    parser.add_argument("--jpeg-quality", type=int, default=85,
-                        help="JPEG quality 60-100 (default 85)")
+    parser.add_argument("--jpeg-quality", type=int, default=95,
+                        help="JPEG quality 60-100 (default 95)")
+    parser.add_argument("--expected-width", type=int, default=None,
+                        help="Expected image width — when provided, skips per-batch resolution detection")
+    parser.add_argument("--expected-height", type=int, default=None,
+                        help="Expected image height")
     args = parser.parse_args()
 
     input_dir = Path(args.input_dir)
@@ -212,7 +219,8 @@ def main():
 
     # ── Load frames ───────────────────────────────────────────────────────
     frame_files_all, core_start, core_end = load_with_neighbors(
-        input_dir, args.start, args.batch)
+        input_dir, args.start, args.batch,
+        args.expected_width, args.expected_height)
     frame_files = frame_files_all[core_start:core_end]  # core batch files
     n = len(frame_files)
     n_all = len(frame_files_all)
@@ -317,7 +325,7 @@ def main():
 
     # ── Step 1: Detect trails (YOLO) ────────────────────────────────────
     print("\nStep 1 \u2014 detecting trails", flush=True)
-    print("  Loading YOLO model...", flush=True)
+    print("  Loading AI trail detector...", flush=True)
     model = load_model(str(args.model), args.confidence, args.device)
 
     masks_all = []

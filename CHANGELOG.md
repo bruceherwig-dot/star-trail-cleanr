@@ -2,6 +2,13 @@
 
 ---
 
+## v1.3-beta
+- Stable download links: the Mac zip and Windows installer can now be linked from one permanent URL each, no more updating links every release.
+- JPEG quality default raised from 80 to 95 to eliminate visible 8x8 block artifacts that showed up in the sky after stacking 100+ frames. Old default was inherited from web-image conventions and was wrong for star-trail stacking.
+- End-of-run summary now reads "airplane and satellite trails" instead of just "airplane trails", which matches what the app actually removes.
+- Resolution check is faster and quieter: no more "scanning 1/22, 2/22..." lines on every batch. The check happens once at the start of the run; batches just load straight into processing.
+- "Loading YOLO model..." renamed to "Loading AI trail detector..." in the run log.
+
 ## v1.2-beta
 - Windows now ships as a one-click installer instead of a raw zip. The new Setup file is a single .exe that installs the app to Program Files, creates a Start Menu shortcut, and registers a real uninstaller. No more 60,000-file Explorer extract.
 - The installer is much smaller than the old zip thanks to LZMA2 compression.

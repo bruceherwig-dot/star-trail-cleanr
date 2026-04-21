@@ -52,7 +52,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: StarTrailCleanR-Windows
-          path: installer/StarTrailCleanRSetup-v*.exe
+          path: installer/StarTrailCleanRSetup.exe
 
   release:
     needs: [build-mac, build-windows]
@@ -66,10 +66,10 @@ jobs:
         with:
           files: |
             StarTrailCleanR-Mac/StarTrailCleanR-Mac-AppleSilicon.zip
-            StarTrailCleanR-Windows/StarTrailCleanRSetup-v*.exe
+            StarTrailCleanR-Windows/StarTrailCleanRSetup.exe
           body: |
             ## Star Trail CleanR ${{ github.ref_name }}
 
             ### Download
             - **Mac (Apple Silicon M1/M2/M3/M4)**: StarTrailCleanR-Mac-AppleSilicon.zip, unzip and run StarTrailCleanR.app (right-click then Open first time)
-            - **Windows**: StarTrailCleanRSetup-v*.exe, double-click to install. If Windows SmartScreen warns about an unrecognized publisher, click "More info" then "Run anyway".
+            - **Windows**: StarTrailCleanRSetup.exe, double-click to install. If Windows SmartScreen warns about an unrecognized publisher, click "More info" then "Run anyway".

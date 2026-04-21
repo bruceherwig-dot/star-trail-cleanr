@@ -395,6 +395,8 @@ class CleanerWorker(QThread):
                     cmd.extend(["--hot-pixel-map", hot_map_file])
                 cmd.extend(["--output-format", self.output_format,
                             "--jpeg-quality", str(self.jpeg_quality)])
+                cmd.extend(["--expected-width", str(dominant[0]),
+                            "--expected-height", str(dominant[1])])
 
                 self._proc = subprocess.Popen(
                     cmd,
@@ -975,7 +977,7 @@ class MainWindow(QMainWindow):
         self._jpeg_quality = QSpinBox()
         self._jpeg_quality.setRange(60, 100)
         self._jpeg_quality.setSingleStep(5)
-        self._jpeg_quality.setValue(80)
+        self._jpeg_quality.setValue(95)
         self._jpeg_quality.setFixedWidth(55)
         hp_row.addWidget(self._jpeg_quality)
         hp_row.addStretch(1)
@@ -1043,7 +1045,7 @@ class MainWindow(QMainWindow):
         if idx >= 0:
             self._format_combo.setCurrentIndex(idx)
         self._jpeg_quality.setValue(
-            int(SETTINGS.value("jpeg_quality", 80)))
+            int(SETTINGS.value("jpeg_quality", 95)))
         self._on_format_changed(self._format_combo.currentText())
         last_frame_limit = SETTINGS.value("frame_limit", "20")
         fli = self._frame_limit.findText(last_frame_limit)
@@ -1622,7 +1624,7 @@ class MainWindow(QMainWindow):
         else:
             time_saved = f"~{saved_sec} second{'s' if saved_sec != 1 else ''}"
         self._stats_trail_line = (
-            f"Swept <b>{total_trails:,}</b> airplane trails from your skies "
+            f"Swept <b>{total_trails:,}</b> airplane and satellite trails from your skies "
             f"across <b>{total_frames:,}</b> frames.<br>"
             f"<i>Based on manual cleanup at 20 seconds per trail.</i><br><br>"
             f"<span style='font-size:20px; font-weight:bold;'>TIME SAVED: {time_saved}</span>"
