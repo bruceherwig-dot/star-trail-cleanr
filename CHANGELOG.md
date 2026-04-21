@@ -2,6 +2,11 @@
 
 ---
 
+## v1.2-beta
+- Windows now ships as a one-click installer instead of a raw zip. The new Setup file is a single .exe that installs the app to Program Files, creates a Start Menu shortcut, and registers a real uninstaller. No more 60,000-file Explorer extract.
+- The installer is much smaller than the old zip thanks to LZMA2 compression.
+- Mac unchanged for now. Mac handles the .app-in-zip cleanly because macOS treats the bundle as a single item.
+
 ## v1.1-beta
 - Fixed a crash on Windows where the app tried to load the AI model from a local folder that doesn't exist on the tester's machine. The model is now bundled inside the app itself.
 

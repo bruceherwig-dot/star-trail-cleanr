@@ -37,15 +37,22 @@ jobs:
         run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
       - name: Install dependencies
         run: pip install pyinstaller opencv-python numpy pillow PySide6 ultralytics sahi
-      - name: Build
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+        shell: pwsh
+      - name: Build (PyInstaller)
         run: python build_helper.py
-      - name: Zip app
-        run: Compress-Archive -Path dist\StarTrailCleanR -DestinationPath StarTrailCleanR-Windows.zip
+      - name: Read version
+        id: version
+        run: echo "version=$(Get-Content version.txt)" >> $env:GITHUB_OUTPUT
+        shell: pwsh
+      - name: Build installer (Inno Setup)
+        run: iscc /DAppVersion=${{ steps.version.outputs.version }} installer\StarTrailCleanR.iss
         shell: pwsh
       - uses: actions/upload-artifact@v4
         with:
           name: StarTrailCleanR-Windows
-          path: StarTrailCleanR-Windows.zip
+          path: installer/StarTrailCleanRSetup-v*.exe
 
   release:
     needs: [build-mac, build-windows]
@@ -59,10 +66,10 @@ jobs:
         with:
           files: |
             StarTrailCleanR-Mac/StarTrailCleanR-Mac-AppleSilicon.zip
-            StarTrailCleanR-Windows/StarTrailCleanR-Windows.zip
+            StarTrailCleanR-Windows/StarTrailCleanRSetup-v*.exe
           body: |
             ## Star Trail CleanR ${{ github.ref_name }}
 
             ### Download
             - **Mac (Apple Silicon M1/M2/M3/M4)**: StarTrailCleanR-Mac-AppleSilicon.zip, unzip and run StarTrailCleanR.app (right-click then Open first time)
-            - **Windows**: StarTrailCleanR-Windows.zip, unzip and run StarTrailCleanR.exe
+            - **Windows**: StarTrailCleanRSetup-v*.exe, double-click to install. If Windows SmartScreen warns about an unrecognized publisher, click "More info" then "Run anyway".
