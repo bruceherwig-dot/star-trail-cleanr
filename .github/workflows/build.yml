@@ -49,10 +49,18 @@ jobs:
       - name: Build installer (Inno Setup)
         run: iscc /DAppVersion=${{ steps.version.outputs.version }} installer\StarTrailCleanR.iss
         shell: pwsh
+      - name: Wrap installer in zip
+        # Edge SmartScreen quarantines unsigned .exe downloads in a "Microsoft
+        # Defender SmartScreen couldn't verify..." dialog whose "Keep" option
+        # is buried in a near-invisible dropdown next to the Delete button.
+        # Wrapping the installer in a zip sidesteps that gate. NoCompression
+        # because the .exe is already LZMA2-compressed; Deflate would just burn CI time.
+        run: Compress-Archive -Path installer\StarTrailCleanRSetup.exe -DestinationPath installer\StarTrailCleanRSetup.zip -CompressionLevel NoCompression
+        shell: pwsh
       - uses: actions/upload-artifact@v4
         with:
           name: StarTrailCleanR-Windows
-          path: installer/StarTrailCleanRSetup.exe
+          path: installer/StarTrailCleanRSetup.zip
 
   release:
     needs: [build-mac, build-windows]
@@ -66,10 +74,10 @@ jobs:
         with:
           files: |
             StarTrailCleanR-Mac/StarTrailCleanR-Mac-AppleSilicon.zip
-            StarTrailCleanR-Windows/StarTrailCleanRSetup.exe
+            StarTrailCleanR-Windows/StarTrailCleanRSetup.zip
           body: |
             ## Star Trail CleanR ${{ github.ref_name }}
 
             ### Download
             - **Mac (Apple Silicon M1/M2/M3/M4)**: StarTrailCleanR-Mac-AppleSilicon.zip, unzip and run StarTrailCleanR.app (right-click then Open first time)
-            - **Windows**: StarTrailCleanRSetup.exe, double-click to install. If Windows SmartScreen warns about an unrecognized publisher, click "More info" then "Run anyway".
+            - **Windows**: StarTrailCleanRSetup.zip. Right-click the downloaded zip and choose "Extract All...", then double-click StarTrailCleanRSetup.exe inside the extracted folder. If Windows shows a blue "Windows protected your PC" warning, click "More info" then "Run anyway".
