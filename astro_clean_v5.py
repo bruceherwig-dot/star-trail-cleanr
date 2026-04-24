@@ -139,8 +139,9 @@ def main():
     parser.add_argument("--tile-size", type=int, default=640)
     parser.add_argument("--overlap", type=float, default=0.2)
     parser.add_argument("--dilate", type=int, default=1)
-    parser.add_argument("--device", default="mps",
-                        help="Inference device: mps, cuda, cpu (default mps)")
+    parser.add_argument("--device", default="auto",
+                        help="Inference device: auto, cuda, mps, cpu "
+                             "(default auto picks cuda > mps > cpu)")
     parser.add_argument("--min-area", type=int, default=1000,
                         help="Min trail component area in pixels (default 1000)")
     parser.add_argument("--foreground-mask", type=str, default=None,

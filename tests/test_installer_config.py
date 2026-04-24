@@ -52,3 +52,58 @@ def test_workflow_wraps_installer_in_zip():
         "build.yml is missing the Compress-Archive step that wraps the installer in a zip"
     assert "StarTrailCleanRSetup.zip" in text, \
         "build.yml does not produce StarTrailCleanRSetup.zip"
+
+
+def test_iss_parameterizes_output_name():
+    """The .iss supports /DOutputName= override so variant installers
+    (e.g. StarTrailCleanRSetup-NVIDIA) can reuse the same script."""
+    text = ISS.read_text()
+    assert "#ifndef OutputName" in text or "#define OutputName" in text, \
+        "Installer script does not define OutputName as an overridable symbol"
+    assert "OutputBaseFilename={#OutputName}" in text, \
+        "OutputBaseFilename is not wired to the OutputName symbol"
+
+
+def test_workflow_has_mac_intel_build():
+    """Intel Mac build job present, runs on Intel runner, produces its own zip."""
+    text = WORKFLOW.read_text()
+    assert "build-mac-intel:" in text, "build.yml is missing the Mac Intel build job"
+    assert "macos-15-intel" in text or "macos-26-intel" in text, \
+        "Mac Intel job does not select an Intel macOS runner"
+    assert "StarTrailCleanR-Mac-Intel.zip" in text, \
+        "Mac Intel zip filename missing from workflow"
+
+
+def test_workflow_has_windows_nvidia_build():
+    """Windows NVIDIA build job present, uses CUDA PyTorch index, produces its own zip."""
+    text = WORKFLOW.read_text()
+    assert "build-windows-nvidia:" in text, "build.yml is missing the Windows NVIDIA build job"
+    assert "whl/cu121" in text or "whl/cu124" in text or "whl/cu126" in text, \
+        "Windows NVIDIA job does not install a CUDA PyTorch variant from pytorch.org"
+    assert "StarTrailCleanRSetup-NVIDIA.zip" in text, \
+        "Windows NVIDIA installer zip filename missing from workflow"
+    assert "OutputName=StarTrailCleanRSetup-NVIDIA" in text, \
+        "Windows NVIDIA job does not override the installer output name via /DOutputName"
+
+
+def test_release_job_includes_all_four_artifacts():
+    """All four installer variants must be attached to the GitHub release."""
+    text = WORKFLOW.read_text()
+    for needed in (
+        "StarTrailCleanR-Mac-AppleSilicon.zip",
+        "StarTrailCleanR-Mac-Intel.zip",
+        "StarTrailCleanRSetup.zip",
+        "StarTrailCleanRSetup-NVIDIA.zip",
+    ):
+        assert needed in text, f"Release files list is missing {needed}"
+
+
+def test_build_helper_strips_unused_cuda_libs():
+    """NCCL (multi-GPU comms) and nvJPEG (GPU image I/O) are safe to drop because
+    the pipeline is single-GPU and reads images via OpenCV on the CPU. Ensure the
+    build cleanup keeps targeting them."""
+    build_helper = REPO / "build_helper.py"
+    text = build_helper.read_text()
+    for token in ("nccl", "nvjpeg"):
+        assert token in text.lower(), \
+            f"build_helper.py does not reference {token} for CUDA library cleanup"

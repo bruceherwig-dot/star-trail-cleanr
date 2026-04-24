@@ -11,6 +11,12 @@
   #define AppVersion "0.000"
 #endif
 
+; Override via /DOutputName=StarTrailCleanRSetup-NVIDIA (or similar) to produce
+; variant installers without duplicating this entire .iss file.
+#ifndef OutputName
+  #define OutputName "StarTrailCleanRSetup"
+#endif
+
 #define AppName "Star Trail CleanR"
 #define AppPublisher "Bruce Herwig"
 #define AppURL "https://github.com/bruceherwig-dot/StarTrailCleanR"
@@ -29,7 +35,7 @@ DefaultDirName={autopf}\StarTrailCleanR
 DefaultGroupName=Star Trail CleanR
 DisableProgramGroupPage=yes
 OutputDir=.
-OutputBaseFilename=StarTrailCleanRSetup
+OutputBaseFilename={#OutputName}
 SetupIconFile=..\assets\StarTrailCleanR.ico
 Compression=lzma2/ultra
 SolidCompression=yes

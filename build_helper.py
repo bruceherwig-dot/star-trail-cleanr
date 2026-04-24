@@ -223,6 +223,40 @@ if not removed:
 for path, size in removed:
     print(f'  {path}  ({size:.1f} MB)')
 
+# File-level cleanup inside torch/lib/. Targets CUDA libraries we do not use:
+#  - NCCL: NVIDIA's multi-GPU communication library. Star Trail CleanR runs
+#    single-GPU inference, so NCCL is never loaded.
+#  - nvJPEG: NVIDIA's GPU-side JPEG reader/writer. We read images via OpenCV
+#    on the CPU, so nvJPEG is never loaded.
+# Applies to both CPU and CUDA builds; on CPU-only wheels these files do not
+# exist, and the cleanup is a no-op. On CUDA (NVIDIA) builds, removes them
+# preemptively to trim the installer.
+CUDA_LIB_PREFIXES_TO_REMOVE = ('libnccl', 'nccl', 'libnvjpeg', 'nvjpeg')
+removed_files = []
+for root, dirs, files in os.walk(dist_root):
+    if os.path.basename(root) != 'lib':
+        continue
+    if os.path.basename(os.path.dirname(root)) != 'torch':
+        continue
+    for f in list(files):
+        for prefix in CUDA_LIB_PREFIXES_TO_REMOVE:
+            if f.startswith(prefix):
+                full_file = os.path.join(root, f)
+                try:
+                    fsize = os.path.getsize(full_file) / 1024 / 1024
+                    os.remove(full_file)
+                    removed_files.append((os.path.relpath(full_file, 'dist'), fsize))
+                except OSError:
+                    pass
+                break
+
+if removed_files:
+    print('\nCUDA-specific library cleanup (NCCL, nvJPEG):')
+    for path, fsize in removed_files:
+        print(f'  {path}  ({fsize:.1f} MB)')
+else:
+    print('\nCUDA-specific library cleanup: nothing matched (expected for CPU-only builds).')
+
 after = dir_size_mb(os.path.join('dist'))
 print(f'\nAfter cleanup: {after:.1f} MB  (saved {before - after:.1f} MB)')
 

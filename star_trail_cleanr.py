@@ -1,5 +1,6 @@
 import sys
 import os
+import re
 
 # Prevent torch-on-Windows crash when another Python install has its own
 # libiomp5md.dll on PATH. Must be set BEFORE any torch-touching import so it
@@ -90,9 +91,30 @@ def _apply_theme():
 
 SCRIPT = os.path.join(_base, "astro_clean_v5.py")
 _bundled_model = os.path.join(_base, "best.pt")
-MODEL = _bundled_model if os.path.isfile(_bundled_model) else os.path.join(
+_DEV_FALLBACK_MODEL = os.path.join(
     os.path.expanduser("~"),
     "Documents/yolo_runs/trail_detector_v11s_tiled/weights/best.pt")
+
+
+def get_model_path():
+    """Return the best available trail-detector model path for this session.
+
+    Priority: user-folder download > bundled model > dev fallback.
+    Re-evaluated on each call so a mid-session model install is picked up
+    on the next processing run.
+    """
+    try:
+        from modules.user_folder import (
+            get_installed_model_path, get_installed_model_version,
+        )
+        user_model = get_installed_model_path()
+        if user_model.is_file() and get_installed_model_version():
+            return str(user_model)
+    except Exception:
+        pass
+    if os.path.isfile(_bundled_model):
+        return _bundled_model
+    return _DEV_FALLBACK_MODEL
 
 try:
     with open(os.path.join(_base, "version.txt")) as _f:
@@ -383,11 +405,11 @@ class CleanerWorker(QThread):
                 _log_est("batch_start", i, 0, this_batch, None, None, force=True)
                 if getattr(sys, 'frozen', False):
                     cmd = [sys.executable, '--cleanr-worker', SCRIPT, folder,
-                           "-o", output_folder, "--model", MODEL,
+                           "-o", output_folder, "--model", get_model_path(),
                            "--start", str(start), "--batch", str(this_batch)]
                 else:
                     cmd = [sys.executable, "-u", SCRIPT, folder,
-                           "-o", output_folder, "--model", MODEL,
+                           "-o", output_folder, "--model", get_model_path(),
                            "--start", str(start), "--batch", str(this_batch)]
 
                 if self.mask_path:
@@ -548,6 +570,76 @@ class CleanerWorker(QThread):
             self.error.emit(str(e))
 
 
+class UpdateCheckThread(QThread):
+    """Background check for a newer app release on GitHub. Silent on any failure."""
+    result_ready = Signal(dict)
+
+    def run(self):
+        from modules.update_check import check_for_update
+        result = check_for_update(VERSION)
+        if result:
+            self.result_ready.emit(result)
+
+
+class ModelUpdateCheckThread(QThread):
+    """Background check for a newer trail-detector model release. Silent on any failure."""
+    result_ready = Signal(dict)
+
+    def run(self):
+        from modules.model_update import check_for_model_update
+        result = check_for_model_update()
+        if result:
+            self.result_ready.emit(result)
+
+
+class ModelDownloadThread(QThread):
+    """Streams a model file into the user folder. Atomic via temp-then-rename.
+
+    Writes the version note only after the rename succeeds, so a mid-download
+    crash leaves the previous model in place and the note untouched.
+    """
+    progress = Signal(int, int)   # bytes_done, total_bytes (total=0 if unknown)
+    finished_ok = Signal(str)     # version tag that was installed
+    failed = Signal(str)          # short error string; not user-visible
+
+    def __init__(self, url, target_path, version_tag, parent=None):
+        super().__init__(parent)
+        self.url = url
+        self.target_path = target_path
+        self.version_tag = version_tag
+
+    def run(self):
+        import os as _os
+        import urllib.request
+        tmp_path = self.target_path + ".tmp"
+        try:
+            req = urllib.request.Request(
+                self.url,
+                headers={"User-Agent": "StarTrailCleanR-ModelDownload"},
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                total = int(resp.headers.get("Content-Length") or 0)
+                done = 0
+                with open(tmp_path, "wb") as f:
+                    while True:
+                        chunk = resp.read(65536)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        done += len(chunk)
+                        self.progress.emit(done, total)
+            _os.replace(tmp_path, self.target_path)
+            from modules.user_folder import save_installed_model_version
+            save_installed_model_version(self.version_tag)
+            self.finished_ok.emit(self.version_tag)
+        except Exception as e:
+            try:
+                _os.unlink(tmp_path)
+            except Exception:
+                pass
+            self.failed.emit(str(e))
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -585,6 +677,8 @@ class MainWindow(QMainWindow):
         container_layout.setContentsMargins(0, 0, 0, 0)
         container_layout.setSpacing(0)
         container_layout.addWidget(self._build_banner())
+        container_layout.addWidget(self._build_update_banner())
+        container_layout.addWidget(self._build_model_update_card())
         container_layout.addWidget(self._tabs)
         self.setCentralWidget(container)
 
@@ -594,6 +688,9 @@ class MainWindow(QMainWindow):
 
         for lbl in self.findChildren(QLabel):
             lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+
+        self._start_update_check()
+        self._start_model_update_check()
 
     # ── FAQ tab ──────────────────────────────────────────────────────────────
 
@@ -774,6 +871,11 @@ class MainWindow(QMainWindow):
         sub = QLabel(f"Beta v{VERSION}")
         sub.setStyleSheet("color: #a8c0e0; font-size: 12px; background: transparent;")
         text_col.addWidget(sub)
+        self._header_model_label = QLabel(self._current_model_display_name())
+        self._header_model_label.setStyleSheet(
+            "color: #a8c0e0; font-size: 12px; background: transparent;"
+        )
+        text_col.addWidget(self._header_model_label)
         text_col.addStretch()
         outer.addWidget(text_wrap)
         outer.addStretch()
@@ -812,6 +914,239 @@ class MainWindow(QMainWindow):
         outer.addWidget(quit_btn)
 
         return banner
+
+    # ── Update banner (hidden until a newer release is found on GitHub) ──────
+
+    def _build_update_banner(self):
+        banner = QFrame()
+        banner.setFixedHeight(44)
+        banner.setStyleSheet("QFrame { background-color: #e68a00; }")
+        banner.setVisible(False)
+        layout = QHBoxLayout(banner)
+        layout.setContentsMargins(16, 0, 8, 0)
+        layout.setSpacing(12)
+
+        self._update_label = QLabel("")
+        self._update_label.setStyleSheet(
+            "color: white; font-size: 14px; font-weight: bold; background: transparent;"
+        )
+        layout.addWidget(self._update_label)
+        layout.addStretch()
+
+        download_btn = QPushButton("Download")
+        download_btn.setFixedHeight(28)
+        download_btn.setStyleSheet(
+            "QPushButton { background-color: white; color: #e68a00; font-size: 13px; "
+            "font-weight: bold; border-radius: 4px; padding: 0 16px; border: none; }"
+            "QPushButton:hover { background-color: #fdf6e3; }"
+        )
+        download_btn.clicked.connect(self._on_update_download)
+        layout.addWidget(download_btn)
+
+        dismiss_btn = QPushButton("✕")
+        dismiss_btn.setFixedSize(28, 28)
+        dismiss_btn.setToolTip("Dismiss for this session")
+        dismiss_btn.setStyleSheet(
+            "QPushButton { background: transparent; color: white; font-size: 16px; "
+            "font-weight: bold; border: none; }"
+            "QPushButton:hover { color: #ffdddd; }"
+        )
+        dismiss_btn.clicked.connect(lambda: self._update_banner.setVisible(False))
+        layout.addWidget(dismiss_btn)
+
+        self._update_banner = banner
+        self._update_download_url = None
+        return banner
+
+    def _start_update_check(self):
+        self._update_thread = UpdateCheckThread(self)
+        self._update_thread.result_ready.connect(self._on_update_result)
+        self._update_thread.start()
+
+    def _on_update_result(self, result):
+        tag = result.get("tag", "")
+        self._update_download_url = result.get("download_url")
+        self._update_label.setText(f"New version available: {tag}")
+        self._update_banner.setVisible(True)
+
+    def _on_update_download(self):
+        if self._update_download_url:
+            import webbrowser
+            webbrowser.open(self._update_download_url)
+
+    # ── Model update card (shows when GitHub has a newer trail detector) ─────
+
+    def _build_model_update_card(self):
+        card = QFrame()
+        card.setVisible(False)
+        card.setStyleSheet("QFrame { background-color: #e68a00; }")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(16, 10, 16, 10)
+        layout.setSpacing(2)
+
+        self._model_title = QLabel("")
+        self._model_title.setStyleSheet(
+            "color: white; font-size: 16px; font-weight: bold; background: transparent;"
+        )
+        layout.addWidget(self._model_title)
+
+        self._model_summary = QLabel("")
+        self._model_summary.setStyleSheet(
+            "color: white; font-size: 14px; background: transparent;"
+        )
+        self._model_summary.setWordWrap(True)
+        layout.addWidget(self._model_summary)
+
+        self._model_credits = QLabel("")
+        self._model_credits.setStyleSheet(
+            "color: white; font-size: 13px; font-style: italic; background: transparent;"
+        )
+        self._model_credits.setWordWrap(True)
+        layout.addWidget(self._model_credits)
+
+        action_row = QHBoxLayout()
+        action_row.setContentsMargins(0, 6, 0, 0)
+        action_row.setSpacing(8)
+
+        self._model_download_btn = QPushButton("Download now")
+        self._model_download_btn.setFixedHeight(28)
+        self._model_download_btn.setStyleSheet(
+            "QPushButton { background-color: white; color: #e68a00; font-size: 13px; "
+            "font-weight: bold; border-radius: 4px; padding: 0 16px; border: none; }"
+            "QPushButton:hover { background-color: #fdf6e3; }"
+        )
+        self._model_download_btn.clicked.connect(self._on_model_download_clicked)
+        action_row.addWidget(self._model_download_btn)
+
+        self._model_notnow_btn = QPushButton("Not right now")
+        self._model_notnow_btn.setFixedHeight(28)
+        self._model_notnow_btn.setStyleSheet(
+            "QPushButton { background: transparent; color: white; font-size: 13px; "
+            "font-weight: bold; border-radius: 4px; padding: 0 16px; "
+            "border: 1px solid white; }"
+            "QPushButton:hover { background-color: rgba(255,255,255,0.15); }"
+        )
+        self._model_notnow_btn.clicked.connect(self._on_model_notnow_clicked)
+        action_row.addWidget(self._model_notnow_btn)
+
+        self._model_progress = QProgressBar()
+        self._model_progress.setFixedHeight(24)
+        self._model_progress.setVisible(False)
+        self._model_progress.setStyleSheet(
+            "QProgressBar { background-color: rgba(255,255,255,0.25); border: 1px solid white; "
+            "border-radius: 4px; color: white; text-align: center; font-weight: bold; }"
+            "QProgressBar::chunk { background-color: white; border-radius: 3px; }"
+        )
+        action_row.addWidget(self._model_progress, 1)
+
+        self._model_gotit_btn = QPushButton("Got it")
+        self._model_gotit_btn.setFixedHeight(28)
+        self._model_gotit_btn.setVisible(False)
+        self._model_gotit_btn.setStyleSheet(
+            "QPushButton { background-color: white; color: #e68a00; font-size: 13px; "
+            "font-weight: bold; border-radius: 4px; padding: 0 16px; border: none; }"
+            "QPushButton:hover { background-color: #fdf6e3; }"
+        )
+        self._model_gotit_btn.clicked.connect(lambda: self._model_card.setVisible(False))
+        action_row.addWidget(self._model_gotit_btn)
+
+        action_row.addStretch()
+        layout.addLayout(action_row)
+
+        self._model_card = card
+        self._model_download_url = None
+        self._model_download_tag = None
+        return card
+
+    @staticmethod
+    def _model_display_name(tag):
+        """'model-v2' becomes 'Trail Detector 2'. Falls back to the raw tag on parse failure."""
+        if not tag:
+            return "New model"
+        m = re.match(r"^model-v(\d+(?:\.\d+)?)", tag)
+        if not m:
+            return tag
+        num = m.group(1)
+        if "." in num:
+            num = num.rstrip("0").rstrip(".")
+        return f"Trail Detector {num}"
+
+    def _current_model_display_name(self):
+        """Return 'Trail Detector N' for the currently-active model. Empty string on failure."""
+        try:
+            from modules.model_update import local_model_version
+            return self._model_display_name(local_model_version())
+        except Exception:
+            return ""
+
+    def _start_model_update_check(self):
+        self._model_update_thread = ModelUpdateCheckThread(self)
+        self._model_update_thread.result_ready.connect(self._on_model_update_result)
+        self._model_update_thread.start()
+
+    def _on_model_update_result(self, result):
+        self._model_download_tag = result.get("tag", "")
+        self._model_download_url = result.get("download_url")
+        display = self._model_display_name(self._model_download_tag)
+        self._model_title.setText(f"{display} available")
+        summary = result.get("summary") or "A new trail detector has been released."
+        self._model_summary.setText(summary)
+        self._model_summary.setVisible(True)
+        credits = result.get("credits") or ""
+        if credits:
+            self._model_credits.setText(f"Credits: {credits}")
+            self._model_credits.setVisible(True)
+        else:
+            self._model_credits.setVisible(False)
+        self._model_download_btn.setVisible(True)
+        self._model_notnow_btn.setVisible(True)
+        self._model_progress.setVisible(False)
+        self._model_gotit_btn.setVisible(False)
+        self._model_card.setVisible(True)
+
+    def _on_model_download_clicked(self):
+        if not self._model_download_url:
+            return
+        self._model_download_btn.setVisible(False)
+        self._model_notnow_btn.setVisible(False)
+        self._model_progress.setRange(0, 100)
+        self._model_progress.setValue(0)
+        self._model_progress.setFormat("Downloading %p%")
+        self._model_progress.setVisible(True)
+        from modules.user_folder import get_installed_model_path
+        target = str(get_installed_model_path())
+        self._model_download_thread = ModelDownloadThread(
+            self._model_download_url, target, self._model_download_tag, self
+        )
+        self._model_download_thread.progress.connect(self._on_model_download_progress)
+        self._model_download_thread.finished_ok.connect(self._on_model_download_finished)
+        self._model_download_thread.failed.connect(self._on_model_download_failed)
+        self._model_download_thread.start()
+
+    def _on_model_notnow_clicked(self):
+        self._model_card.setVisible(False)
+
+    def _on_model_download_progress(self, done, total):
+        if total > 0:
+            pct = int(done * 100 / total)
+            self._model_progress.setValue(pct)
+        else:
+            # Server didn't send Content-Length: fall back to an indeterminate pulse.
+            if self._model_progress.minimum() != 0 or self._model_progress.maximum() != 0:
+                self._model_progress.setRange(0, 0)
+
+    def _on_model_download_finished(self, version):
+        self._model_progress.setVisible(False)
+        display = self._model_display_name(version)
+        self._model_title.setText(f"{display} installed")
+        self._model_summary.setVisible(False)
+        self._model_credits.setVisible(False)
+        self._model_gotit_btn.setVisible(True)
+        self._header_model_label.setText(display)
+
+    def _on_model_download_failed(self, err):
+        # Silent fallback: hide the card, try again next launch.
+        self._model_card.setVisible(False)
 
     def _relaunch(self):
         """Close and reopen the app."""

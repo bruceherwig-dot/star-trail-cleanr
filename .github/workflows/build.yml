@@ -26,6 +26,30 @@ jobs:
           name: StarTrailCleanR-Mac
           path: StarTrailCleanR-Mac-AppleSilicon.zip
 
+  build-mac-intel:
+    # Intel Mac build on GitHub's x86_64 macOS runner.
+    # GitHub has announced Intel Mac runners retire in Fall 2027. This job
+    # runs through at least that point; after retirement we either drop
+    # Intel Mac releases or move to a different host.
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install CPU-only PyTorch
+        run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+      - name: Install dependencies
+        run: pip install pyinstaller opencv-python numpy pillow PySide6 ultralytics sahi
+      - name: Build (Intel)
+        run: python build_helper.py
+      - name: Zip app
+        run: cd dist && zip -r ../StarTrailCleanR-Mac-Intel.zip StarTrailCleanR.app
+      - uses: actions/upload-artifact@v4
+        with:
+          name: StarTrailCleanR-Mac-Intel
+          path: StarTrailCleanR-Mac-Intel.zip
+
   build-windows:
     runs-on: windows-latest
     steps:
@@ -62,8 +86,48 @@ jobs:
           name: StarTrailCleanR-Windows
           path: installer/StarTrailCleanRSetup.zip
 
+  build-windows-nvidia:
+    # Same build as build-windows, but PyTorch is the NVIDIA-CUDA variant.
+    # Bundled PyTorch is ~1.5 GB larger, so the final installer is bigger.
+    # If the compressed installer busts GitHub's 2 GB asset limit, drop to
+    # a lower CUDA version or move to external hosting for this variant.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install NVIDIA-CUDA PyTorch
+        # cu121 = PyTorch built against CUDA 12.1. Chosen for broad driver
+        # compatibility (needs NVIDIA driver 525+); newer CUDA variants need
+        # newer drivers. Bump together with a driver-version bump if needed.
+        run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+      - name: Install dependencies
+        run: pip install pyinstaller opencv-python numpy pillow PySide6 ultralytics sahi
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+        shell: pwsh
+      - name: Build (PyInstaller)
+        run: python build_helper.py
+      - name: Read version
+        id: version
+        run: echo "version=$(Get-Content version.txt)" >> $env:GITHUB_OUTPUT
+        shell: pwsh
+      - name: Build installer (Inno Setup)
+        # /DOutputName overrides the default installer filename so the NVIDIA
+        # variant produces StarTrailCleanRSetup-NVIDIA.exe, not the CPU name.
+        run: iscc /DAppVersion=${{ steps.version.outputs.version }} /DOutputName=StarTrailCleanRSetup-NVIDIA installer\StarTrailCleanR.iss
+        shell: pwsh
+      - name: Wrap installer in zip
+        run: Compress-Archive -Path installer\StarTrailCleanRSetup-NVIDIA.exe -DestinationPath installer\StarTrailCleanRSetup-NVIDIA.zip -CompressionLevel NoCompression
+        shell: pwsh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: StarTrailCleanR-Windows-NVIDIA
+          path: installer/StarTrailCleanRSetup-NVIDIA.zip
+
   release:
-    needs: [build-mac, build-windows]
+    needs: [build-mac, build-mac-intel, build-windows, build-windows-nvidia]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -74,10 +138,18 @@ jobs:
         with:
           files: |
             StarTrailCleanR-Mac/StarTrailCleanR-Mac-AppleSilicon.zip
+            StarTrailCleanR-Mac-Intel/StarTrailCleanR-Mac-Intel.zip
             StarTrailCleanR-Windows/StarTrailCleanRSetup.zip
+            StarTrailCleanR-Windows-NVIDIA/StarTrailCleanRSetup-NVIDIA.zip
           body: |
             ## Star Trail CleanR ${{ github.ref_name }}
 
             ### Download
-            - **Mac (Apple Silicon M1/M2/M3/M4)**: StarTrailCleanR-Mac-AppleSilicon.zip, unzip and run StarTrailCleanR.app (right-click then Open first time)
-            - **Windows**: StarTrailCleanRSetup.zip. Right-click the downloaded zip and choose "Extract All...", then double-click StarTrailCleanRSetup.exe inside the extracted folder. If Windows shows a blue "Windows protected your PC" warning, click "More info" then "Run anyway".
+
+            **Mac**
+            - **Apple Silicon (M1/M2/M3/M4)**: StarTrailCleanR-Mac-AppleSilicon.zip, unzip and run StarTrailCleanR.app (right-click then Open first time).
+            - **Intel (older Macs)**: StarTrailCleanR-Mac-Intel.zip, same steps. Slower than Apple Silicon (no built-in GPU acceleration) but functional.
+
+            **Windows**
+            - **Standard (CPU)**: StarTrailCleanRSetup.zip. Right-click the downloaded zip and choose "Extract All...", then double-click StarTrailCleanRSetup.exe inside the extracted folder. If Windows shows a blue "Windows protected your PC" warning, click "More info" then "Run anyway".
+            - **NVIDIA GPU (faster detection)**: StarTrailCleanRSetup-NVIDIA.zip. Same install steps. About 1.5 GB larger download; requires an NVIDIA graphics card and driver 525 or newer. If you're not sure, use the Standard (CPU) version.

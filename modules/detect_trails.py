@@ -4,12 +4,34 @@ import numpy as np
 from typing import Optional
 
 
+def best_device() -> str:
+    """Return the best available inference device: cuda > mps > cpu.
+
+    Checks only what's actually usable RIGHT NOW on this machine. The CUDA
+    check requires a CUDA-enabled PyTorch AND a working NVIDIA driver, so
+    a user on Windows CPU-only, Intel Mac, or Apple Silicon with MPS each
+    falls to the right branch.
+    """
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return "cuda"
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            return "mps"
+    except Exception:
+        pass
+    return "cpu"
+
+
 def load_model(model_path: str, confidence: float = 0.25,
-               device: str = "mps"):
+               device: Optional[str] = None):
     """Load YOLOv8-seg model via SAHI AutoDetectionModel.
 
-    Call once; pass returned object to detect_frame().
+    device=None (or "auto") picks the best available: cuda > mps > cpu.
+    Pass an explicit string to override.
     """
+    if not device or device == "auto":
+        device = best_device()
     from sahi import AutoDetectionModel
     model = AutoDetectionModel.from_pretrained(
         model_type="ultralytics",
