@@ -86,52 +86,15 @@ jobs:
           name: StarTrailCleanR-Windows
           path: installer/StarTrailCleanRSetup.zip
 
-  build-windows-nvidia:
-    # Same build as build-windows, but PyTorch is the NVIDIA-CUDA variant.
-    # Bundled PyTorch is ~1.5 GB larger, so the final installer is bigger.
-    # If the compressed installer busts GitHub's 2 GB asset limit, drop to
-    # a lower CUDA version or move to external hosting for this variant.
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: Install NVIDIA-CUDA PyTorch
-        # cu121 = PyTorch built against CUDA 12.1. Chosen for broad driver
-        # compatibility (needs NVIDIA driver 525+); newer CUDA variants need
-        # newer drivers. Bump together with a driver-version bump if needed.
-        run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-      - name: Install dependencies
-        run: pip install pyinstaller opencv-python numpy pillow PySide6 ultralytics sahi
-      - name: Install Inno Setup
-        run: choco install innosetup -y --no-progress
-        shell: pwsh
-      - name: Build (PyInstaller)
-        run: python build_helper.py
-      - name: Read version
-        id: version
-        run: echo "version=$(Get-Content version.txt)" >> $env:GITHUB_OUTPUT
-        shell: pwsh
-      - name: Build installer (Inno Setup)
-        # /DOutputName overrides the default installer filename so the NVIDIA
-        # variant produces StarTrailCleanRSetup-NVIDIA.exe, not the CPU name.
-        run: iscc /DAppVersion=${{ steps.version.outputs.version }} /DOutputName=StarTrailCleanRSetup-NVIDIA installer\StarTrailCleanR.iss
-        shell: pwsh
-      - name: Wrap installer in zip
-        # Uses 7-Zip (pre-installed at C:\Program Files\7-Zip on windows-latest)
-        # instead of PowerShell's Compress-Archive, which fails with "Stream was
-        # too long" on files over 2 GB. The NVIDIA installer exceeds that. -mx=0
-        # = store (no compression); the .exe is already LZMA2-compressed.
-        run: '& "C:\Program Files\7-Zip\7z.exe" a -tzip -mx=0 installer\StarTrailCleanRSetup-NVIDIA.zip installer\StarTrailCleanRSetup-NVIDIA.exe'
-        shell: pwsh
-      - uses: actions/upload-artifact@v4
-        with:
-          name: StarTrailCleanR-Windows-NVIDIA
-          path: installer/StarTrailCleanRSetup-NVIDIA.zip
+  # build-windows-nvidia removed 2026-04-23 in the v1.5-beta re-ship.
+  # The CUDA-enabled installer came out 3.13 GB, over GitHub's 2 GB per-file
+  # release asset cap. Parked as todo #1 pending a size fix (strip more CUDA
+  # libraries with a Windows NVIDIA tester, host externally, or switch to
+  # torch-directml). When re-adding this job, also restore its tests in
+  # tests/test_installer_config.py and its URL in reference_stable_download_urls.md.
 
   release:
-    needs: [build-mac, build-mac-intel, build-windows, build-windows-nvidia]
+    needs: [build-mac, build-mac-intel, build-windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -144,7 +107,6 @@ jobs:
             StarTrailCleanR-Mac/StarTrailCleanR-Mac-AppleSilicon.zip
             StarTrailCleanR-Mac-Intel/StarTrailCleanR-Mac-Intel.zip
             StarTrailCleanR-Windows/StarTrailCleanRSetup.zip
-            StarTrailCleanR-Windows-NVIDIA/StarTrailCleanRSetup-NVIDIA.zip
           body: |
             ## Star Trail CleanR ${{ github.ref_name }}
 
@@ -155,5 +117,4 @@ jobs:
             - **Intel (older Macs)**: StarTrailCleanR-Mac-Intel.zip, same steps. Slower than Apple Silicon (no built-in GPU acceleration) but functional.
 
             **Windows**
-            - **Standard (CPU)**: StarTrailCleanRSetup.zip. Right-click the downloaded zip and choose "Extract All...", then double-click StarTrailCleanRSetup.exe inside the extracted folder. If Windows shows a blue "Windows protected your PC" warning, click "More info" then "Run anyway".
-            - **NVIDIA GPU (faster detection)**: StarTrailCleanRSetup-NVIDIA.zip. Same install steps. About 1.5 GB larger download; requires an NVIDIA graphics card and driver 525 or newer. If you're not sure, use the Standard (CPU) version.
+            - **Standard**: StarTrailCleanRSetup.zip. Right-click the downloaded zip and choose "Extract All...", then double-click StarTrailCleanRSetup.exe inside the extracted folder. If Windows shows a blue "Windows protected your PC" warning, click "More info" then "Run anyway".

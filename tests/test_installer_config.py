@@ -74,26 +74,18 @@ def test_workflow_has_mac_intel_build():
         "Mac Intel zip filename missing from workflow"
 
 
-def test_workflow_has_windows_nvidia_build():
-    """Windows NVIDIA build job present, uses CUDA PyTorch index, produces its own zip."""
-    text = WORKFLOW.read_text()
-    assert "build-windows-nvidia:" in text, "build.yml is missing the Windows NVIDIA build job"
-    assert "whl/cu121" in text or "whl/cu124" in text or "whl/cu126" in text, \
-        "Windows NVIDIA job does not install a CUDA PyTorch variant from pytorch.org"
-    assert "StarTrailCleanRSetup-NVIDIA.zip" in text, \
-        "Windows NVIDIA installer zip filename missing from workflow"
-    assert "OutputName=StarTrailCleanRSetup-NVIDIA" in text, \
-        "Windows NVIDIA job does not override the installer output name via /DOutputName"
+def test_release_job_includes_all_three_artifacts():
+    """All three installer variants must be attached to the GitHub release.
 
-
-def test_release_job_includes_all_four_artifacts():
-    """All four installer variants must be attached to the GitHub release."""
+    NVIDIA variant was removed in v1.5-beta after hitting GitHub's 2 GB
+    per-file asset cap. When NVIDIA comes back (todo #1), add its filename
+    here and rename this test accordingly.
+    """
     text = WORKFLOW.read_text()
     for needed in (
         "StarTrailCleanR-Mac-AppleSilicon.zip",
         "StarTrailCleanR-Mac-Intel.zip",
         "StarTrailCleanRSetup.zip",
-        "StarTrailCleanRSetup-NVIDIA.zip",
     ):
         assert needed in text, f"Release files list is missing {needed}"
 
