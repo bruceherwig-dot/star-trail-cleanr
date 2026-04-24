@@ -119,7 +119,11 @@ jobs:
         run: iscc /DAppVersion=${{ steps.version.outputs.version }} /DOutputName=StarTrailCleanRSetup-NVIDIA installer\StarTrailCleanR.iss
         shell: pwsh
       - name: Wrap installer in zip
-        run: Compress-Archive -Path installer\StarTrailCleanRSetup-NVIDIA.exe -DestinationPath installer\StarTrailCleanRSetup-NVIDIA.zip -CompressionLevel NoCompression
+        # Uses 7-Zip (pre-installed at C:\Program Files\7-Zip on windows-latest)
+        # instead of PowerShell's Compress-Archive, which fails with "Stream was
+        # too long" on files over 2 GB. The NVIDIA installer exceeds that. -mx=0
+        # = store (no compression); the .exe is already LZMA2-compressed.
+        run: '& "C:\Program Files\7-Zip\7z.exe" a -tzip -mx=0 installer\StarTrailCleanRSetup-NVIDIA.zip installer\StarTrailCleanRSetup-NVIDIA.exe'
         shell: pwsh
       - uses: actions/upload-artifact@v4
         with:
