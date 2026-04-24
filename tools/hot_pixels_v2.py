@@ -102,3 +102,78 @@ def build_hot_pixel_map_chromatic(
     thresh = int(np.ceil(min_fraction * n))
     persistent = hit_count >= thresh
     return (persistent.astype(np.uint8) * 255)
+
+
+def build_hot_pixel_map_white(
+    frames,
+    center_threshold=30.0,
+    inner_threshold=15.0,
+    r_outer_lo=5, r_outer_hi=8,
+    min_fraction=0.8,
+):
+    # White/silicon-level defect detector. All three photosites stuck,
+    # so the defect shows as a neutral luminance spike with no chromatic
+    # bias. Same ring geometry as the chromatic detector, but the test
+    # quantity is mean(R,G,B) instead of one channel minus the other two.
+    # Stars pass the radial-spike test in a single frame, but Earth
+    # rotation moves them between samples, so they fail the persistence
+    # gate at any fixed (x,y).
+    if not frames:
+        return None
+    h, w = frames[0].shape[:2]
+
+    in_outer_side = 3
+    in_inner_side = 1
+    out_outer_side = 2 * r_outer_hi + 1
+    out_inner_side = 2 * (r_outer_lo - 1) + 1
+
+    in_outer_area = float(in_outer_side * in_outer_side)
+    in_inner_area = float(in_inner_side * in_inner_side)
+    in_ring_area = in_outer_area - in_inner_area
+
+    out_outer_area = float(out_outer_side * out_outer_side)
+    out_inner_area = float(out_inner_side * out_inner_side)
+    out_ring_area = out_outer_area - out_inner_area
+
+    def annulus_mean(src, outer_side, outer_area, inner_side, inner_area, ring_area):
+        outer = cv2.boxFilter(
+            src, -1, (outer_side, outer_side),
+            normalize=True, borderType=cv2.BORDER_REPLICATE
+        )
+        if inner_side <= 1:
+            return (outer * outer_area - src * inner_area) / ring_area
+        inner = cv2.boxFilter(
+            src, -1, (inner_side, inner_side),
+            normalize=True, borderType=cv2.BORDER_REPLICATE
+        )
+        return (outer * outer_area - inner * inner_area) / ring_area
+
+    hit_count = np.zeros((h, w), np.uint16)
+
+    for frame in frames:
+        f = frame.astype(np.float32)
+        luma = (f[:, :, 0] + f[:, :, 1] + f[:, :, 2]) / 3.0
+
+        d_out = annulus_mean(
+            luma, out_outer_side, out_outer_area,
+            out_inner_side, out_inner_area, out_ring_area,
+        )
+        d_in = annulus_mean(
+            luma, in_outer_side, in_outer_area,
+            in_inner_side, in_inner_area, in_ring_area,
+        )
+
+        delta_c = luma - d_out
+        delta_i = d_in - d_out
+
+        cond = (
+            (np.abs(delta_c) >= center_threshold) &
+            (np.abs(delta_i) >= inner_threshold) &
+            (delta_c * delta_i > 0)
+        )
+        hit_count += cond.astype(np.uint16)
+
+    n = len(frames)
+    thresh = int(np.ceil(min_fraction * n))
+    persistent = hit_count >= thresh
+    return (persistent.astype(np.uint8) * 255)
