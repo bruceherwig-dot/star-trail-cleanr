@@ -16,7 +16,7 @@ jobs:
       - name: Install CPU-only PyTorch
         run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
       - name: Install dependencies
-        run: pip install pyinstaller opencv-python numpy pillow PySide6 ultralytics sahi
+        run: pip install pyinstaller opencv-python numpy pillow PySide6 ultralytics sahi nvidia-ml-py
       - name: Build (Apple Silicon)
         run: python build_helper.py
       - name: Zip app
@@ -40,7 +40,7 @@ jobs:
       - name: Install CPU-only PyTorch
         run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
       - name: Install dependencies
-        run: pip install pyinstaller opencv-python numpy pillow PySide6 ultralytics sahi
+        run: pip install pyinstaller opencv-python numpy pillow PySide6 ultralytics sahi nvidia-ml-py
       - name: Build (Intel)
         run: python build_helper.py
       - name: Zip app
@@ -60,7 +60,7 @@ jobs:
       - name: Install CPU-only PyTorch
         run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
       - name: Install dependencies
-        run: pip install pyinstaller opencv-python numpy pillow PySide6 ultralytics sahi
+        run: pip install pyinstaller opencv-python numpy pillow PySide6 ultralytics sahi nvidia-ml-py
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
         shell: pwsh

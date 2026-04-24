@@ -592,6 +592,16 @@ class ModelUpdateCheckThread(QThread):
             self.result_ready.emit(result)
 
 
+class NvidiaDetectThread(QThread):
+    """Background NVIDIA GPU detection. Emits the outcome and a detail string."""
+    result_ready = Signal(str, str)
+
+    def run(self):
+        from modules.nvidia_detect import detect_nvidia
+        outcome, detail = detect_nvidia()
+        self.result_ready.emit(outcome, detail)
+
+
 class ModelDownloadThread(QThread):
     """Streams a model file into the user folder. Atomic via temp-then-rename.
 
@@ -679,6 +689,7 @@ class MainWindow(QMainWindow):
         container_layout.addWidget(self._build_banner())
         container_layout.addWidget(self._build_update_banner())
         container_layout.addWidget(self._build_model_update_card())
+        container_layout.addWidget(self._build_nvidia_banner())
         container_layout.addWidget(self._tabs)
         self.setCentralWidget(container)
 
@@ -691,6 +702,7 @@ class MainWindow(QMainWindow):
 
         self._start_update_check()
         self._start_model_update_check()
+        self._start_nvidia_detect()
 
     # ── FAQ tab ──────────────────────────────────────────────────────────────
 
@@ -1060,7 +1072,7 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _model_display_name(tag):
-        """'model-v2' becomes 'Trail Detector 2'. Falls back to the raw tag on parse failure."""
+        """'model-v2' becomes 'Trail Detector v2'. Falls back to the raw tag on parse failure."""
         if not tag:
             return "New model"
         m = re.match(r"^model-v(\d+(?:\.\d+)?)", tag)
@@ -1069,7 +1081,7 @@ class MainWindow(QMainWindow):
         num = m.group(1)
         if "." in num:
             num = num.rstrip("0").rstrip(".")
-        return f"Trail Detector {num}"
+        return f"Trail Detector v{num}"
 
     def _current_model_display_name(self):
         """Return 'Trail Detector N' for the currently-active model. Empty string on failure."""
@@ -1148,6 +1160,55 @@ class MainWindow(QMainWindow):
         # Silent fallback: hide the card, try again next launch.
         self._model_card.setVisible(False)
 
+    # ── NVIDIA "coming soon" banner ──────────────────────────────────────────
+
+    def _build_nvidia_banner(self):
+        banner = QFrame()
+        banner.setFixedHeight(44)
+        banner.setStyleSheet("QFrame { background-color: #e68a00; }")
+        banner.setVisible(False)
+        layout = QHBoxLayout(banner)
+        layout.setContentsMargins(16, 0, 8, 0)
+        layout.setSpacing(12)
+
+        self._nvidia_label = QLabel(
+            "NVIDIA GPU detected. Full GPU support is coming in a future update."
+        )
+        self._nvidia_label.setStyleSheet(
+            "color: white; font-size: 14px; font-weight: bold; background: transparent;"
+        )
+        layout.addWidget(self._nvidia_label)
+        layout.addStretch()
+
+        gotit_btn = QPushButton("Got it")
+        gotit_btn.setFixedHeight(28)
+        gotit_btn.setStyleSheet(
+            "QPushButton { background-color: white; color: #e68a00; font-size: 13px; "
+            "font-weight: bold; border-radius: 4px; padding: 0 16px; border: none; }"
+            "QPushButton:hover { background-color: #fdf6e3; }"
+        )
+        gotit_btn.clicked.connect(self._on_nvidia_gotit_clicked)
+        layout.addWidget(gotit_btn)
+
+        self._nvidia_banner = banner
+        return banner
+
+    def _start_nvidia_detect(self):
+        if SETTINGS.value("nvidia_coming_soon_dismissed", False, type=bool):
+            return
+        self._nvidia_thread = NvidiaDetectThread(self)
+        self._nvidia_thread.result_ready.connect(self._on_nvidia_detect_result)
+        self._nvidia_thread.start()
+
+    def _on_nvidia_detect_result(self, outcome, detail):
+        print(f"[nvidia-detect] outcome={outcome} detail={detail}", flush=True)
+        if outcome == "yes":
+            self._nvidia_banner.setVisible(True)
+
+    def _on_nvidia_gotit_clicked(self):
+        SETTINGS.setValue("nvidia_coming_soon_dismissed", True)
+        self._nvidia_banner.setVisible(False)
+
     def _relaunch(self):
         """Close and reopen the app."""
         import subprocess
@@ -1207,11 +1268,16 @@ class MainWindow(QMainWindow):
         self._folder_input = QLineEdit()
         self._folder_input.setPlaceholderText("Select folder using Browse\u2026")
         self._folder_input.textChanged.connect(self._auto_output)
+        self._folder_input.textChanged.connect(self._update_input_open_btn_state)
         self._folder_input.editingFinished.connect(self._on_input_edited)
         row_in.addWidget(self._folder_input, 4)
         browse_in = QPushButton("Browse\u2026")
         browse_in.clicked.connect(self._browse_input)
         row_in.addWidget(browse_in, 1)
+        self._input_open_btn = QPushButton("Open Folder")
+        self._input_open_btn.setEnabled(False)
+        self._input_open_btn.clicked.connect(self._open_setup_input_folder)
+        row_in.addWidget(self._input_open_btn, 1)
         layout.addLayout(row_in)
 
         self._frame_count_label = QLabel("")
@@ -1233,10 +1299,15 @@ class MainWindow(QMainWindow):
         row_out = QHBoxLayout()
         self._output_input = QLineEdit()
         self._output_input.setPlaceholderText("Auto-fills from input folder")
+        self._output_input.textChanged.connect(self._update_output_open_btn_state)
         row_out.addWidget(self._output_input, 4)
         browse_out = QPushButton("Browse\u2026")
         browse_out.clicked.connect(self._browse_output)
         row_out.addWidget(browse_out, 1)
+        self._output_open_btn = QPushButton("Open Folder")
+        self._output_open_btn.setEnabled(False)
+        self._output_open_btn.clicked.connect(self._open_setup_output_folder)
+        row_out.addWidget(self._output_open_btn, 1)
         layout.addLayout(row_out)
         layout.addSpacing(10)
 
@@ -1571,20 +1642,37 @@ class MainWindow(QMainWindow):
         last_dir = SETTINGS.value("last_input_dir", "")
         folder = QFileDialog.getExistingDirectory(self, "Select Input Folder", last_dir)
         if folder:
-            is_new = folder != self._folder_input.text().strip()
             self._folder_input.setText(folder)
             SETTINGS.setValue("last_input_dir", folder)
-            if is_new:
-                self._frame_limit.setCurrentText("20")
             self._update_mask_status()
             self._update_frame_count()
 
     def _on_input_edited(self):
-        folder = self._folder_input.text().strip()
-        if folder and folder != getattr(self, "_last_input_seen", None):
-            self._last_input_seen = folder
-            self._frame_limit.setCurrentText("20")
         self._update_frame_count()
+
+    def _update_input_open_btn_state(self):
+        path = self._folder_input.text().strip()
+        self._input_open_btn.setEnabled(bool(path) and os.path.isdir(path))
+
+    def _update_output_open_btn_state(self):
+        path = self._output_input.text().strip()
+        self._output_open_btn.setEnabled(bool(path) and os.path.isdir(path))
+
+    def _open_setup_input_folder(self):
+        path = self._folder_input.text().strip()
+        if path and os.path.isdir(path):
+            if sys.platform == "win32":
+                os.startfile(path)
+            else:
+                subprocess.run(["open", path])
+
+    def _open_setup_output_folder(self):
+        path = self._output_input.text().strip()
+        if path and os.path.isdir(path):
+            if sys.platform == "win32":
+                os.startfile(path)
+            else:
+                subprocess.run(["open", path])
 
     def _update_frame_count(self):
         folder = self._folder_input.text().strip()
@@ -1624,28 +1712,6 @@ class MainWindow(QMainWindow):
                 else:
                     item.setFlags(flags & ~Qt.ItemIsEnabled)
             self._frame_limit.view().setRowHidden(i, not enabled)
-
-        if count is not None and count > 0:
-            cur = self._frame_limit.currentText()
-            if cur != "All Frames":
-                try:
-                    if int(cur) > count:
-                        for i in range(self._frame_limit.count()):
-                            t = self._frame_limit.itemText(i)
-                            if t == "All Frames":
-                                continue
-                            try:
-                                if int(t) <= count:
-                                    self._frame_limit.setCurrentIndex(i)
-                                    break
-                            except ValueError:
-                                pass
-                        else:
-                            idx = self._frame_limit.findText("All Frames")
-                            if idx >= 0:
-                                self._frame_limit.setCurrentIndex(idx)
-                except ValueError:
-                    pass
 
     def _browse_output(self):
         last_dir = SETTINGS.value("last_output_dir", "")
