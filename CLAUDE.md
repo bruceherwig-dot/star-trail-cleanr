@@ -2,7 +2,7 @@
 
 ## Standing instructions (apply to every response)
 - **Before giving any recommendation or advice:** verify the reasoning applies to the actual system in use. Check relevant source files or context before advising. Flag uncertainty explicitly with "I think" or "I'm not sure" — do not present unverified reasoning as fact.
-- **Bump `version.txt` by .001 on every code edit.** After ANY Edit/Write to `star_trail_cleanr.py`, `astro_clean_v5.py`, `modules/*.py`, or `build_helper.py`, read `version.txt`, add .001, and write it back — in the same response as the code change. The GUI header shows this number, so Bruce can see at a glance that the code actually changed. One bump per logical change, even if it touched multiple files. Never skip. If you forgot on an earlier change in the same response, catch up now.
+- **Do NOT touch `version.txt` during development.** The per-edit .001 bump rule was retired 2026-04-24. `version.txt` now matches the shipped GitHub tag exactly (e.g., `1.7` for `v1.7-beta`) and is updated ONLY at release time, once, to match the new tag. See `feedback_version_scheme.md` for the ship procedure.
 
 ## Sacred data — NEVER touch
 - **Original source images** — never delete, overwrite, or modify. Convert/copy alongside, never replace.

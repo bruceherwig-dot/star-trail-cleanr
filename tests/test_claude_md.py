@@ -19,9 +19,13 @@ def test_sacred_data_rule_present():
     assert "reviewed labelme" in text, "reviewed-labels sacred rule removed from CLAUDE.md"
 
 
-def test_version_bump_rule_present():
+def test_version_rule_present():
+    """CLAUDE.md must state that version.txt is not touched during development
+    and is only updated at release time to match the shipped tag."""
     text = _read().lower()
-    assert "version.txt" in text and ".001" in text, "version-bump rule removed from CLAUDE.md"
+    assert "version.txt" in text, "version.txt rule removed from CLAUDE.md"
+    assert "release time" in text or "ship" in text or "tag" in text, \
+        "CLAUDE.md no longer states the at-release-time rule for version.txt"
 
 
 def test_release_checklist_present():
