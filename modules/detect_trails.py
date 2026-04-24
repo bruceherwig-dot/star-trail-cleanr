@@ -63,7 +63,7 @@ def detect_frame(model, img_path: str, tile_size: int = 640,
         slice_width=tile_size,
         overlap_height_ratio=overlap,
         overlap_width_ratio=overlap,
-        postprocess_type="NMM",
+        postprocess_type="NMS",
         verbose=0,
     )
 
