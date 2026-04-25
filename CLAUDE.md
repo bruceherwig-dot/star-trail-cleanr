@@ -26,7 +26,7 @@
 2. Commit `CHANGELOG.md` together with the code changes (same commit or immediately before tag)
 3. Tag the release (`git tag vX.XX-beta`)
 4. Push commits and tag (`git push && git push origin vX.XX-beta`)
-5. Wait for GitHub Actions build to complete, then post download links to user
+5. Watch the GitHub Actions build with `bash scripts/watch_ci.sh` — when it reports "Build succeeded", post the download links to the user. (This is the standard watcher; never invent a new one each release.)
 
 ## Smoke test suite (`tests/`)
 Regression safety net for Claude's edits — Bruce does not run these himself.
