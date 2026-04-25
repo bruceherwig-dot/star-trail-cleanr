@@ -23,6 +23,10 @@ astro_clean.py
 astro_clean_v2.py
 astro_clean_v3.py
 
+# Sentry build-time config (DSN baked in by CI from GitHub Secret).
+# Absent in dev so Sentry stays inactive when running from source.
+_sentry_config.py
+
 # Python / PyInstaller
 __pycache__/
 *.pyc

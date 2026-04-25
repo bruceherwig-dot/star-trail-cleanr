@@ -77,6 +77,12 @@ Got a before-and-after you'd like to share? Got an idea or feedback to make Star
 
 ---
 
+## Crash Reports
+
+The first time you launch Star Trail CleanR you'll be asked whether you'd like to send anonymous crash reports. If you say yes, the app sends an automatic report (stack trace, operating system, app version) when it crashes, so the bug can be found and fixed. If you say no, nothing is sent. Either way, no images, no folder paths, and no personal information are ever collected.
+
+---
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

@@ -263,6 +263,38 @@ except Exception:
 SETTINGS = QSettings("StarTrailCleanR", "StarTrailCleanR")
 
 
+# Sentry DSN: baked at build time by CI from the SENTRY_DSN GitHub Secret.
+# `_sentry_config.py` is gitignored and absent in dev, so Sentry stays
+# inactive when running from source.
+try:
+    from _sentry_config import DSN as _SENTRY_DSN
+except ImportError:
+    _SENTRY_DSN = ""
+
+
+def _maybe_init_sentry():
+    """Initialize Sentry only if the user opted in AND a DSN is available.
+
+    Privacy-safe defaults: no performance traces, no auto-collected personal
+    info (file paths, env, etc). Wraps the import in try/except so a missing
+    sentry-sdk in dev environments never breaks the app.
+    """
+    if not SETTINGS.value("crash_reporting_enabled", False, type=bool):
+        return
+    if not _SENTRY_DSN:
+        return
+    try:
+        import sentry_sdk
+        sentry_sdk.init(
+            dsn=_SENTRY_DSN,
+            traces_sample_rate=0,
+            send_default_pii=False,
+            release=f"star-trail-cleanr@{VERSION}",
+        )
+    except Exception:
+        pass
+
+
 WORKSPACE_DIR = "cleanr_workspace"
 
 
@@ -2335,6 +2367,30 @@ if __name__ == '__main__':
         app.setWindowIcon(QIcon(_icon_path))
 
     _apply_theme()
+
+    # First-run crash-reporting opt-in. Asked once; choice persists in
+    # QSettings. Only shown when a DSN is actually present (CI builds), so
+    # dev runs don't see the prompt at all.
+    if _SENTRY_DSN and not SETTINGS.contains("crash_reporting_choice_made"):
+        from PySide6.QtWidgets import QMessageBox
+        prompt = QMessageBox()
+        prompt.setWindowTitle("Star Trail CleanR")
+        prompt.setIcon(QMessageBox.Question)
+        prompt.setText("Help improve Star Trail CleanR by sending anonymous crash reports?")
+        prompt.setInformativeText(
+            "If the app ever crashes, an automatic error report is sent so the bug "
+            "can be fixed.\n\nThe report contains a stack trace, your operating "
+            "system, and the app version. No images, no folder paths, no personal "
+            "information."
+        )
+        prompt.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        prompt.setDefaultButton(QMessageBox.Yes)
+        choice = prompt.exec()
+        SETTINGS.setValue("crash_reporting_enabled", choice == QMessageBox.Yes)
+        SETTINGS.setValue("crash_reporting_choice_made", True)
+
+    _maybe_init_sentry()
+
     window = MainWindow()
     window.show()
 

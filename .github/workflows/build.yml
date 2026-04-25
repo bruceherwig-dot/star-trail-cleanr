@@ -16,7 +16,11 @@ jobs:
       - name: Install CPU-only PyTorch
         run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
       - name: Install dependencies
-        run: pip install pyinstaller opencv-python numpy pillow PySide6 ultralytics sahi nvidia-ml-py
+        run: pip install pyinstaller opencv-python numpy pillow PySide6 ultralytics sahi nvidia-ml-py sentry-sdk
+      - name: Bake Sentry DSN
+        env:
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+        run: python -c "import os; open('_sentry_config.py','w').write('DSN = ' + repr(os.environ.get('SENTRY_DSN','')))"
       - name: Build (Apple Silicon)
         run: python build_helper.py
       - name: Zip app
@@ -40,7 +44,11 @@ jobs:
       - name: Install CPU-only PyTorch
         run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
       - name: Install dependencies
-        run: pip install pyinstaller opencv-python numpy pillow PySide6 ultralytics sahi nvidia-ml-py
+        run: pip install pyinstaller opencv-python numpy pillow PySide6 ultralytics sahi nvidia-ml-py sentry-sdk
+      - name: Bake Sentry DSN
+        env:
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+        run: python -c "import os; open('_sentry_config.py','w').write('DSN = ' + repr(os.environ.get('SENTRY_DSN','')))"
       - name: Build (Intel)
         run: python build_helper.py
       - name: Zip app
@@ -60,7 +68,11 @@ jobs:
       - name: Install CPU-only PyTorch
         run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
       - name: Install dependencies
-        run: pip install pyinstaller opencv-python numpy pillow PySide6 ultralytics sahi nvidia-ml-py
+        run: pip install pyinstaller opencv-python numpy pillow PySide6 ultralytics sahi nvidia-ml-py sentry-sdk
+      - name: Bake Sentry DSN
+        env:
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+        run: python -c "import os; open('_sentry_config.py','w').write('DSN = ' + repr(os.environ.get('SENTRY_DSN','')))"
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
         shell: pwsh
