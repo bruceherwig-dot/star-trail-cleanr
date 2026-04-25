@@ -1,6 +1,7 @@
 # Astrophotography Airplane & Satellite Trail Removal — v5
 
 ## Standing instructions (apply to every response)
+- **NEVER claim what our code does or doesn't do without reading the code first.** Bruce is not a programmer. He believes every technical claim I make and acts on it (defers features, reshapes plans). Before saying "our pipeline uses X," "we strip Y," "we can't do Z because of library W" — grep or Read the actual file. If I catch myself hedging with "I think" or "given that we use" about our own code, STOP and check. Past examples where I got this wrong: told Bruce EXIF couldn't be preserved when the code already had PIL pass-through, told him the tile-merge step was the polygon step, told him the detection grid matched the training grid when it didn't. Full rule and trip-wire phrases in `feedback_never_guess_about_our_code.md`.
 - **Before giving any recommendation or advice:** verify the reasoning applies to the actual system in use. Check relevant source files or context before advising. Flag uncertainty explicitly with "I think" or "I'm not sure" — do not present unverified reasoning as fact.
 - **Do NOT touch `version.txt` during development.** The per-edit .001 bump rule was retired 2026-04-24. `version.txt` now matches the shipped GitHub tag exactly (e.g., `1.7` for `v1.7-beta`) and is updated ONLY at release time, once, to match the new tag. See `feedback_version_scheme.md` for the ship procedure.
 

@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
     QSpinBox, QTabWidget, QTextBrowser,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QSettings, QTimer
-from PySide6.QtGui import QFont, QPixmap
+from PySide6.QtGui import QFont, QPixmap, QIcon
 
 from mask_painter import MaskPainterWidget
 
@@ -2179,6 +2179,19 @@ if __name__ == '__main__':
         sys.exit(1)
 
     app = QApplication(sys.argv)
+
+    # Set the Dock / taskbar icon. Same icon file the frozen build embeds,
+    # so dev-mode (live Python via the AppleScript wrapper) also gets the
+    # proper Star Trail CleanR icon instead of the Python launcher's rocket.
+    if getattr(sys, 'frozen', False):
+        _icon_base = sys._MEIPASS
+    else:
+        _icon_base = os.path.dirname(os.path.abspath(__file__))
+    _icon_ext = '.ico' if sys.platform == 'win32' else '.icns'
+    _icon_path = os.path.join(_icon_base, 'assets', 'StarTrailCleanR' + _icon_ext)
+    if os.path.exists(_icon_path):
+        app.setWindowIcon(QIcon(_icon_path))
+
     _apply_theme()
     window = MainWindow()
     window.show()

@@ -166,7 +166,7 @@ def main():
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
 
-    def _write_output(stem: str, img: np.ndarray, icc_profile=None, exif_bytes=None):
+    def _write_output(stem: str, img: np.ndarray, icc_profile=None, exif_bytes=None, dpi=None):
         from PIL import Image
         if args.output_format == "jpg":
             out = img if img.dtype == np.uint8 else (img >> 8).astype(np.uint8)
@@ -177,6 +177,8 @@ def main():
                 save_kwargs["icc_profile"] = icc_profile
             if exif_bytes:
                 save_kwargs["exif"] = exif_bytes
+            if dpi:
+                save_kwargs["dpi"] = dpi
             pil.save(str(cleaned_dir / (stem + ".jpg")), "JPEG", **save_kwargs)
         elif args.output_format == "tif8":
             out = img if img.dtype == np.uint8 else (img >> 8).astype(np.uint8)
@@ -187,6 +189,8 @@ def main():
                 save_kwargs["icc_profile"] = icc_profile
             if exif_bytes:
                 save_kwargs["exif"] = exif_bytes
+            if dpi:
+                save_kwargs["dpi"] = dpi
             pil.save(str(cleaned_dir / (stem + ".tif")), "TIFF", **save_kwargs)
         else:  # tif16
             if img.dtype == np.uint16:
@@ -200,6 +204,8 @@ def main():
                 save_kwargs["icc_profile"] = icc_profile
             if exif_bytes:
                 save_kwargs["exif"] = exif_bytes
+            if dpi:
+                save_kwargs["dpi"] = dpi
             pil.save(str(cleaned_dir / (stem + ".tif")), "TIFF", **save_kwargs)
     cleaned_dir = output_dir
     cleaned_dir.mkdir(parents=True, exist_ok=True)
@@ -234,13 +240,58 @@ def main():
     # tagged as raw sRGB.
     icc_profile = None
     exif_bytes = None
+    dpi = None
     try:
         from PIL import Image as _PILImage
         with _PILImage.open(str(frame_files_all[core_start])) as _meta_im:
             icc_profile = _meta_im.info.get("icc_profile")
             exif_bytes = _meta_im.info.get("exif")
+            dpi = _meta_im.info.get("dpi")
     except Exception as _e:
         print(f"  WARN: could not read color profile ({_e})")
+
+    # Build the Software-tag stamp that goes into every cleaned file's EXIF.
+    # Format: "Star Trail CleanR v<app> / Trail Detector v<model> / www.startrailcleanr.com"
+    def _resolve_app_version():
+        try:
+            base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
+            with open(os.path.join(base, "version.txt")) as vf:
+                return vf.read().strip()
+        except Exception:
+            return "?"
+
+    def _resolve_model_version():
+        try:
+            from modules.model_update import local_model_version
+            import re
+            tag = local_model_version()
+            m = re.match(r"^model-v(\d+(?:\.\d+)?)", tag or "")
+            return f"v{m.group(1)}" if m else (tag or "?")
+        except Exception:
+            return "?"
+
+    _stamp = f"Star Trail CleanR v{_resolve_app_version()} / Trail Detector {_resolve_model_version()} / www.startrailcleanr.com"
+
+    def _stamp_exif(source_bytes):
+        """Return EXIF bytes with our stamp in three places for max viewer
+        compatibility. Preserves all other EXIF unchanged.
+            0x010E ImageDescription — shown as "Description/Caption" in Preview, Photoshop, Lightroom
+            0x0131 Software         — shown in EXIF viewers, Lightroom, Photoshop Origin panel
+            0x9C9C XPComment        — shown in Windows Explorer "Comments" column (UTF-16LE encoded)
+        """
+        try:
+            from PIL import Image as _PILImage
+            ex = _PILImage.Exif()
+            if source_bytes:
+                ex.load(source_bytes)
+            ex[0x010E] = _stamp  # ImageDescription (ASCII)
+            ex[0x0131] = _stamp  # Software (ASCII)
+            ex[0x9C9C] = _stamp.encode('utf-16le') + b'\x00\x00'  # XPComment (UTF-16LE, null-terminated)
+            return ex.tobytes()
+        except Exception:
+            return source_bytes
+
+    exif_bytes = _stamp_exif(exif_bytes)
 
     print(f"Loading {n} frames...")
     frames_all = []
@@ -394,10 +445,10 @@ def main():
                 # Use i + core_start as index into the full (with-neighbors) arrays
                 cleaned = repair_frame(img, mask, i + core_start,
                                        frames_all)
-                _write_output(fp.stem, cleaned, icc_profile=icc_profile, exif_bytes=exif_bytes)
+                _write_output(fp.stem, cleaned, icc_profile=icc_profile, exif_bytes=exif_bytes, dpi=dpi)
                 n_repaired += 1
             else:
-                _write_output(fp.stem, img, icc_profile=icc_profile, exif_bytes=exif_bytes)
+                _write_output(fp.stem, img, icc_profile=icc_profile, exif_bytes=exif_bytes, dpi=dpi)
 
         print(f"  repairing {i+1}/{n}: {fp.name} \u2014 {trail_label}", flush=True)
 
