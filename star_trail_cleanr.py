@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
     QSpinBox, QTabWidget, QTextBrowser,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QSettings, QTimer
-from PySide6.QtGui import QFont, QPixmap, QIcon
+from PySide6.QtGui import QFont, QPixmap, QIcon, QPalette, QColor
 
 from mask_painter import MaskPainterWidget
 
@@ -46,47 +46,185 @@ if getattr(sys, 'frozen', False):
 else:
     _base = os.path.dirname(os.path.abspath(__file__))
 
-# Theme colors — initialized to light-mode defaults; _apply_theme() updates
-# these at startup based on the OS color scheme. Read by stylesheets via
-# f-string interpolation, so any widget built after main() runs gets the
-# right values.
-MUTED_TEXT = "#666"
-HINT_TEXT = "#888"
-CARD_BG = "#e0e0e0"
-CARD_TEXT = "#000"
-CARD_BORDER = "#ccc"
-LIGHT_PANEL_BG = "#f0f7ff"
-DISABLED_BTN_BG = "#999"
-DISABLED_BTN_HOVER = "#888"
-SECONDARY_BTN_BG = "#666"
+# ── Theme system ─────────────────────────────────────────────────────────────
+# One central place for every color the app uses. Brand colors (header navy,
+# banner orange, button green/blue/red, heading blue) read fine on both light
+# and dark backgrounds and stay constant. Surface/text colors swap per mode.
+#
+# Stylesheets pull from THE legacy globals below (MUTED_TEXT, CARD_BG, etc.)
+# at widget-creation time. _apply_theme() repoints those globals to the right
+# variant, sets an explicit Qt palette so plain QLabels also render correctly,
+# and applies a window-level stylesheet.
+
+# Brand colors — same in both modes
+BRAND_HEADER_BG       = "#0a1e3f"   # header banner navy
+BRAND_HEADER_TEXT     = "white"
+BRAND_HEADER_SUB      = "#a8c0e0"
+BRAND_TAB_INACTIVE_BG = "#142a4a"
+BRAND_TAB_INACTIVE_FG = "#a8c0e0"
+BRAND_TAB_ACTIVE_BG   = "#1a6fc4"
+BRAND_TAB_ACTIVE_FG   = "white"
+BRAND_TAB_HOVER_BG    = "#1d3a66"
+BRAND_HEADING_BLUE    = "#1a6fc4"   # FAQ/About <h2>, detail label, stats border
+BRAND_HEADING_HOVER   = "#1580e0"
+BRAND_RUN_GREEN       = "#2a7a2a"
+BRAND_RUN_GREEN_HOVER = "#339933"
+BRAND_QUIT_RED        = "#d93025"
+BRAND_QUIT_RED_HOVER  = "#b8271b"
+BRAND_NOTICE_ORANGE   = "#e68a00"   # update banner, model card, NVIDIA banner
+BRAND_NOTICE_HOVER    = "#fdf6e3"
+BRAND_SUPPORT_BG      = "#d0e4f5"
+BRAND_SUPPORT_FG      = "#1a3a5c"
+BRAND_SUPPORT_BORDER  = "#a0c4e0"
+BRAND_SUPPORT_HOVER   = "#b8d4ec"
+
+# Surface / text colors — swap between light and dark
+THEME = {
+    "light": {
+        "muted_text":     "#666",
+        "hint_text":      "#888",
+        "card_bg":        "#e0e0e0",
+        "card_text":      "#000",
+        "card_border":    "#ccc",
+        "panel_bg":       "#f0f7ff",
+        "browser_bg":     "white",
+        "browser_text":   "#000",
+        "disabled_btn":   "#999",
+        "disabled_hover": "#888",
+        "secondary_btn":  "#666",
+        "window_bg":      "",        # empty = let Qt use system default
+        "success_text":   "#2a7a2a",
+    },
+    "dark": {
+        "muted_text":     "#aaaaaa",
+        "hint_text":      "#9aa4b0",
+        "card_bg":        "#2d3138",
+        "card_text":      "#e6e6e6",
+        "card_border":    "#3a3f4a",
+        "panel_bg":       "#1c2733",
+        "browser_bg":     "#1c1c1e",
+        "browser_text":   "#e6e6e6",
+        "disabled_btn":   "#4a4a4a",
+        "disabled_hover": "#5a5a5a",
+        "secondary_btn":  "#555555",
+        "window_bg":      "#1c1c1e",
+        "success_text":   "#5dd87a",
+    },
+}
+
+_CURRENT_MODE = "light"
+
+# Legacy globals — repointed by _apply_theme() so existing f-string stylesheets
+# pick up the current mode's value at widget-creation time.
+MUTED_TEXT          = THEME["light"]["muted_text"]
+HINT_TEXT           = THEME["light"]["hint_text"]
+CARD_BG             = THEME["light"]["card_bg"]
+CARD_TEXT           = THEME["light"]["card_text"]
+CARD_BORDER         = THEME["light"]["card_border"]
+LIGHT_PANEL_BG      = THEME["light"]["panel_bg"]
+DISABLED_BTN_BG     = THEME["light"]["disabled_btn"]
+DISABLED_BTN_HOVER  = THEME["light"]["disabled_hover"]
+SECONDARY_BTN_BG    = THEME["light"]["secondary_btn"]
+BROWSER_BG          = THEME["light"]["browser_bg"]
+BROWSER_TEXT        = THEME["light"]["browser_text"]
+SUCCESS_TEXT        = THEME["light"]["success_text"]
+
+
+def _detect_mode():
+    """Return 'dark' or 'light' based on the current OS color scheme."""
+    try:
+        scheme = QApplication.styleHints().colorScheme()
+        if scheme == Qt.ColorScheme.Dark:
+            return "dark"
+        if scheme == Qt.ColorScheme.Light:
+            return "light"
+    except Exception:
+        pass
+    # Fallback: read the system palette's window color and pick by lightness.
+    try:
+        bg = QApplication.palette().color(QPalette.Window)
+        return "dark" if bg.lightness() < 128 else "light"
+    except Exception:
+        return "light"
 
 
 def _apply_theme():
-    """Detect OS color scheme and update the theme color globals.
+    """Detect OS appearance and rewire all theme globals + Qt palette.
 
-    Called once from main() before any widget is built. Widget stylesheets
-    interpolate these globals via f-strings, so they pick up the right
-    values automatically. The mode is detected once at startup; toggling
-    the OS theme mid-session won't take effect until restart.
+    Run once at startup before any widget is built and again if the OS
+    appearance changes mid-session. Sets an explicit Qt palette so plain
+    QLabels (which inherit text color from the palette, not from any
+    stylesheet) render correctly in dark mode regardless of any platform
+    quirks in Qt's own auto-detection.
     """
+    global _CURRENT_MODE
     global MUTED_TEXT, HINT_TEXT, CARD_BG, CARD_TEXT, CARD_BORDER
     global LIGHT_PANEL_BG, DISABLED_BTN_BG, DISABLED_BTN_HOVER, SECONDARY_BTN_BG
-    try:
-        from PySide6.QtCore import Qt as _Qt
-        scheme = QApplication.styleHints().colorScheme()
-        is_dark = (scheme == _Qt.ColorScheme.Dark)
-    except Exception:
-        is_dark = False
-    if is_dark:
-        MUTED_TEXT = "#aaaaaa"
-        HINT_TEXT = "#9aa4b0"
-        CARD_BG = "#2d3138"
-        CARD_TEXT = "#e6e6e6"
-        CARD_BORDER = "#3a3f4a"
-        LIGHT_PANEL_BG = "#1c2733"
-        DISABLED_BTN_BG = "#4a4a4a"
-        DISABLED_BTN_HOVER = "#5a5a5a"
-        SECONDARY_BTN_BG = "#555555"
+    global BROWSER_BG, BROWSER_TEXT, SUCCESS_TEXT
+
+    mode = _detect_mode()
+    _CURRENT_MODE = mode
+    t = THEME[mode]
+
+    MUTED_TEXT         = t["muted_text"]
+    HINT_TEXT          = t["hint_text"]
+    CARD_BG            = t["card_bg"]
+    CARD_TEXT          = t["card_text"]
+    CARD_BORDER        = t["card_border"]
+    LIGHT_PANEL_BG     = t["panel_bg"]
+    DISABLED_BTN_BG    = t["disabled_btn"]
+    DISABLED_BTN_HOVER = t["disabled_hover"]
+    SECONDARY_BTN_BG   = t["secondary_btn"]
+    BROWSER_BG         = t["browser_bg"]
+    BROWSER_TEXT       = t["browser_text"]
+    SUCCESS_TEXT       = t["success_text"]
+
+    app = QApplication.instance()
+    if app is None:
+        return
+
+    # Set the QPalette explicitly. Plain QLabels and other widgets that
+    # don't carry their own stylesheet read text color from the palette,
+    # so this is what makes the step headings on the Main tab readable
+    # in dark mode even though they have no setStyleSheet call.
+    pal = app.style().standardPalette()
+    if mode == "dark":
+        body_bg   = QColor("#1c1c1e")
+        body_text = QColor("#e6e6e6")
+        base_bg   = QColor("#2a2c30")    # text-input fields
+        button_bg = QColor("#3a3f4a")
+        placeholder = QColor("#9aa4b0")
+        pal.setColor(QPalette.Window,         body_bg)
+        pal.setColor(QPalette.WindowText,     body_text)
+        pal.setColor(QPalette.Base,           base_bg)
+        pal.setColor(QPalette.AlternateBase,  body_bg)
+        pal.setColor(QPalette.Text,           body_text)
+        pal.setColor(QPalette.Button,         button_bg)
+        pal.setColor(QPalette.ButtonText,     body_text)
+        pal.setColor(QPalette.PlaceholderText, placeholder)
+        pal.setColor(QPalette.ToolTipBase,    body_bg)
+        pal.setColor(QPalette.ToolTipText,    body_text)
+        pal.setColor(QPalette.Highlight,      QColor("#1a6fc4"))
+        pal.setColor(QPalette.HighlightedText, QColor("white"))
+        pal.setColor(QPalette.Link,           QColor("#5da9ff"))
+        # Disabled state: dimmer button + faded text so Open Folder buttons
+        # visibly gray out in dark mode just like they do in light mode.
+        pal.setColor(QPalette.Disabled, QPalette.Button,     QColor("#2a2c30"))
+        pal.setColor(QPalette.Disabled, QPalette.ButtonText, QColor("#6a6f78"))
+        pal.setColor(QPalette.Disabled, QPalette.WindowText, QColor("#6a6f78"))
+        pal.setColor(QPalette.Disabled, QPalette.Text,       QColor("#6a6f78"))
+    app.setPalette(pal)
+
+    # Window-level stylesheet for QMainWindow / QStackedWidget background.
+    # Empty string in light mode lets Qt use the system default.
+    win_bg = t["window_bg"]
+    if win_bg:
+        app.setStyleSheet(
+            f"QMainWindow {{ background-color: {win_bg}; }}"
+            f"QStackedWidget {{ background-color: {win_bg}; }}"
+        )
+    else:
+        app.setStyleSheet("")
 
 
 SCRIPT = os.path.join(_base, "astro_clean_v5.py")
@@ -670,12 +808,12 @@ class MainWindow(QMainWindow):
         self._tabs.tabBar().setExpanding(True)
         self._tabs.tabBar().setDocumentMode(True)
         self._tabs.setStyleSheet(
-            "QTabWidget::pane { border: none; background: palette(window); }"
+            f"QTabWidget::pane {{ border: none; background: palette(window); }}"
             "QTabBar { qproperty-drawBase: 0; }"
-            "QTabBar::tab { background: #142a4a; color: #a8c0e0; padding: 14px 20px; "
+            f"QTabBar::tab {{ background: {BRAND_TAB_INACTIVE_BG}; color: {BRAND_TAB_INACTIVE_FG}; padding: 14px 20px; "
             "font-size: 15px; font-weight: bold; border: none; min-width: 200px; }"
-            "QTabBar::tab:selected { background: #1a6fc4; color: white; }"
-            "QTabBar::tab:hover:!selected { background: #1d3a66; color: white; }"
+            f"QTabBar::tab:selected {{ background: {BRAND_TAB_ACTIVE_BG}; color: {BRAND_TAB_ACTIVE_FG}; }}"
+            f"QTabBar::tab:hover:!selected {{ background: {BRAND_TAB_HOVER_BG}; color: {BRAND_TAB_ACTIVE_FG}; }}"
         )
         self._tabs.addTab(self._stack, "Main")
         self._tabs.addTab(self._build_faq_tab(), "FAQ")
@@ -713,32 +851,32 @@ class MainWindow(QMainWindow):
         wrap_layout.setSpacing(0)
         browser = QTextBrowser()
         browser.setOpenExternalLinks(True)
-        browser.document().setDocumentMargin(0)
+        browser.document().setDocumentMargin(20)
         browser.setStyleSheet(
-            "QTextBrowser { background: palette(window); border: none; font-size: 14px; }"
+            f"QTextBrowser {{ background: {BROWSER_BG}; color: {BROWSER_TEXT}; border: none; font-size: 14px; }}"
         )
         browser.setHtml(f"""
-        <html><body style='font-family: -apple-system, sans-serif; line-height: 1.5; margin:0; padding:0;'>
+        <html><body style='font-family: -apple-system, sans-serif; line-height: 1.5; margin:0; padding:0; color:{BROWSER_TEXT}; background-color:{BROWSER_BG};'>
         <p style='margin:0; padding:0; line-height:0; font-size:1px; height:0;'></p>
-        <h2 style='color:#1a6fc4; margin-top:0; margin-bottom:2px;'>Why Star Trail CleanR?</h2>
+        <h2 style='color:{BRAND_HEADING_BLUE}; margin-top:0; margin-bottom:2px;'>Why Star Trail CleanR?</h2>
         <p style='margin-top:2px;'>Star Trail CleanR removes airplane and satellite trails
         from astrophotography sequences while preserving the real stars. The result is a
         clean set of frames you can stack into a perfect star trail composite.</p>
 
-        <h2 style='color:#1a6fc4; margin-bottom:2px;'>Trail Detection</h2>
+        <h2 style='color:{BRAND_HEADING_BLUE}; margin-bottom:2px;'>Trail Detection</h2>
         <p style='margin-top:2px;'>Each frame is run through a YOLO segmentation model
         trained on thousands of manually labeled airplane and satellite trails across many
         cameras, lenses, and sky conditions. The model produces pixel-accurate masks for
         every trail it finds.</p>
 
-        <h2 style='color:#1a6fc4; margin-bottom:2px;'>The Fix &mdash; Star Bridge Repair</h2>
+        <h2 style='color:{BRAND_HEADING_BLUE}; margin-bottom:2px;'>The Fix &mdash; Star Bridge Repair</h2>
         <p style='margin-top:2px;'>For each trail, Star Trail CleanR pulls clean pixels
         from the frame immediately before and after, blending them across the trail using
         a morphing technique called <i>Star Bridge</i>. This preserves the real stars
         underneath the trail and keeps the brightness and color natural &mdash; no smudges,
         no blank patches.</p>
 
-        <h2 style='color:#1a6fc4; margin-bottom:2px;'>Workflow</h2>
+        <h2 style='color:{BRAND_HEADING_BLUE}; margin-bottom:2px;'>Workflow</h2>
         <ol style='margin-top:2px;'>
         <li><b>Browse</b> &mdash; choose your folder of frames.</li>
         <li><b>Mask (optional)</b> &mdash; paint over ground, buildings, and rocks so
@@ -751,7 +889,7 @@ class MainWindow(QMainWindow):
         (StarStaX, Sequator, Photoshop) for the final composite.</li>
         </ol>
 
-        <h2 style='color:#1a6fc4; margin-bottom:2px;'>Limitations</h2>
+        <h2 style='color:{BRAND_HEADING_BLUE}; margin-bottom:2px;'>Limitations</h2>
         <ul style='margin-top:2px;'>
         <li><b>Trail variety is bounded by the AI's training data.</b> If a type of
         trail isn't being detected well in your sequences, you can help train the next
@@ -801,13 +939,13 @@ class MainWindow(QMainWindow):
         bio = QTextBrowser()
         bio.setOpenExternalLinks(True)
         bio.setStyleSheet(
-            "QTextBrowser { background: palette(window); border: none; font-size: 14px; }"
+            f"QTextBrowser {{ background: {BROWSER_BG}; color: {BROWSER_TEXT}; border: none; font-size: 14px; }}"
         )
-        bio.document().setDocumentMargin(0)
+        bio.document().setDocumentMargin(20)
         bio.setHtml(f"""
-        <html><body style='font-family: -apple-system, sans-serif; line-height: 1.5; margin:0; padding:0;'>
+        <html><body style='font-family: -apple-system, sans-serif; line-height: 1.5; margin:0; padding:0; color:{BROWSER_TEXT}; background-color:{BROWSER_BG};'>
         <p style='margin:0; padding:0; line-height:0; font-size:1px; height:0;'></p>
-        <h2 style='color:#1a6fc4; margin-top:0; margin-bottom:2px;'>About the Authors</h2>
+        <h2 style='color:{BRAND_HEADING_BLUE}; margin-top:0; margin-bottom:2px;'>About the Authors</h2>
         <p style='margin-top:2px;'>Star Trail CleanR is a passion project. I've been
         shooting star trails for over a decade, and the whole time I kept thinking
         <i>somebody should really write a program that gets rid of all the airplane
@@ -822,23 +960,23 @@ class MainWindow(QMainWindow):
         <p>Star Trail CleanR is a free gift to the astrophotography community that
         has taught me so much.</p>
 
-        <h3 style='color:#1a6fc4; margin:12px 0 2px 0;'>Links</h3>
+        <h3 style='color:{BRAND_HEADING_BLUE}; margin:12px 0 2px 0;'>Links</h3>
         <ul style='margin-top:2px;'>
         <li>Photos for sale: <a href='https://bruceherwig.com'>bruceherwig.com</a></li>
         <li>Blog: <a href='https://bruceherwig.wordpress.com'>bruceherwig.wordpress.com</a></li>
         </ul>
 
-        <h3 style='color:#1a6fc4; margin:12px 0 2px 0;'>Acknowledgments</h3>
+        <h3 style='color:{BRAND_HEADING_BLUE}; margin:12px 0 2px 0;'>Acknowledgments</h3>
         <p style='margin-top:2px;'>Star Trail CleanR exists because of the generosity of fellow astrophotographers
         who shared their image sequences for AI training, tested early builds, and offered
         feedback. Every detected trail is a thank-you to them.</p>
         <p><a href='https://bruceherwig.wordpress.com/star-trail-cleanr/#Thanks'>See the
         full list of contributors &rarr;</a></p>
 
-        <h3 style='color:#1a6fc4; margin:12px 0 2px 0;'>Version History</h3>
+        <h3 style='color:{BRAND_HEADING_BLUE}; margin:12px 0 2px 0;'>Version History</h3>
         <p style='margin-top:2px;'>See the full <a href='https://github.com/bruceherwig-dot/star-trail-cleanr/blob/main/CHANGELOG.md'>version history on GitHub</a>.</p>
 
-        <h3 style='color:#1a6fc4; margin:12px 0 2px 0;'>Share Your Work&hellip; Have a Suggestion?</h3>
+        <h3 style='color:{BRAND_HEADING_BLUE}; margin:12px 0 2px 0;'>Share Your Work&hellip; Have a Suggestion?</h3>
         <p style='margin-top:2px;'>Got a before-and-after you'd like to share? I would love to see it!<br>
         Have an idea or feedback to make Star Trail CleanR even better? I want to hear it!<br>
         Email me at <a href='mailto:bruceherwig@gmail.com?subject=Star%20Trail%20CleanR'>bruceherwig@gmail.com</a></p>
@@ -855,7 +993,7 @@ class MainWindow(QMainWindow):
     def _build_banner(self):
         banner = QWidget()
         banner.setFixedHeight(80)
-        banner.setStyleSheet("background-color: #0a1e3f;")
+        banner.setStyleSheet(f"background-color: {BRAND_HEADER_BG};")
         outer = QHBoxLayout(banner)
         outer.setContentsMargins(0, 0, 16, 0)
         outer.setSpacing(12)
@@ -878,14 +1016,14 @@ class MainWindow(QMainWindow):
         text_col.setSpacing(2)
         text_col.addStretch()
         title = QLabel("Star Trail CleanR")
-        title.setStyleSheet("color: white; font-size: 26px; font-weight: bold; background: transparent;")
+        title.setStyleSheet(f"color: {BRAND_HEADER_TEXT}; font-size: 26px; font-weight: bold; background: transparent;")
         text_col.addWidget(title)
         sub = QLabel(f"Beta v{VERSION}")
-        sub.setStyleSheet("color: #a8c0e0; font-size: 12px; background: transparent;")
+        sub.setStyleSheet(f"color: {BRAND_HEADER_SUB}; font-size: 12px; background: transparent;")
         text_col.addWidget(sub)
         self._header_model_label = QLabel(self._current_model_display_name())
         self._header_model_label.setStyleSheet(
-            "color: #a8c0e0; font-size: 12px; background: transparent;"
+            f"color: {BRAND_HEADER_SUB}; font-size: 12px; background: transparent;"
         )
         text_col.addWidget(self._header_model_label)
         text_col.addStretch()
@@ -903,10 +1041,10 @@ class MainWindow(QMainWindow):
         support_btn = QPushButton("\u2764  Support")
         support_btn.setFixedHeight(32)
         support_btn.setStyleSheet(
-            "QPushButton { background-color: #d0e4f5; color: #1a3a5c; font-size: 13px; "
-            "font-weight: bold; border-radius: 16px; border: 1px solid #a0c4e0; "
-            "padding: 0 16px; }"
-            "QPushButton:hover { background-color: #b8d4ec; }"
+            f"QPushButton {{ background-color: {BRAND_SUPPORT_BG}; color: {BRAND_SUPPORT_FG}; font-size: 13px; "
+            f"font-weight: bold; border-radius: 16px; border: 1px solid {BRAND_SUPPORT_BORDER}; "
+            f"padding: 0 16px; }}"
+            f"QPushButton:hover {{ background-color: {BRAND_SUPPORT_HOVER}; }}"
         )
         support_btn.setToolTip("Support this project")
         support_btn.clicked.connect(lambda: __import__('webbrowser').open(
@@ -917,9 +1055,9 @@ class MainWindow(QMainWindow):
         quit_btn = QPushButton("\u2715")
         quit_btn.setFixedSize(32, 32)
         quit_btn.setStyleSheet(
-            "QPushButton { background-color: #d93025; color: white; font-size: 22px; "
-            "font-weight: bold; border-radius: 4px; border: none; }"
-            "QPushButton:hover { background-color: #b8271b; }"
+            f"QPushButton {{ background-color: {BRAND_QUIT_RED}; color: white; font-size: 22px; "
+            f"font-weight: bold; border-radius: 4px; border: none; }}"
+            f"QPushButton:hover {{ background-color: {BRAND_QUIT_RED_HOVER}; }}"
         )
         quit_btn.setToolTip("Quit Star Trail CleanR")
         quit_btn.clicked.connect(self.close)
@@ -932,7 +1070,7 @@ class MainWindow(QMainWindow):
     def _build_update_banner(self):
         banner = QFrame()
         banner.setFixedHeight(44)
-        banner.setStyleSheet("QFrame { background-color: #e68a00; }")
+        banner.setStyleSheet(f"QFrame {{ background-color: {BRAND_NOTICE_ORANGE}; }}")
         banner.setVisible(False)
         layout = QHBoxLayout(banner)
         layout.setContentsMargins(16, 0, 8, 0)
@@ -948,9 +1086,9 @@ class MainWindow(QMainWindow):
         download_btn = QPushButton("Download")
         download_btn.setFixedHeight(28)
         download_btn.setStyleSheet(
-            "QPushButton { background-color: white; color: #e68a00; font-size: 13px; "
-            "font-weight: bold; border-radius: 4px; padding: 0 16px; border: none; }"
-            "QPushButton:hover { background-color: #fdf6e3; }"
+            f"QPushButton {{ background-color: white; color: {BRAND_NOTICE_ORANGE}; font-size: 13px; "
+            f"font-weight: bold; border-radius: 4px; padding: 0 16px; border: none; }}"
+            f"QPushButton:hover {{ background-color: {BRAND_NOTICE_HOVER}; }}"
         )
         download_btn.clicked.connect(self._on_update_download)
         layout.addWidget(download_btn)
@@ -991,7 +1129,7 @@ class MainWindow(QMainWindow):
     def _build_model_update_card(self):
         card = QFrame()
         card.setVisible(False)
-        card.setStyleSheet("QFrame { background-color: #e68a00; }")
+        card.setStyleSheet(f"QFrame {{ background-color: {BRAND_NOTICE_ORANGE}; }}")
         layout = QVBoxLayout(card)
         layout.setContentsMargins(16, 10, 16, 10)
         layout.setSpacing(2)
@@ -1023,9 +1161,9 @@ class MainWindow(QMainWindow):
         self._model_download_btn = QPushButton("Download now")
         self._model_download_btn.setFixedHeight(28)
         self._model_download_btn.setStyleSheet(
-            "QPushButton { background-color: white; color: #e68a00; font-size: 13px; "
-            "font-weight: bold; border-radius: 4px; padding: 0 16px; border: none; }"
-            "QPushButton:hover { background-color: #fdf6e3; }"
+            f"QPushButton {{ background-color: white; color: {BRAND_NOTICE_ORANGE}; font-size: 13px; "
+            f"font-weight: bold; border-radius: 4px; padding: 0 16px; border: none; }}"
+            f"QPushButton:hover {{ background-color: {BRAND_NOTICE_HOVER}; }}"
         )
         self._model_download_btn.clicked.connect(self._on_model_download_clicked)
         action_row.addWidget(self._model_download_btn)
@@ -1055,9 +1193,9 @@ class MainWindow(QMainWindow):
         self._model_gotit_btn.setFixedHeight(28)
         self._model_gotit_btn.setVisible(False)
         self._model_gotit_btn.setStyleSheet(
-            "QPushButton { background-color: white; color: #e68a00; font-size: 13px; "
-            "font-weight: bold; border-radius: 4px; padding: 0 16px; border: none; }"
-            "QPushButton:hover { background-color: #fdf6e3; }"
+            f"QPushButton {{ background-color: white; color: {BRAND_NOTICE_ORANGE}; font-size: 13px; "
+            f"font-weight: bold; border-radius: 4px; padding: 0 16px; border: none; }}"
+            f"QPushButton:hover {{ background-color: {BRAND_NOTICE_HOVER}; }}"
         )
         self._model_gotit_btn.clicked.connect(lambda: self._model_card.setVisible(False))
         action_row.addWidget(self._model_gotit_btn)
@@ -1165,7 +1303,7 @@ class MainWindow(QMainWindow):
     def _build_nvidia_banner(self):
         banner = QFrame()
         banner.setFixedHeight(44)
-        banner.setStyleSheet("QFrame { background-color: #e68a00; }")
+        banner.setStyleSheet(f"QFrame {{ background-color: {BRAND_NOTICE_ORANGE}; }}")
         banner.setVisible(False)
         layout = QHBoxLayout(banner)
         layout.setContentsMargins(16, 0, 8, 0)
@@ -1183,9 +1321,9 @@ class MainWindow(QMainWindow):
         gotit_btn = QPushButton("Got it")
         gotit_btn.setFixedHeight(28)
         gotit_btn.setStyleSheet(
-            "QPushButton { background-color: white; color: #e68a00; font-size: 13px; "
-            "font-weight: bold; border-radius: 4px; padding: 0 16px; border: none; }"
-            "QPushButton:hover { background-color: #fdf6e3; }"
+            f"QPushButton {{ background-color: white; color: {BRAND_NOTICE_ORANGE}; font-size: 13px; "
+            f"font-weight: bold; border-radius: 4px; padding: 0 16px; border: none; }}"
+            f"QPushButton:hover {{ background-color: {BRAND_NOTICE_HOVER}; }}"
         )
         gotit_btn.clicked.connect(self._on_nvidia_gotit_clicked)
         layout.addWidget(gotit_btn)
@@ -1227,7 +1365,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(24, 20, 24, 20)
 
         lbl_font = QFont()
-        lbl_font.setPointSize(13)
+        lbl_font.setPointSize(15)
         lbl_font.setBold(True)
 
         step_font = QFont()
@@ -1326,9 +1464,9 @@ class MainWindow(QMainWindow):
         self._mask_btn.setFixedHeight(34)
         self._mask_btn.setFixedWidth(160)
         self._mask_btn.setStyleSheet(
-            "QPushButton { background-color: #2a7a2a; color: white; font-size: 13px; "
-            "font-weight: bold; border-radius: 6px; border: none; }"
-            "QPushButton:hover { background-color: #339933; }"
+            f"QPushButton {{ background-color: {BRAND_RUN_GREEN}; color: white; font-size: 13px; "
+            f"font-weight: bold; border-radius: 6px; border: none; }}"
+            f"QPushButton:hover {{ background-color: {BRAND_RUN_GREEN_HOVER}; }}"
         )
         self._mask_btn.clicked.connect(self._open_mask_editor)
         mask_row.addWidget(self._mask_btn)
@@ -1416,9 +1554,9 @@ class MainWindow(QMainWindow):
         self._run_btn = QPushButton("Clean My Stars!")
         self._run_btn.setFixedHeight(60)
         self._run_btn.setStyleSheet(
-            "QPushButton { background-color: #2a7a2a; color: white; font-size: 22px; "
-            "font-weight: bold; border-radius: 6px; border: none; }"
-            "QPushButton:hover { background-color: #339933; }"
+            f"QPushButton {{ background-color: {BRAND_RUN_GREEN}; color: white; font-size: 22px; "
+            f"font-weight: bold; border-radius: 6px; border: none; }}"
+            f"QPushButton:hover {{ background-color: {BRAND_RUN_GREEN_HOVER}; }}"
             f"QPushButton:disabled {{ background-color: {DISABLED_BTN_BG}; }}"
         )
         self._run_btn.clicked.connect(self._run)
@@ -1427,9 +1565,9 @@ class MainWindow(QMainWindow):
         self._setup_open_btn = QPushButton("Open Cleaned Folder")
         self._setup_open_btn.setFixedHeight(48)
         self._setup_open_btn.setStyleSheet(
-            "QPushButton { background-color: #1a6fc4; color: white; font-size: 18px; "
-            "font-weight: bold; border-radius: 6px; border: none; }"
-            "QPushButton:hover { background-color: #1580e0; }"
+            f"QPushButton {{ background-color: {BRAND_HEADING_BLUE}; color: white; font-size: 18px; "
+            f"font-weight: bold; border-radius: 6px; border: none; }}"
+            f"QPushButton:hover {{ background-color: {BRAND_HEADING_HOVER}; }}"
             f"QPushButton:disabled {{ background-color: {DISABLED_BTN_BG}; }}"
         )
         self._setup_open_btn.setEnabled(False)
@@ -1585,7 +1723,7 @@ class MainWindow(QMainWindow):
         # ── Detail / status line ──
         self._detail_label = QLabel("")
         self._detail_label.setAlignment(Qt.AlignCenter)
-        self._detail_label.setStyleSheet("font-size: 12px; color: #1a6fc4;")
+        self._detail_label.setStyleSheet(f"font-size: 12px; color: {BRAND_HEADING_BLUE};")
         self._detail_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         layout.addWidget(self._detail_label)
 
@@ -1596,7 +1734,7 @@ class MainWindow(QMainWindow):
         self._stats_label.setTextFormat(Qt.RichText)
         self._stats_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self._stats_label.setStyleSheet(
-            f"QLabel {{ background-color: {LIGHT_PANEL_BG}; border: 1px solid #1a6fc4; "
+            f"QLabel {{ background-color: {LIGHT_PANEL_BG}; border: 1px solid {BRAND_HEADING_BLUE}; "
             f"border-radius: 6px; padding: 12px; color: {CARD_TEXT}; font-size: 15px; }}"
         )
         self._stats_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -1625,9 +1763,9 @@ class MainWindow(QMainWindow):
         self._open_folder_btn = QPushButton("Open Cleaned Folder")
         self._open_folder_btn.setFixedHeight(48)
         self._open_folder_btn.setStyleSheet(
-            "QPushButton { background-color: #1a6fc4; color: white; font-size: 18px; "
-            "font-weight: bold; border-radius: 6px; border: none; }"
-            "QPushButton:hover { background-color: #1580e0; }"
+            f"QPushButton {{ background-color: {BRAND_HEADING_BLUE}; color: white; font-size: 18px; "
+            f"font-weight: bold; border-radius: 6px; border: none; }}"
+            f"QPushButton:hover {{ background-color: {BRAND_HEADING_HOVER}; }}"
         )
         self._open_folder_btn.clicked.connect(self._open_output_folder)
         btn_row.addWidget(self._open_folder_btn, 1)
@@ -1737,7 +1875,7 @@ class MainWindow(QMainWindow):
         if mask_path and os.path.exists(mask_path):
             self._mask_path = mask_path
             self._mask_status.setText("\u2705 Mask saved")
-            self._mask_status.setStyleSheet("color: #2a7a2a; font-size: 12px; margin-left: 8px;")
+            self._mask_status.setStyleSheet(f"color: {SUCCESS_TEXT}; font-size: 12px; margin-left: 8px;")
             self._mask_btn.setText("Edit Mask\u2026")
         else:
             self._mask_path = None
@@ -2069,6 +2207,10 @@ class MainWindow(QMainWindow):
         self._switch_to_back_btn()
 
     def _on_done(self, output_folder):
+        # Bounce the Dock icon (Mac) or flash the taskbar button (Windows) to
+        # get the user's attention if they've switched to another app. No-op
+        # if the window is currently in focus.
+        QApplication.alert(self)
         self._stop_elapsed_timer()
         self._process_title.setText("Cleaning Complete")
         self._progress_bar.setValue(100)
@@ -2195,4 +2337,19 @@ if __name__ == '__main__':
     _apply_theme()
     window = MainWindow()
     window.show()
+
+    # Live OS appearance switching: when the user toggles macOS Light/Dark
+    # mid-session, relaunch so every themed widget rebuilds with the new
+    # palette. QSettings preserves folder selections and options, so the
+    # user lands right back where they were.
+    def _on_color_scheme_changed(_scheme):
+        try:
+            window._relaunch()
+        except Exception:
+            pass
+    try:
+        app.styleHints().colorSchemeChanged.connect(_on_color_scheme_changed)
+    except Exception:
+        pass
+
     sys.exit(app.exec())
