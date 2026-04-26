@@ -3,6 +3,12 @@ import cv2
 import numpy as np
 from typing import Optional
 
+from . import slope_match
+
+# Default ON. Toggle to False to disable post-NMS slope-match merging if a
+# tester reports a regression. See modules/slope_match.py for the algorithm.
+SLOPE_MATCH_ENABLED = True
+
 
 def best_device() -> str:
     """Return the best available inference device: cuda > mps > cpu.
@@ -67,7 +73,9 @@ def detect_frame(model, img_path: str, tile_size: int = 640,
         verbose=0,
     )
 
-    mask = np.zeros((h, w), dtype=np.uint8)
+    # Build per-prediction full-frame masks first, so slope-match can operate
+    # on them as separate pieces. Combine into one output mask after merging.
+    per_prediction_masks = []
     for pred in result.object_prediction_list:
         if pred.mask is None:
             # No polygon — skip. Bbox-fill would mask huge sky regions.
@@ -76,13 +84,22 @@ def detect_frame(model, img_path: str, tile_size: int = 640,
         if seg is None:
             continue
 
+        m = np.zeros((h, w), dtype=np.uint8)
         if seg.shape == (h, w):
-            mask[seg.astype(bool)] = 255
+            m[seg.astype(bool)] = 255
         else:
-            seg_resized = cv2.resize(
+            m = cv2.resize(
                 seg.astype(np.uint8) * 255, (w, h),
                 interpolation=cv2.INTER_NEAREST)
-            mask = cv2.bitwise_or(mask, seg_resized)
+        if m.any():
+            per_prediction_masks.append(m)
+
+    if SLOPE_MATCH_ENABLED and len(per_prediction_masks) >= 2:
+        per_prediction_masks = slope_match.merge(per_prediction_masks)
+
+    mask = np.zeros((h, w), dtype=np.uint8)
+    for m in per_prediction_masks:
+        mask = np.maximum(mask, m)
 
     if dilate > 0:
         kernel = cv2.getStructuringElement(
