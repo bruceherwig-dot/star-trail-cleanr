@@ -21,7 +21,7 @@ TIMEOUT_S = 5
 # Version label of the model shipped inside the app bundle. Bumped only when
 # we publish a new app release that carries a newer bundled model. Downloaded
 # models in the user folder always take precedence over this.
-BUNDLED_MODEL_VERSION = "model-v2"
+BUNDLED_MODEL_VERSION = "model-v3"
 
 _TAG_RE = re.compile(r"^model-v(\d+(?:\.\d+)?)")
 
