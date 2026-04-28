@@ -4,6 +4,11 @@ on:
   push:
     tags:
       - 'v*'
+  # Manual trigger from the Actions UI for dry-runs (e.g., validating a new
+  # build job before its first real release tag). Builds the binaries; the
+  # `release` job below skips when the workflow isn't running off a tag, so
+  # no GitHub release is created on a manual dispatch.
+  workflow_dispatch:
 
 jobs:
   build-mac:
@@ -151,6 +156,9 @@ jobs:
   release:
     needs: [build-mac, build-mac-intel, build-windows, build-linux]
     runs-on: ubuntu-latest
+    # Skip the release-creation step on manual dry-runs. Only fires when the
+    # workflow was triggered by a `v*` tag push.
+    if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
     steps:
