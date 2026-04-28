@@ -90,6 +90,7 @@ cmd = [
     '--collect-all', 'sahi',
     '--collect-all', 'ultralytics',
     '--collect-all', 'skimage',
+    '--collect-all', 'tifffile',
 ]
 # Force PyInstaller to exclude the same skip list at the module-analysis level,
 # not just the data-file walker. This stops transitive imports from pulling

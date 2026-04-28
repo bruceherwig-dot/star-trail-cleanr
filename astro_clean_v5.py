@@ -193,20 +193,30 @@ def main():
                 save_kwargs["dpi"] = dpi
             pil.save(str(cleaned_dir / (stem + ".tif")), "TIFF", **save_kwargs)
         else:  # tif16
+            # PIL has no first-class 16-bit RGB image mode, so its fromarray
+            # raises KeyError on uint16 RGB arrays. Use tifffile (a scientific
+            # TIFF library, pinned explicitly in build_helper.py) to write
+            # the file. Lazy import keeps it out of the JPG / tif8 hot path.
+            import tifffile
             if img.dtype == np.uint16:
                 out = img
             else:
                 out = img.astype(np.uint16) * 257
             rgb = cv2.cvtColor(out, cv2.COLOR_BGR2RGB)
-            pil = Image.fromarray(rgb, mode="RGB;16")
-            save_kwargs = {"compression": "tiff_deflate"}
+            extratags = []
             if icc_profile:
-                save_kwargs["icc_profile"] = icc_profile
-            if exif_bytes:
-                save_kwargs["exif"] = exif_bytes
+                # TIFF tag 34675 = InterColorProfile (ICC). 'B' = byte array.
+                extratags.append((34675, 'B', len(icc_profile), icc_profile, False))
+            tiff_kwargs = {
+                "photometric": "rgb",
+                "compression": "deflate",
+                "extratags": extratags,
+            }
             if dpi:
-                save_kwargs["dpi"] = dpi
-            pil.save(str(cleaned_dir / (stem + ".tif")), "TIFF", **save_kwargs)
+                # tifffile expects (xres, yres) floats and a unit string.
+                tiff_kwargs["resolution"] = (float(dpi[0]), float(dpi[1]))
+                tiff_kwargs["resolutionunit"] = "inch"
+            tifffile.imwrite(str(cleaned_dir / (stem + ".tif")), rgb, **tiff_kwargs)
     cleaned_dir = output_dir
     cleaned_dir.mkdir(parents=True, exist_ok=True)
     masks_dir = output_dir / "masks" if args.save_masks else None
