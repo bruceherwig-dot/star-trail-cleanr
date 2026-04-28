@@ -34,7 +34,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QComboBox, QProgressBar,
     QTextEdit, QFileDialog, QStackedWidget, QCheckBox, QFrame,
-    QSpinBox, QTabWidget, QTextBrowser,
+    QSpinBox, QTabWidget, QTextBrowser, QScrollArea,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QSettings, QTimer
 from PySide6.QtGui import QFont, QPixmap, QIcon, QPalette, QColor
@@ -1618,7 +1618,13 @@ class MainWindow(QMainWindow):
         btn_row.addWidget(self._setup_open_btn, 1)
         layout.addLayout(btn_row)
 
-        self._stack.addWidget(page)
+        scroll = QScrollArea()
+        scroll.setWidget(page)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._stack.addWidget(scroll)
 
         # Restore last used folder
         last_dir = SETTINGS.value("last_input_dir", "")
@@ -1994,6 +2000,15 @@ class MainWindow(QMainWindow):
         folder, output = result
         SETTINGS.setValue("last_input_dir", folder)
 
+        # Run summary fields — captured by the stats/timing handlers, then
+        # written to disk by _write_run_summary() at the end of _on_done.
+        import datetime as _dt
+        self._run_start_time = _dt.datetime.now()
+        self._run_total_trails = 0
+        self._run_total_frames = 0
+        self._run_initial_est_sec = 0
+        self._run_actual_sec = 0
+
         # Go to process page — reset all widgets
         self._process_title.setText("Cleaning in Progress")
         self._progress_bar.setValue(0)
@@ -2035,7 +2050,6 @@ class MainWindow(QMainWindow):
         self._batch_text = ""
 
         # Start spinner + elapsed timer (handles both)
-        self._run_start_time = time.time()
         self._spinner_timer = QTimer(self)
         self._spinner_timer.timeout.connect(self._update_spinner)
         self._spinner_timer.start(250)
@@ -2097,7 +2111,8 @@ class MainWindow(QMainWindow):
     def _update_spinner(self):
         self._spinner_idx += 1
         ch = self._spinner_chars[self._spinner_idx % len(self._spinner_chars)]
-        elapsed = time.time() - self._run_start_time if hasattr(self, '_run_start_time') else 0
+        start = getattr(self, '_run_start_time', None)
+        elapsed = (time.time() - start.timestamp()) if start is not None else 0
         m, s = divmod(int(elapsed), 60)
         self._elapsed_label.setText(f"{ch}  Elapsed: {m}m {s:02d}s")
 
@@ -2181,6 +2196,9 @@ class MainWindow(QMainWindow):
         self._jpeg_quality_label.setEnabled(is_jpg)
 
     def _on_stats_ready(self, total_trails, total_frames):
+        # Capture for the run-summary file even on zero-trail runs.
+        self._run_total_trails = total_trails
+        self._run_total_frames = total_frames
         if total_trails <= 0:
             return
         SECONDS_PER_MANUAL_TRAIL = 20
@@ -2213,6 +2231,8 @@ class MainWindow(QMainWindow):
         self._stats_label.show()
 
     def _on_timing_stats(self, initial_est_sec, actual_sec):
+        self._run_initial_est_sec = initial_est_sec
+        self._run_actual_sec = actual_sec
         tail = "You're welcome." if actual_sec <= initial_est_sec else "My apologies."
         self._stats_timing_line = (
             f"<br><br><span style='font-size:14px; color:{MUTED_TEXT};'>"
@@ -2263,6 +2283,153 @@ class MainWindow(QMainWindow):
         self._done_output_folder = output_folder
         self._update_open_btn_state()
         self._switch_to_back_btn()
+        self._write_run_summary()
+
+    def _write_run_summary(self):
+        """Write a plain-text run summary into <input>/cleanr_workspace/."""
+        import datetime as _dt
+        input_folder = self._folder_input.text().strip()
+        if not input_folder or not os.path.isdir(input_folder):
+            return
+        start = getattr(self, '_run_start_time', None)
+        if start is None:
+            return
+        end = _dt.datetime.now()
+        output_folder = (getattr(self, '_done_output_folder', '')
+                         or self._output_input.text().strip())
+        trails = getattr(self, '_run_total_trails', 0)
+        frames = getattr(self, '_run_total_frames', 0)
+        est_sec = getattr(self, '_run_initial_est_sec', 0)
+        actual_sec = getattr(self, '_run_actual_sec', 0)
+
+        # Mirror the on-screen "TIME SAVED" formatting.
+        SECONDS_PER_MANUAL_TRAIL = 20
+        saved_sec = trails * SECONDS_PER_MANUAL_TRAIL
+        if saved_sec >= 60:
+            rounded_min = int(round(saved_sec / 900.0) * 15)
+            if rounded_min < 15:
+                rounded_min = 15
+            h = rounded_min // 60
+            m = rounded_min % 60
+            if h >= 1 and m == 0:
+                time_saved = f"~{h} hour{'s' if h != 1 else ''}"
+            elif h >= 1:
+                time_saved = f"~{h} hour{'s' if h != 1 else ''} {m} minute{'s' if m != 1 else ''}"
+            else:
+                time_saved = f"~{m} minute{'s' if m != 1 else ''}"
+        else:
+            time_saved = f"~{saved_sec} second{'s' if saved_sec != 1 else ''}"
+
+        tail = "You're welcome." if actual_sec <= est_sec else "My apologies."
+        detector = self._current_model_display_name() or "(unknown)"
+
+        # Technical details — gathered fresh each run for the debug section.
+        import platform as _platform
+        try:
+            from modules import detect_trails as _dt
+            hybrid_on = bool(getattr(_dt, "HYBRID_AXIS_EXTEND_ENABLED", False))
+            slope_on = bool(getattr(_dt, "SLOPE_MATCH_ENABLED", False))
+            try:
+                compute = _dt.best_device()
+            except Exception:
+                compute = "(unknown)"
+        except Exception:
+            hybrid_on = False
+            slope_on = False
+            compute = "(unknown)"
+
+        hybrid_label = "active (v6 guarded)" if hybrid_on else "off"
+        slope_label = "active" if slope_on else "off"
+        compute_pretty = {"cuda": "NVIDIA CUDA", "mps": "Apple MPS",
+                          "cpu": "CPU"}.get(compute, compute)
+
+        sysname = _platform.system()
+        if sysname == "Darwin":
+            mac_ver = _platform.mac_ver()[0] or _platform.release()
+            os_line = f"macOS {mac_ver}"
+        elif sysname == "Windows":
+            os_line = f"Windows {_platform.release()}"
+        else:
+            os_line = f"{sysname} {_platform.release()}"
+
+        machine = _platform.machine()
+        hw_line = {"arm64": "Apple Silicon (arm64)",
+                   "x86_64": "Intel/AMD 64-bit (x86_64)",
+                   "AMD64": "Intel/AMD 64-bit (AMD64)"}.get(machine, machine)
+
+        out_fmt = self._format_combo.currentText() if hasattr(self, "_format_combo") else "(unknown)"
+        jpeg_q = self._jpeg_quality.value() if hasattr(self, "_jpeg_quality") else None
+        if out_fmt == "JPG" and jpeg_q is not None:
+            output_line = f"JPG (quality {jpeg_q})"
+        else:
+            output_line = out_fmt
+
+        # Pipeline settings — these are the script defaults the GUI runs with.
+        # If a future GUI exposes them, surface the live values here instead.
+        dilate_val = 1
+        conf_val = 0.25
+        tile_val = 640
+        overlap_val = 0.2
+
+        lines = [
+            "================================================",
+            "  Star Trail CleanR",
+            "  Remove the Trails. Keep the Stars.",
+            "  www.startrailcleanr.com",
+            "================================================",
+            "",
+            "Run Summary",
+            "",
+            f"Date:                  {start.strftime('%Y-%m-%d')}",
+            f"Started:               {start.strftime('%H:%M:%S')}",
+            f"Finished:              {end.strftime('%H:%M:%S')}",
+            "",
+            f"App version:           Beta v{VERSION}",
+            f"Trail Detector:        {detector}",
+            "",
+            "Input folder:",
+            f"  {input_folder}",
+            "",
+            "Output folder:",
+            f"  {output_folder}",
+            "",
+            f"Frames processed:      {frames:,}",
+            f"Trails found:          {trails:,}",
+            "",
+            f"Estimated time:        {fmt_hms(est_sec)}",
+            f"Actual time:           {fmt_hms(actual_sec)}",
+            "",
+            f"Thought it'd take {fmt_hms(est_sec)}. "
+            f"Took {fmt_hms(actual_sec)}. {tail}",
+            "",
+            f"Time saved vs cleaning manually (at ~20 sec per trail):  {time_saved}",
+            "",
+            "================================================",
+            "",
+            "Technical Details",
+            "",
+            f"Mask edge expansion:   dilate={dilate_val}",
+            f"AI confidence cutoff:  {conf_val}",
+            f"Tile size / overlap:   {tile_val} px / {int(overlap_val*100)}%",
+            f"Hybrid axis-extend:    {hybrid_label}",
+            f"Slope-match merge:     {slope_label}",
+            f"Output:                {output_line}",
+            f"Operating system:      {os_line}",
+            f"Hardware:              {hw_line}",
+            f"Compute device:        {compute_pretty}",
+            f"Python:                {_platform.python_version()}",
+            "",
+            "================================================",
+        ]
+
+        workspace = os.path.join(input_folder, WORKSPACE_DIR)
+        try:
+            os.makedirs(workspace, exist_ok=True)
+            fname = f"run_summary_{start.strftime('%Y-%m-%d_%H-%M-%S')}.txt"
+            with open(os.path.join(workspace, fname), 'w', encoding='utf-8') as f:
+                f.write('\n'.join(lines) + '\n')
+        except OSError:
+            pass
 
     def _update_open_btn_state(self):
         folder = self._output_input.text().strip()

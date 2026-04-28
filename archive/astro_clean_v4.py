@@ -2,7 +2,7 @@
 import sys
 try:
     if hasattr(sys.stdout, 'reconfigure'):
-        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stdout.reconfigure(encoding='utf-8', line_buffering=True)
 except Exception:
     pass
 """
@@ -42,6 +42,7 @@ import sys
 import time
 import cv2
 import numpy as np
+from scipy.spatial import cKDTree
 from pathlib import Path
 from typing import List, Tuple, Optional
 
@@ -125,9 +126,7 @@ def align_batch(frames: List[np.ndarray]) -> Tuple[List[np.ndarray], float]:
             dx, dy = float(shift[0]), float(shift[1])
             aligned.append(_warp(f, dx, dy))
             shifts.append((dx, dy))
-        sys.stdout.write(f"\r    aligning {i+1}/{len(frames)}  ")
-        sys.stdout.flush()
-    print()
+        print(f"    aligning {i+1}/{len(frames)}", flush=True)
 
     # Star trail direction = opposite of alignment shift direction.
     # Use non-zero shifts only; median over all frames for robustness.
@@ -258,18 +257,26 @@ def detect_candidates(frame: np.ndarray,
         color_hit = np.clip(color_hit.astype(np.float32) * norm_2d, 0, 255).astype(np.uint8)
         gray_hit  = np.clip(gray_hit.astype(np.float32)  * norm_2d, 0, 255).astype(np.uint8)
 
+    MAX_CENTROIDS = 2000
+
     def _extract(hit_map: np.ndarray) -> List[Tuple[int, int]]:
         mask = (hit_map > threshold).astype(np.uint8) * 255
-        _, _, stats, craws = cv2.connectedComponentsWithStats(mask)
-        out = []
+        labels, _, stats, craws = cv2.connectedComponentsWithStats(mask)
+        candidates = []
         for lbl in range(1, len(stats)):
             if stats[lbl, cv2.CC_STAT_AREA] < min_pixels:
                 continue
             cx = int(round(craws[lbl][0]))
             cy = int(round(craws[lbl][1]))
             if edge_margin <= cx < w - edge_margin and edge_margin <= cy < h - edge_margin:
-                out.append((cx, cy))
-        return out
+                # Peak brightness of this component for ranking
+                peak = float(hit_map[cy, cx])
+                candidates.append((peak, cx, cy))
+        # Keep only the brightest — real trails are brighter than star residuals
+        if len(candidates) > MAX_CENTROIDS:
+            candidates.sort(reverse=True)
+            candidates = candidates[:MAX_CENTROIDS]
+        return [(cx, cy) for _, cx, cy in candidates]
 
     return _extract(color_hit), _extract(gray_hit)
 
@@ -293,17 +300,17 @@ def compute_motion_pairs(
     a = np.array(cents_a, dtype=np.int32)   # (Na, 2)
     b = np.array(cents_b, dtype=np.int32)   # (Nb, 2)
 
+    # KD-tree: O(N log N) instead of O(N²) — scales to any centroid count
+    tree = cKDTree(b.astype(np.float64))
     pairs = []
-    # For reasonable centroid counts this nested loop is fast enough.
-    # For very large counts we could use a KD-tree, but 50–300 centroids/frame
-    # → 50×300 = 15 000 comparisons per pair — well within budget.
     for cx, cy in a:
-        dx = b[:, 0] - cx
-        dy = b[:, 1] - cy
-        dist = np.sqrt(dx.astype(np.float32)**2 + dy.astype(np.float32)**2)
-        ok = (dist >= min_move) & (dist <= max_move)
-        for j in np.where(ok)[0]:
-            pairs.append((cx, cy, int(dx[j]), int(dy[j])))
+        idxs = tree.query_ball_point([cx, cy], max_move)
+        for j in idxs:
+            dx = int(b[j, 0] - cx)
+            dy = int(b[j, 1] - cy)
+            dist = (dx * dx + dy * dy) ** 0.5
+            if dist >= min_move:
+                pairs.append((cx, cy, dx, dy))
     return pairs
 
 
@@ -999,6 +1006,9 @@ def main():
     parser.add_argument("--save-masks",      type=str, default=None, metavar="DIR",
                         help="Save binary repair masks (255=trail, 0=sky) as PNG files to this directory. "
                              "Use for training data generation — exact pixel-accurate masks, no JPEG noise.")
+    parser.add_argument("--foreground-mask", type=str, default=None, metavar="PATH",
+                        help="Path to a foreground mask PNG (255=foreground/skip, 0=sky/process). "
+                             "Centroids falling inside the foreground region are excluded from repair.")
     args = parser.parse_args()
 
     input_dir   = Path(args.input_dir)
@@ -1008,6 +1018,16 @@ def main():
     masks_dir   = Path(args.save_masks) if args.save_masks else None
     for d in [d for d in [debug_dir, cleaned_dir, masks_dir] if d]:
         d.mkdir(parents=True, exist_ok=True)
+
+    # Load foreground mask (if provided) — 255=skip, 0=process
+    fg_mask = None
+    if args.foreground_mask:
+        fg_mask = cv2.imread(args.foreground_mask, cv2.IMREAD_GRAYSCALE)
+        if fg_mask is None:
+            print(f"ERROR: could not load foreground mask: {args.foreground_mask}")
+            sys.exit(1)
+        print(f"  Foreground mask loaded: {args.foreground_mask}  "
+              f"({(fg_mask > 127).sum()} px excluded)")
 
     frame_files = load_frame_files(input_dir, args.start, args.batch)
     if len(frame_files) < 3:
@@ -1116,8 +1136,7 @@ def main():
                                    bg_norm)
         color_cents_all.append(cc)
         gray_cents_all.append(gc)
-        sys.stdout.write(f"\r  {fp.name}  {len(cc):4d} color  {len(gc):4d} gray  ")
-        sys.stdout.flush()
+        print(f"  frame {i+1}/{n}: {fp.name} — {len(cc)} color, {len(gc)} gray candidates", flush=True)
     print()
 
     # ── Step 4: Cross-frame motion-vector pairs (per channel) ─────────────────
@@ -1135,9 +1154,8 @@ def main():
             all_color_pairs.append((i, cx, cy, dx, dy))
         for cx, cy, dx, dy in gp:
             all_gray_pairs.append((i, cx, cy, dx, dy))
-        sys.stdout.write(f"\r  pair {i}↔{i+1}: {len(cp):5d} color  {len(gp):5d} gray  ")
-        sys.stdout.flush()
-    print(f"\n  total: {len(all_color_pairs)} color pairs + {len(all_gray_pairs)} gray pairs")
+        print(f"  pair {i+1}/{n-1}", flush=True)
+    print(f"  total: {len(all_color_pairs)} color pairs + {len(all_gray_pairs)} gray pairs")
 
     # ── Step 5: Cluster motion vectors ────────────────────────────────────────
     print("\nStep 5 — clustering motion vectors")
@@ -1389,6 +1407,23 @@ def main():
     # Combine motion-vector peak directions + Hough directions for line-connect
     all_trail_dirs: List[Tuple[float, float]] = peak_dirs + hough_dirs
 
+    # ── Foreground mask filter ────────────────────────────────────────────────
+    # Discard centroids that fall inside the user-painted foreground region.
+    if fg_mask is not None:
+        # Resize mask to match frame dimensions if needed
+        if fg_mask.shape[:2] != (h, w):
+            fg_mask = cv2.resize(fg_mask, (w, h), interpolation=cv2.INTER_NEAREST)
+        total_before = sum(len(s) for s in trail_cents_per_frame)
+        for i in range(n):
+            trail_cents_per_frame[i] = {
+                (cx, cy) for cx, cy in trail_cents_per_frame[i]
+                if fg_mask[cy, cx] < 128
+            }
+        total_after = sum(len(s) for s in trail_cents_per_frame)
+        removed = total_before - total_after
+        if removed:
+            print(f"  foreground mask: excluded {removed} centroids in masked region → {total_after} centroids")
+
     # ── Step 7: Repair ────────────────────────────────────────────────────────
     sb = args.skip_boundary
     snap_rad_px = max(0, int(args.snap_rad * sc))
@@ -1436,10 +1471,7 @@ def main():
             dbg = draw_debug(frames_8bit[i], mask, tc, label)
             cv2.imwrite(str(debug_dir / fp.name), dbg)
 
-        sys.stdout.write(
-            f"\r  {fp.name}{'*skip*' if skip else '      '}  "
-            f"dashes={len(tc):4d}  trail_px={trail_px:7d}  ")
-        sys.stdout.flush()
+        print(f"  repairing {i+1}/{n}: {fp.name} — {len(tc)} dashes, {trail_px} trail px", flush=True)
 
     elapsed = time.time() - t_total
     print(f"\n\nDone in {elapsed:.0f}s  ({elapsed/len(frames):.1f}s/frame)")
