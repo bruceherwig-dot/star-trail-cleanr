@@ -3,7 +3,10 @@ import cv2
 import numpy as np
 from typing import Optional
 
-from skimage.morphology import skeletonize as _skeletonize
+# scikit-image is only needed by the crossing splitter, which is currently
+# disabled in production. Imported lazily inside _try_split_crossing so the
+# frozen app does not need scikit-image bundled to start. If the splitter is
+# re-enabled, also restore `--collect-all skimage` in build_helper.py.
 
 from . import slope_match
 
@@ -520,6 +523,7 @@ def _try_split_crossing(comp_bool: np.ndarray) -> Optional[tuple]:
         return None
     if _component_aspect(comp_bool) >= _SPLIT_ASPECT_MAX:
         return None
+    from skimage.morphology import skeletonize as _skeletonize
     skel_bool = _skeletonize(comp_bool)
     if int(skel_bool.sum()) < _SPLIT_SKEL_MIN_PX:
         return None

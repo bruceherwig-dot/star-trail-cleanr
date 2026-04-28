@@ -604,7 +604,7 @@ class CleanerWorker(QThread):
                 self._proc = subprocess.Popen(
                     cmd,
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    text=True, bufsize=1
+                    text=True, encoding="utf-8", errors="replace", bufsize=1
                 )
                 cur_step = 0
                 detect_count = 0

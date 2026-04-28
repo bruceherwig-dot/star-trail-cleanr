@@ -58,7 +58,7 @@ def _filter_by_resolution(files: List[Path],
     deduped = sorted(stems_seen.values())
     n_dupes = len(files) - len(deduped)
     if n_dupes:
-        print(f"  De-duplicated {n_dupes} file(s) (JPG+TIFF pairs \u2192 kept TIFF)")
+        print(f"  De-duplicated {n_dupes} file(s) (JPG+TIFF pairs -> kept TIFF)")
     files = deduped
 
     from PIL import Image as _PILImage
@@ -313,7 +313,7 @@ def main():
         frames_all.append(img)
     frames = frames_all[core_start:core_end]  # core batch frames
     h, w = frames[0].shape[:2]
-    print(f"  {n} frames loaded ({w}\u00d7{h})")
+    print(f"  {n} frames loaded ({w}x{h})")
 
     dtypes = {str(f.dtype) for f in frames_all}
     if len(dtypes) > 1:
@@ -376,7 +376,7 @@ def main():
     t_total = time.time()
 
     # ── Step 1: Detect trails (YOLO) ────────────────────────────────────
-    print("\nStep 1 \u2014 detecting trails", flush=True)
+    print("\nStep 1 - detecting trails", flush=True)
     print("  Loading AI trail detector...", flush=True)
     model = load_model(str(args.model), args.confidence, args.device)
 
@@ -403,10 +403,10 @@ def main():
         trail_label = f"{trail_count} trail{'s' if trail_count != 1 else ''}"
         is_neighbor = i < core_start or i >= core_end
         if is_neighbor:
-            print(f"  detecting neighbor: {fp.name} \u2014 {trail_label}", flush=True)
+            print(f"  detecting neighbor: {fp.name} - {trail_label}", flush=True)
         else:
             core_num = i - core_start + 1
-            print(f"  detecting {core_num}/{n}: {fp.name} \u2014 {trail_label}", flush=True)
+            print(f"  detecting {core_num}/{n}: {fp.name} - {trail_label}", flush=True)
 
     masks_per_frame = masks_all[core_start:core_end]
     trail_frames = sum(1 for m in masks_per_frame if m.max() > 0)
@@ -417,7 +417,7 @@ def main():
             continue
         n_cc, _ = cv2.connectedComponents((m > 0).astype(np.uint8))
         batch_trail_count += max(0, n_cc - 1)  # subtract background
-    print(f"  Step 1 complete \u2014 {trail_frames}/{n} frames have trails", flush=True)
+    print(f"  Step 1 complete - {trail_frames}/{n} frames have trails", flush=True)
 
     if masks_dir:
         for fp, mask in zip(frame_files, masks_per_frame):
@@ -425,7 +425,7 @@ def main():
 
     # ── Step 2: Repair ────────────────────────────────────────────────────
     sb = args.skip_boundary
-    print(f"\nStep 2 \u2014 repairing frames (skipping first/last {sb})", flush=True)
+    print(f"\nStep 2 - repairing frames (skipping first/last {sb})", flush=True)
 
     n_repaired = 0
     total_trail = 0
@@ -450,7 +450,7 @@ def main():
             else:
                 _write_output(fp.stem, img, icc_profile=icc_profile, exif_bytes=exif_bytes, dpi=dpi)
 
-        print(f"  repairing {i+1}/{n}: {fp.name} \u2014 {trail_label}", flush=True)
+        print(f"  repairing {i+1}/{n}: {fp.name} - {trail_label}", flush=True)
 
     elapsed = time.time() - t_total
     mins, secs = divmod(int(elapsed), 60)
