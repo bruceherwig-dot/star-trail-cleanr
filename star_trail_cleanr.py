@@ -46,6 +46,17 @@ if getattr(sys, 'frozen', False):
 else:
     _base = os.path.dirname(os.path.abspath(__file__))
 
+
+def _open_folder_in_file_manager(path):
+    """Open a folder in the OS file manager. Windows: Explorer.
+    Mac: Finder via 'open'. Linux: whichever file manager is wired to xdg-open."""
+    if sys.platform == "win32":
+        os.startfile(path)
+    elif sys.platform == "darwin":
+        subprocess.run(["open", path])
+    else:
+        subprocess.run(["xdg-open", path])
+
 # ── Theme system ─────────────────────────────────────────────────────────────
 # One central place for every color the app uses. Brand colors (header navy,
 # banner orange, button green/blue/red, heading blue) read fine on both light
@@ -1831,18 +1842,12 @@ class MainWindow(QMainWindow):
     def _open_setup_input_folder(self):
         path = self._folder_input.text().strip()
         if path and os.path.isdir(path):
-            if sys.platform == "win32":
-                os.startfile(path)
-            else:
-                subprocess.run(["open", path])
+            _open_folder_in_file_manager(path)
 
     def _open_setup_output_folder(self):
         path = self._output_input.text().strip()
         if path and os.path.isdir(path):
-            if sys.platform == "win32":
-                os.startfile(path)
-            else:
-                subprocess.run(["open", path])
+            _open_folder_in_file_manager(path)
 
     def _update_frame_count(self):
         folder = self._folder_input.text().strip()
@@ -2276,18 +2281,12 @@ class MainWindow(QMainWindow):
         if not os.path.isdir(folder):
             self._error_label.setText(f"Output folder doesn\u2019t exist yet \u2014 run cleaning first.")
             return
-        if sys.platform == "win32":
-            os.startfile(folder)
-        else:
-            subprocess.run(["open", folder])
+        _open_folder_in_file_manager(folder)
 
     def _open_output_folder(self):
         folder = getattr(self, '_done_output_folder', None)
         if folder and os.path.isdir(folder):
-            if sys.platform == "win32":
-                os.startfile(folder)
-            else:
-                subprocess.run(["open", folder])
+            _open_folder_in_file_manager(folder)
 
     def _on_finished(self):
         self._stop_elapsed_timer()
@@ -2361,7 +2360,12 @@ if __name__ == '__main__':
         _icon_base = sys._MEIPASS
     else:
         _icon_base = os.path.dirname(os.path.abspath(__file__))
-    _icon_ext = '.ico' if sys.platform == 'win32' else '.icns'
+    if sys.platform == 'win32':
+        _icon_ext = '.ico'
+    elif sys.platform == 'darwin':
+        _icon_ext = '.icns'
+    else:
+        _icon_ext = '.png'
     _icon_path = os.path.join(_icon_base, 'assets', 'StarTrailCleanR' + _icon_ext)
     if os.path.exists(_icon_path):
         app.setWindowIcon(QIcon(_icon_path))

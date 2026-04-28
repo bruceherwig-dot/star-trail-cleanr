@@ -74,8 +74,19 @@ def test_workflow_has_mac_intel_build():
         "Mac Intel zip filename missing from workflow"
 
 
-def test_release_job_includes_all_three_artifacts():
-    """All three installer variants must be attached to the GitHub release.
+def test_workflow_has_linux_build():
+    """Linux build job present, pinned to ubuntu-22.04 (not -latest) so the binary
+    works on older distros, and produces a tar.gz to preserve the exec bit."""
+    text = WORKFLOW.read_text()
+    assert "build-linux:" in text, "build.yml is missing the Linux build job"
+    assert "ubuntu-22.04" in text, \
+        "Linux job is not pinned to ubuntu-22.04 (would break older-distro support)"
+    assert "StarTrailCleanR-Linux-x86_64.tar.gz" in text, \
+        "Linux tar.gz filename missing from workflow"
+
+
+def test_release_job_includes_all_four_artifacts():
+    """All four installer variants must be attached to the GitHub release.
 
     NVIDIA variant was removed in v1.5-beta after hitting GitHub's 2 GB
     per-file asset cap. When NVIDIA comes back (todo #1), add its filename
@@ -86,6 +97,7 @@ def test_release_job_includes_all_three_artifacts():
         "StarTrailCleanR-Mac-AppleSilicon.zip",
         "StarTrailCleanR-Mac-Intel.zip",
         "StarTrailCleanRSetup.zip",
+        "StarTrailCleanR-Linux-x86_64.tar.gz",
     ):
         assert needed in text, f"Release files list is missing {needed}"
 

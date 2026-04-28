@@ -1,4 +1,4 @@
-name: Build Mac & Windows
+name: Build Mac, Windows, Linux
 
 on:
   push:
@@ -98,6 +98,49 @@ jobs:
           name: StarTrailCleanR-Windows
           path: installer/StarTrailCleanRSetup.zip
 
+  build-linux:
+    # Ubuntu 22.04 (glibc 2.35) instead of ubuntu-latest so the binary runs
+    # on Ubuntu 22.04+, Debian 12+, Fedora 36+, and other 2022-or-newer
+    # distros. ubuntu-latest currently pins to 24.04 (glibc 2.39) which would
+    # shut out users still on older LTS releases.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install Qt system libraries
+        # PySide6 wheels include Qt's own .so files but Qt loads a handful of
+        # standard X11/Wayland system libraries at runtime. Ubuntu's minimal
+        # CI image doesn't include them by default. Without these the bundle
+        # builds fine but the frozen app crashes on launch with
+        # "Could not load the Qt platform plugin 'xcb'".
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 \
+            libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
+            libxcb-shape0 libxcb-sync1 libxcb-xfixes0 libxcb-xinerama0 libegl1 \
+            libfontconfig1 libdbus-1-3
+      - name: Install CPU-only PyTorch
+        run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+      - name: Install dependencies
+        run: pip install pyinstaller opencv-python numpy pillow PySide6 ultralytics sahi nvidia-ml-py sentry-sdk
+      - name: Bake Sentry DSN
+        env:
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+        run: python -c "import os; open('_sentry_config.py','w').write('DSN = ' + repr(os.environ.get('SENTRY_DSN','')))"
+      - name: Build (PyInstaller)
+        run: python build_helper.py
+      - name: Tar bundle
+        # tar.gz keeps Unix file permissions (the binary's exec bit). zip
+        # would strip them and the user would get "permission denied" trying
+        # to launch the binary. .tar.gz is the Linux norm anyway.
+        run: cd dist && tar -czf ../StarTrailCleanR-Linux-x86_64.tar.gz StarTrailCleanR
+      - uses: actions/upload-artifact@v4
+        with:
+          name: StarTrailCleanR-Linux
+          path: StarTrailCleanR-Linux-x86_64.tar.gz
+
   # build-windows-nvidia removed 2026-04-23 in the v1.5-beta re-ship.
   # The CUDA-enabled installer came out 3.13 GB, over GitHub's 2 GB per-file
   # release asset cap. Parked as todo #1 pending a size fix (strip more CUDA
@@ -106,7 +149,7 @@ jobs:
   # tests/test_installer_config.py and its URL in reference_stable_download_urls.md.
 
   release:
-    needs: [build-mac, build-mac-intel, build-windows]
+    needs: [build-mac, build-mac-intel, build-windows, build-linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -119,6 +162,7 @@ jobs:
             StarTrailCleanR-Mac/StarTrailCleanR-Mac-AppleSilicon.zip
             StarTrailCleanR-Mac-Intel/StarTrailCleanR-Mac-Intel.zip
             StarTrailCleanR-Windows/StarTrailCleanRSetup.zip
+            StarTrailCleanR-Linux/StarTrailCleanR-Linux-x86_64.tar.gz
           body: |
             ## Star Trail CleanR ${{ github.ref_name }}
 
@@ -130,3 +174,6 @@ jobs:
 
             **Windows**
             - **Standard**: StarTrailCleanRSetup.zip. Right-click the downloaded zip and choose "Extract All...", then double-click StarTrailCleanRSetup.exe inside the extracted folder. If Windows shows a blue "Windows protected your PC" warning, click "More info" then "Run anyway".
+
+            **Linux** (x86_64, Ubuntu 22.04+ / Debian 12+ / Fedora 36+ or newer)
+            - StarTrailCleanR-Linux-x86_64.tar.gz. Extract anywhere (`tar -xzf StarTrailCleanR-Linux-x86_64.tar.gz`), then run `./StarTrailCleanR/StarTrailCleanR` from the extracted folder. First Linux release; please report any issues.

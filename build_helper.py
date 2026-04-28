@@ -71,7 +71,12 @@ for site_dir in site_dirs:
             if pkg_name in seen:
                 break
 
-icon_ext = '.ico' if sys.platform == 'win32' else '.icns'
+if sys.platform == 'win32':
+    icon_ext = '.ico'
+elif sys.platform == 'darwin':
+    icon_ext = '.icns'
+else:
+    icon_ext = '.png'
 icon_path = os.path.join(os.path.dirname(__file__), 'assets', 'StarTrailCleanR' + icon_ext)
 
 cmd = [
