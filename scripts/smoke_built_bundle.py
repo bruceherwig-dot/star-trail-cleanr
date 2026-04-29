@@ -77,53 +77,62 @@ def main():
             print(f"FAIL: missing bundled file: {p}", file=sys.stderr)
             sys.exit(1)
 
+    # Run the worker once per output format. Each format hits a different
+    # write path with different runtime dependencies (jpg/tif8 use Pillow,
+    # tif16 uses tifffile). A latent missing-tifffile crash sat in
+    # v1.91/v1.92/v1.93 because the smoke test only exercised jpg.
     with tempfile.TemporaryDirectory() as td:
         in_dir = Path(td) / "in"
-        out_dir = Path(td) / "out"
         in_dir.mkdir()
         frame = in_dir / "smoke_frame.jpg"
         _make_synthetic_frame(frame)
 
-        cmd = [
-            str(exe), "--cleanr-worker", str(worker),
-            str(in_dir), "-o", str(out_dir),
-            "--model", str(model),
-            "--start", "0", "--batch", "1",
-            "--output-format", "jpg",
-        ]
-        print(f"Running: {' '.join(cmd)}", flush=True)
+        for fmt, ext in [("jpg", "jpg"), ("tif8", "tif"), ("tif16", "tif")]:
+            out_dir = Path(td) / f"out_{fmt}"
 
-        try:
-            proc = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=TIMEOUT_SECS,
-            )
-        except subprocess.TimeoutExpired as e:
-            print(f"FAIL: worker did not finish within {TIMEOUT_SECS}s", file=sys.stderr)
-            if e.stdout:
-                print("---- worker stdout (partial) ----", file=sys.stderr)
-                print(e.stdout if isinstance(e.stdout, str) else e.stdout.decode("utf-8", "replace"),
-                      file=sys.stderr)
-            if e.stderr:
-                print("---- worker stderr (partial) ----", file=sys.stderr)
-                print(e.stderr if isinstance(e.stderr, str) else e.stderr.decode("utf-8", "replace"),
-                      file=sys.stderr)
-            sys.exit(1)
+            cmd = [
+                str(exe), "--cleanr-worker", str(worker),
+                str(in_dir), "-o", str(out_dir),
+                "--model", str(model),
+                "--start", "0", "--batch", "1",
+                "--output-format", fmt,
+            ]
+            print(f"\n=== Smoke: --output-format {fmt} ===", flush=True)
+            print(f"Running: {' '.join(cmd)}", flush=True)
 
-        print("---- worker stdout ----", flush=True)
-        print(proc.stdout, flush=True)
-        print("---- worker stderr ----", flush=True)
-        print(proc.stderr, flush=True)
+            try:
+                proc = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=TIMEOUT_SECS,
+                )
+            except subprocess.TimeoutExpired as e:
+                print(f"FAIL ({fmt}): worker did not finish within {TIMEOUT_SECS}s", file=sys.stderr)
+                if e.stdout:
+                    print("---- worker stdout (partial) ----", file=sys.stderr)
+                    print(e.stdout if isinstance(e.stdout, str) else e.stdout.decode("utf-8", "replace"),
+                          file=sys.stderr)
+                if e.stderr:
+                    print("---- worker stderr (partial) ----", file=sys.stderr)
+                    print(e.stderr if isinstance(e.stderr, str) else e.stderr.decode("utf-8", "replace"),
+                          file=sys.stderr)
+                sys.exit(1)
 
-        if proc.returncode != 0:
-            print(f"FAIL: worker exited {proc.returncode}", file=sys.stderr)
-            sys.exit(1)
+            print(f"---- worker stdout ({fmt}) ----", flush=True)
+            print(proc.stdout, flush=True)
+            print(f"---- worker stderr ({fmt}) ----", flush=True)
+            print(proc.stderr, flush=True)
 
-        outputs = list(out_dir.glob("*.jpg"))
-        if not outputs:
-            print(f"FAIL: no output frames produced in {out_dir}", file=sys.stderr)
-            sys.exit(1)
+            if proc.returncode != 0:
+                print(f"FAIL ({fmt}): worker exited {proc.returncode}", file=sys.stderr)
+                sys.exit(1)
 
-        print(f"PASS: bundled worker produced {len(outputs)} output frame(s)", flush=True)
+            outputs = list(out_dir.glob(f"*.{ext}"))
+            if not outputs:
+                print(f"FAIL ({fmt}): no .{ext} output produced in {out_dir}", file=sys.stderr)
+                sys.exit(1)
+
+            print(f"PASS ({fmt}): bundled worker produced {len(outputs)} .{ext} frame(s)", flush=True)
+
+        print("\nPASS: all output formats (jpg, tif8, tif16) bundled cleanly", flush=True)
 
 
 if __name__ == "__main__":
