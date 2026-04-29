@@ -2305,6 +2305,30 @@ class MainWindow(QMainWindow):
         if not output:
             self._error_label.setText("Please select an output folder (Step 2).")
             return None
+
+        # Pre-flight write check: try to create the output folder + write a small
+        # probe file. Catches read-only drives, OneDrive sync conflicts, locked-down
+        # folders, and antivirus blocks BEFORE the worker starts so the user sees
+        # a clear message instead of a mid-run crash.
+        try:
+            os.makedirs(output, exist_ok=True)
+            _probe_path = os.path.join(output, ".star_trail_cleanr_probe.tmp")
+            with open(_probe_path, "w") as _f:
+                _f.write("probe")
+            os.remove(_probe_path)
+        except (PermissionError, OSError) as _err:
+            from PySide6.QtWidgets import QMessageBox as _QMB
+            _QMB.warning(
+                self,
+                "Cannot write to output folder",
+                f"Star Trail CleanR cannot write to:\n\n{output}\n\n"
+                "Pick a different folder, or check that it isn't on a read-only "
+                "drive, a OneDrive synced location, or a folder where files are "
+                "open in another app.\n\n"
+                f"(Detail: {type(_err).__name__}: {_err})"
+            )
+            return None
+
         self._error_label.setText("")
         return folder, output
 

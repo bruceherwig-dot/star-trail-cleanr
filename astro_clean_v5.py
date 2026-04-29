@@ -215,6 +215,22 @@ def main():
 
     def _write_output(stem: str, img: np.ndarray, icc_profile=None, exif_bytes=None, dpi=None):
         from PIL import Image
+        try:
+            return _write_output_inner(stem, img, icc_profile=icc_profile,
+                                       exif_bytes=exif_bytes, dpi=dpi)
+        except (PermissionError, OSError) as _err:
+            print(
+                f"\nERROR: Cannot write cleaned frame to:\n  {output_dir}\n\n"
+                "The output folder may be on a read-only drive, synced by "
+                "OneDrive, or a file there may be open in another app. "
+                "Pick a different output folder and try again.\n\n"
+                f"(Detail: {type(_err).__name__}: {_err})",
+                flush=True,
+            )
+            sys.exit(2)
+
+    def _write_output_inner(stem: str, img: np.ndarray, icc_profile=None, exif_bytes=None, dpi=None):
+        from PIL import Image
         if args.output_format == "jpg":
             out = img if img.dtype == np.uint8 else (img >> 8).astype(np.uint8)
             rgb = cv2.cvtColor(out, cv2.COLOR_BGR2RGB)
