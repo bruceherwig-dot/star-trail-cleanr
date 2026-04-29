@@ -81,11 +81,15 @@ def main():
     # write path with different runtime dependencies (jpg/tif8 use Pillow,
     # tif16 uses tifffile). A latent missing-tifffile crash sat in
     # v1.91/v1.92/v1.93 because the smoke test only exercised jpg.
+    # The worker requires >= 3 frames (Star Bridge repair uses N-1/N+1
+    # neighbors). Earlier 1-frame version of this smoke failed at every
+    # subprocess call with "ERROR: need >= 3 frames (got 1)" before any
+    # output-format code path was even reached.
     with tempfile.TemporaryDirectory() as td:
         in_dir = Path(td) / "in"
         in_dir.mkdir()
-        frame = in_dir / "smoke_frame.jpg"
-        _make_synthetic_frame(frame)
+        for i in range(3):
+            _make_synthetic_frame(in_dir / f"smoke_frame_{i}.jpg")
 
         for fmt, ext in [("jpg", "jpg"), ("tif8", "tif"), ("tif16", "tif")]:
             out_dir = Path(td) / f"out_{fmt}"
@@ -94,7 +98,7 @@ def main():
                 str(exe), "--cleanr-worker", str(worker),
                 str(in_dir), "-o", str(out_dir),
                 "--model", str(model),
-                "--start", "0", "--batch", "1",
+                "--start", "0", "--batch", "3",
                 "--output-format", fmt,
             ]
             print(f"\n=== Smoke: --output-format {fmt} ===", flush=True)
