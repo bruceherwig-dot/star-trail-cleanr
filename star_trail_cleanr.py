@@ -361,6 +361,7 @@ class CleanerWorker(QThread):
     stats_ready = Signal(int, int)     # total_trails, total_frames_scanned
     timing_stats = Signal(float, float)  # initial_estimate_sec, actual_total_sec
     initial_estimate = Signal(float)   # initial estimate seconds (emitted once)
+    warmup_active = Signal(bool)       # True = AI loading window, False = real per-frame progress kicked in
     error = Signal(str)
     done = Signal(str)
 
@@ -652,9 +653,15 @@ class CleanerWorker(QThread):
                         continue
 
                     # Parse step transitions
+                    if "frames loaded" in proc_line:
+                        # Frame loading finished. Start the heartbeat NOW so the
+                        # silent hot-pixel + AI-load windows that follow show motion.
+                        self.warmup_active.emit(True)
                     if "Step 1" in proc_line and "detecting" in proc_line:
                         cur_step = 1
                         self.step_progress.emit(1, 0, this_batch)
+                        # Idempotent on the GUI side; harmless if already running.
+                        self.warmup_active.emit(True)
                     elif "Step 2" in proc_line and "repairing" in proc_line:
                         cur_step = 2
                         self.step_progress.emit(1, this_batch, this_batch)
@@ -671,6 +678,7 @@ class CleanerWorker(QThread):
                             now_t = time.time()
                             if est_processing_start_t is None:
                                 est_processing_start_t = now_t
+                            self.warmup_active.emit(False)
                             self.step_progress.emit(1, frame_num, frame_total)
                             self.step_detail.emit(proc_line)
 
@@ -895,6 +903,26 @@ class ModelDownloadThread(QThread):
             self.failed.emit(str(e))
 
 
+class _XCloseButton(QPushButton):
+    """Close button that paints two diagonal white lines via QPainter for
+    pixel-perfect centering at any size. Avoids font-metric drift that left
+    the unicode multiplication sign sitting visibly off-center across
+    platforms. Background color and hover state come from the stylesheet."""
+
+    def paintEvent(self, event):
+        from PySide6.QtGui import QPainter, QPen
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        pen = QPen(Qt.white, 3.5)
+        pen.setCapStyle(Qt.RoundCap)
+        painter.setPen(pen)
+        w, h = self.width(), self.height()
+        margin = max(10, int(min(w, h) * 0.34))
+        painter.drawLine(margin, margin, w - margin, h - margin)
+        painter.drawLine(w - margin, margin, margin, h - margin)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -1026,23 +1054,23 @@ class MainWindow(QMainWindow):
         cameras, lenses, and sky conditions. The model produces pixel-accurate masks for
         every trail it finds.</p>
 
-        <h2 style='color:{BRAND_HEADING_BLUE}; margin-bottom:2px;'>The Fix &mdash; Star Bridge Repair</h2>
+        <h2 style='color:{BRAND_HEADING_BLUE}; margin-bottom:2px;'>The Fix: Star Bridge Repair</h2>
         <p style='margin-top:2px;'>For each trail, Star Trail CleanR pulls clean pixels
         from the frame immediately before and after, blending them across the trail using
         a morphing technique called <i>Star Bridge</i>. This preserves the real stars
-        underneath the trail and keeps the brightness and color natural &mdash; no smudges,
+        underneath the trail and keeps the brightness and color natural. No smudges,
         no blank patches.</p>
 
         <h2 style='color:{BRAND_HEADING_BLUE}; margin-bottom:2px;'>Workflow</h2>
         <ol style='margin-top:2px;'>
-        <li><b>Browse</b> &mdash; choose your folder of frames.</li>
-        <li><b>Mask (optional)</b> &mdash; paint over ground, buildings, and rocks so
+        <li><b>Browse.</b> Choose your folder of frames.</li>
+        <li><b>Mask (optional).</b> Paint over ground, buildings, and rocks so
         the AI ignores them. Trees can be left unmasked.</li>
-        <li><b>Format</b> &mdash; pick output format (JPG / TIFF 8-bit / TIFF 16-bit)
+        <li><b>Format.</b> Pick output format (JPG / TIFF 8-bit / TIFF 16-bit)
         and JPEG quality.</li>
-        <li><b>Run</b> &mdash; sit back. Cleaned frames land in a <code>cleaned/</code>
+        <li><b>Run.</b> Sit back. Cleaned frames land in a <code>cleaned/</code>
         folder next to your originals.</li>
-        <li><b>Stack</b> &mdash; load the cleaned frames into your favorite stacker
+        <li><b>Stack.</b> Load the cleaned frames into your favorite stacker
         (StarStaX, Sequator, Photoshop, etc.) for the final composite.</li>
         </ol>
 
@@ -1051,7 +1079,7 @@ class MainWindow(QMainWindow):
         <li><b>Trail variety is bounded by the AI's training data.</b> If a type of
         trail isn't being detected well in your sequences, you can help train the next
         version: zip 300+ frames from that scene and send them to
-        <a href='mailto:bruceherwig@gmail.com?subject=Star%20Trail%20CleanR%20training%20frames'>bruceherwig@gmail.com</a>.
+        <a href='mailto:bruceherwig+startrailcleanr@gmail.com?subject=Star%20Trail%20CleanR%20training%20frames'>bruceherwig+startrailcleanr@gmail.com</a>.
         For large folders, share a Dropbox, Google Drive, or WeTransfer link instead
         of attaching directly. The model gets smarter every time the community
         contributes.</li>
@@ -1062,14 +1090,14 @@ class MainWindow(QMainWindow):
         your sequence to JPG or TIFF first, then run Star Trail CleanR on the converted
         frames.</li>
         <li><b>Not a one-click fix.</b> You'll still want to touch up the final
-        composite in Photoshop or your editor of choice &mdash; but if we did our job
+        composite in Photoshop or your editor of choice. But if we did our job
         right, it's a fraction of the time you used to spend.</li>
         <li><b>Designed for wide-field star trail sequences,</b> not deep-sky tracked exposures.</li>
         </ul>
 
         <p style='color:{HINT_TEXT}; margin-top:24px;'>Star Trail CleanR is free and offered as
         a gift to the astrophotography community.
-        <a href='mailto:bruceherwig@gmail.com?subject=Star%20Trail%20CleanR%20feedback'>Feedback welcome.</a></p>
+        <a href='mailto:bruceherwig+startrailcleanr@gmail.com?subject=Star%20Trail%20CleanR%20feedback'>Feedback welcome.</a></p>
         </body></html>
         """)
         wrap_layout.addWidget(browser)
@@ -1106,27 +1134,27 @@ class MainWindow(QMainWindow):
         <p style='margin-top:2px;'>Star Trail CleanR is a passion project. I've been
         shooting star trails for over a decade, and the whole time I kept thinking
         <i>somebody should really write a program that gets rid of all the airplane
-        and satellite trails.</i> Nobody did. So I finally built one &mdash; with a
+        and satellite trails.</i> Nobody did. So I finally built one, with a
         lot of help.</p>
 
-        <p>The "lot of help" is Claude, Anthropic's AI assistant. Countless hours of
-        back-and-forth: I describe what I want, Claude writes the code, we test it,
-        I push back, we try again. Star Trail CleanR wouldn't exist without that
-        partnership.</p>
+        <p>After countless hours of back-and-forth with Claude Code, I described what
+        I wanted, Claude wrote the code, we tested it, I pushed back, we tried again.
+        Star Trail CleanR wouldn't exist without that partnership.</p>
 
-        <p>Star Trail CleanR is a free gift to the astrophotography community that
+        <p>Star Trail CleanR is my free gift to the astrophotography community that
         has taught me so much.</p>
 
         <h3 style='color:{BRAND_HEADING_BLUE}; margin:12px 0 2px 0;'>Links</h3>
         <ul style='margin-top:2px;'>
-        <li>Photos for sale: <a href='https://bruceherwig.com'>bruceherwig.com</a></li>
+        <li>Project site: <a href='https://startrailcleanr.com'>StarTrailCleanR.com</a></li>
+        <li>Photos for sale: <a href='https://bruceherwigphotographer.square.site/shop/astrophotography/3?page=1&amp;limit=30&amp;sort_by=category_order&amp;sort_order=asc'>bruceherwig.com</a></li>
         <li>Blog: <a href='https://bruceherwig.wordpress.com'>bruceherwig.wordpress.com</a></li>
         </ul>
 
         <h3 style='color:{BRAND_HEADING_BLUE}; margin:12px 0 2px 0;'>Acknowledgments</h3>
         <p style='margin-top:2px;'>Star Trail CleanR exists because of the generosity of fellow astrophotographers
         who shared their image sequences for AI training, tested early builds, and offered
-        feedback. Every detected trail is a thank-you to them.</p>
+        feedback. Thank you, all of you.</p>
         <p><a href='https://bruceherwig.wordpress.com/star-trail-cleanr/#Thanks'>See the
         full list of contributors &rarr;</a></p>
 
@@ -1136,7 +1164,7 @@ class MainWindow(QMainWindow):
         <h3 style='color:{BRAND_HEADING_BLUE}; margin:12px 0 2px 0;'>Share Your Work&hellip; Have a Suggestion?</h3>
         <p style='margin-top:2px;'>Got a before-and-after you'd like to share? I would love to see it!<br>
         Have an idea or feedback to make Star Trail CleanR even better? I want to hear it!<br>
-        Email me at <a href='mailto:bruceherwig@gmail.com?subject=Star%20Trail%20CleanR'>bruceherwig@gmail.com</a></p>
+        Email me at <a href='mailto:bruceherwig+startrailcleanr@gmail.com?subject=Star%20Trail%20CleanR'>bruceherwig+startrailcleanr@gmail.com</a></p>
 
         <p style='color:{HINT_TEXT}; margin-top:24px;'>&copy; 2026 Bruce Herwig</p>
         </body></html>
@@ -1237,14 +1265,13 @@ class MainWindow(QMainWindow):
             "https://bruceherwigphotographer.square.site/product/tip-jar/WCQQP7HM4SGFWSNBSAFNX7QF"))
         outer.addWidget(support_btn)
 
-        # Right: Close X
-        # × (U+00D7 multiplication sign) reads as a proper close glyph,
-        # narrower than capital X, and centers cleanly in Inter.
-        quit_btn = QPushButton("×")
+        # Right: Close X. Painted via QPainter (see _XCloseButton) so the
+        # glyph is centered to the pixel regardless of font metrics.
+        quit_btn = _XCloseButton()
         quit_btn.setFixedSize(32, 32)
         quit_btn.setStyleSheet(
-            f"QPushButton {{ background-color: {BRAND_QUIT_RED}; color: white; font-size: 28px; "
-            f"font-weight: bold; border-radius: 4px; border: none; }}"
+            f"QPushButton {{ background-color: {BRAND_QUIT_RED}; "
+            f"border-radius: 4px; border: none; }}"
             f"QPushButton:hover {{ background-color: {BRAND_QUIT_RED_HOVER}; }}"
         )
         quit_btn.setToolTip("Quit Star Trail CleanR")
@@ -1927,12 +1954,9 @@ class MainWindow(QMainWindow):
         step2_row.addWidget(self._step2_bar, 1)
         layout.addLayout(step2_row)
 
-        # ── Detail / status line ──
-        self._detail_label = QLabel("")
-        self._detail_label.setAlignment(Qt.AlignCenter)
-        self._detail_label.setStyleSheet(f"font-size: 14px; color: {BRAND_HEADING_BLUE};")
-        self._detail_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        layout.addWidget(self._detail_label)
+        # The detail / status line lives at the top of the right-side
+        # community panel under the "Star Log" header. See
+        # _build_run_community_panel for its creation.
 
         # Post-run stats are shown in a centered modal dialog, not inline,
         # so they can't fight with the log area for vertical space or hide
@@ -1942,6 +1966,18 @@ class MainWindow(QMainWindow):
         log_row = QHBoxLayout()
         log_row.setSpacing(20)
 
+        # Left column: "Star Log" title + scrolling log box.
+        log_col = QVBoxLayout()
+        log_col.setSpacing(8)
+        log_col.setContentsMargins(0, 0, 0, 0)
+
+        star_log_title = QLabel("Star Log")
+        star_log_title.setAlignment(Qt.AlignCenter)
+        star_log_title.setStyleSheet(
+            f"font-size: 18px; font-weight: bold; color: {CARD_TEXT};"
+        )
+        log_col.addWidget(star_log_title)
+
         self._status_out = QTextEdit()
         self._status_out.setReadOnly(True)
         # Center every line of the log within the box.
@@ -1949,7 +1985,9 @@ class MainWindow(QMainWindow):
         _opt = self._status_out.document().defaultTextOption()
         _opt.setAlignment(Qt.AlignCenter)
         self._status_out.document().setDefaultTextOption(_opt)
-        log_row.addWidget(self._status_out, 1)
+        log_col.addWidget(self._status_out, 1)
+
+        log_row.addLayout(log_col, 1)
 
         log_row.addWidget(self._build_run_community_panel(), 1)
         layout.addLayout(log_row, 1)
@@ -2307,7 +2345,6 @@ class MainWindow(QMainWindow):
         self._step2_bar.setValue(0)
         self._step2_bar.setFormat("0%")
         self._step2_label.setText("Repairing\nwaiting")
-        self._detail_label.setText("")
         # Stats are now shown in a modal dialog (see _show_run_complete_dialog),
         # not in an inline label. No widget to reset here.
         self._status_out.setText("")
@@ -2331,6 +2368,28 @@ class MainWindow(QMainWindow):
         self._spinner_timer.timeout.connect(self._update_spinner)
         self._spinner_timer.start(250)
 
+        # Warmup heartbeat: rotates astro-flavored phrases through the Star
+        # Log detail label during the silent AI-load gap (15-30s on first
+        # batch) so the run never looks frozen. Stops when the first real
+        # per-frame detect line arrives.
+        self._warmup_phrases = [
+            "Studying your stars",
+            "Scanning the sky",
+            "Hunting for trails",
+            "Tracing starlight",
+            "Sweeping the sky",
+            "Spotting trails",
+            "Squinting at the sky",
+            "Eyeing your stars",
+            "Watching for streaks",
+            "Reading the sky",
+            "Peering into your night",
+            "Combing the night sky",
+        ]
+        self._warmup_counter = 0
+        self._warmup_timer = QTimer(self)
+        self._warmup_timer.timeout.connect(self._warmup_tick)
+
         # Set output folder now so the "Open Cleaned Folder" button works during the run
         self._done_output_folder = output
 
@@ -2344,7 +2403,7 @@ class MainWindow(QMainWindow):
         self.worker.status.connect(self._on_status)
         self.worker.batch_info.connect(self._on_batch_info)
         self.worker.step_progress.connect(self._on_step_progress)
-        self.worker.step_detail.connect(self._on_step_detail)
+        self.worker.warmup_active.connect(self._on_warmup_active)
         self.worker.frame_count.connect(self._on_frame_count)
         self.worker.stats_ready.connect(self._on_stats_ready)
         self.worker.timing_stats.connect(self._on_timing_stats)
@@ -2380,6 +2439,8 @@ class MainWindow(QMainWindow):
     def _stop_elapsed_timer(self):
         if hasattr(self, '_spinner_timer') and self._spinner_timer.isActive():
             self._spinner_timer.stop()
+        if hasattr(self, '_warmup_timer') and self._warmup_timer.isActive():
+            self._warmup_timer.stop()
 
     def _go_to_setup(self):
         self._stop_elapsed_timer()
@@ -2454,8 +2515,36 @@ class MainWindow(QMainWindow):
                 self._step2_bar.setFormat(f"{pct}%")
                 self._step2_label.setText(f"Repairing\nframe {current}/{total}")
 
-    def _on_step_detail(self, text):
-        self._detail_label.setText(text)
+    def _on_warmup_active(self, active):
+        if active:
+            # Idempotent: if the heartbeat is already running (because we triggered
+            # it at "frames loaded"), don't reset the rotation when "Step 1" arrives.
+            if not self._warmup_timer.isActive():
+                self._warmup_counter = 0
+                self._warmup_tick()
+                self._warmup_timer.start(500)
+        else:
+            self._warmup_timer.stop()
+
+    def _warmup_tick(self):
+        from PySide6.QtGui import QTextCursor
+        idx = (self._warmup_counter // 4) % len(self._warmup_phrases)
+        dots_state = self._warmup_counter % 4
+        dot_count = min(dots_state + 1, 3)
+        line = "  " + self._warmup_phrases[idx] + "." * dot_count
+        if dots_state == 0:
+            # New phrase: append a fresh line.
+            self._status_out.append(line)
+        else:
+            # Same phrase, animated dots: replace the last block in place.
+            cursor = self._status_out.textCursor()
+            cursor.movePosition(QTextCursor.End)
+            cursor.movePosition(QTextCursor.StartOfBlock, QTextCursor.KeepAnchor)
+            cursor.removeSelectedText()
+            cursor.insertText(line)
+        sb = self._status_out.verticalScrollBar()
+        sb.setValue(sb.maximum())
+        self._warmup_counter += 1
 
     def _on_frame_count(self, current, total):
         self._frame_counter.setText(f"Scrubbing the stars\u2026 {current} of {total}")
@@ -2496,7 +2585,7 @@ class MainWindow(QMainWindow):
             time_saved = f"~{saved_sec} second{'s' if saved_sec != 1 else ''}"
         self._stats_trail_line = (
             f"Swept <b>{total_trails:,}</b> airplane and satellite trails from your stars<br>"
-            f"across <b>{total_frames:,}</b> frames.<br>"
+            f"across <b>{total_frames:,}</b> twinkling frames.<br>"
             f"<i>Based on manual cleanup at 20 seconds per trail.</i><br><br>"
             f"<span style='font-size:20px; font-weight:bold;'>TIME SAVED: {time_saved}</span>"
             f"<br><br><b>Time to stack!</b><br>"

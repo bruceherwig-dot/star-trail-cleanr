@@ -370,7 +370,7 @@ def main():
         frames_all.append(img)
     frames = frames_all[core_start:core_end]  # core batch frames
     h, w = frames[0].shape[:2]
-    print(f"  {n} frames loaded ({w}x{h})")
+    print(f"  {n} frames loaded ({w}x{h})", flush=True)
 
     dtypes = {str(f.dtype) for f in frames_all}
     if len(dtypes) > 1:

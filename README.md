@@ -42,7 +42,7 @@ Star Trail CleanR runs in two steps:
 
 ## Limitations
 
-- **Trail variety is bounded by the AI's training data.** If a type of trail isn't being detected well in your sequences, you can help train the next version: zip 300+ frames from that scene and email them to bruceherwig@gmail.com. For large folders, share a Dropbox, Google Drive, or WeTransfer link instead. The model gets smarter every time the community contributes.
+- **Trail variety is bounded by the AI's training data.** If a type of trail isn't being detected well in your sequences, you can help train the next version: zip 300+ frames from that scene and email them to bruceherwig+startrailcleanr@gmail.com. For large folders, share a Dropbox, Google Drive, or WeTransfer link instead. The model gets smarter every time the community contributes.
 - **Meteors will be removed too.** Their streaks look similar to airplane and satellite trails, so the detector cannot tell them apart. If you want to keep them, use your originals to mask them back in.
 - **RAW files (.CR2, .NEF, .ARW, etc.) are not yet supported.** Convert your sequence to JPG or TIFF first, then run Star Trail CleanR on the converted frames.
 - **Not a one-click fix.** You'll still want to touch up the final composite in Photoshop or your editor of choice. But if we did our job right, it's a fraction of the time you used to spend.
@@ -54,18 +54,19 @@ Star Trail CleanR runs in two steps:
 
 Star Trail CleanR is a passion project. I've been shooting star trails for over a decade, and the whole time I kept thinking *somebody should really write a program that gets rid of all the airplane and satellite trails*. Nobody did. So I finally built one, with a lot of help.
 
-The "lot of help" is Claude, Anthropic's AI assistant. Countless hours of back-and-forth: I describe what I want, Claude writes the code, we test it, I push back, we try again. Star Trail CleanR would not exist without that partnership.
+After countless hours of back-and-forth with Claude Code, I described what I wanted, Claude wrote the code, we tested it, I pushed back, we tried again. Star Trail CleanR wouldn't exist without that partnership.
 
-Star Trail CleanR is a free gift to the astrophotography community that has taught me so much.
+Star Trail CleanR is my free gift to the astrophotography community that has taught me so much.
 
-- Photos for sale: [bruceherwig.com](https://bruceherwig.com)
+- Project site: [StarTrailCleanR.com](https://startrailcleanr.com)
+- Photos for sale: [bruceherwig.com](https://bruceherwigphotographer.square.site/shop/astrophotography/3?page=1&limit=30&sort_by=category_order&sort_order=asc)
 - Blog: [bruceherwig.wordpress.com](https://bruceherwig.wordpress.com)
 
 ---
 
 ## Acknowledgments
 
-Star Trail CleanR exists because of the generosity of fellow astrophotographers who shared their image sequences for AI training, tested early builds, and offered feedback. Every detected trail is a thank-you to them.
+Star Trail CleanR exists because of the generosity of fellow astrophotographers who shared their image sequences for AI training, tested early builds, and offered feedback. Thank you, all of you.
 
 See the [full list of contributors](https://bruceherwig.wordpress.com/star-trail-cleanr/#Thanks).
 
@@ -73,7 +74,7 @@ See the [full list of contributors](https://bruceherwig.wordpress.com/star-trail
 
 ## Feedback and Sharing
 
-Got a before-and-after you'd like to share? Got an idea or feedback to make Star Trail CleanR even better? Email [bruceherwig@gmail.com](mailto:bruceherwig@gmail.com).
+Got a before-and-after you'd like to share? Got an idea or feedback to make Star Trail CleanR even better? Email [bruceherwig+startrailcleanr@gmail.com](mailto:bruceherwig+startrailcleanr@gmail.com).
 
 ---
 

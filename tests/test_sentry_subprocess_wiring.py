@@ -89,7 +89,7 @@ def test_gui_forwards_worker_stderr_to_sentry_on_failure():
     src = _read("star_trail_cleanr.py")
     fail_idx = src.find("if self._proc.returncode != 0:")
     assert fail_idx != -1
-    fail_block = src[fail_idx:fail_idx + 1500]
+    fail_block = src[fail_idx:fail_idx + 4000]
     assert "sentry_sdk.capture_message" in fail_block, (
         "When the worker exits non-zero, the GUI must forward the captured "
         "stderr to Sentry. This is the only path that catches crashes that "
@@ -97,6 +97,27 @@ def test_gui_forwards_worker_stderr_to_sentry_on_failure():
     )
     assert "stderr_full" in fail_block, \
         "GUI must attach the full worker stderr text to the Sentry event"
+    assert "stderr_preview" in fail_block, \
+        "GUI must attach a head-tail preview of stderr (first/last 50 lines)"
+    assert "stdout_preview" in fail_block, (
+        "GUI must attach a head-tail preview of worker stdout — some crashes "
+        "leave their last useful info on stdout, not stderr"
+    )
+    assert 'scope.set_tag("os"' in fail_block, (
+        "GUI must tag the Sentry event with the host OS so we can triage "
+        "platform-specific crashes without needing to ask the user"
+    )
+
+
+def test_gui_accumulates_worker_stdout_for_crash_reports():
+    """The stdout-line consumer loop must append to a list so the
+    head/tail preview has something to report on crash."""
+    src = _read("star_trail_cleanr.py")
+    assert "proc_stdout_lines" in src, (
+        "GUI must accumulate worker stdout lines into a list (proc_stdout_lines)"
+        " so they can be sent to Sentry on crash. Without this the stdout"
+        " preview is empty and we lose useful diagnostic context."
+    )
 
 
 def test_worker_sentry_init_handles_missing_sdk_gracefully():
