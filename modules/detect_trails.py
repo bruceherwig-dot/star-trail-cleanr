@@ -350,22 +350,39 @@ def _sliced_inference_dual_postprocess(model, image,
     return nms_predictions, nmm_predictions
 
 
-def detect_frame(model, img_path: str, tile_size: int = 640,
+def detect_frame(model, image, tile_size: int = 640,
                  overlap: float = 0.2, dilate: int = 1) -> Optional[np.ndarray]:
     """Run SAHI tiled inference on one frame.
 
+    `image` may be a numpy array (preferred — no redundant disk I/O) or a
+    file path. Whatever arrives is normalized to 8-bit, 3-channel BGR before
+    handing to SAHI: SAHI calls PIL.Image.fromarray internally, and PIL has
+    no 16-bit RGB mode, so any uint16 RGB array crashes with
+    "Cannot handle this data type: (1, 1, 3), <u2" (Windows v1.91 regression).
+
     Returns binary uint8 mask (255=trail, 0=sky) at original resolution,
     or None if image cannot be read.
-
-    When HYBRID_AXIS_EXTEND_ENABLED is True, applies BOTH NMS and NMM
-    postprocess on the same single SAHI inference pass and extends the NMS
-    mask along trail axes where NMS truncated content at tile boundaries.
-    Same per-frame inference cost as plain NMS (postprocess is cheap).
-    Recovers ~95% of right-edge truncation cases (verified 2026-04-26).
     """
-    img = cv2.imread(str(img_path))
-    if img is None:
-        return None
+    if isinstance(image, np.ndarray):
+        img = image
+    else:
+        img = cv2.imread(str(image), cv2.IMREAD_UNCHANGED)
+        if img is None:
+            return None
+
+    if img.dtype == np.uint16:
+        img = (img >> 8).astype(np.uint8)
+    elif img.dtype != np.uint8:
+        img = np.clip(img, 0, 255).astype(np.uint8)
+
+    if img.ndim == 2:
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    elif img.ndim == 3:
+        if img.shape[2] == 1:
+            img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        elif img.shape[2] == 4:
+            img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+
     h, w = img.shape[:2]
 
     if HYBRID_AXIS_EXTEND_ENABLED:

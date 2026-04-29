@@ -601,10 +601,16 @@ class CleanerWorker(QThread):
                 cmd.extend(["--expected-width", str(dominant[0]),
                             "--expected-height", str(dominant[1])])
 
+                worker_env = os.environ.copy()
+                if (SETTINGS.value("crash_reporting_enabled", False, type=bool)
+                        and _SENTRY_DSN):
+                    worker_env["STC_SENTRY_DSN"] = _SENTRY_DSN
+
                 self._proc = subprocess.Popen(
                     cmd,
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    text=True, encoding="utf-8", errors="replace", bufsize=1
+                    text=True, encoding="utf-8", errors="replace", bufsize=1,
+                    env=worker_env,
                 )
                 cur_step = 0
                 detect_count = 0
@@ -702,6 +708,28 @@ class CleanerWorker(QThread):
                     stderr_text = self._proc.stderr.read().strip()
                     err_lines = [l for l in stderr_text.splitlines() if l.strip()]
                     err_msg = err_lines[-1] if err_lines else "unknown error"
+                    # Safety net: forward worker stderr to Sentry. The worker
+                    # has its own Sentry init for unhandled exceptions, but
+                    # crashes that die before that init runs (missing DLLs,
+                    # bundle import failures) only surface here as stderr.
+                    if (SETTINGS.value("crash_reporting_enabled", False, type=bool)
+                            and _SENTRY_DSN):
+                        try:
+                            import sentry_sdk
+                            with sentry_sdk.push_scope() as scope:
+                                scope.set_tag("component", "gui_worker_capture")
+                                scope.set_tag("batch_index", str(i + 1))
+                                scope.set_tag("n_batches", str(n_batches))
+                                scope.set_tag("image_w", str(dominant[0]))
+                                scope.set_tag("image_h", str(dominant[1]))
+                                scope.set_tag("output_format", str(self.output_format))
+                                scope.set_extra("stderr_full", stderr_text or "")
+                                sentry_sdk.capture_message(
+                                    f"Worker exited {self._proc.returncode}: {err_msg}",
+                                    level="error",
+                                )
+                        except Exception:
+                            pass
                     self.error.emit(f"Batch {i+1} failed: {err_msg}")
                     return
                 self._proc = None

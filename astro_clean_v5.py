@@ -33,6 +33,45 @@ from modules.detect_trails import (
 from modules.repair import repair_frame
 
 
+def _init_worker_sentry():
+    """Initialize Sentry in the worker subprocess if the GUI passed a DSN.
+
+    The GUI sets STC_SENTRY_DSN in the worker's environment ONLY when the
+    user has opted into crash reporting AND a DSN was baked into the build.
+    If the env var is missing or empty, this is a no-op — Sentry stays
+    inactive and the worker has no reporting hookup. This preserves the
+    opt-in privacy contract end-to-end.
+
+    Worker-side Sentry catches unhandled exceptions inside the processing
+    loop (detect, repair, file I/O). Crashes that die before this init runs
+    are still reported by the GUI's stderr-capture safety net.
+    """
+    dsn = os.environ.get("STC_SENTRY_DSN", "")
+    if not dsn:
+        return
+    try:
+        import sentry_sdk
+        version = "?"
+        try:
+            base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
+            with open(os.path.join(base, "version.txt")) as vf:
+                version = vf.read().strip()
+        except Exception:
+            pass
+        sentry_sdk.init(
+            dsn=dsn,
+            traces_sample_rate=0,
+            send_default_pii=False,
+            release=f"star-trail-cleanr@{version}",
+        )
+        sentry_sdk.set_tag("component", "worker")
+    except Exception:
+        pass
+
+
+_init_worker_sentry()
+
+
 def _filter_by_resolution(files: List[Path],
                           expected_width: int = None,
                           expected_height: int = None) -> List[Path]:
@@ -392,7 +431,7 @@ def main():
 
     masks_all = []
     for i, fp in enumerate(frame_files_all):
-        mask = detect_frame(model, str(fp), args.tile_size,
+        mask = detect_frame(model, frames_8bit_all[i], args.tile_size,
                             args.overlap, args.dilate)
         if mask is None:
             masks_all.append(np.zeros((h, w), dtype=np.uint8))
