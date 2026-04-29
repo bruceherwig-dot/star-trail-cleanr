@@ -623,6 +623,10 @@ class CleanerWorker(QThread):
                 detect_count = 0
                 repair_count = 0
                 _sub_re = re.compile(r'(\d+)/(\d+)')
+                # Capture worker stdout for crash reports. Limit memory by
+                # only keeping the first 50 and last 50 lines — that's
+                # enough context for triage without retaining huge logs.
+                proc_stdout_lines = []
 
                 for proc_line in self._proc.stdout:
                     if self._cancelled:
@@ -631,6 +635,7 @@ class CleanerWorker(QThread):
                     proc_line = proc_line.strip()
                     if not proc_line:
                         continue
+                    proc_stdout_lines.append(proc_line)
 
                     # Parse stat lines emitted by astro_clean_v5
                     if proc_line.startswith("BATCH_TRAIL_COUNT:"):
@@ -715,14 +720,35 @@ class CleanerWorker(QThread):
                     stderr_text = self._proc.stderr.read().strip()
                     err_lines = [l for l in stderr_text.splitlines() if l.strip()]
                     err_msg = err_lines[-1] if err_lines else "unknown error"
-                    # Safety net: forward worker stderr to Sentry. The worker
-                    # has its own Sentry init for unhandled exceptions, but
-                    # crashes that die before that init runs (missing DLLs,
-                    # bundle import failures) only surface here as stderr.
+
+                    def _head_tail(lines, n=50):
+                        """Return first n + last n lines joined, with a marker
+                        if the middle was elided. Caps memory + email size."""
+                        if len(lines) <= 2 * n:
+                            return "\n".join(lines)
+                        head = "\n".join(lines[:n])
+                        tail = "\n".join(lines[-n:])
+                        omitted = len(lines) - 2 * n
+                        return f"{head}\n... ({omitted} lines elided) ...\n{tail}"
+
+                    stderr_lines = [l for l in stderr_text.splitlines() if l.strip()]
+                    stderr_preview = _head_tail(stderr_lines)
+                    stdout_preview = _head_tail(proc_stdout_lines)
+
+                    # Safety net: forward worker stderr + stdout to Sentry.
+                    # The worker has its own Sentry init for unhandled
+                    # exceptions, but crashes that die before that init runs
+                    # (missing DLLs, bundle import failures, OS-level kills)
+                    # only surface here.
                     if (SETTINGS.value("crash_reporting_enabled", False, type=bool)
                             and _SENTRY_DSN):
                         try:
                             import sentry_sdk
+                            import platform as _plat
+                            os_tag = (
+                                f"{_plat.system()} {_plat.release()} "
+                                f"({_plat.machine()})"
+                            )
                             with sentry_sdk.push_scope() as scope:
                                 scope.set_tag("component", "gui_worker_capture")
                                 scope.set_tag("batch_index", str(i + 1))
@@ -730,6 +756,9 @@ class CleanerWorker(QThread):
                                 scope.set_tag("image_w", str(dominant[0]))
                                 scope.set_tag("image_h", str(dominant[1]))
                                 scope.set_tag("output_format", str(self.output_format))
+                                scope.set_tag("os", os_tag)
+                                scope.set_extra("stderr_preview", stderr_preview or "")
+                                scope.set_extra("stdout_preview", stdout_preview or "")
                                 scope.set_extra("stderr_full", stderr_text or "")
                                 sentry_sdk.capture_message(
                                     f"Worker exited {self._proc.returncode}: {err_msg}",
@@ -986,7 +1015,7 @@ class MainWindow(QMainWindow):
         <li><b>Run</b> &mdash; sit back. Cleaned frames land in a <code>cleaned/</code>
         folder next to your originals.</li>
         <li><b>Stack</b> &mdash; load the cleaned frames into your favorite stacker
-        (StarStaX, Sequator, Photoshop) for the final composite.</li>
+        (StarStaX, Sequator, Photoshop, etc.) for the final composite.</li>
         </ol>
 
         <h2 style='color:{BRAND_HEADING_BLUE}; margin-bottom:2px;'>Limitations</h2>
@@ -2303,13 +2332,13 @@ class MainWindow(QMainWindow):
         else:
             time_saved = f"~{saved_sec} second{'s' if saved_sec != 1 else ''}"
         self._stats_trail_line = (
-            f"Swept <b>{total_trails:,}</b> airplane and satellite trails from your skies "
+            f"Swept <b>{total_trails:,}</b> airplane and satellite trails from your skies<br>"
             f"across <b>{total_frames:,}</b> frames.<br>"
             f"<i>Based on manual cleanup at 20 seconds per trail.</i><br><br>"
             f"<span style='font-size:20px; font-weight:bold;'>TIME SAVED: {time_saved}</span>"
             f"<br><br><b>Time to stack!</b><br>"
             f"Open the Cleaned Folder, then load the frames into your favorite "
-            f"stacker (StarStaX, Sequator, Photoshop) for the final composite."
+            f"stacker (StarStaX, Sequator, Photoshop, etc.) for the final composite."
         )
         # Stats HTML stored on self; the modal dialog renders it on _on_done.
 
@@ -2390,7 +2419,7 @@ class MainWindow(QMainWindow):
         v.setSpacing(14)
 
         # Big header
-        header = QLabel("Your skies are scrubbed.")
+        header = QLabel("Your skies are scrubbed!")
         hf = QFont()
         hf.setPointSize(24)
         hf.setBold(True)
