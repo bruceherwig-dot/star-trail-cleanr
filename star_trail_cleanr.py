@@ -864,9 +864,31 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle(f"Star Trail CleanR (Beta v{VERSION})")
         self.setMinimumWidth(720)
+        # Floor at 550 px now that the button bar is pinned outside the
+        # scroll area — short-screen users get a smaller window with the
+        # form scrolling, but the action button is always in view. Was 820
+        # back when buttons lived inside the scroll area.
+        self.setMinimumHeight(550)
         saved_geo = SETTINGS.value("window_geometry")
         if saved_geo:
             self.restoreGeometry(saved_geo)
+        else:
+            # First-time launch: open at a known-good size that shows all
+            # six steps AND the Clean My Stars button without scrolling.
+            # Capped at 90% of available screen so it never opens off-screen
+            # on small laptops.
+            screen = QApplication.primaryScreen()
+            if screen:
+                geom = screen.availableGeometry()
+                w = min(1100, int(geom.width() * 0.9))
+                h = min(950, int(geom.height() * 0.9))
+                self.resize(w, h)
+                # Center on the active screen.
+                x = geom.x() + (geom.width() - w) // 2
+                y = geom.y() + (geom.height() - h) // 2
+                self.move(x, y)
+            else:
+                self.resize(1100, 950)
         self.worker = None
         self._mask_path = None
         self._mask_window = None
@@ -882,7 +904,7 @@ class MainWindow(QMainWindow):
             f"QTabWidget::pane {{ border: none; background: palette(window); }}"
             "QTabBar { qproperty-drawBase: 0; }"
             f"QTabBar::tab {{ background: {BRAND_TAB_INACTIVE_BG}; color: {BRAND_TAB_INACTIVE_FG}; padding: 14px 20px; "
-            "font-size: 15px; font-weight: bold; border: none; min-width: 200px; }"
+            "font-size: 19px; font-weight: bold; border: none; min-width: 200px; }"
             f"QTabBar::tab:selected {{ background: {BRAND_TAB_ACTIVE_BG}; color: {BRAND_TAB_ACTIVE_FG}; }}"
             f"QTabBar::tab:hover:!selected {{ background: {BRAND_TAB_HOVER_BG}; color: {BRAND_TAB_ACTIVE_FG}; }}"
         )
@@ -924,10 +946,10 @@ class MainWindow(QMainWindow):
         browser.setOpenExternalLinks(True)
         browser.document().setDocumentMargin(20)
         browser.setStyleSheet(
-            f"QTextBrowser {{ background: {BROWSER_BG}; color: {BROWSER_TEXT}; border: none; font-size: 14px; }}"
+            f"QTextBrowser {{ background: {BROWSER_BG}; color: {BROWSER_TEXT}; border: none; font-size: 15px; }}"
         )
         browser.setHtml(f"""
-        <html><body style='font-family: -apple-system, sans-serif; line-height: 1.5; margin:0; padding:0; color:{BROWSER_TEXT}; background-color:{BROWSER_BG};'>
+        <html><body style='font-family: Inter, -apple-system, Segoe UI, sans-serif; line-height: 1.5; margin:0; padding:0; color:{BROWSER_TEXT}; background-color:{BROWSER_BG};'>
         <p style='margin:0; padding:0; line-height:0; font-size:1px; height:0;'></p>
         <h2 style='color:{BRAND_HEADING_BLUE}; margin-top:0; margin-bottom:2px;'>Why Star Trail CleanR?</h2>
         <p style='margin-top:2px;'>Star Trail CleanR removes airplane and satellite trails
@@ -1010,11 +1032,11 @@ class MainWindow(QMainWindow):
         bio = QTextBrowser()
         bio.setOpenExternalLinks(True)
         bio.setStyleSheet(
-            f"QTextBrowser {{ background: {BROWSER_BG}; color: {BROWSER_TEXT}; border: none; font-size: 14px; }}"
+            f"QTextBrowser {{ background: {BROWSER_BG}; color: {BROWSER_TEXT}; border: none; font-size: 15px; }}"
         )
         bio.document().setDocumentMargin(20)
         bio.setHtml(f"""
-        <html><body style='font-family: -apple-system, sans-serif; line-height: 1.5; margin:0; padding:0; color:{BROWSER_TEXT}; background-color:{BROWSER_BG};'>
+        <html><body style='font-family: Inter, -apple-system, Segoe UI, sans-serif; line-height: 1.5; margin:0; padding:0; color:{BROWSER_TEXT}; background-color:{BROWSER_BG};'>
         <p style='margin:0; padding:0; line-height:0; font-size:1px; height:0;'></p>
         <h2 style='color:{BRAND_HEADING_BLUE}; margin-top:0; margin-bottom:2px;'>About the Authors</h2>
         <p style='margin-top:2px;'>Star Trail CleanR is a passion project. I've been
@@ -1089,14 +1111,17 @@ class MainWindow(QMainWindow):
         title = QLabel("Star Trail CleanR")
         title.setStyleSheet(f"color: {BRAND_HEADER_TEXT}; font-size: 26px; font-weight: bold; background: transparent;")
         text_col.addWidget(title)
-        sub = QLabel(f"Beta v{VERSION}")
-        sub.setStyleSheet(f"color: {BRAND_HEADER_SUB}; font-size: 12px; background: transparent;")
-        text_col.addWidget(sub)
-        self._header_model_label = QLabel(self._current_model_display_name())
-        self._header_model_label.setStyleSheet(
+        # Single QLabel holding both subtitle lines so the user can select
+        # and copy the version + detector together as one block. Two separate
+        # QLabels forced one-line-at-a-time copy.
+        self._header_subline = QLabel(
+            f"Beta v{VERSION}\n{self._current_model_display_name()}"
+        )
+        self._header_subline.setStyleSheet(
             f"color: {BRAND_HEADER_SUB}; font-size: 12px; background: transparent;"
         )
-        text_col.addWidget(self._header_model_label)
+        self._header_subline.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        text_col.addWidget(self._header_subline)
         text_col.addStretch()
         outer.addWidget(text_wrap)
         outer.addStretch()
@@ -1108,25 +1133,53 @@ class MainWindow(QMainWindow):
         relaunch_btn.clicked.connect(self._relaunch)
         outer.addWidget(relaunch_btn)
 
-        # Right: Support button
-        support_btn = QPushButton("\u2764  Support")
-        support_btn.setFixedHeight(32)
+        # Right: Support button. Heart and "Support" use different font sizes
+        # so the heart can be visually larger than the word. QPushButton's
+        # own text would force one shared size, so we put two QLabels inside
+        # the button. WA_TransparentForMouseEvents makes the labels pass
+        # clicks through to the button.
+        support_btn = QPushButton()
+        support_btn.setFixedHeight(36)
+        # Width is fixed because a QPushButton with an internal layout
+        # sizes to its (empty) text by default, clipping the children. This
+        # value comfortably fits heart (22px) + spacing + "Support" (15px)
+        # + 18px padding on each side.
+        support_btn.setFixedWidth(144)
+        support_btn.setCursor(Qt.PointingHandCursor)
         support_btn.setStyleSheet(
-            f"QPushButton {{ background-color: {BRAND_SUPPORT_BG}; color: {BRAND_SUPPORT_FG}; font-size: 13px; "
-            f"font-weight: bold; border-radius: 16px; border: 1px solid {BRAND_SUPPORT_BORDER}; "
-            f"padding: 0 16px; }}"
+            f"QPushButton {{ background-color: {BRAND_SUPPORT_BG}; "
+            f"border-radius: 18px; border: 1px solid {BRAND_SUPPORT_BORDER}; "
+            f"padding: 0 18px; }}"
             f"QPushButton:hover {{ background-color: {BRAND_SUPPORT_HOVER}; }}"
         )
+        _support_inner = QHBoxLayout(support_btn)
+        _support_inner.setContentsMargins(0, 0, 0, 0)
+        _support_inner.setSpacing(8)
+        _support_inner.setAlignment(Qt.AlignCenter)
+        _heart_lbl = QLabel("\u2764")
+        _heart_lbl.setStyleSheet(
+            f"color: {BRAND_SUPPORT_FG}; font-size: 22px; background: transparent;"
+        )
+        _heart_lbl.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        _support_text = QLabel("Support")
+        _support_text.setStyleSheet(
+            f"color: {BRAND_SUPPORT_FG}; font-size: 15px; font-weight: bold; background: transparent;"
+        )
+        _support_text.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        _support_inner.addWidget(_heart_lbl)
+        _support_inner.addWidget(_support_text)
         support_btn.setToolTip("Support this project")
         support_btn.clicked.connect(lambda: __import__('webbrowser').open(
             "https://bruceherwigphotographer.square.site/product/tip-jar/WCQQP7HM4SGFWSNBSAFNX7QF"))
         outer.addWidget(support_btn)
 
         # Right: Close X
-        quit_btn = QPushButton("\u2715")
+        # × (U+00D7 multiplication sign) reads as a proper close glyph,
+        # narrower than capital X, and centers cleanly in Inter.
+        quit_btn = QPushButton("×")
         quit_btn.setFixedSize(32, 32)
         quit_btn.setStyleSheet(
-            f"QPushButton {{ background-color: {BRAND_QUIT_RED}; color: white; font-size: 22px; "
+            f"QPushButton {{ background-color: {BRAND_QUIT_RED}; color: white; font-size: 28px; "
             f"font-weight: bold; border-radius: 4px; border: none; }}"
             f"QPushButton:hover {{ background-color: {BRAND_QUIT_RED_HOVER}; }}"
         )
@@ -1363,7 +1416,7 @@ class MainWindow(QMainWindow):
         self._model_summary.setVisible(False)
         self._model_credits.setVisible(False)
         self._model_gotit_btn.setVisible(True)
-        self._header_model_label.setText(display)
+        self._header_subline.setText(f"Beta v{VERSION}\n{display}")
 
     def _on_model_download_failed(self, err):
         # Silent fallback: hide the card, try again next launch.
@@ -1432,20 +1485,24 @@ class MainWindow(QMainWindow):
     def _build_setup_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setSpacing(6)
-        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(4)
+        layout.setContentsMargins(20, 12, 20, 12)
+        layout.setAlignment(Qt.AlignTop)
 
+        # Sizes bumped 2026-04-28 to match Inter's smaller x-height vs the
+        # platform default fonts. Old 15/12 pt rendered too small once we
+        # forced Inter app-wide.
         lbl_font = QFont()
-        lbl_font.setPointSize(15)
+        lbl_font.setPointSize(19)
         lbl_font.setBold(True)
 
         step_font = QFont()
-        step_font.setPointSize(12)
+        step_font.setPointSize(15)
 
         # Headline + subtitle
         headline = QLabel("Remove the Trails. Keep the Stars.")
         headline_font = QFont()
-        headline_font.setPointSize(22)
+        headline_font.setPointSize(24)
         headline_font.setBold(True)
         headline.setFont(headline_font)
         layout.addWidget(headline)
@@ -1461,17 +1518,34 @@ class MainWindow(QMainWindow):
         subtitle.setWordWrap(True)
         layout.addWidget(subtitle)
 
-        layout.addSpacing(16)
+        layout.addSpacing(8)
 
         # ── Step 1: Select Images ────────────────────────────────────────────
-        step1 = QLabel("1. Select Star Trail Images")
-        step1.setFont(lbl_font)
-        layout.addWidget(step1)
-
-        hint1 = QLabel("(.JPG, .TIF \u2014 8 & 16 bit files accepted)")
-        hint1.setFont(step_font)
-        hint1.setStyleSheet(f"color: {MUTED_TEXT};")
-        layout.addWidget(hint1)
+        # Heading + format hint are ONE QLabel (rich text) so layout never
+        # has to align two QLabels of different fonts on the same line —
+        # that produced overlap. Frame count is dynamic, lives in its own
+        # label to the right.
+        # Option A: heading + frame count share one row. Heading on the left
+        # at its sizeHint width; count on the far right, pushed there by a
+        # stretch. No separate count row, no extra vertical space.
+        step1_row = QHBoxLayout()
+        step1_row.setSpacing(12)
+        step1 = QLabel(
+            "<span style='font-size:19pt; font-weight:bold;'>1. Select Folder with Your Star Trail Images</span>"
+            f"&nbsp;&nbsp;<span style='font-size:14pt; color:{MUTED_TEXT}; vertical-align:baseline;'>(.JPG, .TIF \u2014 8 &amp; 16 bit files accepted)</span>"
+        )
+        step1.setTextFormat(Qt.RichText)
+        step1_row.addWidget(step1)
+        step1_row.addStretch(1)
+        self._frame_count_label = QLabel("")
+        # padding-right shifts the text leftward inside the label so it
+        # visually centers between Browse and Open Folder below it instead
+        # of hugging the right edge of the row.
+        self._frame_count_label.setStyleSheet(
+            "color: #5b9bd5; font-size: 15pt; padding-right: 100px;"
+        )
+        step1_row.addWidget(self._frame_count_label)
+        layout.addLayout(step1_row)
 
         row_in = QHBoxLayout()
         self._folder_input = QLineEdit()
@@ -1488,22 +1562,15 @@ class MainWindow(QMainWindow):
         self._input_open_btn.clicked.connect(self._open_setup_input_folder)
         row_in.addWidget(self._input_open_btn, 1)
         layout.addLayout(row_in)
-
-        self._frame_count_label = QLabel("")
-        self._frame_count_label.setFont(step_font)
-        self._frame_count_label.setStyleSheet(f"color: {MUTED_TEXT};")
-        layout.addWidget(self._frame_count_label)
-        layout.addSpacing(10)
+        layout.addSpacing(4)
 
         # ── Step 2: Select Output ────────────────────────────────────────────
-        step2 = QLabel("2. Select Output Folder")
-        step2.setFont(lbl_font)
+        step2 = QLabel(
+            "<span style='font-size:19pt; font-weight:bold;'>2. Select Output Folder</span>"
+            f"&nbsp;&nbsp;<span style='font-size:14pt; color:{MUTED_TEXT}; vertical-align:baseline;'>(default: a \u2018Cleaned\u2019 folder inside your originals)</span>"
+        )
+        step2.setTextFormat(Qt.RichText)
         layout.addWidget(step2)
-
-        hint2 = QLabel("(default: a \u2018Cleaned\u2019 folder inside your originals)")
-        hint2.setFont(step_font)
-        hint2.setStyleSheet(f"color: {MUTED_TEXT};")
-        layout.addWidget(hint2)
 
         row_out = QHBoxLayout()
         self._output_input = QLineEdit()
@@ -1518,24 +1585,22 @@ class MainWindow(QMainWindow):
         self._output_open_btn.clicked.connect(self._open_setup_output_folder)
         row_out.addWidget(self._output_open_btn, 1)
         layout.addLayout(row_out)
-        layout.addSpacing(10)
+        layout.addSpacing(4)
 
         # ── Step 3: Foreground Mask ──────────────────────────────────────────
-        step3 = QLabel("3. Foreground Mask (optional)")
-        step3.setFont(lbl_font)
+        step3 = QLabel(
+            "<span style='font-size:19pt; font-weight:bold;'>3. Foreground Mask (optional)</span>"
+            f"&nbsp;&nbsp;<span style='font-size:14pt; color:{MUTED_TEXT}; vertical-align:baseline;'>Not required, but helpful \u2014 keeps the AI focused on the sky</span>"
+        )
+        step3.setTextFormat(Qt.RichText)
         layout.addWidget(step3)
-
-        hint3 = QLabel("Not required, but helpful \u2014 keeps the AI focused on the sky")
-        hint3.setFont(step_font)
-        hint3.setStyleSheet(f"color: {MUTED_TEXT};")
-        layout.addWidget(hint3)
 
         mask_row = QHBoxLayout()
         self._mask_btn = QPushButton("Create Mask\u2026")
         self._mask_btn.setFixedHeight(34)
         self._mask_btn.setFixedWidth(160)
         self._mask_btn.setStyleSheet(
-            f"QPushButton {{ background-color: {BRAND_RUN_GREEN}; color: white; font-size: 13px; "
+            f"QPushButton {{ background-color: {BRAND_RUN_GREEN}; color: white; font-size: 16px; "
             f"font-weight: bold; border-radius: 6px; border: none; }}"
             f"QPushButton:hover {{ background-color: {BRAND_RUN_GREEN_HOVER}; }}"
         )
@@ -1547,33 +1612,29 @@ class MainWindow(QMainWindow):
         mask_row.addWidget(self._mask_status)
         mask_row.addStretch()
         layout.addLayout(mask_row)
-        layout.addSpacing(10)
+        layout.addSpacing(4)
 
         # ── Step 4: Number of Images ─────────────────────────────────────────
-        step4 = QLabel("4. Number of Images to Process")
-        step4.setFont(lbl_font)
+        step4 = QLabel(
+            "<span style='font-size:19pt; font-weight:bold;'>4. Number of Images to Process</span>"
+            f"&nbsp;&nbsp;<span style='font-size:14pt; color:{MUTED_TEXT}; vertical-align:baseline;'>Recommended: test a small batch before doing a full run</span>"
+        )
+        step4.setTextFormat(Qt.RichText)
         layout.addWidget(step4)
-
-        hint4 = QLabel("Recommended: test a small batch before doing a full run")
-        hint4.setFont(step_font)
-        hint4.setStyleSheet(f"color: {MUTED_TEXT};")
-        layout.addWidget(hint4)
 
         self._frame_limit = QComboBox()
         self._frame_limit.addItems(["20", "50", "100", "250", "All Frames"])
         self._frame_limit.setFixedWidth(140)
         layout.addWidget(self._frame_limit)
-        layout.addSpacing(10)
+        layout.addSpacing(4)
 
         # ── Step 5: Output Options ───────────────────────────────────────────
-        step5 = QLabel("5. Output Options")
-        step5.setFont(lbl_font)
+        step5 = QLabel(
+            "<span style='font-size:19pt; font-weight:bold;'>5. Output Options</span>"
+            f"&nbsp;&nbsp;<span style='font-size:14pt; color:{MUTED_TEXT}; vertical-align:baseline;'>File format and quality</span>"
+        )
+        step5.setTextFormat(Qt.RichText)
         layout.addWidget(step5)
-
-        hint5 = QLabel("File format and quality")
-        hint5.setFont(step_font)
-        hint5.setStyleSheet(f"color: {MUTED_TEXT};")
-        layout.addWidget(hint5)
 
         hp_row = QHBoxLayout()
 
@@ -1593,39 +1654,38 @@ class MainWindow(QMainWindow):
         self._jpeg_quality.setRange(60, 100)
         self._jpeg_quality.setSingleStep(5)
         self._jpeg_quality.setValue(95)
-        self._jpeg_quality.setFixedWidth(55)
+        # 60 px is the tight fit for "100" + spin arrows in Inter at 15 px.
+        # Was 75; Bruce flagged still-too-wide on screen with "85" inside.
+        self._jpeg_quality.setFixedWidth(60)
         hp_row.addWidget(self._jpeg_quality)
         hp_row.addStretch(1)
 
         self._format_combo.currentTextChanged.connect(self._on_format_changed)
 
         layout.addLayout(hp_row)
-        layout.addSpacing(14)
+        layout.addSpacing(6)
 
         # ── Step 6: Run ──────────────────────────────────────────────────────
-        step6 = QLabel("6. Remove airplane and satellite trails")
-        step6.setFont(lbl_font)
+        step6 = QLabel(
+            "<span style='font-size:19pt; font-weight:bold;'>6. Remove airplane and satellite trails</span>"
+            f"&nbsp;&nbsp;<span style='font-size:14pt; color:{MUTED_TEXT}; vertical-align:baseline;'>Processing time depends on frame count, pixel count of your images, and computer speed</span>"
+        )
+        step6.setTextFormat(Qt.RichText)
         layout.addWidget(step6)
-
-        hint6 = QLabel("Processing time depends on image count, resolution, and computer speed")
-        hint6.setFont(step_font)
-        hint6.setStyleSheet(f"color: {MUTED_TEXT};")
-        layout.addWidget(hint6)
 
         self._error_label = QLabel("")
         self._error_label.setStyleSheet("color: red; font-size: 13px;")
         layout.addWidget(self._error_label)
 
-        layout.addStretch()
+        layout.addSpacing(8)
 
         btn_row = QHBoxLayout()
-        btn_row.setAlignment(Qt.AlignBottom)
         btn_row.setSpacing(16)
 
         self._run_btn = QPushButton("Clean My Stars!")
         self._run_btn.setFixedHeight(60)
         self._run_btn.setStyleSheet(
-            f"QPushButton {{ background-color: {BRAND_RUN_GREEN}; color: white; font-size: 22px; "
+            f"QPushButton {{ background-color: {BRAND_RUN_GREEN}; color: white; font-size: 26px; "
             f"font-weight: bold; border-radius: 6px; border: none; }}"
             f"QPushButton:hover {{ background-color: {BRAND_RUN_GREEN_HOVER}; }}"
             f"QPushButton:disabled {{ background-color: {DISABLED_BTN_BG}; }}"
@@ -1636,7 +1696,7 @@ class MainWindow(QMainWindow):
         self._setup_open_btn = QPushButton("Open Cleaned Folder")
         self._setup_open_btn.setFixedHeight(48)
         self._setup_open_btn.setStyleSheet(
-            f"QPushButton {{ background-color: {BRAND_HEADING_BLUE}; color: white; font-size: 18px; "
+            f"QPushButton {{ background-color: {BRAND_HEADING_BLUE}; color: white; font-size: 22px; "
             f"font-weight: bold; border-radius: 6px; border: none; }}"
             f"QPushButton:hover {{ background-color: {BRAND_HEADING_HOVER}; }}"
             f"QPushButton:disabled {{ background-color: {DISABLED_BTN_BG}; }}"
@@ -1695,7 +1755,7 @@ class MainWindow(QMainWindow):
 
         title = QLabel("Cleaning in Progress")
         title_font = QFont()
-        title_font.setPointSize(20)
+        title_font.setPointSize(24)
         title_font.setBold(True)
         title.setFont(title_font)
         self._process_title = title
@@ -1704,12 +1764,12 @@ class MainWindow(QMainWindow):
         # ── Overall progress bar (fat) ──
         frame_label_row = QHBoxLayout()
         self._frame_counter = QLabel("")
-        self._frame_counter.setStyleSheet(f"font-size: 13px; color: {MUTED_TEXT};")
+        self._frame_counter.setStyleSheet(f"font-size: 15px; color: {MUTED_TEXT};")
         self._frame_counter.setTextInteractionFlags(Qt.TextSelectableByMouse)
         frame_label_row.addWidget(self._frame_counter)
         frame_label_row.addSpacing(20)
         self._initial_est_label = QLabel("")
-        self._initial_est_label.setStyleSheet(f"font-size: 13px; color: {MUTED_TEXT};")
+        self._initial_est_label.setStyleSheet(f"font-size: 15px; color: {MUTED_TEXT};")
         self._initial_est_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         frame_label_row.addWidget(self._initial_est_label)
         frame_label_row.addStretch()
@@ -1722,7 +1782,7 @@ class MainWindow(QMainWindow):
         self._progress_bar.setFormat("%p%")
         self._progress_bar.setStyleSheet(
             f"QProgressBar {{ border: 1px solid {CARD_BORDER}; border-radius: 10px; "
-            f"background: {CARD_BG}; text-align: center; font-weight: bold; font-size: 14px; color: {CARD_TEXT}; }}"
+            f"background: {CARD_BG}; text-align: center; font-weight: bold; font-size: 16px; color: {CARD_TEXT}; }}"
             "QProgressBar::chunk { background: qlineargradient("
             "x1:0, y1:0, x2:1, y2:0, stop:0 #4a9eff, stop:1 #66b3ff); border-radius: 9px; }"
         )
@@ -1742,7 +1802,7 @@ class MainWindow(QMainWindow):
         # ── Batch label with spinner ──
         self._batch_label = QLabel("")
         batch_font = QFont()
-        batch_font.setPointSize(15)
+        batch_font.setPointSize(18)
         batch_font.setBold(True)
         self._batch_label.setFont(batch_font)
         self._batch_label.setAlignment(Qt.AlignCenter)
@@ -1759,7 +1819,7 @@ class MainWindow(QMainWindow):
         step1_row = QHBoxLayout()
         self._step1_label = QLabel("Detecting\nwaiting")
         self._step1_label.setFixedWidth(120)
-        self._step1_label.setStyleSheet(f"font-size: 12px; color: {HINT_TEXT};")
+        self._step1_label.setStyleSheet(f"font-size: 14px; color: {HINT_TEXT};")
         self._step1_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         step1_row.addWidget(self._step1_label)
         self._step1_bar = QProgressBar()
@@ -1769,7 +1829,7 @@ class MainWindow(QMainWindow):
         self._step1_bar.setFormat("0%")
         self._step1_bar.setStyleSheet(
             f"QProgressBar {{ border: 1px solid {CARD_BORDER}; border-radius: 8px; "
-            f"background: {CARD_BG}; text-align: center; font-weight: bold; font-size: 13px; color: {CARD_TEXT}; }}"
+            f"background: {CARD_BG}; text-align: center; font-weight: bold; font-size: 15px; color: {CARD_TEXT}; }}"
             "QProgressBar::chunk { background: qlineargradient("
             "x1:0, y1:0, x2:1, y2:0, stop:0 #4a9eff, stop:1 #66b3ff); border-radius: 7px; }"
         )
@@ -1780,7 +1840,7 @@ class MainWindow(QMainWindow):
         step2_row = QHBoxLayout()
         self._step2_label = QLabel("Repairing\nwaiting")
         self._step2_label.setFixedWidth(120)
-        self._step2_label.setStyleSheet(f"font-size: 12px; color: {HINT_TEXT};")
+        self._step2_label.setStyleSheet(f"font-size: 14px; color: {HINT_TEXT};")
         self._step2_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         step2_row.addWidget(self._step2_label)
         self._step2_bar = QProgressBar()
@@ -1790,7 +1850,7 @@ class MainWindow(QMainWindow):
         self._step2_bar.setFormat("0%")
         self._step2_bar.setStyleSheet(
             f"QProgressBar {{ border: 1px solid {CARD_BORDER}; border-radius: 8px; "
-            f"background: {CARD_BG}; text-align: center; font-weight: bold; font-size: 13px; color: {CARD_TEXT}; }}"
+            f"background: {CARD_BG}; text-align: center; font-weight: bold; font-size: 15px; color: {CARD_TEXT}; }}"
             "QProgressBar::chunk { background: qlineargradient("
             "x1:0, y1:0, x2:1, y2:0, stop:0 #4a9eff, stop:1 #66b3ff); border-radius: 7px; }"
         )
@@ -1800,23 +1860,13 @@ class MainWindow(QMainWindow):
         # ── Detail / status line ──
         self._detail_label = QLabel("")
         self._detail_label.setAlignment(Qt.AlignCenter)
-        self._detail_label.setStyleSheet(f"font-size: 12px; color: {BRAND_HEADING_BLUE};")
+        self._detail_label.setStyleSheet(f"font-size: 14px; color: {BRAND_HEADING_BLUE};")
         self._detail_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         layout.addWidget(self._detail_label)
 
-        # ── Post-run stats card (hidden until run completes) ──
-        self._stats_label = QLabel("")
-        self._stats_label.setAlignment(Qt.AlignCenter)
-        self._stats_label.setWordWrap(True)
-        self._stats_label.setTextFormat(Qt.RichText)
-        self._stats_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self._stats_label.setStyleSheet(
-            f"QLabel {{ background-color: {LIGHT_PANEL_BG}; border: 1px solid {BRAND_HEADING_BLUE}; "
-            f"border-radius: 6px; padding: 12px; color: {CARD_TEXT}; font-size: 15px; }}"
-        )
-        self._stats_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self._stats_label.hide()
-        layout.addWidget(self._stats_label)
+        # Post-run stats are shown in a centered modal dialog, not inline,
+        # so they can't fight with the log area for vertical space or hide
+        # the Back to Setup button. See _show_run_complete_dialog.
 
         # ── Log area ──
         self._status_out = QTextEdit()
@@ -1830,7 +1880,7 @@ class MainWindow(QMainWindow):
         self._cancel_btn = QPushButton("Cancel Cleaning")
         self._cancel_btn.setFixedHeight(60)
         self._cancel_btn.setStyleSheet(
-            f"QPushButton {{ background-color: {SECONDARY_BTN_BG}; color: white; font-size: 22px; "
+            f"QPushButton {{ background-color: {SECONDARY_BTN_BG}; color: white; font-size: 26px; "
             f"font-weight: bold; border-radius: 6px; border: none; }}"
             f"QPushButton:hover {{ background-color: {DISABLED_BTN_HOVER}; }}"
         )
@@ -1840,7 +1890,7 @@ class MainWindow(QMainWindow):
         self._open_folder_btn = QPushButton("Open Cleaned Folder")
         self._open_folder_btn.setFixedHeight(48)
         self._open_folder_btn.setStyleSheet(
-            f"QPushButton {{ background-color: {BRAND_HEADING_BLUE}; color: white; font-size: 18px; "
+            f"QPushButton {{ background-color: {BRAND_HEADING_BLUE}; color: white; font-size: 22px; "
             f"font-weight: bold; border-radius: 6px; border: none; }}"
             f"QPushButton:hover {{ background-color: {BRAND_HEADING_HOVER}; }}"
         )
@@ -2059,8 +2109,8 @@ class MainWindow(QMainWindow):
         self._step2_bar.setFormat("0%")
         self._step2_label.setText("Repairing\nwaiting")
         self._detail_label.setText("")
-        self._stats_label.setText("")
-        self._stats_label.hide()
+        # Stats are now shown in a modal dialog (see _show_run_complete_dialog),
+        # not in an inline label. No widget to reset here.
         self._status_out.setText("")
         self._cancel_btn.setText("Cancel Cleaning")
         self._cancel_btn.setEnabled(True)
@@ -2254,9 +2304,7 @@ class MainWindow(QMainWindow):
             f"Open the Cleaned Folder, then load the frames into your favorite "
             f"stacker (StarStaX, Sequator, Photoshop) for the final composite."
         )
-        self._stats_label.setText(
-            self._stats_trail_line + getattr(self, '_stats_timing_line', ''))
-        self._stats_label.show()
+        # Stats HTML stored on self; the modal dialog renders it on _on_done.
 
     def _on_timing_stats(self, initial_est_sec, actual_sec):
         self._run_initial_est_sec = initial_est_sec
@@ -2268,9 +2316,7 @@ class MainWindow(QMainWindow):
             f"Took <b>{fmt_hms(actual_sec)}</b>. {tail}"
             f"</span>"
         )
-        if hasattr(self, '_stats_trail_line'):
-            self._stats_label.setText(self._stats_trail_line + self._stats_timing_line)
-            self._stats_label.show()
+        # Modal dialog will read this on _on_done.
 
     def _on_status(self, text):
         self._status_out.append(text)
@@ -2312,6 +2358,85 @@ class MainWindow(QMainWindow):
         self._update_open_btn_state()
         self._switch_to_back_btn()
         self._write_run_summary()
+        # Show the run-complete dialog if there's anything to celebrate
+        # (i.e. trails were swept). Zero-trail runs skip the popup.
+        if getattr(self, '_run_total_trails', 0) > 0:
+            self._show_run_complete_dialog()
+
+    def _show_run_complete_dialog(self):
+        """Centered modal showing run summary. Replaces the old inline card
+        which fought the log area for space and hid the Back to Setup button.
+        Reads HTML lines built in _on_stats_ready and _on_timing_stats."""
+        trail_html = getattr(self, '_stats_trail_line', '')
+        timing_html = getattr(self, '_stats_timing_line', '')
+        if not trail_html:
+            return
+        from PySide6.QtWidgets import QDialog
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Run Complete")
+        dlg.setModal(True)
+        dlg.setMinimumWidth(560)
+        dlg.setStyleSheet(f"QDialog {{ background-color: {LIGHT_PANEL_BG}; }}")
+
+        v = QVBoxLayout(dlg)
+        v.setContentsMargins(28, 24, 28, 20)
+        v.setSpacing(14)
+
+        # Big header
+        header = QLabel("Your stars are scrubbed!")
+        hf = QFont()
+        hf.setPointSize(24)
+        hf.setBold(True)
+        header.setFont(hf)
+        header.setAlignment(Qt.AlignCenter)
+        header.setStyleSheet(f"color: {BRAND_HEADING_BLUE}; background: transparent;")
+        v.addWidget(header)
+
+        # Body — same HTML the inline card used to render
+        body = QLabel(trail_html + timing_html)
+        body.setTextFormat(Qt.RichText)
+        body.setWordWrap(True)
+        body.setAlignment(Qt.AlignCenter)
+        body.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        body.setStyleSheet(
+            f"color: {CARD_TEXT}; font-size: 17px; background: transparent;"
+        )
+        v.addWidget(body)
+
+        # Buttons
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(12)
+        open_btn = QPushButton("Open Cleaned Folder")
+        open_btn.setFixedHeight(44)
+        open_btn.setStyleSheet(
+            f"QPushButton {{ background-color: {BRAND_HEADING_BLUE}; color: white; "
+            f"font-size: 18px; font-weight: bold; border-radius: 6px; border: none; "
+            f"padding: 0 18px; }}"
+            f"QPushButton:hover {{ background-color: {BRAND_HEADING_HOVER}; }}"
+        )
+        open_btn.clicked.connect(self._open_output_folder)
+        btn_row.addWidget(open_btn)
+
+        close_btn = QPushButton("Close")
+        close_btn.setFixedHeight(44)
+        close_btn.setStyleSheet(
+            f"QPushButton {{ background-color: {SECONDARY_BTN_BG}; color: white; "
+            f"font-size: 18px; font-weight: bold; border-radius: 6px; border: none; "
+            f"padding: 0 24px; }}"
+            f"QPushButton:hover {{ background-color: {DISABLED_BTN_HOVER}; }}"
+        )
+        close_btn.clicked.connect(dlg.accept)
+        btn_row.addWidget(close_btn)
+        v.addLayout(btn_row)
+
+        # Center over the main window (or the screen if main isn't placed yet)
+        dlg.adjustSize()
+        parent_geo = self.geometry()
+        if parent_geo.isValid() and parent_geo.width() > 0:
+            dx = parent_geo.x() + (parent_geo.width() - dlg.width()) // 2
+            dy = parent_geo.y() + (parent_geo.height() - dlg.height()) // 2
+            dlg.move(dx, dy)
+        dlg.exec()
 
     def _write_run_summary(self):
         """Write a plain-text run summary into <input>/cleanr_workspace/."""
@@ -2547,6 +2672,40 @@ if __name__ == '__main__':
         sys.exit(1)
 
     app = QApplication(sys.argv)
+
+    # Bundle our own font so widgets render at the same widths on every OS.
+    # Without this, Mac uses San Francisco, Windows uses Segoe UI, Linux uses
+    # whatever the desktop theme gives us — same point size renders different
+    # widths, which clipped controls (e.g. the JPEG quality spinbox at 55 px
+    # was fine on Mac, hid the number on Windows). Inter is OFL-licensed and
+    # bundled in assets/fonts/. Falls back to system default if files missing.
+    if getattr(sys, 'frozen', False):
+        _font_base = sys._MEIPASS
+    else:
+        _font_base = os.path.dirname(os.path.abspath(__file__))
+    _fonts_dir = os.path.join(_font_base, 'assets', 'fonts')
+    from PySide6.QtGui import QFontDatabase
+    for _fname in ("Inter-Regular.ttf", "Inter-Bold.ttf"):
+        _fpath = os.path.join(_fonts_dir, _fname)
+        if os.path.exists(_fpath):
+            QFontDatabase.addApplicationFont(_fpath)
+    if "Inter" in QFontDatabase.families():
+        _app_font = QFont("Inter")
+        # 13pt for Inter ≈ visual weight of 10pt San Francisco on Mac.
+        # Inter has a smaller x-height than the platform defaults, so the
+        # raw point size doesn't translate 1:1 between fonts.
+        _app_font.setPointSize(13)
+        app.setFont(_app_font)
+        # Baseline sizes for input controls + buttons that don't carry their
+        # own stylesheet. Buttons with inline styles (Run, Support, X, notice
+        # cards) override these. Ensures Browse, Open Folder, spin/combo
+        # boxes etc. don't render tiny in Inter.
+        app.setStyleSheet(
+            "QPushButton { font-size: 16px; }"
+            "QComboBox { font-size: 15px; }"
+            "QSpinBox  { font-size: 15px; }"
+            "QLineEdit { font-size: 14px; }"
+        )
 
     # Set the Dock / taskbar icon. Same icon file the frozen build embeds,
     # so dev-mode (live Python via the AppleScript wrapper) also gets the
