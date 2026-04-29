@@ -2063,10 +2063,11 @@ class MainWindow(QMainWindow):
         self._community_lbl.anchorClicked.connect(
             lambda url: self._on_support_link_clicked(url.toString())
         )
-        # Fixed height tuned to fit at Setup-natural-locked window size.
-        # 160 px holds both messages when each wraps to three lines at
-        # the half-of-window panel width — verified offscreen at multiple
-        # widths before this number was committed.
+        # Fixed height in LOGICAL pixels. Qt scales logical to device
+        # pixels automatically, and content inside the box uses the same
+        # logical pixel space, so 160 holds the same wrapped lines at
+        # 100% / 125% / 150% DPI. Tuned to fit at Setup-natural-locked
+        # window size on Bruce's Mac at 100% — verified live.
         self._community_lbl.setFixedHeight(160)
         v.addWidget(self._community_lbl)
 
