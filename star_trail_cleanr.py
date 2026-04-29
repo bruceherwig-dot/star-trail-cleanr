@@ -2332,7 +2332,7 @@ class MainWindow(QMainWindow):
         else:
             time_saved = f"~{saved_sec} second{'s' if saved_sec != 1 else ''}"
         self._stats_trail_line = (
-            f"Swept <b>{total_trails:,}</b> airplane and satellite trails from your skies<br>"
+            f"Swept <b>{total_trails:,}</b> airplane and satellite trails from your stars<br>"
             f"across <b>{total_frames:,}</b> frames.<br>"
             f"<i>Based on manual cleanup at 20 seconds per trail.</i><br><br>"
             f"<span style='font-size:20px; font-weight:bold;'>TIME SAVED: {time_saved}</span>"
