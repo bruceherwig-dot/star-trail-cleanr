@@ -7,6 +7,13 @@ import re
 # also propagates to the worker subprocess that re-runs this script.
 os.environ.setdefault('KMP_DUPLICATE_LIB_OK', 'TRUE')
 
+# Apple Silicon: torchvision::nms is not implemented for the MPS (GPU)
+# device in the PyTorch version we ship, so YOLO warmup crashes during
+# inference. Falling back to CPU for unimplemented MPS ops is invisible
+# to the user (negligible perf hit on small ops) and fixes the crash.
+# Set in the GUI process AND the worker (see astro_clean_v5.py top).
+os.environ.setdefault('PYTORCH_ENABLE_MPS_FALLBACK', '1')
+
 # Windows frozen app (--windowed) has no console: sys.stdout/stderr are None.
 if sys.platform == 'win32' and getattr(sys, 'frozen', False):
     if sys.stdout is None:
@@ -2383,7 +2390,7 @@ class MainWindow(QMainWindow):
         v.setSpacing(14)
 
         # Big header
-        header = QLabel("Your stars are scrubbed!")
+        header = QLabel("Your skies are scrubbed.")
         hf = QFont()
         hf.setPointSize(24)
         hf.setBold(True)

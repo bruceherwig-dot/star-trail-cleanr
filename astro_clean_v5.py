@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-import sys
+import sys, os
+# Apple Silicon: torchvision::nms is not implemented for the MPS (GPU)
+# device in the PyTorch version we ship, so YOLO warmup crashes during
+# inference for every Apple Silicon Mac user that lets the model run on
+# MPS. PYTORCH_ENABLE_MPS_FALLBACK=1 tells PyTorch to silently use the
+# CPU for ops that aren't implemented on MPS. Negligible perf hit on
+# small ops like NMS, fixes the crash. Must be set BEFORE any torch
+# import (including those pulled in by ultralytics / sahi).
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 try:
     if hasattr(sys.stdout, 'reconfigure'):
         sys.stdout.reconfigure(encoding='utf-8')
