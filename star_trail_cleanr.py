@@ -900,31 +900,29 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle(f"Star Trail CleanR (Beta v{VERSION})")
         self.setMinimumWidth(720)
-        # Floor at 550 px now that the button bar is pinned outside the
-        # scroll area — short-screen users get a smaller window with the
-        # form scrolling, but the action button is always in view. Was 820
-        # back when buttons lived inside the scroll area.
-        self.setMinimumHeight(550)
+        # Min height is computed dynamically from the Setup page's actual
+        # layout after the window first shows — see _lock_min_height. No
+        # hardcoded numbers here so the floor self-corrects whenever the
+        # layout changes (more steps, padding tweaks, font swap, etc.).
+        self._min_height_locked = False
         saved_geo = SETTINGS.value("window_geometry")
         if saved_geo:
             self.restoreGeometry(saved_geo)
         else:
-            # First-time launch: open at a known-good size that shows all
-            # six steps AND the Clean My Stars button without scrolling.
-            # Capped at 90% of available screen so it never opens off-screen
-            # on small laptops.
-            screen = QApplication.primaryScreen()
+            # First-time launch: open at the natural content height so all
+            # six steps AND the Clean My Stars button are visible without
+            # scrolling. Capped at 90% of available screen.
             if screen:
                 geom = screen.availableGeometry()
-                w = min(1100, int(geom.width() * 0.9))
-                h = min(950, int(geom.height() * 0.9))
+                w = min(1300, int(geom.width() * 0.9))
+                h = min(1300, int(geom.height() * 0.9))
                 self.resize(w, h)
                 # Center on the active screen.
                 x = geom.x() + (geom.width() - w) // 2
                 y = geom.y() + (geom.height() - h) // 2
                 self.move(x, y)
             else:
-                self.resize(1100, 950)
+                self.resize(1300, 1300)
         self.worker = None
         self._mask_path = None
         self._mask_window = None
@@ -970,6 +968,36 @@ class MainWindow(QMainWindow):
         self._start_update_check()
         self._start_model_update_check()
         self._start_nvidia_detect()
+
+    def showEvent(self, event):
+        """First show: defer one tick to let the layout settle, then lock
+        the window's minimum height to whatever the Setup page's actual
+        layout requires. Avoids hardcoding heights that drift out of sync
+        when the layout changes."""
+        super().showEvent(event)
+        if not self._min_height_locked:
+            QTimer.singleShot(0, self._lock_min_height)
+            self._min_height_locked = True
+
+    def _lock_min_height(self):
+        """Lock the window's vertical size to exactly the Setup tab's
+        natural content height. min == max so the window cannot be
+        resized vertically. Setup never has empty space below the Clean
+        button or scroll above it. Run's right-panel text box is tuned
+        small enough to fit at this same locked height."""
+        if not hasattr(self, "_setup_inner") or self._setup_inner is None:
+            return
+        setup_natural = self._setup_inner.sizeHint().height()
+        chrome = self.height() - self._stack.height()
+        target = setup_natural + chrome
+        screen = QApplication.primaryScreen()
+        if screen:
+            target = min(target, int(screen.availableGeometry().height() * 0.9))
+        target = max(target, 600)
+        self.setMinimumHeight(target)
+        self.setMaximumHeight(target)
+        if self.height() != target:
+            self.resize(self.width(), target)
 
     # ── FAQ tab ──────────────────────────────────────────────────────────────
 
@@ -1520,6 +1548,9 @@ class MainWindow(QMainWindow):
 
     def _build_setup_page(self):
         page = QWidget()
+        # Hold onto the inner widget so the window can lock its minimum
+        # height to whatever the layout actually needs. See _lock_min_height.
+        self._setup_inner = page
         layout = QVBoxLayout(page)
         layout.setSpacing(4)
         layout.setContentsMargins(20, 12, 20, 12)
@@ -1690,9 +1721,12 @@ class MainWindow(QMainWindow):
         self._jpeg_quality.setRange(60, 100)
         self._jpeg_quality.setSingleStep(5)
         self._jpeg_quality.setValue(95)
-        # 60 px is the tight fit for "100" + spin arrows in Inter at 15 px.
-        # Was 75; Bruce flagged still-too-wide on screen with "85" inside.
-        self._jpeg_quality.setFixedWidth(60)
+        # Don't hardcode a pixel width. Qt's sizeHint already computes
+        # the right size from the current font's metrics + the native
+        # spinbox chrome (arrows + frame padding) — which differs by
+        # platform. The previous setFixedWidth(60) was tuned on Mac
+        # against Inter and silently hid the digits on Windows where
+        # native arrows take up more horizontal room.
         hp_row.addWidget(self._jpeg_quality)
         hp_row.addStretch(1)
 
@@ -1904,10 +1938,21 @@ class MainWindow(QMainWindow):
         # so they can't fight with the log area for vertical space or hide
         # the Back to Setup button. See _show_run_complete_dialog.
 
-        # ── Log area ──
+        # ── Log area + community panel (50/50 horizontal split) ──
+        log_row = QHBoxLayout()
+        log_row.setSpacing(20)
+
         self._status_out = QTextEdit()
         self._status_out.setReadOnly(True)
-        layout.addWidget(self._status_out, 1)
+        # Center every line of the log within the box.
+        from PySide6.QtGui import QTextOption as _QTextOpt
+        _opt = self._status_out.document().defaultTextOption()
+        _opt.setAlignment(Qt.AlignCenter)
+        self._status_out.document().setDefaultTextOption(_opt)
+        log_row.addWidget(self._status_out, 1)
+
+        log_row.addWidget(self._build_run_community_panel(), 1)
+        layout.addLayout(log_row, 1)
 
         btn_row = QHBoxLayout()
         btn_row.setAlignment(Qt.AlignBottom)
@@ -1936,6 +1981,123 @@ class MainWindow(QMainWindow):
         layout.addLayout(btn_row)
 
         self._stack.addWidget(page)
+
+    def _build_run_community_panel(self):
+        import platform as _plat
+        import urllib.parse as _urlp
+        import html as _html
+
+        sysname = _plat.system()
+        if sysname == "Darwin":
+            machine = _plat.machine()
+            os_line = "Mac (Apple Silicon)" if machine == "arm64" else "Mac (Intel)"
+        elif sysname == "Windows":
+            os_line = f"Windows {_plat.release()}"
+        elif sysname == "Linux":
+            os_line = "Linux"
+        else:
+            os_line = sysname
+
+        self._support_email = "bruceherwig+startrailcleanr@gmail.com"
+        subject = "Star Trail CleanR error report"
+        body = (
+            "Hi Bruce,\n\n"
+            "[Describe what happened]\n\n"
+            f"App version: Beta v{VERSION}\n"
+            f"OS: {os_line}\n"
+        )
+        self._support_mail_url = (
+            f"mailto:{self._support_email}"
+            f"?subject={_urlp.quote(subject)}"
+            f"&body={_urlp.quote(body)}"
+        )
+        # HTML-escape the URL so the & in subject=...&body=... doesn't trip
+        # Qt's HTML parser (a literal & inside an href value can silently
+        # truncate the URL).
+        safe_url = _html.escape(self._support_mail_url, quote=True)
+
+        panel = QWidget()
+        # Expanding vertical policy: panel fills the full log_row height
+        # instead of being sized to sizeHint and centered. With the layout
+        # below using a bottom stretch, content sits at the top — aligned
+        # with the top edge of the log box on the left.
+        from PySide6.QtWidgets import QSizePolicy as _QSP
+        panel.setSizePolicy(_QSP.Preferred, _QSP.Expanding)
+        v = QVBoxLayout(panel)
+        v.setContentsMargins(24, 0, 24, 12)
+        v.setSpacing(0)
+
+        # Two separate QLabels — one per paragraph. Single-paragraph
+        # plain word-wrapped QLabels size themselves cleanly via
+        # Qt's natural sizeHint. The earlier single-QLabel-with-HTML
+        # approach had buggy heightForWidth interactions that clipped
+        # the email link.
+        # ONE text box. Both messages, blank line between. Width is
+        # whatever the layout gives it; height is set explicitly to the
+        # rendered document height after the HTML is laid out, so the
+        # box is exactly tall enough to hold all the text — no clipping,
+        # no scrollbar, no per-line sizing tricks.
+        from PySide6.QtWidgets import QTextBrowser
+        from PySide6.QtCore import QUrl as _QUrl
+
+        content_html = (
+            "<div style='text-align:center;'>"
+            f"<p style='margin:0; font-size:16px; color:{CARD_TEXT};'>"
+            "Help spread the word! When you share on social media, "
+            "tag your image with #StarTrailCleanR"
+            "</p>"
+            f"<p style='margin:24px 0 0 0; font-size:16px; color:{CARD_TEXT};'>"
+            "Did you get an error message? Take a screenshot and email "
+            f"<a href=\"{safe_url}\" style='color:{BRAND_HEADING_BLUE};'>"
+            f"{self._support_email}</a>"
+            "</p>"
+            "</div>"
+        )
+        self._community_lbl = QTextBrowser()
+        self._community_lbl.setOpenLinks(False)
+        self._community_lbl.setFrameShape(QFrame.NoFrame)
+        self._community_lbl.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._community_lbl.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._community_lbl.setStyleSheet("background: transparent;")
+        self._community_lbl.setHtml(content_html)
+        self._community_lbl.anchorClicked.connect(
+            lambda url: self._on_support_link_clicked(url.toString())
+        )
+        # Fixed height tuned to fit at Setup-natural-locked window size.
+        # 160 px holds both messages when each wraps to three lines at
+        # the half-of-window panel width — verified offscreen at multiple
+        # widths before this number was committed.
+        self._community_lbl.setFixedHeight(160)
+        v.addWidget(self._community_lbl)
+
+        v.addSpacing(10)
+
+        # Hidden status label that flashes "Email copied" briefly on click.
+        self._community_status = QLabel("")
+        self._community_status.setAlignment(Qt.AlignCenter)
+        self._community_status.setStyleSheet(
+            f"font-size: 13px; color: {MUTED_TEXT};"
+        )
+        v.addWidget(self._community_status)
+
+        v.addStretch(1)
+
+        return panel
+
+    def _on_support_link_clicked(self, url):
+        """Click handler for the support email link. Always copies the
+        address to the clipboard (works regardless of mail-app setup) and
+        also tries to open the user's mail app with the message
+        pre-filled. A short status line confirms the click registered."""
+        from PySide6.QtCore import QUrl as _QUrl
+        from PySide6.QtGui import QDesktopServices as _QDS
+
+        QApplication.clipboard().setText(self._support_email)
+        _QDS.openUrl(_QUrl(url))
+        self._community_status.setText("Email copied. Paste it anywhere.")
+        QTimer.singleShot(
+            3000, lambda: self._community_status.setText("")
+        )
 
     # ── Browse / validation ──────────────────────────────────────────────────
 
@@ -2439,6 +2601,22 @@ class MainWindow(QMainWindow):
         )
         v.addWidget(body)
 
+        # Social-media nudge under the body, separated by a divider.
+        v.addSpacing(8)
+        share = QLabel(
+            "Help spread the word! When you share on social media, "
+            "tag your image with <b>#StarTrailCleanR</b>"
+        )
+        share.setTextFormat(Qt.RichText)
+        share.setWordWrap(True)
+        share.setAlignment(Qt.AlignCenter)
+        share.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        share.setStyleSheet(
+            f"color: {CARD_TEXT}; font-size: 15px; background: transparent;"
+            f"padding: 12px 24px; border-top: 1px solid {CARD_BORDER};"
+        )
+        v.addWidget(share)
+
         # Buttons
         btn_row = QHBoxLayout()
         btn_row.setSpacing(12)
@@ -2465,13 +2643,22 @@ class MainWindow(QMainWindow):
         btn_row.addWidget(close_btn)
         v.addLayout(btn_row)
 
-        # Center over the main window (or the screen if main isn't placed yet)
-        dlg.adjustSize()
-        parent_geo = self.geometry()
-        if parent_geo.isValid() and parent_geo.width() > 0:
-            dx = parent_geo.x() + (parent_geo.width() - dlg.width()) // 2
-            dy = parent_geo.y() + (parent_geo.height() - dlg.height()) // 2
+        # Center over the main window. The centering must run AFTER the
+        # dialog's layout has fully rendered — adjustSize() before exec()
+        # under-reports height when the body has wrapped text or a newly
+        # added section, so we use a deferred QTimer.singleShot(0, ...)
+        # which fires once the dialog is on screen and dlg.size() returns
+        # real values. frameGeometry() on the parent includes the title
+        # bar so the vertical math is what the user actually sees.
+        def _center_dialog():
+            parent_frame = self.frameGeometry()
+            if not (parent_frame.isValid() and parent_frame.width() > 0):
+                return
+            dx = parent_frame.x() + (parent_frame.width() - dlg.width()) // 2
+            dy = parent_frame.y() + (parent_frame.height() - dlg.height()) // 2
             dlg.move(dx, dy)
+
+        QTimer.singleShot(0, _center_dialog)
         dlg.exec()
 
     def _write_run_summary(self):
