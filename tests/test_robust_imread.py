@@ -70,6 +70,63 @@ def test_robust_imread_returns_none_when_every_reader_fails():
     assert img is None
 
 
+def test_pil_fallback_rescues_jpeg_when_cv2_fails():
+    """v1.99.1 fix: cv2.imread on Windows fails on paths with non-ASCII
+    characters (Slovak, Czech, German, French, etc.) BEFORE it tries to
+    decode. We can't reproduce the Windows-specific path failure on macOS,
+    but we can simulate the pattern by patching cv2.imread to return None
+    on a JPEG. PIL must rescue it.
+
+    This is the regression test for tester `magio` whose run died on
+    `C:\\Users\\magio\\Desktop\\Štrba\\svetlá\\ZFC_6071.jpg`.
+    """
+    import cv2 as _cv2
+    from modules import io_safe
+    from modules.io_safe import robust_imread
+
+    # Uniform-color image: JPEG compression is lossless on flat regions, so
+    # the exact pixel value survives the round trip. The test cares about
+    # "did PIL rescue the read," not about JPEG fidelity.
+    arr = np.full((40, 60, 3), 100, dtype=np.uint8)
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "ZFC_6071.jpg"
+        _cv2.imwrite(str(p), arr)
+
+        real_imread = io_safe.cv2.imread
+        try:
+            io_safe.cv2.imread = lambda *a, **kw: None
+            img = robust_imread(p, _cv2.IMREAD_UNCHANGED, _retry_delays=())
+        finally:
+            io_safe.cv2.imread = real_imread
+
+    assert img is not None, (
+        "PIL fallback failed to rescue a JPEG when cv2.imread returned None. "
+        "This is the v1.99.1 fix for Windows non-ASCII paths."
+    )
+    assert img.shape == (40, 60, 3)
+    assert img.dtype == np.uint8
+    # Uniform-color JPEG — every pixel should be exactly 100 in every channel.
+    assert int(img[10, 20, 0]) == 100
+    assert int(img[10, 20, 1]) == 100
+    assert int(img[10, 20, 2]) == 100
+
+
+def test_pil_fallback_present_in_diag():
+    """When all readers fail, the diagnosis must name Pillow as one of the
+    attempts so support / Sentry data can show users WHICH readers we tried."""
+    from modules.io_safe import robust_imread_diag
+    img, diag = robust_imread_diag(
+        "/tmp/definitely_does_not_exist_qzqz_v2.jpg", _retry_delays=()
+    )
+    assert img is None
+    assert diag is not None
+    assert "OpenCV" in diag, "diagnosis missing OpenCV"
+    assert "Pillow" in diag, (
+        "diagnosis is missing Pillow attempt — the v1.99.1 fallback isn't "
+        "being exercised"
+    )
+
+
 def test_diag_reports_underlying_reason_on_failure():
     """The diag variant must return a non-empty diagnosis when reads fail,
     so the worker can show the user the actual cause instead of a vague
