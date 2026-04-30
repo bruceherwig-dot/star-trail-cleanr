@@ -940,6 +940,7 @@ class MainWindow(QMainWindow):
             # First-time launch: open at the natural content height so all
             # six steps AND the Clean My Stars button are visible without
             # scrolling. Capped at 90% of available screen.
+            screen = QApplication.primaryScreen()
             if screen:
                 geom = screen.availableGeometry()
                 w = min(1300, int(geom.width() * 0.9))
