@@ -9,6 +9,7 @@ from typing import Optional
 # re-enabled, also restore `--collect-all skimage` in build_helper.py.
 
 from . import slope_match
+from .io_safe import robust_imread
 
 # DISABLED 2026-04-26: testing if slope-match is the regression that made
 # today's Silvana lighthouse stack worse than Apr 24's. Re-enable after the
@@ -366,7 +367,7 @@ def detect_frame(model, image, tile_size: int = 640,
     if isinstance(image, np.ndarray):
         img = image
     else:
-        img = cv2.imread(str(image), cv2.IMREAD_UNCHANGED)
+        img = robust_imread(image, cv2.IMREAD_UNCHANGED)
         if img is None:
             return None
 

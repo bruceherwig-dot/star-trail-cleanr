@@ -39,6 +39,7 @@ from modules.detect_trails import (
     load_model, detect_frame, apply_sky_mask, filter_small_components
 )
 from modules.repair import repair_frame
+from modules.io_safe import robust_imread, robust_imread_diag
 
 
 def _init_worker_sentry():
@@ -78,6 +79,71 @@ def _init_worker_sentry():
 
 
 _init_worker_sentry()
+
+
+def _capture_unreadable_file_to_sentry(fp, diag):
+    """Fire a Sentry warning event when a file gets skipped because no reader
+    could decode it. Best-effort — silently no-ops if Sentry isn't initialized.
+
+    Fingerprint groups every skip into one Sentry issue so a tester with many
+    bad files doesn't flood the inbox; individual events still carry the
+    per-file path, size, extension, and reader diagnoses for triage.
+    """
+    try:
+        import sentry_sdk
+        import platform as _plat
+        size_bytes = -1
+        mtime = None
+        try:
+            st = fp.stat()
+            size_bytes = st.st_size
+            mtime = st.st_mtime
+        except Exception:
+            pass
+        with sentry_sdk.push_scope() as scope:
+            scope.set_tag("event_type", "worker_unreadable_file")
+            scope.set_tag("file_extension", fp.suffix.lower() or "(none)")
+            scope.set_tag("os", _plat.system())
+            scope.set_tag("os_release", _plat.release())
+            scope.set_extra("file_path", str(fp))
+            scope.set_extra("file_name", fp.name)
+            scope.set_extra("file_size_bytes", size_bytes)
+            scope.set_extra("file_mtime", mtime)
+            scope.set_extra("reader_diagnosis", diag or "(none)")
+            scope.fingerprint = ["worker_unreadable_file"]
+            sentry_sdk.capture_message(
+                "Worker skipped unreadable file",
+                level="warning",
+            )
+    except Exception:
+        pass
+
+
+def _prompt_gui_for_bad_file(fp, diag):
+    """Ask the GUI what to do with an unreadable file. Blocks reading stdin
+    until the GUI writes back a single-line response.
+
+    Emits a `STC_BAD_FILE_PROMPT:` sentinel with a JSON payload (path, name,
+    diagnosis) on stdout, then reads one line from stdin. Expected response
+    is "CONTINUE" (skip this frame) or "STOP" (graceful run end). If stdin is
+    closed or anything goes wrong, default to STOP — safer than guessing the
+    user's intent.
+    """
+    import json
+    payload = {
+        "path": str(fp),
+        "name": fp.name,
+        "diagnosis": diag or "",
+    }
+    print(f"STC_BAD_FILE_PROMPT: {json.dumps(payload)}", flush=True)
+    try:
+        line = sys.stdin.readline()
+    except Exception:
+        return "STOP"
+    if not line:
+        return "STOP"
+    response = line.strip().upper()
+    return "CONTINUE" if response == "CONTINUE" else "STOP"
 
 
 def _filter_by_resolution(files: List[Path],
@@ -368,14 +434,49 @@ def main():
 
     print(f"Loading {n} frames...")
     frames_all = []
+    files_kept = []
+    skipped = []
+    skipped_before_core = 0
+    skipped_in_core = 0
     for fi, fp in enumerate(frame_files_all):
-        if core_start <= fi < core_end:
+        is_core = core_start <= fi < core_end
+        is_before_core = fi < core_start
+        if is_core:
             core_pos = fi - core_start + 1
             print(f"  loading {core_pos}/{n}: {fp.name}", flush=True)
-        img = cv2.imread(str(fp), cv2.IMREAD_UNCHANGED)
+
+        img, diag = robust_imread_diag(fp, cv2.IMREAD_UNCHANGED)
         if img is None:
-            print(f"\nERROR: cannot read {fp.name}")
-            sys.exit(1)
+            # Best-effort developer telemetry — captured before we ask the GUI
+            # so we still have data even if the user clicks Stop.
+            _capture_unreadable_file_to_sentry(fp, diag)
+
+            # Log the per-file detail to the Star Log scroll for support emails.
+            print(
+                "\n  Bad file:\n"
+                f"    {fp}\n"
+                "  Reason:\n"
+                f"{diag}",
+                flush=True,
+            )
+
+            decision = _prompt_gui_for_bad_file(fp, diag)
+            if decision == "STOP":
+                print(
+                    "\n  Run stopped at user's request. Partial output (the "
+                    "frames cleaned so far) is preserved in the output folder.",
+                    flush=True,
+                )
+                sys.exit(0)
+
+            # CONTINUE: skip this frame, keep loading the rest of the batch.
+            if is_before_core:
+                skipped_before_core += 1
+            elif is_core:
+                skipped_in_core += 1
+            skipped.append((fp, diag))
+            continue
+
         # JPEGs may have EXIF rotation tags. IMREAD_UNCHANGED ignores them,
         # but SAHI applies them → mask/frame orientation mismatch.
         # Re-read with IMREAD_COLOR to get EXIF rotation, if it changes shape.
@@ -384,8 +485,33 @@ def main():
             if img_exif is not None and img_exif.shape[:2] != img.shape[:2]:
                 img = img_exif
         frames_all.append(img)
-    frames = frames_all[core_start:core_end]  # core batch frames
+        files_kept.append(fp)
+
+    # Rebind to kept-only lists with adjusted core pointers so downstream
+    # indexing stays correct even when one or more files were skipped.
+    frame_files_all = files_kept
+    core_start -= skipped_before_core
+    core_end -= skipped_before_core + skipped_in_core
+    frame_files = frame_files_all[core_start:core_end]
+    n = len(frame_files)
+    n_all = len(frame_files_all)
+
+    if n < 1:
+        print(
+            "\nERROR: every frame in this batch was unreadable, so there is\n"
+            "nothing to clean. See the per-file reasons above."
+        )
+        sys.exit(1)
+
+    frames = frames_all[core_start:core_end]
     h, w = frames[0].shape[:2]
+    if skipped:
+        print(
+            f"\n  Note: {len(skipped)} file(s) skipped because they couldn't\n"
+            f"  be read. The cleaned output will have gap(s) at those\n"
+            f"  positions. Continuing with {n} frame(s).",
+            flush=True,
+        )
     print(f"  {n} frames loaded ({w}x{h})", flush=True)
 
     dtypes = {str(f.dtype) for f in frames_all}
@@ -425,7 +551,7 @@ def main():
         if hot_map.max() > 0 and dilated.max() > 0:
             if is_16bit:
                 for i in range(len(frames)):
-                    orig = cv2.imread(str(frame_files[i]), cv2.IMREAD_UNCHANGED)
+                    orig = robust_imread(frame_files[i], cv2.IMREAD_UNCHANGED)
                     orig8 = (orig >> 8).astype(np.uint8)
                     rep8 = cv2.inpaint(orig8, dilated, 3, cv2.INPAINT_NS)
                     rep16 = rep8.astype(np.uint16) * 257

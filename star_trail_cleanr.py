@@ -30,6 +30,8 @@ if len(sys.argv) > 1 and sys.argv[1] == '--cleanr-worker':
     sys.exit(0)
 
 import glob
+import json
+import threading
 import time
 import subprocess
 import cv2
@@ -41,7 +43,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QComboBox, QProgressBar,
     QTextEdit, QFileDialog, QStackedWidget, QCheckBox, QFrame,
-    QSpinBox, QTabWidget, QTextBrowser, QScrollArea,
+    QSpinBox, QTabWidget, QTextBrowser, QScrollArea, QMessageBox,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QSettings, QTimer
 from PySide6.QtGui import QFont, QPixmap, QIcon, QPalette, QColor
@@ -427,6 +429,23 @@ def fmt_hms(seconds):
     return f"{m}m {s:02d}s"
 
 
+def _windows_release_label():
+    """Return '11' on Windows 11, '10' on Windows 10, etc.
+
+    platform.release() reports '10' on both Windows 10 and Windows 11 because
+    Microsoft kept the kernel version at 10.0. The build number from
+    platform.version() is the reliable signal: build >= 22000 = Windows 11.
+    """
+    import platform as _p
+    try:
+        build = int(_p.version().split('.')[-1])
+        if build >= 22000:
+            return "11"
+    except Exception:
+        pass
+    return _p.release()
+
+
 class CleanerWorker(QThread):
     progress = Signal(int, int, str)   # pct, total, remaining_str
     status = Signal(str)               # log line
@@ -438,8 +457,17 @@ class CleanerWorker(QThread):
     timing_stats = Signal(float, float)  # initial_estimate_sec, actual_total_sec
     initial_estimate = Signal(float)   # initial estimate seconds (emitted once)
     warmup_active = Signal(bool)       # True = AI loading window, False = real per-frame progress kicked in
+    bad_file_prompt = Signal(str, str)  # path, diagnosis — main thread shows the modal
+    too_many_bad_files = Signal(int)   # count — main thread shows the final notice
     error = Signal(str)
     done = Signal(str)
+
+    # Cap on how many "skip and continue" decisions we'll accept in a single
+    # run before auto-stopping. Bruce: "if it continues to fail, then
+    # gracefully exit." After the user has been notified of one bad file and
+    # chosen to continue, a second failure means the problem isn't a single
+    # frame — exit gracefully instead of pelting the user with more popups.
+    BAD_FILE_SKIP_CAP = 1
 
     def __init__(self, folder, output_folder, frame_limit, mask_path=None,
                  output_format="jpg", jpeg_quality=85):
@@ -452,12 +480,36 @@ class CleanerWorker(QThread):
         self.jpeg_quality = jpeg_quality
         self._cancelled = False
         self._proc = None  # current subprocess
+        # Bad-file dialog plumbing. The QThread blocks reading subprocess
+        # stdout when it sees a prompt sentinel; the main thread shows the
+        # modal and calls set_bad_file_decision() to release it.
+        self._bad_file_event = threading.Event()
+        self._bad_file_response = None
+        self._run_skip_count = 0          # cumulative across all batches
+        self._graceful_stop_requested = False
 
     def cancel(self):
         """Request cancellation — kills the running subprocess."""
         self._cancelled = True
         if self._proc and self._proc.poll() is None:
             self._proc.kill()
+        # Unblock anything waiting on the bad-file dialog so the thread can
+        # exit cleanly even mid-prompt.
+        self._bad_file_response = "STOP"
+        self._bad_file_event.set()
+
+    def set_bad_file_decision(self, decision):
+        """Called from the main thread after the user answers the bad-file
+        modal. `decision` is "CONTINUE" (skip this frame) or "STOP" (end the
+        run gracefully)."""
+        self._bad_file_response = decision if decision in ("CONTINUE", "STOP") else "STOP"
+        self._bad_file_event.set()
+
+    def request_graceful_stop(self):
+        """Tell the run loop to stop after the current batch instead of
+        starting the next one. Set when the user clicked Stop Run on the
+        bad-file modal or when the run-wide skip cap was hit."""
+        self._graceful_stop_requested = True
 
     def run(self):
         folder = self.folder
@@ -600,7 +652,6 @@ class CleanerWorker(QThread):
             EST_PAD_FACTOR = 1.20  # under-promise: bias estimate 20% high
 
             # Load persisted timing from prior runs to seed the estimator per-machine
-            import json
             _timing_path = os.path.join(os.path.expanduser("~"),
                                         ".star_trail_cleanr", "last_timing.json")
             seeded_sec_per_frame = None
@@ -662,6 +713,15 @@ class CleanerWorker(QThread):
                 if self._cancelled:
                     _log_est("cancelled", i, None, None, None, None, force=True)
                     return
+                if self._graceful_stop_requested:
+                    _log_est("graceful_stop", i, None, None, None, None,
+                             force=True,
+                             note=f"skipped_count={self._run_skip_count}")
+                    self.done.emit(
+                        f"Run stopped after {self._run_skip_count} unreadable "
+                        f"file(s). Cleaned {i} of {n_batches} batch(es)."
+                    )
+                    return
 
                 self.batch_info.emit(i + 1, n_batches)
                 _add_log(f"Batch {i+1}/{n_batches}")
@@ -693,6 +753,7 @@ class CleanerWorker(QThread):
                 self._proc = subprocess.Popen(
                     cmd,
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    stdin=subprocess.PIPE,
                     text=True, encoding="utf-8", errors="replace", bufsize=1,
                     env=worker_env,
                 )
@@ -713,6 +774,45 @@ class CleanerWorker(QThread):
                     if not proc_line:
                         continue
                     proc_stdout_lines.append(proc_line)
+
+                    # Bad-file prompt: worker is asking what to do about an
+                    # unreadable image. Show the modal on the main thread and
+                    # write back the user's decision via worker stdin.
+                    if proc_line.startswith("STC_BAD_FILE_PROMPT:"):
+                        try:
+                            payload = json.loads(
+                                proc_line.split(":", 1)[1].strip()
+                            )
+                        except Exception:
+                            payload = {"path": "(unknown)", "diagnosis": "(unknown)"}
+                        path = payload.get("path", "(unknown)")
+                        diag = payload.get("diagnosis", "(none)")
+
+                        if self._run_skip_count >= self.BAD_FILE_SKIP_CAP:
+                            # Cap exceeded: don't prompt again. Tell worker to
+                            # stop, mark the run for graceful exit, and let
+                            # the main thread show the final "too many" notice.
+                            decision = "STOP"
+                            self._graceful_stop_requested = True
+                            self.too_many_bad_files.emit(self._run_skip_count + 1)
+                        else:
+                            # Block until the main thread answers the modal.
+                            self._bad_file_response = None
+                            self._bad_file_event.clear()
+                            self.bad_file_prompt.emit(path, diag)
+                            self._bad_file_event.wait()
+                            decision = self._bad_file_response or "STOP"
+                            if decision == "CONTINUE":
+                                self._run_skip_count += 1
+                            else:
+                                self._graceful_stop_requested = True
+
+                        try:
+                            self._proc.stdin.write(decision + "\n")
+                            self._proc.stdin.flush()
+                        except Exception:
+                            pass
+                        continue
 
                     # Parse stat lines emitted by astro_clean_v5
                     if proc_line.startswith("BATCH_TRAIL_COUNT:"):
@@ -829,10 +929,9 @@ class CleanerWorker(QThread):
                         try:
                             import sentry_sdk
                             import platform as _plat
-                            os_tag = (
-                                f"{_plat.system()} {_plat.release()} "
-                                f"({_plat.machine()})"
-                            )
+                            sysname = _plat.system()
+                            rel = _windows_release_label() if sysname == "Windows" else _plat.release()
+                            os_tag = f"{sysname} {rel} ({_plat.machine()})"
                             with sentry_sdk.push_scope() as scope:
                                 scope.set_tag("component", "gui_worker_capture")
                                 scope.set_tag("batch_index", str(i + 1))
@@ -2107,7 +2206,7 @@ class MainWindow(QMainWindow):
             machine = _plat.machine()
             os_line = "Mac (Apple Silicon)" if machine == "arm64" else "Mac (Intel)"
         elif sysname == "Windows":
-            os_line = f"Windows {_plat.release()}"
+            os_line = f"Windows {_windows_release_label()}"
         elif sysname == "Linux":
             os_line = "Linux"
         else:
@@ -2512,6 +2611,8 @@ class MainWindow(QMainWindow):
         self.worker.error.connect(self._on_error)
         self.worker.done.connect(self._on_done)
         self.worker.finished.connect(self._on_finished)
+        self.worker.bad_file_prompt.connect(self._on_bad_file_prompt)
+        self.worker.too_many_bad_files.connect(self._on_too_many_bad_files)
         self.worker.start()
 
     def _cancel_run(self):
@@ -2726,6 +2827,85 @@ class MainWindow(QMainWindow):
         self._status_out.setText(f"ERROR: {msg}")
         self._switch_to_back_btn()
 
+    def _on_bad_file_prompt(self, path, diagnosis):
+        """Worker hit a file that no reader could decode. Block the run with
+        a modal so the user knows about it and can choose to skip the frame
+        or stop the run. The worker is paused waiting for our answer."""
+        from pathlib import Path as _Path
+        QApplication.alert(self)
+        name = _Path(path).name if path else "(unknown)"
+
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Warning)
+        msg.setWindowTitle("Couldn't read a file")
+        msg.setTextFormat(Qt.RichText)
+        msg.setText(
+            "<b>Could not read this file</b>"
+            f"<p style='font-family: monospace;'>{name}</p>"
+        )
+        diagnostic_sent = bool(
+            SETTINGS.value("crash_reporting_enabled", False, type=bool)
+            and _SENTRY_DSN
+        )
+        diagnostic_line = (
+            " Diagnostic data has already been sent automatically."
+            if diagnostic_sent
+            else ""
+        )
+        msg.setInformativeText(
+            "<p>We tried our image readers three times. None could read "
+            "the file. It may be damaged, or it may have a format our "
+            "readers can't handle.</p>"
+            "<p>If you continue, Star Trail CleanR will skip this frame. "
+            "There may be a small gap in your final star trail where this "
+            "image would have been.</p>"
+            "<p><b>As a workaround:</b> export your entire sequence as "
+            "JPEGs and run Star Trail CleanR on the JPEG folder.</p>"
+            "<p>If you'd like to help us improve, please email this file to "
+            "<a href='mailto:bruceherwig+startrailcleanr@gmail.com"
+            "?subject=Star%20Trail%20CleanR%20unreadable%20file'>"
+            f"bruceherwig+startrailcleanr@gmail.com</a>.{diagnostic_line}</p>"
+        )
+        msg.setDetailedText(
+            f"Path:\n  {path}\n\nReader output:\n{diagnosis or '(none)'}"
+        )
+        skip_btn = msg.addButton(
+            "Skip this frame and continue", QMessageBox.AcceptRole
+        )
+        msg.addButton("Stop Run", QMessageBox.RejectRole)
+        msg.setDefaultButton(skip_btn)
+        msg.exec()
+
+        decision = "CONTINUE" if msg.clickedButton() is skip_btn else "STOP"
+        if hasattr(self, "worker") and self.worker is not None:
+            if decision == "STOP":
+                self.worker.request_graceful_stop()
+            self.worker.set_bad_file_decision(decision)
+
+    def _on_too_many_bad_files(self, count):
+        """Run-wide cap hit. The worker has already been told to stop; this
+        modal is purely informational so the user understands why."""
+        QApplication.alert(self)
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Critical)
+        msg.setWindowTitle("Multiple unreadable files")
+        msg.setTextFormat(Qt.RichText)
+        msg.setText(
+            "<b>Star Trail CleanR is stopping this run.</b>"
+        )
+        msg.setInformativeText(
+            f"<p>{count} files in your input folder couldn't be read. "
+            "Something may be wrong with the source.</p>"
+            "<p><b>As a workaround:</b> export your entire sequence as "
+            "JPEGs and run Star Trail CleanR on the JPEG folder.</p>"
+            "<p>If your input folder is on a USB or network drive, you "
+            "can also try copying it to your main hard drive and running "
+            "again &mdash; external drives sometimes drop reads.</p>"
+            "<p>The frames cleaned so far are preserved in the output "
+            "folder.</p>"
+        )
+        msg.exec()
+
     def _on_done(self, output_folder):
         # Bounce the Dock icon (Mac) or flash the taskbar button (Windows) to
         # get the user's attention if they've switched to another app. No-op
@@ -2915,7 +3095,7 @@ class MainWindow(QMainWindow):
             mac_ver = _platform.mac_ver()[0] or _platform.release()
             os_line = f"macOS {mac_ver}"
         elif sysname == "Windows":
-            os_line = f"Windows {_platform.release()}"
+            os_line = f"Windows {_windows_release_label()}"
         else:
             os_line = f"{sysname} {_platform.release()}"
 
@@ -3079,7 +3259,6 @@ if __name__ == '__main__':
     try:
         _lock_socket.bind(('127.0.0.1', 49173))
     except OSError:
-        from PySide6.QtWidgets import QMessageBox
         app = QApplication(sys.argv)
         QMessageBox.warning(None, "Star Trail CleanR",
                             "Star Trail CleanR is already running.")
