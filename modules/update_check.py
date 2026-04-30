@@ -4,6 +4,7 @@ Quiet on any failure (offline, DNS error, timeout, rate limit, parse error).
 Returns None so the caller just skips the banner.
 """
 import json
+import platform
 import re
 import sys
 import urllib.error
@@ -14,8 +15,17 @@ REPO = "bruceherwig-dot/star-trail-cleanr"
 API_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
 TIMEOUT_S = 5
 
-MAC_ASSET = "StarTrailCleanR-Mac-AppleSilicon.zip"
+# Asset filenames published by .github/workflows/build.yml on every tag.
+# Keep these in sync with the artifact-upload step names in that workflow.
+MAC_AS_ASSET = "StarTrailCleanR-Mac-AppleSilicon.zip"
+MAC_INTEL_ASSET = "StarTrailCleanR-Mac-Intel.zip"
 WIN_ASSET = "StarTrailCleanRSetup.zip"
+LINUX_ASSET = "StarTrailCleanR-Linux-x86_64.tar.gz"
+
+# Backwards-compatible alias; older callers imported MAC_ASSET. Points at the
+# Apple Silicon build (the most common Mac case) so anything still using it
+# does not silently break for AS users.
+MAC_ASSET = MAC_AS_ASSET
 
 
 def parse_tag(tag) -> Optional[float]:
@@ -41,11 +51,34 @@ def parse_local(version_str) -> Optional[float]:
         return None
 
 
+def _detect_asset() -> str:
+    """Pick the right release asset for this OS + CPU.
+
+    Falls back to the Windows installer for any unrecognized combination
+    rather than returning None — calling code expects a usable URL even
+    in odd environments. Mac chip detection uses platform.machine() which
+    returns 'arm64' for Apple Silicon and 'x86_64' for Intel; sys.platform
+    alone cannot distinguish the two.
+    """
+    if sys.platform == "darwin":
+        machine = (platform.machine() or "").lower()
+        if machine in ("arm64", "aarch64"):
+            return MAC_AS_ASSET
+        if machine in ("x86_64", "amd64", "i386", "i686"):
+            return MAC_INTEL_ASSET
+        # Unknown Mac chip — Apple Silicon is the more common case in 2026.
+        return MAC_AS_ASSET
+    if sys.platform.startswith("linux"):
+        return LINUX_ASSET
+    if sys.platform in ("win32", "cygwin"):
+        return WIN_ASSET
+    return WIN_ASSET
+
+
 def get_download_url() -> str:
-    """Stable GitHub URL for the running platform. Auto-resolves to the latest release."""
+    """Stable GitHub URL for this OS + CPU. Auto-resolves to the latest release."""
     base = f"https://github.com/{REPO}/releases/latest/download"
-    asset = MAC_ASSET if sys.platform == "darwin" else WIN_ASSET
-    return f"{base}/{asset}"
+    return f"{base}/{_detect_asset()}"
 
 
 def check_for_update(local_version_str: str, timeout_s: float = TIMEOUT_S) -> Optional[dict]:

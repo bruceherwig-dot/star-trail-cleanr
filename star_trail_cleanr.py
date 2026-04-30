@@ -375,8 +375,9 @@ def _handle_launch_failure(exc):
         box.setIcon(QMessageBox.Critical)
         box.setText("Star Trail CleanR ran into a problem launching.")
         box.setInformativeText(
-            "Please reinstall the latest version from startrailcleanr.com. "
-            "If the problem repeats, email bruceherwig+startrailcleanr@gmail.com."
+            "Click Download Latest below to get the newest build for your "
+            "computer. If the problem repeats, email "
+            "bruceherwig+startrailcleanr@gmail.com."
         )
         download_btn = box.addButton("Download Latest", QMessageBox.AcceptRole)
         box.addButton("Quit", QMessageBox.RejectRole)

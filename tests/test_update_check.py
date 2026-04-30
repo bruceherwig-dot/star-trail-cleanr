@@ -63,12 +63,58 @@ def test_version_comparison_equal():
 
 
 def test_download_url_per_platform():
-    """URL is platform-specific and ends in the expected asset name."""
-    from modules.update_check import get_download_url, MAC_ASSET, WIN_ASSET
+    """URL is platform-specific and points at one of the four real assets."""
+    from modules.update_check import (
+        get_download_url, MAC_AS_ASSET, MAC_INTEL_ASSET, WIN_ASSET, LINUX_ASSET,
+    )
     url = get_download_url()
     assert url.startswith("https://github.com/")
     assert "/releases/latest/download/" in url
-    assert url.endswith(MAC_ASSET) or url.endswith(WIN_ASSET)
+    assert any(url.endswith(a) for a in (MAC_AS_ASSET, MAC_INTEL_ASSET, WIN_ASSET, LINUX_ASSET))
+
+
+def _patched_detect(platform_value, machine_value):
+    """Run _detect_asset with sys.platform and platform.machine monkey-patched."""
+    import modules.update_check as uc
+    orig_platform = uc.sys.platform
+    orig_machine = uc.platform.machine
+    try:
+        uc.sys.platform = platform_value
+        uc.platform.machine = lambda: machine_value
+        return uc._detect_asset()
+    finally:
+        uc.sys.platform = orig_platform
+        uc.platform.machine = orig_machine
+
+
+def test_detect_asset_mac_apple_silicon():
+    from modules.update_check import MAC_AS_ASSET
+    assert _patched_detect("darwin", "arm64") == MAC_AS_ASSET
+
+
+def test_detect_asset_mac_intel():
+    from modules.update_check import MAC_INTEL_ASSET
+    assert _patched_detect("darwin", "x86_64") == MAC_INTEL_ASSET
+
+
+def test_detect_asset_windows():
+    from modules.update_check import WIN_ASSET
+    assert _patched_detect("win32", "AMD64") == WIN_ASSET
+
+
+def test_detect_asset_linux():
+    from modules.update_check import LINUX_ASSET
+    assert _patched_detect("linux", "x86_64") == LINUX_ASSET
+    assert _patched_detect("linux2", "x86_64") == LINUX_ASSET
+
+
+def test_detect_asset_unknown_falls_back_safely():
+    """Unknown platform should still return a usable asset, not None or empty."""
+    from modules.update_check import WIN_ASSET, MAC_AS_ASSET
+    # Unknown OS -> safe fallback
+    assert _patched_detect("haiku", "x86_64") == WIN_ASSET
+    # Mac with unknown chip -> Apple Silicon (more common in 2026)
+    assert _patched_detect("darwin", "weird-future-chip") == MAC_AS_ASSET
 
 
 def test_check_for_update_bad_local_returns_none():
