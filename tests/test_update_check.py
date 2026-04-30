@@ -123,3 +123,40 @@ def test_check_for_update_bad_local_returns_none():
     assert check_for_update("") is None
     assert check_for_update(None) is None
     assert check_for_update("not-a-number") is None
+
+
+def test_pre_window_check_respects_per_version_dismissal():
+    """Lock in the v1.99-beta+ contract: once a user has clicked Continue
+    on the pre-window upgrade popup for a given release tag, neither the
+    popup nor the in-app orange banner should appear again until a newer
+    tag ships. Both code paths must read AND write the same QSettings key
+    so they share state."""
+    src = (REPO / "star_trail_cleanr.py").read_text()
+
+    # The pre-window popup checks the dismissed tag before showing.
+    pre = src[src.index("def _pre_window_update_check"):src.index("def _handle_launch_failure")]
+    assert 'dismissed_update_tag' in pre, (
+        "_pre_window_update_check no longer reads the dismissed tag — every "
+        "launch will re-prompt for a release the user already declined"
+    )
+    assert 'SETTINGS.setValue("dismissed_update_tag"' in pre, (
+        "_pre_window_update_check no longer remembers the user's Continue "
+        "click — they'd see the same popup forever until they update"
+    )
+
+    # The in-app banner reads the same key (popup-then-banner double-notify
+    # was the bug; the banner must stay hidden if the popup was dismissed).
+    on_result = src[src.index("def _on_update_result"):]
+    on_result = on_result[:on_result.index("\n    def ")]
+    assert 'dismissed_update_tag' in on_result, (
+        "_on_update_result no longer reads the dismissed tag — popup-then-"
+        "banner double-notify is back"
+    )
+
+    # Banner's ✕ persists the dismissal too, so dismissing the banner
+    # silences future launches.
+    dismissed = src[src.index("def _on_update_banner_dismissed"):]
+    dismissed = dismissed[:dismissed.index("\n    def ")] if "\n    def " in dismissed else dismissed
+    assert 'SETTINGS.setValue("dismissed_update_tag"' in dismissed, (
+        "_on_update_banner_dismissed no longer persists the dismissed tag"
+    )

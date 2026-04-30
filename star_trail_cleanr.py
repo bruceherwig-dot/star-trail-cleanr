@@ -322,6 +322,9 @@ def _pre_window_update_check():
     Update Now opens the platform download URL in the user's browser and
     exits the app. Continue proceeds to normal launch.
 
+    Respects per-version dismissal: once the user clicks Continue on a given
+    release tag, the dialog stays quiet for that tag until a newer one ships.
+
     Runs entirely outside MainWindow's setup code, so a launch-class crash
     inside MainWindow.__init__ (the v1.97-beta failure mode) cannot block
     this prompt. Hard 1.5s network timeout so a slow/down GitHub never
@@ -333,6 +336,9 @@ def _pre_window_update_check():
     except Exception:
         return
     if not result:
+        return
+    dismissed = SETTINGS.value("dismissed_update_tag", "", type=str) or ""
+    if dismissed == result["tag"]:
         return
     try:
         from PySide6.QtCore import QUrl
@@ -352,6 +358,9 @@ def _pre_window_update_check():
         if box.clickedButton() is update_btn:
             QDesktopServices.openUrl(QUrl(result["download_url"]))
             sys.exit(0)
+        # User chose Continue — remember this release tag so we don't ask
+        # again until something newer ships.
+        SETTINGS.setValue("dismissed_update_tag", result["tag"])
     except Exception:
         return
 
@@ -1492,11 +1501,12 @@ class MainWindow(QMainWindow):
             "font-weight: bold; border: none; }"
             "QPushButton:hover { color: #ffdddd; }"
         )
-        dismiss_btn.clicked.connect(lambda: self._update_banner.setVisible(False))
+        dismiss_btn.clicked.connect(self._on_update_banner_dismissed)
         layout.addWidget(dismiss_btn)
 
         self._update_banner = banner
         self._update_download_url = None
+        self._update_banner_tag = ""
         return banner
 
     def _start_update_check(self):
@@ -1506,9 +1516,22 @@ class MainWindow(QMainWindow):
 
     def _on_update_result(self, result):
         tag = result.get("tag", "")
+        # Stay quiet if the user has already dismissed this release tag
+        # (either via the pre-window popup or a previous banner click).
+        dismissed = SETTINGS.value("dismissed_update_tag", "", type=str) or ""
+        if dismissed == tag:
+            return
+        self._update_banner_tag = tag
         self._update_download_url = result.get("download_url")
         self._update_label.setText(f"New version available: {tag}")
         self._update_banner.setVisible(True)
+
+    def _on_update_banner_dismissed(self):
+        """Hide the banner and remember the user's dismissal so we don't show
+        the banner OR the pre-window popup again for this release tag."""
+        self._update_banner.setVisible(False)
+        if self._update_banner_tag:
+            SETTINGS.setValue("dismissed_update_tag", self._update_banner_tag)
 
     def _on_update_download(self):
         if self._update_download_url:
