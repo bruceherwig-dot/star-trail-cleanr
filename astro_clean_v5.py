@@ -39,7 +39,7 @@ from modules.detect_trails import (
     load_model, detect_frame, apply_sky_mask, filter_small_components
 )
 from modules.repair import repair_frame
-from modules.io_safe import robust_imread, robust_imread_diag
+from modules.io_safe import robust_imread, robust_imread_diag, robust_imwrite
 
 
 def _init_worker_sentry():
@@ -356,7 +356,7 @@ def main():
     sky_mask = None
     fg_mask = None
     if args.foreground_mask:
-        fg_mask = cv2.imread(args.foreground_mask, cv2.IMREAD_GRAYSCALE)
+        fg_mask = robust_imread(args.foreground_mask, cv2.IMREAD_GRAYSCALE)
         if fg_mask is None:
             print(f"ERROR: cannot load foreground mask: {args.foreground_mask}")
             sys.exit(1)
@@ -481,7 +481,7 @@ def main():
         # but SAHI applies them → mask/frame orientation mismatch.
         # Re-read with IMREAD_COLOR to get EXIF rotation, if it changes shape.
         if fp.suffix.lower() in {'.jpg', '.jpeg'}:
-            img_exif = cv2.imread(str(fp), cv2.IMREAD_COLOR)
+            img_exif = robust_imread(fp, cv2.IMREAD_COLOR)
             if img_exif is not None and img_exif.shape[:2] != img.shape[:2]:
                 img = img_exif
         frames_all.append(img)
@@ -536,12 +536,12 @@ def main():
 
         hot_map = None
         if args.hot_pixel_map and os.path.isfile(args.hot_pixel_map):
-            hot_map = cv2.imread(args.hot_pixel_map, cv2.IMREAD_GRAYSCALE)
+            hot_map = robust_imread(args.hot_pixel_map, cv2.IMREAD_GRAYSCALE)
         if hot_map is None:
             hot_map = build_hot_pixel_map(frames_8bit)
             n_defective = int((hot_map > 0).sum())
             if args.hot_pixel_map and n_defective > 0:
-                cv2.imwrite(args.hot_pixel_map, hot_map)
+                robust_imwrite(args.hot_pixel_map, hot_map)
 
         if hot_map.max() > 0:
             dilated = cv2.dilate(hot_map,
@@ -620,7 +620,7 @@ def main():
 
     if masks_dir:
         for fp, mask in zip(frame_files, masks_per_frame):
-            cv2.imwrite(str(masks_dir / (fp.stem + ".png")), mask)
+            robust_imwrite(masks_dir / (fp.stem + ".png"), mask)
 
     # ── Step 2: Repair ────────────────────────────────────────────────────
     sb = args.skip_boundary

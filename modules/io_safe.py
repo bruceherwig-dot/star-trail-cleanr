@@ -57,10 +57,16 @@ def _try_pil(path: str, flags: int) -> Tuple[Optional[np.ndarray], Optional[str]
     we just can't open it. Pillow uses Python's normal file APIs which
     handle Unicode correctly on every platform. Returns BGR layout to
     match OpenCV's convention.
+
+    For IMREAD_COLOR specifically, applies EXIF rotation to match cv2's
+    behavior on JPEGs (cv2.imread with IMREAD_COLOR honors EXIF Orientation;
+    IMREAD_UNCHANGED does not).
     """
     try:
-        from PIL import Image
+        from PIL import Image, ImageOps
         with Image.open(path) as im:
+            if flags == cv2.IMREAD_COLOR:
+                im = ImageOps.exif_transpose(im)
             arr = np.asarray(im)
     except Exception as e:
         return None, f"raised {type(e).__name__}: {e}"
@@ -206,3 +212,53 @@ def robust_imread(
     """
     img, _ = robust_imread_diag(path, flags, _retry_delays=_retry_delays)
     return img
+
+
+def robust_imwrite(path: Union[str, Path], image: np.ndarray) -> bool:
+    """Drop-in cv2.imwrite replacement that handles non-ASCII paths.
+
+    cv2.imwrite on Windows uses ANSI file APIs and fails to write files
+    whose path contains non-ASCII characters (same root cause as the
+    cv2.imread Unicode-path bug). Pillow uses Python's normal file APIs
+    which handle Unicode correctly on every platform.
+
+    Tries cv2 first (fast path), falls back to Pillow on failure.
+    Accepts BGR / BGRA / grayscale numpy arrays — same convention as
+    cv2.imwrite. Returns True on success, False on failure.
+    """
+    p = str(path)
+
+    prev = _silence_cv2_logs()
+    try:
+        try:
+            if cv2.imwrite(p, image):
+                return True
+        except Exception:
+            pass
+
+        try:
+            from PIL import Image
+            arr = image
+            if arr.ndim == 2:
+                # Grayscale (uint8 or uint16)
+                if arr.dtype == np.uint16:
+                    im = Image.fromarray(arr, mode="I;16")
+                else:
+                    im = Image.fromarray(arr, mode="L")
+            elif arr.ndim == 3:
+                if arr.shape[2] == 3:
+                    rgb = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
+                    im = Image.fromarray(rgb)
+                elif arr.shape[2] == 4:
+                    rgba = cv2.cvtColor(arr, cv2.COLOR_BGRA2RGBA)
+                    im = Image.fromarray(rgba)
+                else:
+                    return False
+            else:
+                return False
+            im.save(p)
+            return True
+        except Exception:
+            return False
+    finally:
+        _restore_cv2_logs(prev)

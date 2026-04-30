@@ -111,6 +111,82 @@ def test_pil_fallback_rescues_jpeg_when_cv2_fails():
     assert int(img[10, 20, 2]) == 100
 
 
+def test_robust_imwrite_handles_basic_image():
+    """robust_imwrite must accept the same BGR array convention as
+    cv2.imwrite, and write a readable file."""
+    from modules.io_safe import robust_imwrite
+    arr = np.full((30, 40, 3), 200, dtype=np.uint8)
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "out.png"
+        ok = robust_imwrite(p, arr)
+        assert ok is True
+        assert p.exists()
+        assert p.stat().st_size > 0
+
+
+def test_robust_imwrite_falls_back_to_pil_when_cv2_fails():
+    """When cv2.imwrite returns False (the Windows non-ASCII-path failure
+    mode we can't reproduce on macOS), the PIL fallback must rescue the
+    write so users with accented folder names still get their output."""
+    from modules import io_safe
+    from modules.io_safe import robust_imwrite
+
+    arr = np.full((30, 40, 3), 150, dtype=np.uint8)
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "out.png"
+        real_imwrite = io_safe.cv2.imwrite
+        try:
+            io_safe.cv2.imwrite = lambda *a, **kw: False
+            ok = robust_imwrite(p, arr)
+        finally:
+            io_safe.cv2.imwrite = real_imwrite
+
+        assert ok is True, "PIL fallback failed when cv2.imwrite returned False"
+        assert p.exists() and p.stat().st_size > 0
+
+
+def test_robust_imwrite_handles_grayscale_and_uint16():
+    """Grayscale (uint8 and uint16) must both write correctly via the
+    PIL fallback path. Hot-pixel maps and saved trail masks are grayscale."""
+    from modules import io_safe
+    from modules.io_safe import robust_imwrite
+
+    with tempfile.TemporaryDirectory() as td:
+        # 8-bit grayscale (typical mask)
+        gray8 = np.full((30, 40), 128, dtype=np.uint8)
+        p8 = Path(td) / "gray8.png"
+        real = io_safe.cv2.imwrite
+        try:
+            io_safe.cv2.imwrite = lambda *a, **kw: False
+            assert robust_imwrite(p8, gray8) is True
+            assert p8.exists() and p8.stat().st_size > 0
+
+            # 16-bit grayscale (uint16 hot-pixel map could be this)
+            gray16 = np.full((30, 40), 30000, dtype=np.uint16)
+            p16 = Path(td) / "gray16.png"
+            assert robust_imwrite(p16, gray16) is True
+            assert p16.exists() and p16.stat().st_size > 0
+        finally:
+            io_safe.cv2.imwrite = real
+
+
+def test_production_writes_use_robust_imwrite():
+    """Lock in v1.992: every cv2.imwrite call site in production code now
+    routes through robust_imwrite so non-ASCII output paths are safe."""
+    text = (REPO / "astro_clean_v5.py").read_text()
+    assert "robust_imwrite(args.hot_pixel_map" in text, (
+        "hot-pixel-map write regressed to bare cv2.imwrite — would fail "
+        "on Windows with non-ASCII folder paths"
+    )
+    assert "robust_imwrite(masks_dir" in text, (
+        "saved-mask write regressed to bare cv2.imwrite"
+    )
+    gui_text = (REPO / "star_trail_cleanr.py").read_text()
+    assert "robust_imwrite(mask_path, mask_np)" in gui_text, (
+        "foreground-mask write regressed to bare cv2.imwrite"
+    )
+
+
 def test_pil_fallback_present_in_diag():
     """When all readers fail, the diagnosis must name Pillow as one of the
     attempts so support / Sentry data can show users WHICH readers we tried."""

@@ -2481,7 +2481,8 @@ class MainWindow(QMainWindow):
         if folder:
             if mask_np.any():
                 mask_path = workspace_path(folder, "foreground_mask.png")
-                cv2.imwrite(mask_path, mask_np)
+                from modules.io_safe import robust_imwrite
+                robust_imwrite(mask_path, mask_np)
                 self._mask_path = mask_path
             else:
                 mask_path = os.path.join(folder, WORKSPACE_DIR, "foreground_mask.png")
