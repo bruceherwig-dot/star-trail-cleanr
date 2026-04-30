@@ -11,7 +11,26 @@ on:
   workflow_dispatch:
 
 jobs:
+  lint:
+    # Hard gate: pyflakes static-name check on every shipping Python file
+    # (GUI, worker, modules). Blocks all four bundle builds on any
+    # crash-class finding. Added after v1.97-beta shipped a one-line
+    # `screen = QApplication.primaryScreen()` drop that pyflakes catches in
+    # under a second. Intentionally minimal-deps so the gate runs in seconds.
+    name: Pyflakes lint gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install pyflakes
+        run: pip install pyflakes
+      - name: Run lint gate
+        run: python3 tests/test_lint.py
+
   build-mac:
+    needs: lint
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -42,6 +61,7 @@ jobs:
           path: StarTrailCleanR-Mac-AppleSilicon.zip
 
   build-mac-intel:
+    needs: lint
     # Intel Mac build on GitHub's x86_64 macOS runner.
     # GitHub has announced Intel Mac runners retire in Fall 2027. This job
     # runs through at least that point; after retirement we either drop
@@ -72,6 +92,7 @@ jobs:
           path: StarTrailCleanR-Mac-Intel.zip
 
   build-windows:
+    needs: lint
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -115,6 +136,7 @@ jobs:
           path: installer/StarTrailCleanRSetup.zip
 
   build-linux:
+    needs: lint
     # Ubuntu 22.04 (glibc 2.35) instead of ubuntu-latest so the binary runs
     # on Ubuntu 22.04+, Debian 12+, Fedora 36+, and other 2022-or-newer
     # distros. ubuntu-latest currently pins to 24.04 (glibc 2.39) which would

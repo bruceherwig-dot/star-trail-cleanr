@@ -23,11 +23,12 @@
 ## Release checklist (ALWAYS do all steps before tagging)
 0. **Run the smoke tests — must be all-green: `python3 tests/run_all.py`**
 1. **If `build_helper.py` was edited or any change to it was stashed, audit the runtime first.** Removing a `--collect-all` line or stashing one away breaks the frozen bundle the moment a top-level import in worker code depends on it. The `test_runtime_imports_bundled.py` smoke test catches this, but only if you actually ran step 0. The v1.81-beta crash (every new install died on Batch 1 with `ModuleNotFoundError: skimage`) was caused by exactly this: stashing a `--collect-all skimage` line while a top-level `from skimage import ...` was still in `modules/detect_trails.py`. Never stash `build_helper.py` changes without confirming the runtime still works without them.
-2. Update `CHANGELOG.md` with the new version and a plain-English summary of changes
-3. Commit `CHANGELOG.md` together with the code changes (same commit or immediately before tag)
-4. Tag the release (`git tag vX.XX-beta`)
-5. Push commits and tag (`git push && git push origin vX.XX-beta`)
-6. Watch the GitHub Actions build with `bash scripts/watch_ci.sh` — when it reports "Build succeeded", post the download links to the user. (This is the standard watcher; never invent a new one each release.)
+2. **Pyflakes lint gate runs in CI on every tag and blocks the four bundle builds on any `undefined name` finding** in `star_trail_cleanr.py`, `astro_clean_v5.py`, or `modules/*.py`. The v1.97-beta launch crash (`name 'screen' is not defined` on first-time-launch) was caused by a one-line drop during a refactor and would have been blocked by this gate. Locally the same check runs as part of `tests/run_all.py` (test_lint.py). If a future release fails the gate, fix the underlying name reference. Do NOT add the file to an exclusion list; do NOT weaken the gate; do NOT bypass with `--skip` flags. The gate exists because Bruce's reputation is on the line every release and this class of bug is invisible until a fresh user opens the app.
+3. Update `CHANGELOG.md` with the new version and a plain-English summary of changes
+4. Commit `CHANGELOG.md` together with the code changes (same commit or immediately before tag)
+5. Tag the release (`git tag vX.XX-beta`)
+6. Push commits and tag (`git push && git push origin vX.XX-beta`)
+7. Watch the GitHub Actions build with `bash scripts/watch_ci.sh` — when it reports "Build succeeded", post the download links to the user. (This is the standard watcher; never invent a new one each release.)
 
 ## Smoke test suite (`tests/`)
 Regression safety net for Claude's edits — Bruce does not run these himself.
