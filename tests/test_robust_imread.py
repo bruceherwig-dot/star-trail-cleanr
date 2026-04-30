@@ -357,3 +357,55 @@ def test_gui_wires_bad_file_dialog():
         "run-wide skip cap is missing or has been changed without updating "
         "this test"
     )
+
+
+def test_frames_filter_prompt_wired():
+    """v1.992: when the GUI scans a folder and finds frames at mixed
+    resolutions or with unreadable headers, it must surface a modal so
+    the user knows what's about to be skipped before the run starts.
+    Lock in the signal, the slot, the wiring, and the abort path."""
+    text = (REPO / "star_trail_cleanr.py").read_text()
+    assert "frames_filter_prompt = Signal(dict)" in text, (
+        "CleanerWorker is missing the frames_filter_prompt signal"
+    )
+    assert "def _on_frames_filter_prompt" in text, (
+        "MainWindow slot for the frames-filter modal is missing"
+    )
+    assert "self.worker.frames_filter_prompt.connect" in text, (
+        "MainWindow no longer connects the frames_filter_prompt signal"
+    )
+    assert "set_frames_filter_decision" in text, (
+        "CleanerWorker.set_frames_filter_decision missing — main thread "
+        "cannot tell the worker what the user picked"
+    )
+    # The pre-flight scan must inspect EVERY frame, not just a 10-sample,
+    # so the breakdown is complete before the modal fires.
+    assert "frame_sizes = {f: _img_size(f) for f in frames}" in text, (
+        "pre-flight scan regressed to the old 10-sample shortcut — "
+        "breakdown will be wrong if more than 10 frames have unusual sizes"
+    )
+
+
+def test_run_summary_includes_skipped_count_when_present():
+    """If frames were skipped, the saved run summary text must say so."""
+    text = (REPO / "star_trail_cleanr.py").read_text()
+    assert "_run_filter_info" in text, (
+        "MainWindow no longer remembers the filter info for the run summary"
+    )
+    assert "Frames skipped:" in text, (
+        "run summary no longer includes a Frames skipped line — users "
+        "have no record after the modal is dismissed"
+    )
+
+
+def test_run_summary_appends_full_star_log():
+    """The saved run summary must include the full Star Log content so a
+    single text file is enough to diagnose any run issue."""
+    text = (REPO / "star_trail_cleanr.py").read_text()
+    assert "self._status_out.toPlainText()" in text, (
+        "run summary writer no longer reads the live log widget"
+    )
+    assert "Star Log (everything that scrolled" in text, (
+        "run summary no longer appends the Star Log section"
+    )
+

@@ -468,6 +468,7 @@ class CleanerWorker(QThread):
     warmup_active = Signal(bool)       # True = AI loading window, False = real per-frame progress kicked in
     bad_file_prompt = Signal(str, str)  # path, diagnosis — main thread shows the modal
     too_many_bad_files = Signal(int)   # count — main thread shows the final notice
+    frames_filter_prompt = Signal(dict)  # info dict — main thread shows the modal explaining skipped frames
     error = Signal(str)
     done = Signal(str)
 
@@ -496,16 +497,31 @@ class CleanerWorker(QThread):
         self._bad_file_response = None
         self._run_skip_count = 0          # cumulative across all batches
         self._graceful_stop_requested = False
+        # Frame-filter dialog plumbing. Fires before any subprocess is
+        # launched, when the GUI's pre-flight scan finds frames it'll have
+        # to drop (different resolution, unreadable header). Same blocking
+        # pattern as bad_file but lives entirely in the QThread (no stdin
+        # to a subprocess needed).
+        self._frames_filter_event = threading.Event()
+        self._frames_filter_response = None
 
     def cancel(self):
         """Request cancellation — kills the running subprocess."""
         self._cancelled = True
         if self._proc and self._proc.poll() is None:
             self._proc.kill()
-        # Unblock anything waiting on the bad-file dialog so the thread can
-        # exit cleanly even mid-prompt.
+        # Unblock anything waiting on a modal dialog so the thread can exit
+        # cleanly even mid-prompt.
         self._bad_file_response = "STOP"
         self._bad_file_event.set()
+        self._frames_filter_response = "CANCEL"
+        self._frames_filter_event.set()
+
+    def set_frames_filter_decision(self, decision):
+        """Called from the main thread after the user answers the
+        frames-filter modal. `decision` is "CONTINUE" or "CANCEL"."""
+        self._frames_filter_response = decision if decision in ("CONTINUE", "CANCEL") else "CANCEL"
+        self._frames_filter_event.set()
 
     def set_bad_file_decision(self, decision):
         """Called from the main thread after the user answers the bad-file
@@ -548,20 +564,71 @@ class CleanerWorker(QThread):
                 except Exception:
                     return None
 
-            sample_step = max(1, total // 10)
-            sample = [frames[i] for i in range(0, total, sample_step)][:10]
-            sizes = [s for s in (_img_size(f) for f in sample) if s is not None]
-            if not sizes:
-                self.error.emit("Could not read any image files to determine resolution.")
+            # Inspect every frame's size up front (not just a 10-sample) so
+            # we know exactly what's in the folder. The pre-flight modal
+            # needs the full picture so it can tell the user what's being
+            # dropped and why.
+            frame_sizes = {f: _img_size(f) for f in frames}
+            unreadable = [f for f, s in frame_sizes.items() if s is None]
+            readable = {f: s for f, s in frame_sizes.items() if s is not None}
+
+            if not readable:
+                self.error.emit(
+                    "Couldn't read any image files in this folder. "
+                    "The files may be damaged or in an unsupported format."
+                )
                 return
-            dominant = Counter(sizes).most_common(1)[0][0]
-            filtered = [f for f in frames if _img_size(f) == dominant]
-            skipped = total - len(filtered)
-            frames = filtered
+
+            size_counts = Counter(readable.values())
+            dominant = size_counts.most_common(1)[0][0]
+            matching = sorted(f for f, s in readable.items() if s == dominant)
+            mismatched = sorted(f for f, s in readable.items() if s != dominant)
+            unreadable_sorted = sorted(unreadable)
+
+            skipped_total = len(mismatched) + len(unreadable_sorted)
+
+            if skipped_total > 0:
+                # Build the breakdown for the modal: every distinct size and
+                # how many files have it, plus example filenames per bucket.
+                breakdown = []
+                for size, count in sorted(size_counts.items(), key=lambda kv: -kv[1]):
+                    is_dominant = (size == dominant)
+                    breakdown.append({
+                        "size": f"{size[0]} × {size[1]}",
+                        "count": count,
+                        "is_dominant": is_dominant,
+                    })
+
+                self._frames_filter_response = None
+                self._frames_filter_event.clear()
+                self.frames_filter_prompt.emit({
+                    "total_found": total,
+                    "matching": len(matching),
+                    "mismatched": len(mismatched),
+                    "unreadable": len(unreadable_sorted),
+                    "dominant_size": f"{dominant[0]} × {dominant[1]}",
+                    "breakdown": breakdown,
+                    "mismatched_sample": [os.path.basename(p) for p in mismatched[:5]],
+                    "unreadable_sample": [os.path.basename(p) for p in unreadable_sorted[:5]],
+                })
+                self._frames_filter_event.wait()
+                if self._frames_filter_response != "CONTINUE" or self._cancelled:
+                    self.error.emit(
+                        "Run cancelled because some frames in this folder "
+                        "would have been skipped. No frames processed."
+                    )
+                    return
+
+            frames = matching
             total = len(frames)
             if not frames:
                 self.error.emit("No image files matched the dominant resolution.")
                 return
+
+            # Stash skipped counts so the run summary can show them.
+            self._skipped_resolution_count = len(mismatched)
+            self._skipped_unreadable_count = len(unreadable_sorted)
+            self._dominant_size_str = f"{dominant[0]} × {dominant[1]}"
 
             MAX_BATCH = 20
             n_batches = (total + MAX_BATCH - 1) // MAX_BATCH
@@ -577,8 +644,9 @@ class CleanerWorker(QThread):
 
             import re
             mask_note = " with foreground mask" if self.mask_path else ""
+            skipped_total = self._skipped_resolution_count + self._skipped_unreadable_count
             header = (f"Processing {total} frames ({dominant[0]}\u00d7{dominant[1]}){mask_note}"
-                      + (f" \u2014 skipped {skipped} file(s) with wrong resolution" if skipped else ""))
+                      + (f" \u2014 skipped {skipped_total} file(s)" if skipped_total else ""))
             header += f"\n{n_batches} batch{'es' if n_batches > 1 else ''} to run"
             self.status.emit(header + "\nStarting\u2026")
             self.progress.emit(0, 100, "")
@@ -2637,6 +2705,7 @@ class MainWindow(QMainWindow):
         self.worker.finished.connect(self._on_finished)
         self.worker.bad_file_prompt.connect(self._on_bad_file_prompt)
         self.worker.too_many_bad_files.connect(self._on_too_many_bad_files)
+        self.worker.frames_filter_prompt.connect(self._on_frames_filter_prompt)
         self.worker.start()
 
     def _cancel_run(self):
@@ -2906,6 +2975,75 @@ class MainWindow(QMainWindow):
                 self.worker.request_graceful_stop()
             self.worker.set_bad_file_decision(decision)
 
+    def _on_frames_filter_prompt(self, info):
+        """Pre-flight scan found frames that won't process (mismatched
+        resolution or unreadable header). Show the user what's about to be
+        skipped and let them choose Continue or Cancel before the run
+        actually starts."""
+        QApplication.alert(self)
+        self._run_filter_info = dict(info)  # remember for run summary
+
+        n_mismatched = info.get("mismatched", 0)
+        n_unreadable = info.get("unreadable", 0)
+        total_found = info.get("total_found", 0)
+        matching = info.get("matching", 0)
+        dominant_size = info.get("dominant_size", "")
+        breakdown = info.get("breakdown", [])
+        mismatched_sample = info.get("mismatched_sample", [])
+        unreadable_sample = info.get("unreadable_sample", [])
+
+        # Build the body in plain English.
+        parts = [
+            "<b>Some frames in this folder will be skipped.</b>",
+            f"<p>Star Trail CleanR found <b>{total_found}</b> image files "
+            f"in this folder. Of those, <b>{matching}</b> will be processed "
+            f"and <b>{n_mismatched + n_unreadable}</b> will be skipped.</p>",
+        ]
+        if breakdown:
+            parts.append("<p><b>Resolutions in this folder:</b></p><ul>")
+            for entry in breakdown:
+                marker = "  (will process)" if entry["is_dominant"] else "  (will skip)"
+                parts.append(
+                    f"<li>{entry['size']} &mdash; {entry['count']} frame(s){marker}</li>"
+                )
+            parts.append("</ul>")
+        if n_unreadable > 0:
+            parts.append(
+                f"<p><b>{n_unreadable}</b> file(s) couldn't be opened to "
+                "check their resolution; they'll be skipped too.</p>"
+            )
+            if unreadable_sample:
+                parts.append("<p>Examples: " +
+                             ", ".join(f"<code>{n}</code>" for n in unreadable_sample) +
+                             "</p>")
+        if mismatched_sample:
+            parts.append("<p>Examples of skipped frames: " +
+                         ", ".join(f"<code>{n}</code>" for n in mismatched_sample) +
+                         "</p>")
+        parts.append(
+            "<p>Common causes: some frames are portrait-orientation "
+            "(rotated 90&deg;), some came from a different camera, or "
+            "the RAW converter produced different sizes. Cancel if you "
+            "want to check the folder first; Continue to process the "
+            f"{matching} matching frame(s) only.</p>"
+        )
+
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Warning)
+        msg.setWindowTitle("Some frames will be skipped")
+        msg.setTextFormat(Qt.RichText)
+        msg.setText("".join(parts))
+        cont_btn = msg.addButton(
+            f"Continue with {matching} frames", QMessageBox.AcceptRole
+        )
+        msg.addButton("Cancel run", QMessageBox.RejectRole)
+        msg.setDefaultButton(cont_btn)
+        msg.exec()
+
+        decision = "CONTINUE" if msg.clickedButton() is cont_btn else "CANCEL"
+        if hasattr(self, "worker") and self.worker is not None:
+            self.worker.set_frames_filter_decision(decision)
+
     def _on_too_many_bad_files(self, count):
         """Run-wide cap hit. The worker has already been told to stop; this
         modal is purely informational so the user understands why."""
@@ -3166,6 +3304,32 @@ class MainWindow(QMainWindow):
             "",
             f"Frames processed:      {frames:,}",
             f"Trails found:          {trails:,}",
+        ]
+
+        # Skipped-frames detail (only present if pre-flight filter dropped any).
+        filter_info = getattr(self, '_run_filter_info', None)
+        if filter_info:
+            n_mismatched = filter_info.get("mismatched", 0)
+            n_unreadable = filter_info.get("unreadable", 0)
+            n_total = filter_info.get("total_found", 0)
+            dominant = filter_info.get("dominant_size", "?")
+            if n_mismatched or n_unreadable:
+                lines.append(
+                    f"Frames skipped:        {n_mismatched + n_unreadable} "
+                    f"(of {n_total} found)"
+                )
+                if n_mismatched:
+                    lines.append(
+                        f"  - {n_mismatched} had a different resolution from "
+                        f"the dominant {dominant}"
+                    )
+                if n_unreadable:
+                    lines.append(
+                        f"  - {n_unreadable} couldn't be opened to check "
+                        f"resolution"
+                    )
+
+        lines += [
             "",
             f"Estimated time:        {fmt_hms(est_sec)}",
             f"Actual time:           {fmt_hms(actual_sec)}",
@@ -3192,6 +3356,22 @@ class MainWindow(QMainWindow):
             "",
             "================================================",
         ]
+
+        # Append the full Star Log content (everything that scrolled in the
+        # run window) so this single file is enough to diagnose any run
+        # issue without asking the user for screenshots.
+        try:
+            log_text = self._status_out.toPlainText() if hasattr(self, '_status_out') else ""
+        except Exception:
+            log_text = ""
+        if log_text.strip():
+            lines += [
+                "",
+                "Star Log (everything that scrolled in the run window)",
+                "================================================",
+                log_text.rstrip(),
+                "================================================",
+            ]
 
         workspace = os.path.join(input_folder, WORKSPACE_DIR)
         try:
