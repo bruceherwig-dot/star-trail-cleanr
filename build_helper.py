@@ -29,6 +29,18 @@ SKIP_PACKAGES = {
     'streamlit',                    # alternative GUI, not used
     'flask', 'fastapi',             # web frameworks, not used
     'jupyter', 'ipykernel', 'ipython', 'notebook',  # notebook stack, not used
+    # 2026-04-30 audit additions — none of these are imported by STC's code.
+    # All transitive: SAHI's optional VLM integrations (openai, anthropic),
+    # ultralytics' training plots (matplotlib, pandas), labelme tooling
+    # (lxml, imgviz, labelme). Verified via grep across modules/ + top-level
+    # *.py — zero direct imports.
+    'pandas',                       # ultralytics training output, not runtime
+    'matplotlib',                   # ultralytics plots, not runtime
+    'lxml',                         # labelme XML, not used at runtime
+    'openai',                       # sahi optional VLM detector, not used
+    'anthropic',                    # sahi optional VLM detector, not used
+    'imgviz',                       # labelme dep, not used at runtime
+    'labelme',                      # annotation tool, not runtime
 }
 
 site_dirs = []
