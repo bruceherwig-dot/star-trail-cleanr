@@ -5,6 +5,17 @@ Prevents missing-data-file crashes without requiring a manually maintained list.
 """
 import os, site, subprocess, sys
 
+# Reproducible builds: pin a deterministic timestamp before PyInstaller starts.
+# Python's bytecode compiler embeds the source file's mtime in every .pyc; on
+# CI runners every fresh checkout gives source files a brand-new mtime, so the
+# same source produces different .pyc bytes between builds. Setting
+# SOURCE_DATE_EPOCH overrides that mtime with a fixed value, making .pyc
+# output deterministic. This is what cuts Sparkle/WinSparkle delta updates
+# from ~237 MB (v1.98 → v1.99 measured 2026-04-30) toward the 30-50 MB range.
+# Value is the standard "reproducible-builds-friendly" timestamp (2020-01-01);
+# the exact number is irrelevant as long as it never changes.
+os.environ['SOURCE_DATE_EPOCH'] = '1577836800'
+
 sep = ';' if sys.platform == 'win32' else ':'
 
 # Extensions PyInstaller handles natively — exclude from --add-data
