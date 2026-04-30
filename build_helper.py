@@ -276,6 +276,48 @@ if removed_files:
 else:
     print('\nCUDA-specific library cleanup: nothing matched (expected for CPU-only builds).')
 
+# Windows Qt-DLL cleanup — mirrors the Mac framework cleanup above.
+# CLEANUP_PATHS removes ~30 unused Qt frameworks from the Mac .app bundle
+# (QtWebEngineCore, Qt3DCore, QtMultimedia, etc.). The same modules ship
+# on Windows as DLLs and .pyd Python bindings, but the Mac pass cannot see
+# them because it matches on directory paths ending in `.framework`. This
+# pass extracts the module names from CLEANUP_PATHS and removes the
+# Windows-equivalent files. Without this, Windows installers ship the
+# entire unused-Qt payload — historically responsible for our Windows
+# bundles being ~200 MB heavier than they need to be.
+if sys.platform == 'win32':
+    qt_module_names = set()
+    for pattern in CLEANUP_PATHS:
+        last = pattern[-1]
+        if last.endswith('.framework') and last.startswith('Qt'):
+            # 'QtWebEngineCore.framework' -> 'WebEngineCore'
+            qt_module_names.add(last[len('Qt'):-len('.framework')])
+
+    win_removed = []
+    for root, dirs, files in os.walk(dist_root):
+        for f in list(files):
+            for mod in qt_module_names:
+                # Match: Qt6<mod>.dll (release), Qt6<mod>d.dll (debug),
+                # <mod>.pyd (Python binding), Qt<mod>.pyd (alt naming).
+                if f in (f'Qt6{mod}.dll', f'Qt6{mod}d.dll',
+                         f'{mod}.pyd', f'Qt{mod}.pyd'):
+                    full_file = os.path.join(root, f)
+                    try:
+                        fsize = os.path.getsize(full_file) / 1024 / 1024
+                        os.remove(full_file)
+                        win_removed.append((os.path.relpath(full_file, 'dist'), fsize))
+                    except OSError:
+                        pass
+                    break
+
+    if win_removed:
+        print('\nWindows Qt-DLL cleanup (mirroring Mac framework cleanup):')
+        for path, fsize in win_removed:
+            print(f'  {path}  ({fsize:.1f} MB)')
+    else:
+        print('\nWindows Qt-DLL cleanup: nothing matched. '
+              'Check Qt module naming if this is unexpected.')
+
 after = dir_size_mb(os.path.join('dist'))
 print(f'\nAfter cleanup: {after:.1f} MB  (saved {before - after:.1f} MB)')
 
