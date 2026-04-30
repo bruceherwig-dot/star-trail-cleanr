@@ -48,11 +48,15 @@ def get_download_url() -> str:
     return f"{base}/{asset}"
 
 
-def check_for_update(local_version_str: str) -> Optional[dict]:
+def check_for_update(local_version_str: str, timeout_s: float = TIMEOUT_S) -> Optional[dict]:
     """Ask GitHub for the latest release and compare.
 
     Returns {'tag': str, 'download_url': str} when a newer release exists.
     Returns None when the user is current OR when any failure occurs.
+
+    timeout_s lets the pre-window launch path use a tighter budget (~1.5s)
+    so a slow network never visibly delays startup. Background banner
+    callers keep the default 5s.
     """
     local = parse_local(local_version_str)
     if local is None:
@@ -65,7 +69,7 @@ def check_for_update(local_version_str: str) -> Optional[dict]:
                 "User-Agent": "StarTrailCleanR-UpdateCheck",
             },
         )
-        with urllib.request.urlopen(req, timeout=TIMEOUT_S) as resp:
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError, ValueError):
         return None

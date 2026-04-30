@@ -313,6 +313,81 @@ def _maybe_init_sentry():
         pass
 
 
+def _pre_window_update_check():
+    """Tight-budget GitHub poll BEFORE MainWindow is constructed.
+
+    If a newer release exists, show a small dialog with an Update Now button.
+    Update Now opens the platform download URL in the user's browser and
+    exits the app. Continue proceeds to normal launch.
+
+    Runs entirely outside MainWindow's setup code, so a launch-class crash
+    inside MainWindow.__init__ (the v1.97-beta failure mode) cannot block
+    this prompt. Hard 1.5s network timeout so a slow/down GitHub never
+    visibly delays startup.
+    """
+    try:
+        from modules.update_check import check_for_update
+        result = check_for_update(VERSION, timeout_s=1.5)
+    except Exception:
+        return
+    if not result:
+        return
+    try:
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        from PySide6.QtWidgets import QMessageBox
+        box = QMessageBox()
+        box.setWindowTitle("Star Trail CleanR")
+        box.setIcon(QMessageBox.Information)
+        box.setText(f"A newer version of Star Trail CleanR ({result['tag']}) is available.")
+        box.setInformativeText(
+            f"You're on v{VERSION}. Update now to make sure you have the latest fixes."
+        )
+        update_btn = box.addButton("Update Now", QMessageBox.AcceptRole)
+        box.addButton("Continue", QMessageBox.RejectRole)
+        box.setDefaultButton(update_btn)
+        box.exec()
+        if box.clickedButton() is update_btn:
+            QDesktopServices.openUrl(QUrl(result["download_url"]))
+            sys.exit(0)
+    except Exception:
+        return
+
+
+def _handle_launch_failure(exc):
+    """Last-resort recovery dialog when MainWindow construction or show()
+    raises. Captures to Sentry (if available) and offers a Download Latest
+    button. Module-scope so the bundle-readiness test treats the sentry_sdk
+    import here as lazy.
+    """
+    try:
+        import sentry_sdk
+        sentry_sdk.capture_exception(exc)
+    except Exception:
+        pass
+    try:
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        from PySide6.QtWidgets import QMessageBox
+        from modules.update_check import get_download_url
+        box = QMessageBox()
+        box.setWindowTitle("Star Trail CleanR")
+        box.setIcon(QMessageBox.Critical)
+        box.setText("Star Trail CleanR ran into a problem launching.")
+        box.setInformativeText(
+            "Please reinstall the latest version from startrailcleanr.com. "
+            "If the problem repeats, email bruceherwig+startrailcleanr@gmail.com."
+        )
+        download_btn = box.addButton("Download Latest", QMessageBox.AcceptRole)
+        box.addButton("Quit", QMessageBox.RejectRole)
+        box.setDefaultButton(download_btn)
+        box.exec()
+        if box.clickedButton() is download_btn:
+            QDesktopServices.openUrl(QUrl(get_download_url()))
+    except Exception:
+        pass
+
+
 WORKSPACE_DIR = "cleanr_workspace"
 
 
@@ -3087,8 +3162,25 @@ if __name__ == '__main__':
 
     _maybe_init_sentry()
 
-    window = MainWindow()
-    window.show()
+    # Pre-window launch recovery (added v1.99-beta after v1.97-beta shipped a
+    # NameError that crashed MainWindow.__init__ before the in-app update
+    # banner could render — users had no signal that a fix existed). Two
+    # safety nets, both running entirely outside MainWindow's setup code so
+    # a future launch-class crash cannot block them:
+    #   (1) _pre_window_update_check: tight-budget GitHub poll. If a newer
+    #       release exists, offer to open the download page before
+    #       MainWindow tries to build.
+    #   (2) try/except around MainWindow construction + show, routed to
+    #       _handle_launch_failure (defined at module scope so the test
+    #       suite treats its imports as lazy). Sentry still gets the
+    #       report; a fallback dialog points the user at the download page.
+    _pre_window_update_check()
+    try:
+        window = MainWindow()
+        window.show()
+    except Exception as _launch_exc:
+        _handle_launch_failure(_launch_exc)
+        sys.exit(1)
 
     # Live OS appearance switching: when the user toggles macOS Light/Dark
     # mid-session, relaunch so every themed widget rebuilds with the new
