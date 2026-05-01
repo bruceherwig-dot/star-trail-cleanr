@@ -558,11 +558,27 @@ class CleanerWorker(QThread):
                 frames = frames[:total]
 
             def _img_size(path):
+                """Return (width, height) for a frame's header. Tries Pillow
+                first (fast, handles JPEG/PNG/most TIFFs); falls back to
+                tifffile for TIFFs Pillow can't parse (BigTIFF, unusual
+                compression, multi-IFD layouts). Mirrors the worker's
+                cv2 → tifffile → PIL ladder so the GUI scan doesn't reject
+                files the worker would actually be able to process.
+                """
                 try:
                     with Image.open(path) as img:
                         return img.size
                 except Exception:
-                    return None
+                    pass
+                if path.lower().endswith(('.tif', '.tiff')):
+                    try:
+                        import tifffile
+                        with tifffile.TiffFile(path) as tf:
+                            page = tf.pages[0]
+                            return (page.imagewidth, page.imagelength)
+                    except Exception:
+                        return None
+                return None
 
             # Inspect every frame's size up front (not just a 10-sample) so
             # we know exactly what's in the folder. The pre-flight modal

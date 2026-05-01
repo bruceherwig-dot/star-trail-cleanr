@@ -2,6 +2,10 @@
 
 ---
 
+## v1.993-beta
+- **Customer experience lens: TIFFs the worker can read should never trigger a "files have a problem" dialog.** v1.992 added a pre-flight modal that surfaces frames being skipped before a run starts. Useful when something is genuinely wrong, but it was firing on TIFFs that Pillow couldn't parse (BigTIFF, unusual compressions, multi-IFD layouts) even though our worker could process them perfectly. The GUI's scan stage now mirrors the worker's reader ladder: tries Pillow first, falls back to tifffile for TIFFs Pillow can't read. Customers with TIFFs from Photoshop's "Save with Layers" mode, scientific-camera converters, or BigTIFF files now have those frames silently process instead of seeing a confusing dialog.
+- **Smoke tests:** +1 structural check that the GUI scan keeps the tifffile fallback in place. Total smoke suite: 132 tests.
+
 ## v1.992-beta
 - **No more silent frame drops.** A Windows tester pointed the app at a folder of 94 TIFFs and only 51 processed; the other 43 vanished without an error message. Root cause: when Star Trail CleanR scans a folder, it picks the dominant image resolution and silently filters out anything that doesn't match. Useful when needed (one bad portrait-orientation frame mixed in), but invisible to the user. v1.992 makes this visible. Before the run starts, if any frames will be skipped — different resolution, unreadable header, anything — a popup shows up listing exactly what's in the folder ("51 frames at 5568×3712, 43 at a different size") with the first few skipped filenames as examples. User can Continue or Cancel and check the folder first.
 - **Run summary now records what got skipped.** The plain-text run summary (saved into your input folder's `cleanr_workspace`) now includes a Frames skipped line broken down by reason, so anyone reviewing a run after the fact can see exactly what processed and what didn't, even if they dismissed the popup at the time.

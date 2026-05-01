@@ -409,3 +409,29 @@ def test_run_summary_appends_full_star_log():
         "run summary no longer appends the Star Log section"
     )
 
+
+
+def test_gui_scan_uses_tifffile_fallback_for_unreadable_tiffs():
+    """v1.993: the GUI's pre-flight scan must mirror the worker's reader
+    ladder so TIFFs that PIL can't parse (BigTIFF, unusual compressions,
+    multi-IFD) are rescued by tifffile instead of triggering the
+    'unreadable header' bucket. From the customer's chair: every TIFF we
+    can actually process should silently process; the skip modal should
+    only fire when something is genuinely wrong with the file."""
+    text = (REPO / "star_trail_cleanr.py").read_text()
+    # Pull just _img_size out of the GUI source for a structural check.
+    start = text.index("def _img_size(path):")
+    end = text.index("# Inspect every frame's size up front", start)
+    fn_src = text[start:end]
+    assert "import tifffile" in fn_src, (
+        "_img_size no longer falls back to tifffile — TIFFs PIL can't "
+        "parse will land in the unreadable bucket and trigger a modal "
+        "that the customer didn't need to see"
+    )
+    assert "TiffFile(path)" in fn_src, (
+        "_img_size doesn't open a TiffFile — the fallback isn't doing the "
+        "actual rescue read"
+    )
+    assert ".tif" in fn_src and ".tiff" in fn_src, (
+        "_img_size fallback isn't gated on TIFF extension"
+    )
