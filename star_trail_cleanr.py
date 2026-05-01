@@ -2372,7 +2372,7 @@ class MainWindow(QMainWindow):
             "<div style='text-align:center;'>"
             f"<p style='margin:0; font-size:16px; color:{CARD_TEXT};'>"
             "Help spread the word! When you share on social media, "
-            "tag your image with #StarTrailCleanR"
+            "tag your image with <b>#StarTrailCleanR</b>"
             "</p>"
             f"<p style='margin:24px 0 0 0; font-size:16px; color:{CARD_TEXT};'>"
             "Did you get an error message? Take a screenshot and email "
