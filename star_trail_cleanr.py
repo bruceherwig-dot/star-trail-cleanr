@@ -1252,7 +1252,12 @@ class MainWindow(QMainWindow):
         container_layout.addWidget(self._build_update_banner())
         container_layout.addWidget(self._build_model_update_card())
         container_layout.addWidget(self._build_nvidia_banner())
-        container_layout.addWidget(self._tabs)
+        # Stretch factor 1 on tabs so extra vertical space (when the user
+        # resizes or maximizes the window) goes into the tab area and
+        # through to the Run-tab Star Log + Setup-tab scroll area, rather
+        # than empty space at top or bottom. Banners stay their fixed
+        # heights; chrome stays the same size; only content grows.
+        container_layout.addWidget(self._tabs, 1)
         self.setCentralWidget(container)
 
         self._build_setup_page()
