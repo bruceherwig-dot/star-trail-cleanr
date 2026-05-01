@@ -517,7 +517,7 @@ class MaskPainterWidget(QWidget):
         banner_text = QLabel(
             "<b style='font-size: 20px;'>Roughly paint over the ground, rocks, and buildings. Stay BELOW the skyline.</b><br>"
             "No need to mask trees \u2014 trails are visible through branches and the AI will still detect them there.<br>"
-            "You're just marking areas where you know trails won't appear."
+            "You're just marking areas where you know trails won't appear, so the AI doesn't try to 'fix' the ground."
         )
         banner_text.setStyleSheet("color: #a0d0a0; font-size: 16px;")
         banner_layout.addWidget(banner_text)
