@@ -2846,35 +2846,27 @@ class MainWindow(QMainWindow):
             self._warmup_timer.stop()
 
     def _warmup_tick(self):
-        from PySide6.QtGui import QTextCursor
+        # Append once per phrase, no in-place dot animation. The previous
+        # "append on tick 0, replace last block on ticks 1-3" approach
+        # caused doubling when worker messages interleaved with warmup
+        # ticks (the QTextEdit replace-last-block cursor logic targeted
+        # the wrong block in some flows). One line per phrase, held for
+        # 2 seconds, gives the same "still working" signal without the
+        # bug surface.
         phrase_step = self._warmup_counter // 4
-        dots_state = self._warmup_counter % 4
-        dot_count = min(dots_state + 1, 3)
+        sub_step = self._warmup_counter % 4
         if phrase_step < len(self._warmup_phrases):
-            # First cycle: rotate through the astro phrases, one every 2 sec.
             text = self._warmup_phrases[phrase_step]
-            is_new_phrase = (dots_state == 0)
         else:
-            # Past the first cycle (AI is taking longer than 24 seconds to
-            # warm up): settle on a steady "still warming up" line so the
+            # Past the first cycle (AI taking longer than 24 seconds to
+            # warm up): show a steady "still warming up" line so the
             # rotation doesn't loop back to "Studying your stars" looking
-            # like the run restarted. Only the dots animate from here.
+            # like the run restarted.
             text = "Still warming up the AI trail detector"
-            is_new_phrase = (phrase_step == len(self._warmup_phrases)
-                             and dots_state == 0)
-        line = "  " + text + "." * dot_count
-        if is_new_phrase:
-            # Append a fresh line.
-            self._status_out.append(line)
-        else:
-            # Same phrase, animated dots: replace the last block in place.
-            cursor = self._status_out.textCursor()
-            cursor.movePosition(QTextCursor.End)
-            cursor.movePosition(QTextCursor.StartOfBlock, QTextCursor.KeepAnchor)
-            cursor.removeSelectedText()
-            cursor.insertText(line)
-        sb = self._status_out.verticalScrollBar()
-        sb.setValue(sb.maximum())
+        if sub_step == 0:
+            self._status_out.append("  " + text + "...")
+            sb = self._status_out.verticalScrollBar()
+            sb.setValue(sb.maximum())
         self._warmup_counter += 1
 
     def _on_frame_count(self, current, total):
