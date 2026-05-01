@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Star Trail CleanR &#8212; Mac (Apple Silicon)</title>
+    <link>https://bruceherwig-dot.github.io/star-trail-cleanr/appcast-mac-apple-silicon.xml</link>
+    <description>Auto-update feed for Star Trail CleanR on Mac (Apple Silicon).</description>
+    <language>en</language>
+    <!-- Update items will be appended here when releases ship.
+         The first item lands when v2.0-beta is tagged. -->
+  </channel>
+</rss>
