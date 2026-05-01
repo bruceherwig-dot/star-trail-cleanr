@@ -40,7 +40,7 @@ jobs:
       - name: Install CPU-only PyTorch
         run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
       - name: Install dependencies
-        run: pip install pyinstaller opencv-python-headless 'numpy<2' pillow PySide6 ultralytics sahi nvidia-ml-py sentry-sdk tifffile scikit-image
+        run: pip install pyinstaller opencv-python-headless 'numpy<2' pillow PySide6 ultralytics sahi nvidia-ml-py sentry-sdk tifffile scikit-image pyobjc-core
       - name: Bake Sentry DSN
         env:
           SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
@@ -75,7 +75,7 @@ jobs:
       - name: Install CPU-only PyTorch
         run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
       - name: Install dependencies
-        run: pip install pyinstaller opencv-python-headless 'numpy<2' pillow PySide6 ultralytics sahi nvidia-ml-py sentry-sdk tifffile scikit-image
+        run: pip install pyinstaller opencv-python-headless 'numpy<2' pillow PySide6 ultralytics sahi nvidia-ml-py sentry-sdk tifffile scikit-image pyobjc-core
       - name: Bake Sentry DSN
         env:
           SENTRY_DSN: ${{ secrets.SENTRY_DSN }}

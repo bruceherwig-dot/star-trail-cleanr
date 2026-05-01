@@ -25,14 +25,22 @@ _dll = None
 
 def _find_winsparkle_dll():
     """Return absolute path to WinSparkle.dll inside the frozen bundle, or
-    None if we're not in a frozen Windows bundle. The dll is placed next to
-    the .exe by the build (see build_helper.py spec binaries entry)."""
+    None if we're not in a frozen Windows bundle. The build places the DLL
+    at the top of the bundle (next to the .exe) so Windows' default DLL
+    search finds it without PATH manipulation. We also check _MEIPASS as a
+    fallback for compatibility with older PyInstaller layouts."""
     if sys.platform != "win32":
         return None
     if not hasattr(sys, "_MEIPASS"):
         return None
-    candidate = os.path.join(sys._MEIPASS, "WinSparkle.dll")
-    return candidate if os.path.exists(candidate) else None
+    candidates = [
+        os.path.join(os.path.dirname(sys.executable), "WinSparkle.dll"),
+        os.path.join(sys._MEIPASS, "WinSparkle.dll"),
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return None
 
 
 def init_winsparkle(appcast_url, app_name, app_version, company_name="Star Trail CleanR"):

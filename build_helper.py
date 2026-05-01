@@ -417,6 +417,82 @@ if sys.platform == 'win32':
         print('\nWindows Qt-DLL cleanup: nothing matched. '
               'Check Qt module naming if this is unexpected.')
 
+# ── Sparkle / WinSparkle integration ────────────────────────────────────
+# Copy the vendored auto-update framework into the bundle and inject the
+# config keys Sparkle needs. WinSparkle on Windows reads its config at
+# runtime via the ctypes wrapper in modules/winsparkle_updater.py — no
+# Info.plist equivalent needed; just the DLL placement.
+
+# GitHub Pages hosts the appcast XML feeds (one per platform) on the
+# repo's gh-pages branch. URLs are stable across releases; only the
+# advertised version inside the XML changes.
+APPCAST_BASE = 'https://bruceherwig-dot.github.io/star-trail-cleanr'
+
+sparkle_pubkey_path = os.path.join(os.path.dirname(__file__), 'assets', 'sparkle_public_key.txt')
+sparkle_pubkey = None
+if os.path.isfile(sparkle_pubkey_path):
+    with open(sparkle_pubkey_path) as f:
+        sparkle_pubkey = f.read().strip()
+
+if sys.platform == 'darwin':
+    import platform as _plat
+    arch = 'apple-silicon' if _plat.machine() == 'arm64' else 'intel'
+    appcast_url = f'{APPCAST_BASE}/appcast-mac-{arch}.xml'
+
+    # Step 1: copy Sparkle.framework into the bundle. Use ditto, not cp -R
+    # — ditto preserves Versions/A symlinks and code-signing seals; cp -R
+    # corrupts both. (Per fman blog post on PyInstaller + Sparkle.)
+    sparkle_src = os.path.join(os.path.dirname(__file__), 'vendored', 'Sparkle.framework')
+    sparkle_dest = os.path.join(dist_root, 'Contents', 'Frameworks', 'Sparkle.framework')
+    if os.path.isdir(sparkle_src):
+        os.makedirs(os.path.dirname(sparkle_dest), exist_ok=True)
+        if os.path.exists(sparkle_dest):
+            shutil.rmtree(sparkle_dest, ignore_errors=True)
+        result = subprocess.run(['ditto', sparkle_src, sparkle_dest], capture_output=True)
+        if result.returncode == 0:
+            sz = dir_size_mb(sparkle_dest)
+            print(f'\nSparkle.framework copied into bundle ({sz:.1f} MB)')
+        else:
+            print(f'\nWARNING: ditto Sparkle.framework failed: {result.stderr.decode()}')
+    else:
+        print(f'\nWARNING: vendored Sparkle.framework not found at {sparkle_src}')
+
+    # Step 2: inject Sparkle keys into Info.plist via PlistBuddy.
+    info_plist = os.path.join(dist_root, 'Contents', 'Info.plist')
+    pb = '/usr/libexec/PlistBuddy'
+    if os.path.isfile(info_plist) and sparkle_pubkey:
+        sparkle_keys = [
+            ('SUFeedURL', 'string', appcast_url),
+            ('SUPublicEDKey', 'string', sparkle_pubkey),
+            ('SUEnableAutomaticChecks', 'bool', 'true'),
+            ('SUScheduledCheckInterval', 'integer', '86400'),
+        ]
+        print('\nInjecting Sparkle keys into Info.plist:')
+        for key, ktype, value in sparkle_keys:
+            r = subprocess.run([pb, '-c', f'Set :{key} {value}', info_plist],
+                               capture_output=True)
+            if r.returncode != 0:
+                r = subprocess.run([pb, '-c', f'Add :{key} {ktype} {value}', info_plist],
+                                   capture_output=True)
+            if r.returncode == 0:
+                print(f'  {key} = {value}')
+            else:
+                print(f'  WARNING: failed to set {key}: {r.stderr.decode().strip()}')
+    elif not sparkle_pubkey:
+        print('\nWARNING: no Sparkle public key — skipping Info.plist injection')
+
+if sys.platform == 'win32':
+    # Place WinSparkle.dll at the top of the bundle (next to the .exe) so
+    # Windows' default DLL search finds it without PATH manipulation.
+    winsparkle_src = os.path.join(os.path.dirname(__file__), 'vendored', 'winsparkle', 'WinSparkle.dll')
+    winsparkle_dest = os.path.join(dist_root, 'WinSparkle.dll')
+    if os.path.isfile(winsparkle_src):
+        shutil.copy2(winsparkle_src, winsparkle_dest)
+        sz = os.path.getsize(winsparkle_dest) / 1024 / 1024
+        print(f'\nWinSparkle.dll copied into bundle ({sz:.1f} MB)')
+    else:
+        print(f'\nWARNING: vendored WinSparkle.dll not found at {winsparkle_src}')
+
 after = dir_size_mb(os.path.join('dist'))
 print(f'\nAfter cleanup: {after:.1f} MB  (saved {before - after:.1f} MB)')
 
