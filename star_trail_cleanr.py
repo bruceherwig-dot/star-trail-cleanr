@@ -2501,7 +2501,13 @@ class MainWindow(QMainWindow):
 
     def _auto_output(self, text):
         if text and text.strip():
-            self._output_input.setText(os.path.join(text.strip(), "cleaned"))
+            # Normalize to forward slashes for display: Qt's QFileDialog
+            # returns forward slashes on every platform, but os.path.join
+            # uses os.sep, so on Windows the joined string ends up mixing
+            # forward and back slashes ("L:/foo/bar\cleaned"). Replace makes
+            # the displayed path consistent.
+            joined = os.path.join(text.strip(), "cleaned").replace("\\", "/")
+            self._output_input.setText(joined)
             self._update_mask_status()
             self._update_open_btn_state()
 
