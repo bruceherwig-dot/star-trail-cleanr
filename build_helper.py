@@ -41,6 +41,13 @@ SKIP_PACKAGES = {
     'anthropic',                    # sahi optional VLM detector, not used
     'imgviz',                       # labelme dep, not used at runtime
     'labelme',                      # annotation tool, not runtime
+    # 2026-05-01 audit additions. Verified safe to exclude:
+    #   pip: not imported by our code; bundled by accident
+    #   astropy_iers_data: required only by astropy (already excluded)
+    #   fontTools: required only by borb + matplotlib (both already excluded)
+    'pip',                          # package installer, not needed at runtime
+    'astropy_iers_data',            # orphan from astropy exclusion
+    'fontTools',                    # orphan from matplotlib + borb exclusions
 }
 
 site_dirs = []
