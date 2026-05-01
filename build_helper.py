@@ -492,6 +492,30 @@ if sys.platform == 'darwin':
     elif not sparkle_pubkey:
         print('\nWARNING: no Sparkle public key — skipping Info.plist injection')
 
+    # Step 3: re-sign the outer .app with an ad-hoc signature. Both copying
+    # Sparkle.framework into Contents/Frameworks and patching Info.plist
+    # invalidate PyInstaller's seal on the outer bundle. Sparkle 2.x's update
+    # validator rejects updates whose outer seal is broken (the inner
+    # frameworks remain validly signed, so we only re-seal the outermost
+    # bundle). errSecCSBadResource (-67030) is the symptom; this is the cure.
+    # Confirmed by Sparkle maintainer that ad-hoc + EdDSA is supported.
+    print('\nRe-signing outer .app bundle (ad-hoc) to repair Info.plist seal...')
+    cs = subprocess.run(
+        ['codesign', '--force', '--sign', '-', dist_root],
+        capture_output=True,
+    )
+    if cs.returncode != 0:
+        print(f'  WARNING: codesign failed: {cs.stderr.decode().strip()}')
+    else:
+        verify = subprocess.run(
+            ['codesign', '--verify', '--verbose=2', dist_root],
+            capture_output=True,
+        )
+        if verify.returncode == 0:
+            print('  outer bundle signature: valid')
+        else:
+            print(f'  WARNING: outer bundle still invalid: {verify.stderr.decode().strip()}')
+
 if sys.platform == 'win32':
     # Place WinSparkle.dll at the top of the bundle (next to the .exe) so
     # Windows' default DLL search finds it without PATH manipulation.
