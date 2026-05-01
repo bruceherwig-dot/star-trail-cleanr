@@ -2847,12 +2847,24 @@ class MainWindow(QMainWindow):
 
     def _warmup_tick(self):
         from PySide6.QtGui import QTextCursor
-        idx = (self._warmup_counter // 4) % len(self._warmup_phrases)
+        phrase_step = self._warmup_counter // 4
         dots_state = self._warmup_counter % 4
         dot_count = min(dots_state + 1, 3)
-        line = "  " + self._warmup_phrases[idx] + "." * dot_count
-        if dots_state == 0:
-            # New phrase: append a fresh line.
+        if phrase_step < len(self._warmup_phrases):
+            # First cycle: rotate through the astro phrases, one every 2 sec.
+            text = self._warmup_phrases[phrase_step]
+            is_new_phrase = (dots_state == 0)
+        else:
+            # Past the first cycle (AI is taking longer than 24 seconds to
+            # warm up): settle on a steady "still warming up" line so the
+            # rotation doesn't loop back to "Studying your stars" looking
+            # like the run restarted. Only the dots animate from here.
+            text = "Still warming up the AI trail detector"
+            is_new_phrase = (phrase_step == len(self._warmup_phrases)
+                             and dots_state == 0)
+        line = "  " + text + "." * dot_count
+        if is_new_phrase:
+            # Append a fresh line.
             self._status_out.append(line)
         else:
             # Same phrase, animated dots: replace the last block in place.
