@@ -3667,6 +3667,9 @@ if __name__ == '__main__':
         "QProgressBar::chunk { background: #4a9eff; border-radius: 4px; }"
     )
     _splash_text_col.addWidget(_splash_bar)
+    _splash_status = QLabel("Initializing…")
+    _splash_status.setStyleSheet("font-size: 11pt; color: #6b7280; background: transparent; border: none;")
+    _splash_text_col.addWidget(_splash_status)
     _splash_text_col.addStretch(1)
     _splash_row.addLayout(_splash_text_col, 1)
     _screen = QApplication.primaryScreen()
@@ -3699,6 +3702,8 @@ if __name__ == '__main__':
         SETTINGS.setValue("crash_reporting_enabled", choice == QMessageBox.Yes)
         SETTINGS.setValue("crash_reporting_choice_made", True)
 
+    _splash_status.setText("Loading components…")
+    app.processEvents()
     _maybe_init_sentry()
 
     # Pre-window launch recovery (added v1.99-beta after v1.97-beta shipped a
@@ -3716,6 +3721,8 @@ if __name__ == '__main__':
     #       _handle_launch_failure (defined at module scope so the test
     #       suite treats its imports as lazy). Sentry still gets the
     #       report; a fallback dialog points the user at the download page.
+    _splash_status.setText("Checking for updates…")
+    app.processEvents()
     if sys.platform == "darwin":
         from modules.sparkle_updater import init_sparkle
         init_sparkle()
@@ -3727,6 +3734,8 @@ if __name__ == '__main__':
             app_version=VERSION,
             company_name="Star Trail CleanR",
         )
+    _splash_status.setText("Building interface…")
+    app.processEvents()
     try:
         window = MainWindow()
         window.show()
