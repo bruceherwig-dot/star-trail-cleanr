@@ -2,6 +2,12 @@
 
 ---
 
+## v2.02-beta
+- **Diagnostic logging for the auto-update flow.** v2.01-beta was supposed to be the first auto-update test (v2.0-beta installs would see a popup advertising v2.01-beta and install it in-app). The popup never appeared. PyInstaller's `--windowed` mode on Mac swallows Python stderr, so the silent-fail mode was invisible. v2.02-beta adds step-by-step file-based diagnostic logging to `~/.star_trail_cleanr/sparkle_debug.log` covering every stage of Sparkle initialization (framework path lookup, PyObjC import, `objc.loadBundle`, the `SPUStandardUpdaterController` init call, exceptions, and update-check invocations). Read the file after launching to see exactly which step failed.
+- **Splash status text refinements.** The splash now shows three messages instead of four: "Initializing…" → "Checking for updates…" → "Warming up the trail detector…". Dropped the "Loading components…" message because the phase it described (Sentry SDK init) finishes in 100-300 ms, faster than the eye can read.
+- **Mask painter banner copy update.** Added the *why* to the masking instruction: "You're just marking areas where you know trails won't appear, **so the AI doesn't try to 'fix' the ground.**"
+- **No functional changes** to trail detection, repair, or output.
+
 ## v2.01-beta
 - **First real test of the auto-update flow.** v2.0-beta installed Sparkle (Mac) and WinSparkle (Windows) but the appcast feed was empty, so no update dialog ever fired. With v2.01-beta tagged and signed, the feed now advertises v2.01-beta as the newest version. v2.0-beta installs running the app should see a native update dialog on next launch (or within 24 hours if already running) saying v2.01-beta is available. Click Install, the app downloads only the changed parts, and restarts itself into v2.01-beta. **If it works as designed, every future release from here is in-app.** If anything misbehaves we'll catch it in Sentry or your support inbox and fix it.
 - **Startup splash screen.** First launches used to show a frozen-looking GUI for a few seconds while the app warmed up (PyTorch imports, model paths, theme detection, Sparkle init). Now you see a splash window with the STC logo, tagline, `#StarTrailCleanR`, and an animated progress bar while the app loads. Brand-navy bars top and bottom match the main app banner. Stays visible for at least 5 seconds, longer if startup runs longer.
