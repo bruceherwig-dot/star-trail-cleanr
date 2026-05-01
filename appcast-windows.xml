@@ -5,7 +5,16 @@
     <link>https://bruceherwig-dot.github.io/star-trail-cleanr/appcast-windows.xml</link>
     <description>Auto-update feed for Star Trail CleanR on Windows.</description>
     <language>en</language>
-    <!-- Update items will be appended here when releases ship.
-         The first item lands when v2.0-beta is tagged. -->
+    <item>
+      <title>Version 2.0-beta</title>
+      <pubDate>Thu, 01 May 2026 16:19:14 +0000</pubDate>
+      <sparkle:version>2.0</sparkle:version>
+      <sparkle:shortVersionString>2.0-beta</sparkle:shortVersionString>
+      <enclosure
+        url="https://github.com/bruceherwig-dot/star-trail-cleanr/releases/download/v2.0-beta/StarTrailCleanRSetup.zip"
+        sparkle:edSignature="S5CuUmGYYBYKA83oEJlXFYnOvsUXFfv4iQDU79Jr1mZC5XFV7aZg/olfFkYh1eldAQwM0R/AbKVN+2jAn/X5Bg=="
+        length="671285718"
+        type="application/octet-stream" />
+    </item>
   </channel>
 </rss>
