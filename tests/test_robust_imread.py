@@ -70,6 +70,139 @@ def test_robust_imread_returns_none_when_every_reader_fails():
     assert img is None
 
 
+def test_pil_fallback_rescues_jpeg_when_cv2_fails():
+    """v1.99.1 fix: cv2.imread on Windows fails on paths with non-ASCII
+    characters (Slovak, Czech, German, French, etc.) BEFORE it tries to
+    decode. We can't reproduce the Windows-specific path failure on macOS,
+    but we can simulate the pattern by patching cv2.imread to return None
+    on a JPEG. PIL must rescue it.
+
+    This is the regression test for tester `magio` whose run died on
+    `C:\\Users\\magio\\Desktop\\Štrba\\svetlá\\ZFC_6071.jpg`.
+    """
+    import cv2 as _cv2
+    from modules import io_safe
+    from modules.io_safe import robust_imread
+
+    # Uniform-color image: JPEG compression is lossless on flat regions, so
+    # the exact pixel value survives the round trip. The test cares about
+    # "did PIL rescue the read," not about JPEG fidelity.
+    arr = np.full((40, 60, 3), 100, dtype=np.uint8)
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "ZFC_6071.jpg"
+        _cv2.imwrite(str(p), arr)
+
+        real_imread = io_safe.cv2.imread
+        try:
+            io_safe.cv2.imread = lambda *a, **kw: None
+            img = robust_imread(p, _cv2.IMREAD_UNCHANGED, _retry_delays=())
+        finally:
+            io_safe.cv2.imread = real_imread
+
+    assert img is not None, (
+        "PIL fallback failed to rescue a JPEG when cv2.imread returned None. "
+        "This is the v1.99.1 fix for Windows non-ASCII paths."
+    )
+    assert img.shape == (40, 60, 3)
+    assert img.dtype == np.uint8
+    # Uniform-color JPEG — every pixel should be exactly 100 in every channel.
+    assert int(img[10, 20, 0]) == 100
+    assert int(img[10, 20, 1]) == 100
+    assert int(img[10, 20, 2]) == 100
+
+
+def test_robust_imwrite_handles_basic_image():
+    """robust_imwrite must accept the same BGR array convention as
+    cv2.imwrite, and write a readable file."""
+    from modules.io_safe import robust_imwrite
+    arr = np.full((30, 40, 3), 200, dtype=np.uint8)
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "out.png"
+        ok = robust_imwrite(p, arr)
+        assert ok is True
+        assert p.exists()
+        assert p.stat().st_size > 0
+
+
+def test_robust_imwrite_falls_back_to_pil_when_cv2_fails():
+    """When cv2.imwrite returns False (the Windows non-ASCII-path failure
+    mode we can't reproduce on macOS), the PIL fallback must rescue the
+    write so users with accented folder names still get their output."""
+    from modules import io_safe
+    from modules.io_safe import robust_imwrite
+
+    arr = np.full((30, 40, 3), 150, dtype=np.uint8)
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "out.png"
+        real_imwrite = io_safe.cv2.imwrite
+        try:
+            io_safe.cv2.imwrite = lambda *a, **kw: False
+            ok = robust_imwrite(p, arr)
+        finally:
+            io_safe.cv2.imwrite = real_imwrite
+
+        assert ok is True, "PIL fallback failed when cv2.imwrite returned False"
+        assert p.exists() and p.stat().st_size > 0
+
+
+def test_robust_imwrite_handles_grayscale_and_uint16():
+    """Grayscale (uint8 and uint16) must both write correctly via the
+    PIL fallback path. Hot-pixel maps and saved trail masks are grayscale."""
+    from modules import io_safe
+    from modules.io_safe import robust_imwrite
+
+    with tempfile.TemporaryDirectory() as td:
+        # 8-bit grayscale (typical mask)
+        gray8 = np.full((30, 40), 128, dtype=np.uint8)
+        p8 = Path(td) / "gray8.png"
+        real = io_safe.cv2.imwrite
+        try:
+            io_safe.cv2.imwrite = lambda *a, **kw: False
+            assert robust_imwrite(p8, gray8) is True
+            assert p8.exists() and p8.stat().st_size > 0
+
+            # 16-bit grayscale (uint16 hot-pixel map could be this)
+            gray16 = np.full((30, 40), 30000, dtype=np.uint16)
+            p16 = Path(td) / "gray16.png"
+            assert robust_imwrite(p16, gray16) is True
+            assert p16.exists() and p16.stat().st_size > 0
+        finally:
+            io_safe.cv2.imwrite = real
+
+
+def test_production_writes_use_robust_imwrite():
+    """Lock in v1.992: every cv2.imwrite call site in production code now
+    routes through robust_imwrite so non-ASCII output paths are safe."""
+    text = (REPO / "astro_clean_v5.py").read_text()
+    assert "robust_imwrite(args.hot_pixel_map" in text, (
+        "hot-pixel-map write regressed to bare cv2.imwrite — would fail "
+        "on Windows with non-ASCII folder paths"
+    )
+    assert "robust_imwrite(masks_dir" in text, (
+        "saved-mask write regressed to bare cv2.imwrite"
+    )
+    gui_text = (REPO / "star_trail_cleanr.py").read_text()
+    assert "robust_imwrite(mask_path, mask_np)" in gui_text, (
+        "foreground-mask write regressed to bare cv2.imwrite"
+    )
+
+
+def test_pil_fallback_present_in_diag():
+    """When all readers fail, the diagnosis must name Pillow as one of the
+    attempts so support / Sentry data can show users WHICH readers we tried."""
+    from modules.io_safe import robust_imread_diag
+    img, diag = robust_imread_diag(
+        "/tmp/definitely_does_not_exist_qzqz_v2.jpg", _retry_delays=()
+    )
+    assert img is None
+    assert diag is not None
+    assert "OpenCV" in diag, "diagnosis missing OpenCV"
+    assert "Pillow" in diag, (
+        "diagnosis is missing Pillow attempt — the v1.99.1 fallback isn't "
+        "being exercised"
+    )
+
+
 def test_diag_reports_underlying_reason_on_failure():
     """The diag variant must return a non-empty diagnosis when reads fail,
     so the worker can show the user the actual cause instead of a vague
@@ -223,4 +356,96 @@ def test_gui_wires_bad_file_dialog():
     assert "BAD_FILE_SKIP_CAP = 1" in text, (
         "run-wide skip cap is missing or has been changed without updating "
         "this test"
+    )
+
+
+def test_frames_filter_prompt_wired():
+    """v1.992: when the GUI scans a folder and finds frames at mixed
+    resolutions or with unreadable headers, it must surface a modal so
+    the user knows what's about to be skipped before the run starts.
+    Lock in the signal, the slot, the wiring, and the abort path."""
+    text = (REPO / "star_trail_cleanr.py").read_text()
+    assert "frames_filter_prompt = Signal(dict)" in text, (
+        "CleanerWorker is missing the frames_filter_prompt signal"
+    )
+    assert "def _on_frames_filter_prompt" in text, (
+        "MainWindow slot for the frames-filter modal is missing"
+    )
+    assert "self.worker.frames_filter_prompt.connect" in text, (
+        "MainWindow no longer connects the frames_filter_prompt signal"
+    )
+    assert "set_frames_filter_decision" in text, (
+        "CleanerWorker.set_frames_filter_decision missing — main thread "
+        "cannot tell the worker what the user picked"
+    )
+    # The pre-flight scan must inspect EVERY frame, not just a 10-sample,
+    # so the breakdown is complete before the modal fires.
+    assert "frame_sizes = {f: _img_size(f) for f in frames}" in text, (
+        "pre-flight scan regressed to the old 10-sample shortcut — "
+        "breakdown will be wrong if more than 10 frames have unusual sizes"
+    )
+
+
+def test_run_summary_includes_skipped_count_when_present():
+    """If frames were skipped, the saved run summary text must say so."""
+    text = (REPO / "star_trail_cleanr.py").read_text()
+    assert "_run_filter_info" in text, (
+        "MainWindow no longer remembers the filter info for the run summary"
+    )
+    assert "Frames skipped:" in text, (
+        "run summary no longer includes a Frames skipped line — users "
+        "have no record after the modal is dismissed"
+    )
+
+
+def test_run_summary_appends_star_log_with_head_tail_trim():
+    """The saved run summary appends the Star Log so a single text file
+    is enough to diagnose any run issue. For very large runs the log is
+    trimmed head+tail so the file stays human-scrollable; small logs
+    pass through whole."""
+    text = (REPO / "star_trail_cleanr.py").read_text()
+    assert "self._status_out.toPlainText()" in text, (
+        "run summary writer no longer reads the live log widget"
+    )
+    assert "Star Log (what scrolled" in text, (
+        "run summary no longer appends the Star Log section"
+    )
+    # Lock in the trimming so a 5000-frame run doesn't produce a 1 MB summary.
+    assert "HEAD_LINES = 50" in text, (
+        "Star Log head-trim threshold removed — large runs will produce "
+        "huge summary files"
+    )
+    assert "TAIL_LINES = 100" in text, (
+        "Star Log tail-trim threshold removed — see above"
+    )
+    assert "lines elided" in text, (
+        "Star Log elide marker missing — readers won't know the middle "
+        "was trimmed and may think the run was incomplete"
+    )
+
+
+
+def test_gui_scan_uses_tifffile_fallback_for_unreadable_tiffs():
+    """v1.993: the GUI's pre-flight scan must mirror the worker's reader
+    ladder so TIFFs that PIL can't parse (BigTIFF, unusual compressions,
+    multi-IFD) are rescued by tifffile instead of triggering the
+    'unreadable header' bucket. From the customer's chair: every TIFF we
+    can actually process should silently process; the skip modal should
+    only fire when something is genuinely wrong with the file."""
+    text = (REPO / "star_trail_cleanr.py").read_text()
+    # Pull just _img_size out of the GUI source for a structural check.
+    start = text.index("def _img_size(path):")
+    end = text.index("# Inspect every frame's size up front", start)
+    fn_src = text[start:end]
+    assert "import tifffile" in fn_src, (
+        "_img_size no longer falls back to tifffile — TIFFs PIL can't "
+        "parse will land in the unreadable bucket and trigger a modal "
+        "that the customer didn't need to see"
+    )
+    assert "TiffFile(path)" in fn_src, (
+        "_img_size doesn't open a TiffFile — the fallback isn't doing the "
+        "actual rescue read"
+    )
+    assert ".tif" in fn_src and ".tiff" in fn_src, (
+        "_img_size fallback isn't gated on TIFF extension"
     )

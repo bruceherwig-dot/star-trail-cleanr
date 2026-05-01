@@ -689,7 +689,8 @@ class MaskPainterWidget(QWidget):
     def load_image(self, img_path: str):
         """Load an image file into the canvas."""
         import cv2
-        img = cv2.imread(img_path, cv2.IMREAD_COLOR)
+        from modules.io_safe import robust_imread
+        img = robust_imread(img_path, cv2.IMREAD_COLOR)
         if img is None:
             return
         self._view.load_image(img)
@@ -706,7 +707,8 @@ class MaskPainterWidget(QWidget):
     def load_existing_mask(self, mask_path: str):
         """Load a previously saved mask."""
         import cv2
-        mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+        from modules.io_safe import robust_imread
+        mask = robust_imread(mask_path, cv2.IMREAD_GRAYSCALE)
         if mask is not None:
             self._view.load_mask(mask)
 
