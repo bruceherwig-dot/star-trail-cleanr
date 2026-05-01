@@ -3373,19 +3373,38 @@ class MainWindow(QMainWindow):
             "================================================",
         ]
 
-        # Append the full Star Log content (everything that scrolled in the
-        # run window) so this single file is enough to diagnose any run
-        # issue without asking the user for screenshots.
+        # Append the Star Log content (what scrolled in the run window) so
+        # this single file is enough to diagnose any run issue without
+        # asking the user for screenshots. For very large runs (1000+
+        # frames) the log can grow into hundreds of KB of repetitive
+        # per-frame progress lines; collapse the middle so the file stays
+        # human-scrollable. Useful info clusters at the head (resolution,
+        # batch count, skipped-files notice) and tail (errors, completion
+        # summary), so head+tail captures the diagnosis-relevant lines.
         try:
             log_text = self._status_out.toPlainText() if hasattr(self, '_status_out') else ""
         except Exception:
             log_text = ""
         if log_text.strip():
+            log_lines = log_text.rstrip().splitlines()
+            HEAD_LINES = 50
+            TAIL_LINES = 100
+            ELIDE_THRESHOLD = HEAD_LINES + TAIL_LINES + 20
+            if len(log_lines) > ELIDE_THRESHOLD:
+                head = log_lines[:HEAD_LINES]
+                tail = log_lines[-TAIL_LINES:]
+                omitted = len(log_lines) - HEAD_LINES - TAIL_LINES
+                rendered_log = "\n".join(head) + (
+                    f"\n\n... ({omitted:,} lines elided — repetitive per-frame "
+                    f"progress; first {HEAD_LINES} and last {TAIL_LINES} lines kept) ...\n\n"
+                ) + "\n".join(tail)
+            else:
+                rendered_log = "\n".join(log_lines)
             lines += [
                 "",
-                "Star Log (everything that scrolled in the run window)",
+                "Star Log (what scrolled in the run window)",
                 "================================================",
-                log_text.rstrip(),
+                rendered_log,
                 "================================================",
             ]
 

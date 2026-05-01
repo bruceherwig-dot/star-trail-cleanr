@@ -398,15 +398,29 @@ def test_run_summary_includes_skipped_count_when_present():
     )
 
 
-def test_run_summary_appends_full_star_log():
-    """The saved run summary must include the full Star Log content so a
-    single text file is enough to diagnose any run issue."""
+def test_run_summary_appends_star_log_with_head_tail_trim():
+    """The saved run summary appends the Star Log so a single text file
+    is enough to diagnose any run issue. For very large runs the log is
+    trimmed head+tail so the file stays human-scrollable; small logs
+    pass through whole."""
     text = (REPO / "star_trail_cleanr.py").read_text()
     assert "self._status_out.toPlainText()" in text, (
         "run summary writer no longer reads the live log widget"
     )
-    assert "Star Log (everything that scrolled" in text, (
+    assert "Star Log (what scrolled" in text, (
         "run summary no longer appends the Star Log section"
+    )
+    # Lock in the trimming so a 5000-frame run doesn't produce a 1 MB summary.
+    assert "HEAD_LINES = 50" in text, (
+        "Star Log head-trim threshold removed — large runs will produce "
+        "huge summary files"
+    )
+    assert "TAIL_LINES = 100" in text, (
+        "Star Log tail-trim threshold removed — see above"
+    )
+    assert "lines elided" in text, (
+        "Star Log elide marker missing — readers won't know the middle "
+        "was trimmed and may think the run was incomplete"
     )
 
 
