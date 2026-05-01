@@ -3702,8 +3702,6 @@ if __name__ == '__main__':
         SETTINGS.setValue("crash_reporting_enabled", choice == QMessageBox.Yes)
         SETTINGS.setValue("crash_reporting_choice_made", True)
 
-    _splash_status.setText("Loading components…")
-    app.processEvents()
     _maybe_init_sentry()
 
     # Pre-window launch recovery (added v1.99-beta after v1.97-beta shipped a
@@ -3734,7 +3732,7 @@ if __name__ == '__main__':
             app_version=VERSION,
             company_name="Star Trail CleanR",
         )
-    _splash_status.setText("Building interface…")
+    _splash_status.setText("Warming up the trail detector…")
     app.processEvents()
     try:
         window = MainWindow()
