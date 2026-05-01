@@ -1921,15 +1921,24 @@ class MainWindow(QMainWindow):
         step1.setTextFormat(Qt.RichText)
         step1_row.addWidget(step1)
         step1_row.addStretch(1)
-        self._frame_count_label = QLabel("")
-        # padding-right shifts the text leftward inside the label so it
-        # visually centers between Browse and Open Folder below it instead
-        # of hugging the right edge of the row.
-        self._frame_count_label.setStyleSheet(
-            "color: #5b9bd5; font-size: 15pt; padding-right: 100px;"
-        )
-        step1_row.addWidget(self._frame_count_label)
         layout.addLayout(step1_row)
+
+        # Frame count label sits in its own row above the input field, with
+        # stretch proportions matching row_in below (4 empty : 2 label).
+        # That keeps the label horizontally centered above the Browse +
+        # Open Folder buttons no matter how wide the window is. Replaces
+        # the prior "padding-right: 100px" workaround which only worked at
+        # one fixed window width.
+        count_row = QHBoxLayout()
+        count_row.setContentsMargins(0, 0, 0, 0)
+        count_row.addStretch(4)
+        self._frame_count_label = QLabel("")
+        self._frame_count_label.setAlignment(Qt.AlignCenter)
+        self._frame_count_label.setStyleSheet(
+            "color: #5b9bd5; font-size: 15pt;"
+        )
+        count_row.addWidget(self._frame_count_label, 2)
+        layout.addLayout(count_row)
 
         row_in = QHBoxLayout()
         self._folder_input = QLineEdit()
@@ -2354,6 +2363,11 @@ class MainWindow(QMainWindow):
         v = QVBoxLayout(panel)
         v.setContentsMargins(24, 0, 24, 12)
         v.setSpacing(0)
+        # Top stretch paired with the existing bottom stretch below so the
+        # content (community message + status flash) sits vertically
+        # centered in the panel at any window size, instead of pinned to
+        # the top.
+        v.addStretch(1)
 
         # Two separate QLabels — one per paragraph. Single-paragraph
         # plain word-wrapped QLabels size themselves cleanly via
