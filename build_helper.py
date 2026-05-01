@@ -205,6 +205,10 @@ CLEANUP_PATHS = [
     ('Qt', 'lib', 'QtMultimedia.framework'),
     ('Qt', 'lib', 'QtMultimediaWidgets.framework'),
     ('Qt', 'lib', 'QtMultimediaQuick.framework'),
+    # Qt Multimedia plugin loaders. Parent framework is removed above; these
+    # plugins (ffmpeg backend + macOS-native AVFoundation backend) become
+    # orphaned and are the only callers of Qt's bundled ffmpeg libs.
+    ('Qt', 'plugins', 'multimedia'),
     ('Qt', 'lib', 'QtVirtualKeyboard.framework'),
     ('Qt', 'lib', 'QtWebChannel.framework'),
     ('Qt', 'lib', 'QtWebSockets.framework'),
@@ -319,6 +323,39 @@ if devtool_removed:
         print(f'  {path}  ({fsize:.1f} MB)')
 else:
     print('\nPySide6 dev-tool cleanup: nothing matched.')
+
+# Qt-bundled ffmpeg lib cleanup. Qt Multimedia framework + plugins are removed
+# above; the ffmpeg-family codec libs in PySide6/Qt/lib (Mac) or Qt/bin
+# (Windows) become orphaned — nothing else in the bundle links them. cv2 has
+# its own ffmpeg copies under cv2/__dot__dylibs/ which we leave alone.
+QT_FFMPEG_LIB_PREFIXES = (
+    'libavcodec.', 'libavformat.', 'libavutil.',
+    'libswscale.', 'libswresample.',
+    'avcodec-', 'avformat-', 'avutil-',
+    'swscale-', 'swresample-',
+)
+ffmpeg_removed = []
+for root, dirs, files in os.walk(dist_root):
+    if 'PySide6' not in root.split(os.sep):
+        continue
+    for f in list(files):
+        for prefix in QT_FFMPEG_LIB_PREFIXES:
+            if f.startswith(prefix):
+                full_file = os.path.join(root, f)
+                try:
+                    fsize = os.path.getsize(full_file) / 1024 / 1024
+                    os.remove(full_file)
+                    ffmpeg_removed.append((os.path.relpath(full_file, 'dist'), fsize))
+                except OSError:
+                    pass
+                break
+
+if ffmpeg_removed:
+    print('\nQt-bundled ffmpeg lib cleanup:')
+    for path, fsize in ffmpeg_removed:
+        print(f'  {path}  ({fsize:.1f} MB)')
+else:
+    print('\nQt-bundled ffmpeg lib cleanup: nothing matched.')
 
 # Windows Qt-DLL cleanup — mirrors the Mac framework cleanup above.
 # CLEANUP_PATHS removes ~30 unused Qt frameworks from the Mac .app bundle
