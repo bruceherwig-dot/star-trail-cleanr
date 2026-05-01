@@ -3606,14 +3606,27 @@ if __name__ == '__main__':
     # banner could render — users had no signal that a fix existed). Two
     # safety nets, both running entirely outside MainWindow's setup code so
     # a future launch-class crash cannot block them:
-    #   (1) _pre_window_update_check: tight-budget GitHub poll. If a newer
-    #       release exists, offer to open the download page before
-    #       MainWindow tries to build.
+    #   (1) Sparkle (Mac) / WinSparkle (Windows) auto-update infrastructure.
+    #       Native popup appears IN-APP when an update is available; the
+    #       app downloads only the changed bytes and restarts itself.
+    #       Replaces the v1.x GitHub-Releases-API poll. Linux falls through
+    #       to a no-op for now; banner-style notification can be added
+    #       later if Linux usage warrants.
     #   (2) try/except around MainWindow construction + show, routed to
     #       _handle_launch_failure (defined at module scope so the test
     #       suite treats its imports as lazy). Sentry still gets the
     #       report; a fallback dialog points the user at the download page.
-    _pre_window_update_check()
+    if sys.platform == "darwin":
+        from modules.sparkle_updater import init_sparkle
+        init_sparkle()
+    elif sys.platform == "win32":
+        from modules.winsparkle_updater import init_winsparkle
+        init_winsparkle(
+            appcast_url="https://bruceherwig-dot.github.io/star-trail-cleanr/appcast-windows.xml",
+            app_name="Star Trail CleanR",
+            app_version=VERSION,
+            company_name="Star Trail CleanR",
+        )
     try:
         window = MainWindow()
         window.show()
