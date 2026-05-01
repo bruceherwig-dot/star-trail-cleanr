@@ -276,6 +276,50 @@ if removed_files:
 else:
     print('\nCUDA-specific library cleanup: nothing matched (expected for CPU-only builds).')
 
+# PySide6 ships Qt SDK build utilities (Assistant.app, Linguist.app, Designer.app,
+# qmlls, qmlformat, qmllint, balsam, balsamui, lrelease, lupdate, qsb, svgtoqml).
+# Never imported at runtime. PyInstaller renames .app -> __dot__app on Mac.
+PYSIDE_DEV_TOOL_NAMES = {
+    'Assistant__dot__app', 'Linguist__dot__app', 'Designer__dot__app',
+    'assistant.exe', 'linguist.exe', 'designer.exe',
+    'qmlls', 'qmlformat', 'qmllint',
+    'balsam', 'balsamui',
+    'lrelease', 'lupdate',
+    'qsb', 'svgtoqml',
+    'qmlls.exe', 'qmlformat.exe', 'qmllint.exe',
+    'balsam.exe', 'balsamui.exe',
+    'lrelease.exe', 'lupdate.exe',
+    'qsb.exe', 'svgtoqml.exe',
+}
+
+devtool_removed = []
+for root, dirs, files in os.walk(dist_root):
+    if 'PySide6' not in root.split(os.sep):
+        continue
+    for f in list(files):
+        if f in PYSIDE_DEV_TOOL_NAMES:
+            full = os.path.join(root, f)
+            try:
+                fsize = os.path.getsize(full) / 1024 / 1024
+                os.remove(full)
+                devtool_removed.append((os.path.relpath(full, 'dist'), fsize))
+            except OSError:
+                pass
+    for d in list(dirs):
+        if d in PYSIDE_DEV_TOOL_NAMES:
+            full = os.path.join(root, d)
+            dsize = dir_size_mb(full)
+            shutil.rmtree(full, ignore_errors=True)
+            devtool_removed.append((os.path.relpath(full, 'dist'), dsize))
+            dirs.remove(d)
+
+if devtool_removed:
+    print('\nPySide6 dev-tool cleanup:')
+    for path, fsize in devtool_removed:
+        print(f'  {path}  ({fsize:.1f} MB)')
+else:
+    print('\nPySide6 dev-tool cleanup: nothing matched.')
+
 # Windows Qt-DLL cleanup — mirrors the Mac framework cleanup above.
 # CLEANUP_PATHS removes ~30 unused Qt frameworks from the Mac .app bundle
 # (QtWebEngineCore, Qt3DCore, QtMultimedia, etc.). The same modules ship
