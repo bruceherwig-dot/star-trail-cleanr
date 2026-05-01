@@ -1277,11 +1277,14 @@ class MainWindow(QMainWindow):
             self._min_height_locked = True
 
     def _lock_min_height(self):
-        """Lock the window's vertical size to exactly the Setup tab's
-        natural content height. min == max so the window cannot be
-        resized vertically. Setup never has empty space below the Clean
-        button or scroll above it. Run's right-panel text box is tuned
-        small enough to fit at this same locked height."""
+        """Set the window's minimum vertical size to the Setup tab's
+        natural content height so Setup never clips below the Clean
+        button. Maximum is intentionally unbounded so users can maximize
+        the window on Windows (where the previous min==max lock left
+        empty desktop below the app) or resize larger if they want.
+        Run's right panel may show extra space at the bottom when the
+        window is taller than Setup's natural height — accepted
+        trade-off vs the maximize-doesn't-fill bug Warren reported."""
         if not hasattr(self, "_setup_inner") or self._setup_inner is None:
             return
         setup_natural = self._setup_inner.sizeHint().height()
@@ -1292,7 +1295,6 @@ class MainWindow(QMainWindow):
             target = min(target, int(screen.availableGeometry().height() * 0.9))
         target = max(target, 600)
         self.setMinimumHeight(target)
-        self.setMaximumHeight(target)
         if self.height() != target:
             self.resize(self.width(), target)
 
@@ -2501,7 +2503,13 @@ class MainWindow(QMainWindow):
 
     def _auto_output(self, text):
         if text and text.strip():
-            self._output_input.setText(os.path.join(text.strip(), "cleaned"))
+            # Normalize to forward slashes for display: Qt's QFileDialog
+            # returns forward slashes on every platform, but os.path.join
+            # uses os.sep, so on Windows the joined string ends up mixing
+            # forward and back slashes ("L:/foo/bar\cleaned"). Replace makes
+            # the displayed path consistent.
+            joined = os.path.join(text.strip(), "cleaned").replace("\\", "/")
+            self._output_input.setText(joined)
             self._update_mask_status()
             self._update_open_btn_state()
 
