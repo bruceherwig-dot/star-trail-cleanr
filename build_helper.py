@@ -457,15 +457,26 @@ if sys.platform == 'darwin':
     else:
         print(f'\nWARNING: vendored Sparkle.framework not found at {sparkle_src}')
 
-    # Step 2: inject Sparkle keys into Info.plist via PlistBuddy.
+    # Step 2: inject Sparkle keys + version metadata into Info.plist via
+    # PlistBuddy. Sparkle refuses to start (error code 7) if CFBundleVersion
+    # is missing or CFBundleShortVersionString is the PyInstaller default
+    # "0.0.0" — both must reflect the real app version. Same value works
+    # for both since we don't maintain a separate build number.
     info_plist = os.path.join(dist_root, 'Contents', 'Info.plist')
     pb = '/usr/libexec/PlistBuddy'
+    version_file = os.path.join(os.path.dirname(__file__), 'version.txt')
+    app_version = '0.0.0'
+    if os.path.isfile(version_file):
+        with open(version_file) as vf:
+            app_version = vf.read().strip() or '0.0.0'
     if os.path.isfile(info_plist) and sparkle_pubkey:
         sparkle_keys = [
             ('SUFeedURL', 'string', appcast_url),
             ('SUPublicEDKey', 'string', sparkle_pubkey),
             ('SUEnableAutomaticChecks', 'bool', 'true'),
             ('SUScheduledCheckInterval', 'integer', '86400'),
+            ('CFBundleVersion', 'string', app_version),
+            ('CFBundleShortVersionString', 'string', app_version),
         ]
         print('\nInjecting Sparkle keys into Info.plist:')
         for key, ktype, value in sparkle_keys:
