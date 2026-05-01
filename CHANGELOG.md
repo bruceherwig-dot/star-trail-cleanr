@@ -2,6 +2,11 @@
 
 ---
 
+## v2.03-beta
+- **Mac builds now ship as DMG instead of ZIP.** Diagnostic logging in v2.02-beta confirmed the v2.0/v2.01/v2.02 auto-update silent-fail was caused by macOS App Translocation: when a `.app` is unzipped from a downloaded `.zip` and launched without first being moved to `/Applications`, macOS runs the app from a randomized read-only path under `/private/var/folders/.../AppTranslocation/...`. Sparkle correctly detects the translocation and refuses to operate (it can't write back to a read-only path to install an update). The fix is the canonical macOS install flow: ship a `.dmg`, user mounts it, drags the app to `/Applications`, launches from there. macOS does not translocate apps installed from a DMG into a known location. v2.03-beta is the first release that uses DMG end-to-end.
+- **First real chance for the auto-update flow to work.** v2.0-beta installed the Sparkle infrastructure but couldn't deliver an update because of translocation. v2.01-beta and v2.02-beta hit the same wall. v2.03-beta breaks the cycle. v2.02-beta users (installed from `/Applications`) launching the app should see the native update popup advertising v2.03-beta within seconds.
+- **No functional changes** to trail detection, repair, output, GUI, or other behavior.
+
 ## v2.02-beta
 - **Diagnostic logging for the auto-update flow.** v2.01-beta was supposed to be the first auto-update test (v2.0-beta installs would see a popup advertising v2.01-beta and install it in-app). The popup never appeared. PyInstaller's `--windowed` mode on Mac swallows Python stderr, so the silent-fail mode was invisible. v2.02-beta adds step-by-step file-based diagnostic logging to `~/.star_trail_cleanr/sparkle_debug.log` covering every stage of Sparkle initialization (framework path lookup, PyObjC import, `objc.loadBundle`, the `SPUStandardUpdaterController` init call, exceptions, and update-check invocations). Read the file after launching to see exactly which step failed.
 - **Splash status text refinements.** The splash now shows three messages instead of four: "Initializing…" → "Checking for updates…" → "Warming up the trail detector…". Dropped the "Loading components…" message because the phase it described (Sentry SDK init) finishes in 100-300 ms, faster than the eye can read.

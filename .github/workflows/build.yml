@@ -53,12 +53,22 @@ jobs:
         # PyInstaller hidden imports, library version mismatches, etc.
         # If this fails, the bad bundle never reaches users.
         run: python scripts/smoke_built_bundle.py
-      - name: Zip app
-        run: cd dist && zip -r ../StarTrailCleanR-Mac-AppleSilicon.zip StarTrailCleanR.app
+      - name: Build DMG
+        # DMG instead of ZIP because macOS Gatekeeper triggers App
+        # Translocation on .app bundles launched from a downloaded ZIP,
+        # which silently disables Sparkle auto-updates and historically
+        # crashed two confirmed users. Mounting a DMG and dragging the
+        # .app to /Applications is the canonical macOS install flow and
+        # avoids translocation entirely.
+        run: |
+          hdiutil create -volname "Star Trail CleanR" \
+            -srcfolder dist/StarTrailCleanR.app \
+            -ov -format UDZO \
+            StarTrailCleanR-Mac-AppleSilicon.dmg
       - uses: actions/upload-artifact@v4
         with:
           name: StarTrailCleanR-Mac
-          path: StarTrailCleanR-Mac-AppleSilicon.zip
+          path: StarTrailCleanR-Mac-AppleSilicon.dmg
 
   build-mac-intel:
     needs: lint
@@ -84,12 +94,16 @@ jobs:
         run: python build_helper.py
       - name: Smoke test bundled app
         run: python scripts/smoke_built_bundle.py
-      - name: Zip app
-        run: cd dist && zip -r ../StarTrailCleanR-Mac-Intel.zip StarTrailCleanR.app
+      - name: Build DMG
+        run: |
+          hdiutil create -volname "Star Trail CleanR" \
+            -srcfolder dist/StarTrailCleanR.app \
+            -ov -format UDZO \
+            StarTrailCleanR-Mac-Intel.dmg
       - uses: actions/upload-artifact@v4
         with:
           name: StarTrailCleanR-Mac-Intel
-          path: StarTrailCleanR-Mac-Intel.zip
+          path: StarTrailCleanR-Mac-Intel.dmg
 
   build-windows:
     needs: lint
@@ -202,8 +216,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            StarTrailCleanR-Mac/StarTrailCleanR-Mac-AppleSilicon.zip
-            StarTrailCleanR-Mac-Intel/StarTrailCleanR-Mac-Intel.zip
+            StarTrailCleanR-Mac/StarTrailCleanR-Mac-AppleSilicon.dmg
+            StarTrailCleanR-Mac-Intel/StarTrailCleanR-Mac-Intel.dmg
             StarTrailCleanR-Windows/StarTrailCleanRSetup.zip
             StarTrailCleanR-Linux/StarTrailCleanR-Linux-x86_64.tar.gz
           body: |
@@ -212,8 +226,8 @@ jobs:
             ### Download
 
             **Mac**
-            - **Apple Silicon (M1/M2/M3/M4)**: StarTrailCleanR-Mac-AppleSilicon.zip, unzip and run StarTrailCleanR.app (right-click then Open first time).
-            - **Intel (older Macs)**: StarTrailCleanR-Mac-Intel.zip, same steps. Slower than Apple Silicon (no built-in GPU acceleration) but functional.
+            - **Apple Silicon (M1/M2/M3/M4)**: StarTrailCleanR-Mac-AppleSilicon.dmg, double-click to mount, then drag StarTrailCleanR to your Applications folder. Right-click and choose Open the first time to bypass Gatekeeper.
+            - **Intel (older Macs)**: StarTrailCleanR-Mac-Intel.dmg, same steps. Slower than Apple Silicon (no built-in GPU acceleration) but functional.
 
             **Windows**
             - **Standard**: StarTrailCleanRSetup.zip. Right-click the downloaded zip and choose "Extract All...", then double-click StarTrailCleanRSetup.exe inside the extracted folder. If Windows shows a blue "Windows protected your PC" warning, click "More info" then "Run anyway".
