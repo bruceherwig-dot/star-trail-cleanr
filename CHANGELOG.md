@@ -2,6 +2,14 @@
 
 ---
 
+## v2.01-beta
+- **First real test of the auto-update flow.** v2.0-beta installed Sparkle (Mac) and WinSparkle (Windows) but the appcast feed was empty, so no update dialog ever fired. With v2.01-beta tagged and signed, the feed now advertises v2.01-beta as the newest version. v2.0-beta installs running the app should see a native update dialog on next launch (or within 24 hours if already running) saying v2.01-beta is available. Click Install, the app downloads only the changed parts, and restarts itself into v2.01-beta. **If it works as designed, every future release from here is in-app.** If anything misbehaves we'll catch it in Sentry or your support inbox and fix it.
+- **Startup splash screen.** First launches used to show a frozen-looking GUI for a few seconds while the app warmed up (PyTorch imports, model paths, theme detection, Sparkle init). Now you see a splash window with the STC logo, tagline, `#StarTrailCleanR`, and an animated progress bar while the app loads. Brand-navy bars top and bottom match the main app banner. Stays visible for at least 5 seconds, longer if startup runs longer.
+- **UI polish on Setup and Run pages:**
+  - Run page community panel (the share-message + email link box on the right): now sits roughly vertically centered in its column at any window height, instead of pinned to the top.
+  - Setup page "N frames found" label: moved to its own row above the input field, width-matched to the Browse + Open Folder buttons. Stays centered above them as the window resizes. Replaces the prior fixed-padding workaround that drifted off-center when the window grew.
+- **No functional changes** to trail detection, repair, or output. Pure UI polish plus the auto-update test payload.
+
 ## v2.0-beta
 - **First release with auto-update infrastructure built in.** The app now ships with Sparkle (Mac) and WinSparkle (Windows) embedded. The intent: when a future release is published, the app fetches a small XML feed in the background and pops a native update dialog asking if you want to install. **This is a beta, the auto-update flow has not yet been exercised end-to-end with real artifacts.** The first real test happens when the next release after v2.0-beta ships and v2.0-beta users see (or don't see) the popup. If it doesn't work, we fix it; if it does, every future release is in-app from v2.0-beta forward. Linux stays on the current notification-banner approach for now.
 - **Maximized window now uses the extra space.** v1.995 unlocked the height; v2.0 lets the content grow into the unlocked space: the Star Log on the Run page gets taller, the Setup tab's scroll area expands. Buttons, banners, and headers stay their normal sizes.

@@ -3589,6 +3589,95 @@ if __name__ == '__main__':
 
     _apply_theme()
 
+    # Startup splash: visible while the slow first-launch work runs (theme
+    # detection, Sentry/Sparkle init, MainWindow construction, font setup).
+    # Without this, users see a frozen-looking app for 1-3 seconds on first
+    # launch, since the GUI renders before the event loop is fully unblocked.
+    # Frameless+StaysOnTop combo per feedback_qt_splash_flags.md (Qt's
+    # SplashScreen flag is unreliable on macOS).
+    from PySide6.QtWidgets import QProgressBar
+    _splash = QWidget()
+    _splash.setWindowFlags(Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+    _splash.setAttribute(Qt.WA_TranslucentBackground)
+    _splash.setFixedSize(600, 338)
+    _splash_outer = QVBoxLayout(_splash)
+    _splash_outer.setContentsMargins(0, 0, 0, 0)
+    _splash_card = QFrame()
+    _splash_card.setStyleSheet(
+        "QFrame#stcSplashCard { background: #f4f6f9; border-radius: 12px; border: 1px solid #d6dde6; }"
+    )
+    _splash_card.setObjectName("stcSplashCard")
+    _splash_outer.addWidget(_splash_card)
+
+    # Card body: top bar, content row, bottom bar
+    _splash_body = QVBoxLayout(_splash_card)
+    _splash_body.setContentsMargins(0, 0, 0, 0)
+    _splash_body.setSpacing(0)
+
+    _splash_top_bar = QFrame()
+    _splash_top_bar.setFixedHeight(64)
+    _splash_top_bar.setStyleSheet(
+        f"QFrame {{ background: {BRAND_HEADER_BG}; border: none; "
+        "border-top-left-radius: 11px; border-top-right-radius: 11px; }"
+    )
+    _splash_body.addWidget(_splash_top_bar)
+
+    _splash_content = QWidget()
+    _splash_content.setStyleSheet("background: transparent;")
+    _splash_row = QHBoxLayout(_splash_content)
+    _splash_row.setContentsMargins(32, 20, 32, 20)
+    _splash_row.setSpacing(24)
+    _splash_body.addWidget(_splash_content, 1)
+
+    _splash_bottom_bar = QFrame()
+    _splash_bottom_bar.setFixedHeight(64)
+    _splash_bottom_bar.setStyleSheet(
+        f"QFrame {{ background: {BRAND_HEADER_BG}; border: none; "
+        "border-bottom-left-radius: 11px; border-bottom-right-radius: 11px; }"
+    )
+    _splash_body.addWidget(_splash_bottom_bar)
+    _splash_icon = QLabel()
+    if os.path.exists(_icon_path):
+        _splash_icon.setPixmap(QIcon(_icon_path).pixmap(140, 140))
+    _splash_icon.setFixedSize(140, 140)
+    # No frame around the icon graphic; the icon file already has its own
+    # rounded shape baked in.
+    _splash_icon.setStyleSheet("background: transparent; border: none;")
+    _splash_row.addWidget(_splash_icon, 0, Qt.AlignVCenter)
+    _splash_text_col = QVBoxLayout()
+    _splash_text_col.setContentsMargins(0, 0, 0, 0)
+    _splash_text_col.setSpacing(8)
+    _splash_text_col.addStretch(1)
+    _splash_title = QLabel("Star Trail CleanR")
+    _splash_title.setStyleSheet("font-size: 24pt; font-weight: bold; color: #1a1f2c; background: transparent; border: none;")
+    _splash_text_col.addWidget(_splash_title)
+    _splash_sub = QLabel("Remove the Trails. Keep the Stars.")
+    _splash_sub.setStyleSheet("font-size: 14pt; color: #4a5568; background: transparent; border: none;")
+    _splash_text_col.addWidget(_splash_sub)
+    _splash_hashtag = QLabel("#StarTrailCleanR")
+    _splash_hashtag.setStyleSheet("font-size: 12pt; color: #2d3748; background: transparent; border: none;")
+    _splash_text_col.addWidget(_splash_hashtag)
+    _splash_text_col.addSpacing(14)
+    _splash_bar = QProgressBar()
+    _splash_bar.setRange(0, 0)
+    _splash_bar.setTextVisible(False)
+    _splash_bar.setFixedHeight(8)
+    _splash_bar.setStyleSheet(
+        "QProgressBar { background: #e2e8f0; border: none; border-radius: 4px; }"
+        "QProgressBar::chunk { background: #4a9eff; border-radius: 4px; }"
+    )
+    _splash_text_col.addWidget(_splash_bar)
+    _splash_text_col.addStretch(1)
+    _splash_row.addLayout(_splash_text_col, 1)
+    _screen = QApplication.primaryScreen()
+    if _screen:
+        _g = _screen.availableGeometry()
+        _splash.move(_g.x() + (_g.width() - 600) // 2, _g.y() + (_g.height() - 338) // 2)
+    _splash.show()
+    app.processEvents()
+    import time as _time
+    _splash_shown_at = _time.monotonic()
+
     # First-run crash-reporting opt-in. Asked once; choice persists in
     # QSettings. Only shown when a DSN is actually present (CI builds), so
     # dev runs don't see the prompt at all.
@@ -3644,6 +3733,15 @@ if __name__ == '__main__':
     except Exception as _launch_exc:
         _handle_launch_failure(_launch_exc)
         sys.exit(1)
+
+    # Dismiss the startup splash. Minimum on-screen duration of 1500 ms so
+    # the user gets to see the title + tagline + progress bar even on a
+    # cached relaunch where the rest of startup is fast. On a true cold
+    # first launch, the slow imports keep the splash up longer than the
+    # minimum and this delay is effectively zero.
+    _elapsed_ms = int((_time.monotonic() - _splash_shown_at) * 1000)
+    _remaining_ms = max(0, 5000 - _elapsed_ms)
+    QTimer.singleShot(_remaining_ms, _splash.close)
 
     # Live OS appearance switching: when the user toggles macOS Light/Dark
     # mid-session, relaunch so every themed widget rebuilds with the new
