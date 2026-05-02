@@ -3723,7 +3723,14 @@ if __name__ == '__main__':
     app.processEvents()
     if sys.platform == "darwin":
         from modules.sparkle_updater import init_sparkle
-        init_sparkle()
+
+        def _dismiss_splash_for_update():
+            try:
+                _splash.close()
+            except Exception:
+                pass
+
+        init_sparkle(on_update_found=_dismiss_splash_for_update)
     elif sys.platform == "win32":
         from modules.winsparkle_updater import init_winsparkle
         init_winsparkle(

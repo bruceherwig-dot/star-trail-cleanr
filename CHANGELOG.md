@@ -2,6 +2,11 @@
 
 ---
 
+## v2.05-beta
+- **First release with delta updates.** Past releases forced every user to redownload the entire ~600 MB app on every update, even when only a few Python files actually changed. v2.05-beta is the first release published with binary delta files alongside the full bundle. Users on a recent prior version (currently v2.04-beta) only download the bytes that actually changed since their version, typically a small fraction of the full 600 MB. Sparkle handles the delta application transparently. New first-time installs still download the full bundle. Mac only — WinSparkle has no delta-update support, so Windows continues to ship the full bundle each release.
+- **Update popup no longer hides behind the splash screen.** v2.03-beta exposed a layering issue: when the startup splash was still on screen and Sparkle's "update available" popup appeared, the popup landed *behind* the splash because the splash claims stay-on-top. v2.05-beta wires a Sparkle delegate that fires the moment a valid update is found, dismissing the splash early so the popup is the only thing on screen.
+- **No functional changes** to trail detection, repair, output, or other behavior.
+
 ## v2.04-beta
 - **Auto-update install no longer fails with "improperly signed and could not be validated."** v2.03-beta finally got the update popup working (the App Translocation fix landed), but clicking Install produced an "Update Error" dialog. Sparkle's logs revealed the new app's outer code-sign seal was broken: PyInstaller ad-hoc-signs the bundle on Apple Silicon, then the build script copies in `Sparkle.framework` and patches the Info.plist, both of which invalidate the seal. Sparkle 2.x has a strict safety check — if the new bundle claims to be code-signed but the signature is corrupt, the update is rejected outright. v2.04-beta re-applies a fresh ad-hoc signature on the outer `.app` after all build modifications, so the seal is intact when Sparkle inspects it.
 - **No functional changes** to trail detection, repair, output, GUI, or other behavior. v2.04-beta is the second half of the auto-update fix that started in v2.03-beta.

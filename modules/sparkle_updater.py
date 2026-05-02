@@ -33,6 +33,8 @@ import time
 import traceback
 
 _updater_controller = None  # module-scope strong reference, prevents GC
+_updater_delegate = None  # module-scope strong reference, prevents GC
+_on_update_found_callback = None  # set by init_sparkle()
 
 _LOG_PATH = os.path.expanduser("~/.star_trail_cleanr/sparkle_debug.log")
 
@@ -71,11 +73,16 @@ def _bundled_sparkle_framework_path():
     return candidate if exists else None
 
 
-def init_sparkle():
+def init_sparkle(on_update_found=None):
     """Initialize Sparkle. Call once at app startup AFTER the QApplication
     has been created (Sparkle attaches to the active NSApplication, which
-    PySide6 creates). Safe to call on non-Mac platforms (no-op)."""
-    global _updater_controller
+    PySide6 creates). Safe to call on non-Mac platforms (no-op).
+
+    on_update_found: optional zero-arg callable invoked when Sparkle finds
+    a valid newer version. Used to dismiss the startup splash so Sparkle's
+    native popup doesn't fight for z-order with our splash window."""
+    global _updater_controller, _updater_delegate, _on_update_found_callback
+    _on_update_found_callback = on_update_found
 
     _log("=" * 60)
     _log("init_sparkle: ENTERED")
@@ -98,10 +105,26 @@ def init_sparkle():
         if SPUStandardUpdaterController is None:
             _log("init_sparkle: controller class missing from loaded bundle, aborting")
             return
+        _log("init_sparkle: building delegate")
+        from Foundation import NSObject
+
+        class _SparkleDelegate(NSObject):
+            def updater_didFindValidUpdate_(self, updater, item):
+                _log("delegate: updater_didFindValidUpdate_ fired")
+                cb = _on_update_found_callback
+                if cb is not None:
+                    try:
+                        cb()
+                    except Exception:
+                        _log(f"delegate: callback raised\n{traceback.format_exc()}")
+
+        _updater_delegate = _SparkleDelegate.alloc().init()
+        _log(f"init_sparkle: delegate={_updater_delegate!r}")
+
         _log("init_sparkle: calling alloc().initWithStartingUpdater...")
         _updater_controller = (
             SPUStandardUpdaterController.alloc()
-            .initWithStartingUpdater_updaterDelegate_userDriverDelegate_(True, None, None)
+            .initWithStartingUpdater_updaterDelegate_userDriverDelegate_(True, _updater_delegate, None)
         )
         _log(f"init_sparkle: controller={_updater_controller!r}")
         _log("init_sparkle: SUCCESS")
