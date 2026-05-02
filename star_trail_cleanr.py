@@ -1241,6 +1241,7 @@ class MainWindow(QMainWindow):
         )
         self._tabs.addTab(self._stack, "Main")
         self._tabs.addTab(self._build_faq_tab(), "FAQ")
+        self._tabs.addTab(self._build_settings_tab(), "Settings")
         self._tabs.addTab(self._build_about_tab(), "About")
 
         # Container: banner on top, tabs below
@@ -1378,6 +1379,69 @@ class MainWindow(QMainWindow):
         """)
         wrap_layout.addWidget(browser)
         return wrap
+
+    # ── Settings tab ─────────────────────────────────────────────────────────
+
+    def _build_settings_tab(self):
+        wrap = QWidget()
+        layout = QVBoxLayout(wrap)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(0)
+        layout.setAlignment(Qt.AlignTop)
+
+        browser = QTextBrowser()
+        browser.setOpenExternalLinks(False)
+        browser.document().setDocumentMargin(20)
+        browser.setStyleSheet(
+            f"QTextBrowser {{ background: {BROWSER_BG}; color: {BROWSER_TEXT}; border: none; font-size: 15px; }}"
+        )
+        browser.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        browser.setHtml(f"""
+        <html><body style='font-family: Inter, -apple-system, Segoe UI, sans-serif; line-height: 1.5; margin:0; padding:0; color:{BROWSER_TEXT}; background-color:{BROWSER_BG};'>
+        <p style='margin:0; padding:0; line-height:0; font-size:1px; height:0;'></p>
+        <h2 style='color:{BRAND_HEADING_BLUE}; margin-top:0; margin-bottom:2px;'>Updates</h2>
+        <p style='margin-top:2px;'>Star Trail CleanR checks for updates automatically. Use this to check right now.</p>
+        </body></html>
+        """)
+        browser.setFixedHeight(90)
+        layout.addWidget(browser)
+
+        check_btn = QPushButton("Check for Updates")
+        check_btn.setFixedHeight(40)
+        check_btn.setFixedWidth(200)
+        check_btn.setCursor(Qt.PointingHandCursor)
+        check_btn.setStyleSheet(
+            f"QPushButton {{ background-color: {SECONDARY_BTN_BG}; color: white; "
+            f"font-size: 15px; font-weight: bold; border-radius: 6px; border: none; }}"
+            f"QPushButton:hover {{ background-color: {DISABLED_BTN_HOVER}; }}"
+        )
+        check_btn.clicked.connect(self._on_check_for_updates)
+        btn_row = QHBoxLayout()
+        btn_row.setContentsMargins(20, 0, 0, 0)
+        btn_row.addWidget(check_btn)
+        btn_row.addStretch()
+        layout.addSpacing(4)
+        layout.addLayout(btn_row)
+
+        # GPU settings will be added here in a future release.
+
+        layout.addStretch()
+        return wrap
+
+    def _on_check_for_updates(self):
+        if getattr(sys, 'frozen', False):
+            if sys.platform == "darwin":
+                from modules.sparkle_updater import check_for_updates
+                check_for_updates()
+            elif sys.platform == "win32":
+                from modules.winsparkle_updater import check_for_updates
+                check_for_updates()
+            else:
+                import webbrowser
+                webbrowser.open("https://startrailcleanr.com")
+        else:
+            import webbrowser
+            webbrowser.open("https://startrailcleanr.com")
 
     # ── About tab ────────────────────────────────────────────────────────────
 
@@ -2858,7 +2922,9 @@ class MainWindow(QMainWindow):
             # Idempotent: if the heartbeat is already running (because we triggered
             # it at "frames loaded"), don't reset the rotation when "Step 1" arrives.
             if not self._warmup_timer.isActive():
-                self._warmup_counter = 0
+                last_phrase = self._warmup_counter // 4
+                next_phrase = (last_phrase + 1) % len(self._warmup_phrases)
+                self._warmup_counter = next_phrase * 4 if self._warmup_counter > 0 else 0
                 self._warmup_tick()
                 self._warmup_timer.start(500)
         else:
@@ -3773,6 +3839,8 @@ if __name__ == '__main__':
     # user lands right back where they were.
     def _on_color_scheme_changed(_scheme):
         try:
+            if window.worker and window.worker.isRunning():
+                return
             window._relaunch()
         except Exception:
             pass

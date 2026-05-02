@@ -2,6 +2,13 @@
 
 ---
 
+## v2.06-beta
+- **Settings tab.** A new Settings tab sits between FAQ and About. The first setting is a "Check for Updates" button that triggers the native update dialog on Mac and Windows (or opens the website on Linux). GPU settings will be added here in a future release.
+- **Run summary always fires.** Running a clean batch with no trails found used to produce no end-of-run popup. Now the summary appears regardless.
+- **Switching macOS Light/Dark mode no longer cancels a running batch.** The mode switch triggers an app relaunch to rebuild the themed UI; that relaunch now waits until any active run finishes.
+- **No startup splash on theme-switch relaunch.** When the app relaunches after a Light/Dark mode switch, it skips the startup splash since the app was already open and imports are cached.
+- **Warmup phrases no longer repeat back to back.** The Star Log warmup rotation (shown while the trail detector loads) could show the same phrase twice in a row across consecutive batches. It now always advances to the next phrase.
+
 ## v2.05-beta
 - **First release with delta updates.** Past releases forced every user to redownload the entire ~600 MB app on every update, even when only a few Python files actually changed. v2.05-beta is the first release published with binary delta files alongside the full bundle. Users on a recent prior version (currently v2.04-beta) only download the bytes that actually changed since their version, typically a small fraction of the full 600 MB. Sparkle handles the delta application transparently. New first-time installs still download the full bundle. Mac only — WinSparkle has no delta-update support, so Windows continues to ship the full bundle each release.
 - **Update popup no longer hides behind the splash screen.** v2.03-beta exposed a layering issue: when the startup splash was still on screen and Sparkle's "update available" popup appeared, the popup landed *behind* the splash because the splash claims stay-on-top. v2.05-beta wires a Sparkle delegate that fires the moment a valid update is found, dismissing the splash early so the popup is the only thing on screen.
