@@ -247,6 +247,15 @@ def _apply_theme():
         app.setStyleSheet("")
 
 
+def _secondary_btn_css():
+    return (
+        f"QPushButton {{ background-color: {SECONDARY_BTN_BG}; color: white; "
+        f"font-size: 15px; border-radius: 6px; border: none; padding: 0 8px; }}"
+        f"QPushButton:hover {{ background-color: {DISABLED_BTN_HOVER}; }}"
+        f"QPushButton:disabled {{ background-color: {DISABLED_BTN_BG}; color: {MUTED_TEXT}; }}"
+    )
+
+
 SCRIPT = os.path.join(_base, "astro_clean_v5.py")
 _bundled_model = os.path.join(_base, "best.pt")
 _DEV_FALLBACK_MODEL = os.path.join(
@@ -463,6 +472,7 @@ class CleanerWorker(QThread):
     step_detail = Signal(str)          # filename + detail text
     frame_count = Signal(int, int)     # frames_cleaned, total
     stats_ready = Signal(int, int)     # total_trails, total_frames_scanned
+    trail_count_update = Signal(int)   # running total trails after each batch
     timing_stats = Signal(float, float)  # initial_estimate_sec, actual_total_sec
     initial_estimate = Signal(float)   # initial estimate seconds (emitted once)
     warmup_active = Signal(bool)       # True = AI loading window, False = real per-frame progress kicked in
@@ -911,6 +921,7 @@ class CleanerWorker(QThread):
                     if proc_line.startswith("BATCH_TRAIL_COUNT:"):
                         try:
                             total_trails_run += int(proc_line.split(":", 1)[1].strip())
+                            self.trail_count_update.emit(total_trails_run)
                         except ValueError:
                             pass
                         continue
@@ -1416,9 +1427,18 @@ class MainWindow(QMainWindow):
             f"QPushButton:hover {{ background-color: {DISABLED_BTN_HOVER}; }}"
         )
         check_btn.clicked.connect(self._on_check_for_updates)
+        self._check_updates_btn = check_btn
+
+        run_hint = QLabel("A run is in progress. Updates are paused until it finishes.")
+        run_hint.setStyleSheet(f"color: {MUTED_TEXT}; font-size: 13px;")
+        run_hint.setVisible(False)
+        self._check_updates_run_hint = run_hint
+
         btn_row = QHBoxLayout()
         btn_row.setContentsMargins(20, 0, 0, 0)
         btn_row.addWidget(check_btn)
+        btn_row.addSpacing(14)
+        btn_row.addWidget(run_hint)
         btn_row.addStretch()
         layout.addSpacing(4)
         layout.addLayout(btn_row)
@@ -1427,6 +1447,11 @@ class MainWindow(QMainWindow):
 
         layout.addStretch()
         return wrap
+
+    def _set_updates_run_state(self, running):
+        if hasattr(self, '_check_updates_btn'):
+            self._check_updates_btn.setEnabled(not running)
+            self._check_updates_run_hint.setVisible(running)
 
     def _on_check_for_updates(self):
         if getattr(sys, 'frozen', False):
@@ -2012,9 +2037,13 @@ class MainWindow(QMainWindow):
         self._folder_input.editingFinished.connect(self._on_input_edited)
         row_in.addWidget(self._folder_input, 4)
         browse_in = QPushButton("Browse\u2026")
+        browse_in.setFixedHeight(34)
+        browse_in.setStyleSheet(_secondary_btn_css())
         browse_in.clicked.connect(self._browse_input)
         row_in.addWidget(browse_in, 1)
         self._input_open_btn = QPushButton("Open Folder")
+        self._input_open_btn.setFixedHeight(34)
+        self._input_open_btn.setStyleSheet(_secondary_btn_css())
         self._input_open_btn.setEnabled(False)
         self._input_open_btn.clicked.connect(self._open_setup_input_folder)
         row_in.addWidget(self._input_open_btn, 1)
@@ -2035,9 +2064,13 @@ class MainWindow(QMainWindow):
         self._output_input.textChanged.connect(self._update_output_open_btn_state)
         row_out.addWidget(self._output_input, 4)
         browse_out = QPushButton("Browse\u2026")
+        browse_out.setFixedHeight(34)
+        browse_out.setStyleSheet(_secondary_btn_css())
         browse_out.clicked.connect(self._browse_output)
         row_out.addWidget(browse_out, 1)
         self._output_open_btn = QPushButton("Open Folder")
+        self._output_open_btn.setFixedHeight(34)
+        self._output_open_btn.setStyleSheet(_secondary_btn_css())
         self._output_open_btn.setEnabled(False)
         self._output_open_btn.clicked.connect(self._open_setup_output_folder)
         row_out.addWidget(self._output_open_btn, 1)
@@ -2219,7 +2252,19 @@ class MainWindow(QMainWindow):
         title_font.setBold(True)
         title.setFont(title_font)
         self._process_title = title
-        layout.addWidget(title)
+
+        self._trail_counter_label = QLabel("")
+        self._trail_counter_label.setStyleSheet(
+            f"font-size: 22px; font-weight: bold; color: {MUTED_TEXT};"
+        )
+        self._trail_counter_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self._trail_counter_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+
+        title_row = QHBoxLayout()
+        title_row.addWidget(title)
+        title_row.addStretch()
+        title_row.addWidget(self._trail_counter_label)
+        layout.addLayout(title_row)
 
         # ── Overall progress bar (fat) ──
         frame_label_row = QHBoxLayout()
@@ -2725,6 +2770,7 @@ class MainWindow(QMainWindow):
 
         # Go to process page — reset all widgets
         self._process_title.setText("Cleaning in Progress")
+        self._trail_counter_label.setText("")
         self._progress_bar.setValue(0)
         self._progress_bar.setFormat("%p%")
         self._progress_bar.setStyleSheet(
@@ -2813,7 +2859,13 @@ class MainWindow(QMainWindow):
         self.worker.bad_file_prompt.connect(self._on_bad_file_prompt)
         self.worker.too_many_bad_files.connect(self._on_too_many_bad_files)
         self.worker.frames_filter_prompt.connect(self._on_frames_filter_prompt)
+        self.worker.trail_count_update.connect(self._on_trail_count_update)
+        self._trail_counter_label.setText("0 trails removed")
+        self._trail_counter_label.setStyleSheet(
+            f"font-size: 22px; font-weight: bold; color: {MUTED_TEXT};"
+        )
         self.worker.start()
+        self._set_updates_run_state(True)
 
     def _cancel_run(self):
         if self.worker and self.worker.isRunning():
@@ -2969,10 +3021,17 @@ class MainWindow(QMainWindow):
         self._jpeg_quality.setEnabled(is_jpg)
         self._jpeg_quality_label.setEnabled(is_jpg)
 
+    def _on_trail_count_update(self, count):
+        self._trail_counter_label.setText(f"{count:,} trails removed")
+
     def _on_stats_ready(self, total_trails, total_frames):
         # Capture for the run-summary file and the run-complete dialog.
         self._run_total_trails = total_trails
         self._run_total_frames = total_frames
+        color = SUCCESS_TEXT if total_trails > 0 else MUTED_TEXT
+        self._trail_counter_label.setStyleSheet(
+            f"font-size: 22px; font-weight: bold; color: {color};"
+        )
         if total_trails <= 0:
             self._stats_trail_line = (
                 f"Sky was clean — no airplane or satellite trails found<br>"
@@ -3547,6 +3606,7 @@ class MainWindow(QMainWindow):
     def _on_finished(self):
         self._stop_elapsed_timer()
         self._switch_to_back_btn()
+        self._set_updates_run_state(False)
 
     def closeEvent(self, event):
         """Save window size and clean up worker thread before closing."""
