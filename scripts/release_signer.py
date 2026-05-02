@@ -147,6 +147,37 @@ def list_existing_deltas(archive_dir):
     return set(p.name for p in archive_dir.glob("*.delta"))
 
 
+def rename_deltas_with_platform_prefix(archive_dir, platform, new_delta_names):
+    """generate_appcast names deltas after the bundle's CFBundleName, which is
+    "StarTrailCleanR" for both Mac architectures. That collides on the GitHub
+    release (same filename, different content). Rename the new deltas to embed
+    the platform key so they upload cleanly. Returns a list of (old_name,
+    new_path) so the caller can rewrite the appcast XML."""
+    pairs = []
+    for old_name in new_delta_names:
+        new_name = f"{platform['archive_stem']}-{old_name.removeprefix('StarTrailCleanR')}"
+        # Prefix doesn't drop "StarTrailCleanR" cleanly when the archive_stem
+        # already starts with it, so guard: archive_stem already begins with
+        # the brand, removing it from old_name avoids "StarTrailCleanR-Mac-AppleSilicon-StarTrailCleanR..." duplication.
+        old = archive_dir / old_name
+        new = archive_dir / new_name
+        if old != new:
+            old.rename(new)
+        pairs.append((old_name, new_name, new))
+    return pairs
+
+
+def update_xml_delta_filenames(xml_text, renames):
+    """Patch the appcast XML so each delta enclosure URL uses the new filename.
+    `renames` is the list of (old_name, new_name, _path) tuples returned by
+    rename_deltas_with_platform_prefix."""
+    for old_name, new_name, _ in renames:
+        # generate_appcast inlines the filename right after the URL prefix,
+        # so a plain string replace is sufficient and unambiguous.
+        xml_text = xml_text.replace(old_name, new_name)
+    return xml_text
+
+
 def run_generate_appcast(archive_dir):
     run([
         str(GENERATE_APPCAST),
@@ -345,16 +376,17 @@ def main():
             run_generate_appcast(archive_dir)
             deltas_after = list_existing_deltas(archive_dir)
             new_delta_names = sorted(deltas_after - deltas_before)
-            new_deltas = [archive_dir / name for name in new_delta_names]
-            if new_deltas:
-                print(f"  generated {len(new_deltas)} delta file(s):")
-                for d in new_deltas:
-                    size_mb = d.stat().st_size / (1024 * 1024)
-                    print(f"    {d.name} ({size_mb:.1f} MB)")
-            all_new_deltas.extend(new_deltas)
+            renames = rename_deltas_with_platform_prefix(archive_dir, platform, new_delta_names)
+            if renames:
+                print(f"  generated {len(renames)} delta file(s):")
+                for _, new_name, path in renames:
+                    size_mb = path.stat().st_size / (1024 * 1024)
+                    print(f"    {new_name} ({size_mb:.1f} MB)")
+            all_new_deltas.extend(path for _, _, path in renames)
             xml_path = archive_dir / platform["appcast"]
             raw_xml = xml_path.read_text()
-            cooked_xml = post_process_appcast_xml(raw_xml, args.tag, short)
+            renamed_xml = update_xml_delta_filenames(raw_xml, renames)
+            cooked_xml = post_process_appcast_xml(renamed_xml, args.tag, short)
         else:
             # Windows: sign manually, splice item into the existing appcast.
             artifact_path = artifacts / platform["release_filename"]

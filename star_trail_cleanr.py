@@ -1856,9 +1856,9 @@ class MainWindow(QMainWindow):
         """Close and reopen the app."""
         import subprocess
         if getattr(sys, 'frozen', False):
-            subprocess.Popen([sys.executable])
+            subprocess.Popen([sys.executable, '--cleanr-relaunch'])
         else:
-            subprocess.Popen([sys.executable, os.path.abspath(__file__)])
+            subprocess.Popen([sys.executable, os.path.abspath(__file__), '--cleanr-relaunch'])
         self.close()
 
     # ── Setup page ───────────────────────────────────────────────────────────
@@ -2904,10 +2904,17 @@ class MainWindow(QMainWindow):
         self._jpeg_quality_label.setEnabled(is_jpg)
 
     def _on_stats_ready(self, total_trails, total_frames):
-        # Capture for the run-summary file even on zero-trail runs.
+        # Capture for the run-summary file and the run-complete dialog.
         self._run_total_trails = total_trails
         self._run_total_frames = total_frames
         if total_trails <= 0:
+            self._stats_trail_line = (
+                f"Sky was clean — no airplane or satellite trails found<br>"
+                f"in your <b>{total_frames:,}</b> frames.<br><br>"
+                f"<b>Time to stack!</b><br>"
+                f"Open the Cleaned Folder, then load the frames into your favorite "
+                f"stacker (StarStaX, Sequator, Photoshop, etc.) for the final composite."
+            )
             return
         SECONDS_PER_MANUAL_TRAIL = 20
         saved_sec = total_trails * SECONDS_PER_MANUAL_TRAIL
@@ -3136,10 +3143,9 @@ class MainWindow(QMainWindow):
         self._update_open_btn_state()
         self._switch_to_back_btn()
         self._write_run_summary()
-        # Show the run-complete dialog if there's anything to celebrate
-        # (i.e. trails were swept). Zero-trail runs skip the popup.
-        if getattr(self, '_run_total_trails', 0) > 0:
-            self._show_run_complete_dialog()
+        # Run-complete dialog fires for every finished run, including
+        # zero-trail runs (the dialog message branches on trail count).
+        self._show_run_complete_dialog()
 
     def _show_run_complete_dialog(self):
         """Centered modal showing run summary. Replaces the old inline card
@@ -3676,10 +3682,14 @@ if __name__ == '__main__':
     if _screen:
         _g = _screen.availableGeometry()
         _splash.move(_g.x() + (_g.width() - 600) // 2, _g.y() + (_g.height() - 338) // 2)
-    _splash.show()
-    app.processEvents()
     import time as _time
-    _splash_shown_at = _time.monotonic()
+    _cleanr_relaunch = '--cleanr-relaunch' in sys.argv
+    if _cleanr_relaunch:
+        _splash_shown_at = 0.0
+    else:
+        _splash.show()
+        app.processEvents()
+        _splash_shown_at = _time.monotonic()
 
     # First-run crash-reporting opt-in. Asked once; choice persists in
     # QSettings. Only shown when a DSN is actually present (CI builds), so
