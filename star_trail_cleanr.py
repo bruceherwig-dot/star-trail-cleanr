@@ -918,10 +918,15 @@ class CleanerWorker(QThread):
                         continue
 
                     # Parse stat lines emitted by astro_clean_v5
+                    if proc_line.startswith("FRAME_TRAIL_COUNT:"):
+                        try:
+                            self.trail_count_update.emit(total_trails_run + int(proc_line.split(":", 1)[1].strip()))
+                        except ValueError:
+                            pass
+                        continue
                     if proc_line.startswith("BATCH_TRAIL_COUNT:"):
                         try:
                             total_trails_run += int(proc_line.split(":", 1)[1].strip())
-                            self.trail_count_update.emit(total_trails_run)
                         except ValueError:
                             pass
                         continue
@@ -1425,6 +1430,7 @@ class MainWindow(QMainWindow):
             f"QPushButton {{ background-color: {SECONDARY_BTN_BG}; color: white; "
             f"font-size: 15px; font-weight: bold; border-radius: 6px; border: none; }}"
             f"QPushButton:hover {{ background-color: {DISABLED_BTN_HOVER}; }}"
+            f"QPushButton:disabled {{ background-color: {DISABLED_BTN_BG}; color: {MUTED_TEXT}; }}"
         )
         check_btn.clicked.connect(self._on_check_for_updates)
         self._check_updates_btn = check_btn
@@ -2860,9 +2866,9 @@ class MainWindow(QMainWindow):
         self.worker.too_many_bad_files.connect(self._on_too_many_bad_files)
         self.worker.frames_filter_prompt.connect(self._on_frames_filter_prompt)
         self.worker.trail_count_update.connect(self._on_trail_count_update)
-        self._trail_counter_label.setText("0 trails removed")
+        self._trail_counter_label.setText("0 Trails Detected")
         self._trail_counter_label.setStyleSheet(
-            f"font-size: 22px; font-weight: bold; color: {MUTED_TEXT};"
+            "font-size: 22px; font-weight: bold; color: #5b9bd5;"
         )
         self.worker.start()
         self._set_updates_run_state(True)
@@ -3022,7 +3028,7 @@ class MainWindow(QMainWindow):
         self._jpeg_quality_label.setEnabled(is_jpg)
 
     def _on_trail_count_update(self, count):
-        self._trail_counter_label.setText(f"{count:,} trails removed")
+        self._trail_counter_label.setText(f"{count:,} Trails Detected")
 
     def _on_stats_ready(self, total_trails, total_frames):
         # Capture for the run-summary file and the run-complete dialog.
@@ -3458,6 +3464,59 @@ class MainWindow(QMainWindow):
         tile_val = 640
         overlap_val = 0.2
 
+        # Read EXIF from the first image in the input folder.
+        def _read_exif_summary(folder):
+            from PIL import Image as _PILImage
+            from PIL.ExifTags import TAGS
+            exts = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
+            first = next(
+                (p for p in sorted(os.listdir(folder))
+                 if os.path.splitext(p)[1].lower() in exts),
+                None
+            )
+            fields = {
+                "camera": "Unknown",
+                "lens":   "Unknown",
+                "taken":  "Unknown",
+                "fstop":  "Unknown",
+                "iso":    "Unknown",
+            }
+            if first is None:
+                return fields
+            try:
+                with _PILImage.open(os.path.join(folder, first)) as _im:
+                    raw = _im.getexif()
+                if not raw:
+                    return fields
+                tag_map = {TAGS.get(k, k): v for k, v in raw.items()}
+                # Photographic fields live in the EXIF sub-IFD, not the main IFD.
+                sub_map = {TAGS.get(k, k): v for k, v in raw.get_ifd(0x8769).items()}
+                make  = str(tag_map.get("Make",  "")).strip()
+                model = str(tag_map.get("Model", "")).strip()
+                if make or model:
+                    if make and model.startswith(make):
+                        fields["camera"] = model
+                    else:
+                        fields["camera"] = f"{make} {model}".strip() or "Unknown"
+                lens = str(sub_map.get("LensModel", "")).strip()
+                fields["lens"] = lens or "Unknown"
+                taken = str(sub_map.get("DateTimeOriginal", "")).strip()
+                fields["taken"] = taken or "Unknown"
+                fnum = sub_map.get("FNumber")
+                if fnum is not None:
+                    try:
+                        fields["fstop"] = f"f/{float(fnum):.1f}"
+                    except Exception:
+                        fields["fstop"] = str(fnum)
+                iso = sub_map.get("ISOSpeedRatings")
+                if iso is not None:
+                    fields["iso"] = str(iso)
+            except Exception:
+                pass
+            return fields
+
+        exif = _read_exif_summary(input_folder)
+
         lines = [
             "================================================",
             "  Star Trail CleanR",
@@ -3473,6 +3532,13 @@ class MainWindow(QMainWindow):
             "",
             f"App version:           Beta v{VERSION}",
             f"Trail Detector:        {detector}",
+            "",
+            "Camera Info",
+            f"  Camera:              {exif['camera']}",
+            f"  Lens:                {exif['lens']}",
+            f"  Date/Time taken:     {exif['taken']}",
+            f"  F-stop:              {exif['fstop']}",
+            f"  ISO:                 {exif['iso']}",
             "",
             "Input folder:",
             f"  {input_folder}",
@@ -3573,7 +3639,7 @@ class MainWindow(QMainWindow):
         workspace = os.path.join(input_folder, WORKSPACE_DIR)
         try:
             os.makedirs(workspace, exist_ok=True)
-            fname = f"run_summary_{start.strftime('%Y-%m-%d_%H-%M-%S')}.txt"
+            fname = f"star_trail_cleanr_log_{start.strftime('%Y-%m-%d_%H-%M-%S')}.txt"
             with open(os.path.join(workspace, fname), 'w', encoding='utf-8') as f:
                 f.write('\n'.join(lines) + '\n')
         except OSError:

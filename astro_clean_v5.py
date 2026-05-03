@@ -384,8 +384,14 @@ def main():
         from PIL import Image as _PILImage
         with _PILImage.open(str(frame_files_all[core_start])) as _meta_im:
             icc_profile = _meta_im.info.get("icc_profile")
-            exif_bytes = _meta_im.info.get("exif")
             dpi = _meta_im.info.get("dpi")
+            # info.get("exif") works for JPEGs but returns None for TIFFs.
+            # getexif().tobytes() works for both formats.
+            try:
+                _exif_obj = _meta_im.getexif()
+                exif_bytes = _exif_obj.tobytes() if _exif_obj else None
+            except Exception:
+                exif_bytes = _meta_im.info.get("exif")
     except Exception as _e:
         print(f"  WARN: could not read color profile ({_e})")
 
@@ -580,6 +586,7 @@ def main():
     model = load_model(str(args.model), args.confidence, args.device)
 
     masks_all = []
+    running_trail_total = 0
     for i, fp in enumerate(frame_files_all):
         mask = detect_frame(model, frames_8bit_all[i], args.tile_size,
                             args.overlap, args.dilate)
@@ -606,6 +613,8 @@ def main():
         else:
             core_num = i - core_start + 1
             print(f"  detecting {core_num}/{n}: {fp.name} - {trail_label}", flush=True)
+            running_trail_total += trail_count
+            print(f"FRAME_TRAIL_COUNT: {running_trail_total}", flush=True)
 
     masks_per_frame = masks_all[core_start:core_end]
     trail_frames = sum(1 for m in masks_per_frame if m.max() > 0)
