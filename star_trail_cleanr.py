@@ -2755,6 +2755,31 @@ class MainWindow(QMainWindow):
             )
             return None
 
+        # Pre-flight mask check: if a mask was saved but can't be read now,
+        # ask the user whether to proceed without it rather than crashing mid-run.
+        if self._mask_path:
+            try:
+                import cv2 as _cv2
+                _test = _cv2.imread(self._mask_path, _cv2.IMREAD_GRAYSCALE)
+            except Exception:
+                _test = None
+            if _test is None:
+                from PySide6.QtWidgets import QMessageBox as _QMB
+                resp = _QMB.warning(
+                    self,
+                    "Saved mask can't be opened",
+                    "The saved foreground mask couldn't be read:\n\n"
+                    f"{self._mask_path}\n\n"
+                    "The file may be corrupted or missing. "
+                    "Proceed without the mask (trails in the foreground area may be flagged), "
+                    "or cancel and re-draw it.",
+                    _QMB.Ok | _QMB.Cancel,
+                    _QMB.Cancel,
+                )
+                if resp == _QMB.Cancel:
+                    return None
+                self._mask_path = None
+
         self._error_label.setText("")
         return folder, output
 

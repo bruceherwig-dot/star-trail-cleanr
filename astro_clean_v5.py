@@ -358,10 +358,10 @@ def main():
     if args.foreground_mask:
         fg_mask = robust_imread(args.foreground_mask, cv2.IMREAD_GRAYSCALE)
         if fg_mask is None:
-            print(f"ERROR: cannot load foreground mask: {args.foreground_mask}")
-            sys.exit(1)
-        sky_mask = cv2.bitwise_not(fg_mask)
-        print(f"  Applying sky mask")
+            print(f"  WARN: foreground mask could not be loaded - continuing without it: {args.foreground_mask}")
+        else:
+            sky_mask = cv2.bitwise_not(fg_mask)
+            print(f"  Applying sky mask")
 
     # ── Load frames ───────────────────────────────────────────────────────
     frame_files_all, core_start, core_end = load_with_neighbors(
