@@ -2,6 +2,15 @@
 
 ---
 
+## v2.07-beta
+- **Trail counter now updates live during detection.** The trails-detected count on the Run page now ticks up frame by frame as the AI scans each image, instead of jumping at the end of each batch after repair. The counter shows in blue while the run is active and turns green when the run finishes.
+- **Run log renamed and expanded.** The file saved to your `cleanr_workspace` folder after each run is now named `star_trail_cleanr_log_date_time.txt` (previously `run_summary_...`). It now includes a Camera Info section near the top — camera make and model, lens, date and time the sequence was shot, f-stop, and ISO — pulled automatically from your image files' EXIF metadata.
+- **TIFF output now carries full camera metadata.** When cleaning TIFF source files and saving as JPEG or TIFF, the output now correctly inherits the original camera data (make, model, lens, exposure, GPS, etc.). A gap in how the app read EXIF from TIFF files meant this metadata was being lost on TIFF inputs; JPEG inputs were unaffected.
+- **Crash fix: corrupt or missing mask file no longer kills the run.** One tester's run failed immediately on batch 1 with no useful error message because a foreground mask file had become unreadable since it was saved. The app now catches this before the run starts and shows a clear dialog: proceed without the mask, or cancel and re-draw it.
+- **Settings tab: Compute Device section.** A new section in the Settings tab shows what the AI trail detector is running on — Apple MPS on Apple Silicon Macs, NVIDIA CUDA on the GPU build, or CPU otherwise. Lets you confirm at a glance that GPU acceleration is active.
+- **NVIDIA GPU detected: upgrade path now built in.** Warren Hatch confirmed the NVIDIA-Accelerated Build cuts processing time in half on large files. When the app detects an NVIDIA GPU on Windows but you're running the standard build, a Download button now appears in Settings (and in the startup banner) linking directly to the NVIDIA-Accelerated Build. The banner text has been updated to reflect this — it no longer says "coming in a future update."
+- **Smoke tests:** 132 passing.
+
 ## v2.06-beta
 - **Settings tab.** A new Settings tab sits between FAQ and About. The first setting is a "Check for Updates" button that triggers the native update dialog on Mac and Windows (or opens the website on Linux). GPU settings will be added here in a future release.
 - **Run summary always fires.** Running a clean batch with no trails found used to produce no end-of-run popup. Now the summary appears regardless.
