@@ -93,6 +93,8 @@ BRAND_QUIT_RED        = "#d93025"
 BRAND_QUIT_RED_HOVER  = "#b8271b"
 BRAND_NOTICE_ORANGE   = "#e68a00"   # update banner, model card, NVIDIA banner
 BRAND_NOTICE_HOVER    = "#fdf6e3"
+# Updated to specific GPU installer URL when the NVIDIA-Accelerated Build ships.
+_GPU_BUILD_URL = "https://github.com/bruceherwig-dot/star-trail-cleanr/releases"
 BRAND_SUPPORT_BG      = "#d0e4f5"
 BRAND_SUPPORT_FG      = "#1a3a5c"
 BRAND_SUPPORT_BORDER  = "#a0c4e0"
@@ -1139,6 +1141,18 @@ class NvidiaDetectThread(QThread):
         self.result_ready.emit(outcome, detail)
 
 
+class BestDeviceThread(QThread):
+    """Background torch device detection. Emits 'cuda', 'mps', or 'cpu'."""
+    result_ready = Signal(str)
+
+    def run(self):
+        try:
+            from modules.detect_trails import best_device
+            self.result_ready.emit(best_device())
+        except Exception:
+            self.result_ready.emit("cpu")
+
+
 class ModelDownloadThread(QThread):
     """Streams a model file into the user folder. Atomic via temp-then-rename.
 
@@ -1239,6 +1253,8 @@ class MainWindow(QMainWindow):
         self.worker = None
         self._mask_path = None
         self._mask_window = None
+        self._nvidia_outcome = None
+        self._compute_device = None
 
         # Main stacked widget: page 0 = setup, page 1 = processing
         self._stack = QStackedWidget()
@@ -1416,7 +1432,7 @@ class MainWindow(QMainWindow):
         <html><body style='font-family: Inter, -apple-system, Segoe UI, sans-serif; line-height: 1.5; margin:0; padding:0; color:{BROWSER_TEXT}; background-color:{BROWSER_BG};'>
         <p style='margin:0; padding:0; line-height:0; font-size:1px; height:0;'></p>
         <h2 style='color:{BRAND_HEADING_BLUE}; margin-top:0; margin-bottom:2px;'>Updates</h2>
-        <p style='margin-top:2px;'>Star Trail CleanR checks for updates automatically. Use this to check right now.</p>
+        <p style='margin-top:2px;'>Star Trail CleanR checks for a new version every time you open it. Use this to check right now.</p>
         </body></html>
         """)
         browser.setFixedHeight(90)
@@ -1449,7 +1465,69 @@ class MainWindow(QMainWindow):
         layout.addSpacing(4)
         layout.addLayout(btn_row)
 
-        # GPU settings will be added here in a future release.
+        layout.addSpacing(24)
+
+        compute_browser = QTextBrowser()
+        compute_browser.setOpenExternalLinks(False)
+        compute_browser.document().setDocumentMargin(20)
+        compute_browser.setStyleSheet(
+            f"QTextBrowser {{ background: {BROWSER_BG}; color: {BROWSER_TEXT}; border: none; font-size: 15px; }}"
+        )
+        compute_browser.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        compute_browser.setHtml(f"""
+        <html><body style='font-family: Inter, -apple-system, Segoe UI, sans-serif; line-height: 1.5; margin:0; padding:0; color:{BROWSER_TEXT}; background-color:{BROWSER_BG};'>
+        <p style='margin:0; padding:0; line-height:0; font-size:1px; height:0;'></p>
+        <h2 style='color:{BRAND_HEADING_BLUE}; margin-top:0; margin-bottom:2px;'>Compute Device</h2>
+        <p style='margin-top:2px;'>What Star Trail CleanR is using to run the AI trail detector on this machine.</p>
+        </body></html>
+        """)
+        compute_browser.setFixedHeight(90)
+        layout.addWidget(compute_browser)
+
+        compute_status = QLabel("Detecting...")
+        compute_status.setStyleSheet(f"color: {MUTED_TEXT}; font-size: 14px; margin-left: 20px;")
+        compute_status.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._compute_status_label = compute_status
+        layout.addSpacing(4)
+        layout.addWidget(compute_status)
+
+        gpu_upgrade_browser = QTextBrowser()
+        gpu_upgrade_browser.setOpenExternalLinks(False)
+        gpu_upgrade_browser.document().setDocumentMargin(20)
+        gpu_upgrade_browser.setStyleSheet(
+            f"QTextBrowser {{ background: {BROWSER_BG}; color: {BROWSER_TEXT}; border: none; font-size: 15px; }}"
+        )
+        gpu_upgrade_browser.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        gpu_upgrade_browser.setHtml(f"""
+        <html><body style='font-family: Inter, -apple-system, Segoe UI, sans-serif; line-height: 1.5; margin:0; padding:0; color:{BROWSER_TEXT}; background-color:{BROWSER_BG};'>
+        <p style='margin-top:8px;'>An NVIDIA GPU is available. The NVIDIA-Accelerated Build runs the trail detector on your GPU for significantly faster processing.</p>
+        </body></html>
+        """)
+        gpu_upgrade_browser.setFixedHeight(68)
+        gpu_upgrade_browser.setVisible(False)
+        self._gpu_upgrade_browser = gpu_upgrade_browser
+        layout.addSpacing(4)
+        layout.addWidget(gpu_upgrade_browser)
+
+        gpu_btn = QPushButton("Download NVIDIA-Accelerated Build")
+        gpu_btn.setFixedHeight(40)
+        gpu_btn.setFixedWidth(300)
+        gpu_btn.setCursor(Qt.PointingHandCursor)
+        gpu_btn.setStyleSheet(
+            f"QPushButton {{ background-color: {SECONDARY_BTN_BG}; color: white; "
+            f"font-size: 15px; font-weight: bold; border-radius: 6px; border: none; }}"
+            f"QPushButton:hover {{ background-color: {DISABLED_BTN_HOVER}; }}"
+        )
+        gpu_btn.clicked.connect(self._on_nvidia_download_clicked)
+        gpu_btn.setVisible(False)
+        self._gpu_download_btn = gpu_btn
+
+        gpu_btn_row = QHBoxLayout()
+        gpu_btn_row.setContentsMargins(20, 0, 0, 0)
+        gpu_btn_row.addWidget(gpu_btn)
+        gpu_btn_row.addStretch()
+        layout.addSpacing(4)
+        layout.addLayout(gpu_btn_row)
 
         layout.addStretch()
         return wrap
@@ -1910,7 +1988,7 @@ class MainWindow(QMainWindow):
         layout.setSpacing(12)
 
         self._nvidia_label = QLabel(
-            "NVIDIA GPU detected. Full GPU support is coming in a future update."
+            "NVIDIA GPU detected. Download the NVIDIA-Accelerated Build for faster processing."
         )
         self._nvidia_label.setStyleSheet(
             "color: white; font-size: 14px; font-weight: bold; background: transparent;"
@@ -1918,34 +1996,83 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._nvidia_label)
         layout.addStretch()
 
-        gotit_btn = QPushButton("Got it")
-        gotit_btn.setFixedHeight(28)
-        gotit_btn.setStyleSheet(
+        download_btn = QPushButton("Download")
+        download_btn.setFixedHeight(28)
+        download_btn.setStyleSheet(
             f"QPushButton {{ background-color: white; color: {BRAND_NOTICE_ORANGE}; font-size: 13px; "
             f"font-weight: bold; border-radius: 4px; padding: 0 16px; border: none; }}"
             f"QPushButton:hover {{ background-color: {BRAND_NOTICE_HOVER}; }}"
         )
-        gotit_btn.clicked.connect(self._on_nvidia_gotit_clicked)
-        layout.addWidget(gotit_btn)
+        download_btn.clicked.connect(self._on_nvidia_download_clicked)
+        layout.addWidget(download_btn)
+
+        later_btn = QPushButton("Later")
+        later_btn.setFixedHeight(28)
+        later_btn.setStyleSheet(
+            f"QPushButton {{ background-color: transparent; color: white; font-size: 13px; "
+            f"border-radius: 4px; padding: 0 12px; border: 1px solid white; }}"
+            f"QPushButton:hover {{ background-color: rgba(255,255,255,0.15); }}"
+        )
+        later_btn.clicked.connect(self._on_nvidia_later_clicked)
+        layout.addWidget(later_btn)
 
         self._nvidia_banner = banner
         return banner
 
     def _start_nvidia_detect(self):
-        if SETTINGS.value("nvidia_coming_soon_dismissed", False, type=bool):
-            return
         self._nvidia_thread = NvidiaDetectThread(self)
         self._nvidia_thread.result_ready.connect(self._on_nvidia_detect_result)
         self._nvidia_thread.start()
+        self._best_device_thread = BestDeviceThread(self)
+        self._best_device_thread.result_ready.connect(self._on_best_device_result)
+        self._best_device_thread.start()
 
     def _on_nvidia_detect_result(self, outcome, detail):
         print(f"[nvidia-detect] outcome={outcome} detail={detail}", flush=True)
-        if outcome == "yes":
+        self._nvidia_outcome = outcome
+        if outcome == "yes" and not SETTINGS.value("nvidia_banner_dismissed", False, type=bool):
             self._nvidia_banner.setVisible(True)
+        self._refresh_compute_section()
 
-    def _on_nvidia_gotit_clicked(self):
-        SETTINGS.setValue("nvidia_coming_soon_dismissed", True)
+    def _on_best_device_result(self, device):
+        self._compute_device = device
+        self._refresh_compute_section()
+
+    def _on_nvidia_download_clicked(self):
+        from PySide6.QtGui import QDesktopServices
+        from PySide6.QtCore import QUrl
+        QDesktopServices.openUrl(QUrl(_GPU_BUILD_URL))
+
+    def _on_nvidia_later_clicked(self):
+        SETTINGS.setValue("nvidia_banner_dismissed", True)
         self._nvidia_banner.setVisible(False)
+
+    def _refresh_compute_section(self):
+        if not hasattr(self, "_compute_status_label"):
+            return
+        import platform as _pl
+        device = self._compute_device
+        outcome = self._nvidia_outcome
+
+        if device == "mps":
+            status = "Apple MPS — GPU acceleration active"
+        elif device == "cuda":
+            status = "NVIDIA CUDA — GPU acceleration active"
+        elif device == "cpu" and outcome == "yes":
+            status = "CPU — NVIDIA GPU detected but standard build is running"
+        elif device == "cpu":
+            status = "CPU — no GPU acceleration"
+        else:
+            return
+
+        self._compute_status_label.setText(status)
+        show_upgrade = (
+            _pl.system() == "Windows"
+            and outcome == "yes"
+            and device == "cpu"
+        )
+        self._gpu_upgrade_browser.setVisible(show_upgrade)
+        self._gpu_download_btn.setVisible(show_upgrade)
 
     def _relaunch(self):
         """Close and reopen the app."""
@@ -3511,11 +3638,11 @@ class MainWindow(QMainWindow):
             try:
                 with _PILImage.open(os.path.join(folder, first)) as _im:
                     raw = _im.getexif()
-                if not raw:
-                    return fields
-                tag_map = {TAGS.get(k, k): v for k, v in raw.items()}
-                # Photographic fields live in the EXIF sub-IFD, not the main IFD.
-                sub_map = {TAGS.get(k, k): v for k, v in raw.get_ifd(0x8769).items()}
+                    if not raw:
+                        return fields
+                    tag_map = {TAGS.get(k, k): v for k, v in raw.items()}
+                    # get_ifd() must be called while the file is still open.
+                    sub_map = {TAGS.get(k, k): v for k, v in raw.get_ifd(0x8769).items()}
                 make  = str(tag_map.get("Make",  "")).strip()
                 model = str(tag_map.get("Model", "")).strip()
                 if make or model:
