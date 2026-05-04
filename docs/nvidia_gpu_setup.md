@@ -2,91 +2,108 @@
 
 **Status: experimental.** This procedure has not yet been verified on a real Windows + NVIDIA machine. You are the first guinea pig. The "Roll back" section at the bottom puts your install back to CPU mode safely if anything breaks. Please email me how it went either way.
 
-By default Star Trail CleanR ships with the CPU-only build of PyTorch to keep the installer small. This guide replaces it with the NVIDIA / CUDA build so the trail detector runs on your GPU instead of your CPU. Expected speedup is roughly 5-10x on modern NVIDIA cards.
-
-These instructions are for Star Trail CleanR **v2.04-beta** (which uses PyTorch 2.11.0 and torchvision 0.26.0 internally). If you are on a different version, the file paths and the exact wheels to download may differ — email me first.
+By default Star Trail CleanR ships with the CPU-only build of PyTorch to keep the installer small. This guide sets up a permanent GPU pack in a folder that Star Trail CleanR updates never touch. You do this once, and every future update continues to use your GPU automatically.
 
 ## What you need
 
 - **NVIDIA GPU.** Any RTX card, or GTX 10-series and newer.
 - **NVIDIA driver** version 525 or newer. Run `nvidia-smi` from a Command Prompt to check; if the command isn't found, install the latest "Game Ready" driver from nvidia.com first.
 - **Windows 10 or 11**, 64-bit.
-- **Star Trail CleanR v2.04-beta installed.** Note where you installed it. The installer's default is `C:\Program Files\Star Trail CleanR\` but the user-mode default is `%LOCALAPPDATA%\Programs\StarTrailCleanR\`. The instructions below say "your install folder" — replace with whichever you used.
-- **Admin rights** if you installed into Program Files. Not needed if installed into LocalAppData.
+- **Star Trail CleanR installed.**
 - **About 4 GB free disk space.**
 - **A tool that can extract `.whl` files.** A `.whl` (Python wheel) is just a renamed zip. 7-Zip or WinRAR work fine.
 
-## Step 1: Download the two CUDA wheels
+## Step 1: Find out which PyTorch version this release expects
 
-Click each link to download. Both are official PyTorch builds from pytorch.org.
+Open your Star Trail CleanR install folder in Windows Explorer. The default locations are:
+- `C:\Program Files\StarTrailCleanR\` (if you installed for all users)
+- `%LOCALAPPDATA%\Programs\StarTrailCleanR\` (user-only install, the default)
 
-- **torch 2.11.0 + CUDA 12.8** (~2.6 GB):
-  https://download.pytorch.org/whl/cu128/torch-2.11.0%2Bcu128-cp311-cp311-win_amd64.whl
+Inside the install folder, open `_internal\stc_expected_torch_version.txt`. It contains a single line like `2.8.0`. That number is the PyTorch version you need to match when downloading the CUDA wheel in Step 2.
 
-- **torchvision 0.26.0 + CUDA 12.8** (~9 MB):
-  https://download.pytorch.org/whl/cu128/torchvision-0.26.0%2Bcu128-cp311-cp311-win_amd64.whl
+## Step 2: Download the two CUDA wheels
 
-(If your driver is too old for CUDA 12.8, swap `cu128` for `cu126` in both URLs to use CUDA 12.6 instead.)
+Use the version number from Step 1 to build the download URLs. Replace `X.Y.Z` with your version number and pick a CUDA suffix based on your driver:
 
-## Step 2: Quit Star Trail CleanR
+- CUDA 12.8 (driver 520+, recommended): use `cu128`
+- CUDA 12.6 (driver 520+): use `cu126`
+- CUDA 11.8 (older cards, driver 450+): use `cu118`
 
-Make sure the app is fully closed. Open Task Manager (Ctrl+Shift+Esc), look for any `StarTrailCleanR.exe` or related processes, end them. Files inside an open app cannot be replaced.
+Download both wheels from pytorch.org (replace `X.Y.Z` and `cuXXX` with your values):
 
-## Step 3: Extract the wheels
+- **torch**: `https://download.pytorch.org/whl/cuXXX/torch-X.Y.Z%2BcuXXX-cp311-cp311-win_amd64.whl`
+- **torchvision**: `https://download.pytorch.org/whl/cuXXX/torchvision-0.Y.Z%2BcuXXX-cp311-cp311-win_amd64.whl`
 
-Right-click each `.whl` file and "Extract" with 7-Zip or your tool of choice. (If your tool refuses to open `.whl`, rename the file extension to `.zip` first.)
+(torchvision's minor version tracks torch's — if torch is 2.8.0, torchvision is 0.23.0. The PyTorch website's "install" page lists the exact matching pair for any given release.)
 
-After extracting `torch-2.11.0+cu128-cp311-cp311-win_amd64.whl` you'll get a folder structure like:
+## Step 3: Quit Star Trail CleanR
+
+Make sure the app is fully closed before continuing.
+
+## Step 4: Create the GPU pack folder
+
+Open Windows Explorer and navigate to:
+
 ```
-torch/                       (this is one of the folders you need)
-torch-2.11.0+cu128.dist-info/    (the matching dist-info)
-... possibly other folders like torchgen/, functorch/ — copy those too if present
+%LOCALAPPDATA%\StarTrailCleanR\
 ```
 
-After extracting torchvision's wheel:
+Create a new folder called `gpu_override` inside it. The full path should be:
+
 ```
-torchvision/
-torchvision-0.26.0+cu128.dist-info/
+%LOCALAPPDATA%\StarTrailCleanR\gpu_override\
 ```
 
-## Step 4: Back up the existing CPU folders
+Star Trail CleanR updates never write to this location, so your GPU files are safe across every future update.
 
-In your install folder's `_internal` directory (e.g., `C:\Program Files\Star Trail CleanR\_internal\`), **rename** these four items rather than deleting them:
+## Step 5: Extract the wheels into the GPU pack folder
 
-- `torch` → `torch.cpu.bak`
-- `torch-2.11.0.dist-info` → `torch-2.11.0.dist-info.cpu.bak`
-- `torchvision` → `torchvision.cpu.bak`
-- `torchvision-0.26.0.dist-info` → `torchvision-0.26.0.dist-info.cpu.bak`
+Right-click each `.whl` file and extract with 7-Zip or your tool of choice. (If your tool refuses, rename the `.whl` extension to `.zip` first.)
 
-Renaming instead of deleting means you can roll back instantly if anything goes wrong.
+From the extracted `torch` wheel, copy these folders into `gpu_override\`:
+- `torch\`
+- `torch-X.Y.Z+cuXXX.dist-info\`
+- Any other top-level folders present (e.g., `torchgen\`, `functorch\`)
 
-## Step 5: Copy the CUDA folders in
+From the extracted `torchvision` wheel, copy:
+- `torchvision\`
+- `torchvision-0.Y.Z+cuXXX.dist-info\`
 
-From the extracted wheels (Step 3), copy the folders into `_internal`:
+## Step 6: Create the version marker file
 
-- `torch/` → `_internal\torch\`
-- `torch-2.11.0+cu128.dist-info/` → `_internal\torch-2.11.0+cu128.dist-info\`
-- `torchvision/` → `_internal\torchvision\`
-- `torchvision-0.26.0+cu128.dist-info/` → `_internal\torchvision-0.26.0+cu128.dist-info\`
+In the `gpu_override\` folder, create a plain text file named exactly:
 
-If Windows asks for admin rights, allow.
+```
+torch_version.txt
+```
 
-## Step 6: Launch Star Trail CleanR
+Open it in Notepad and type the full version string of the torch wheel you downloaded — including the CUDA suffix. For example:
 
-Open the app the normal way. If the swap worked, your runs should be noticeably faster. There is no GUI indicator yet that says "GPU active" (it's on the to-do list). For now, the test is:
+```
+2.8.0+cu128
+```
 
-- Run a small batch (say, 20 frames) before the swap and note the time.
-- Run the same batch after the swap. If it's 5-10x faster, the GPU is working.
+Save and close. This file is how Star Trail CleanR knows your GPU pack matches this release. If you update to a new Star Trail CleanR version that uses a different PyTorch version, the app will detect the mismatch, fall back to CPU, and show a message in Settings telling you to reinstall the GPU pack.
+
+## Step 7: Launch Star Trail CleanR
+
+Open the app the normal way. If the swap worked, your runs should be noticeably faster. Open the **Settings** tab and look at the **Compute Device** section — it should read "NVIDIA CUDA — GPU acceleration active."
 
 You can also open Task Manager → Performance → GPU during a run and watch for activity on your NVIDIA card.
 
-## If something goes wrong — roll back to CPU
+## When Star Trail CleanR updates
+
+Nothing to do. The update installs into the app folder; it never touches `%LOCALAPPDATA%\StarTrailCleanR\gpu_override\`. Your GPU pack loads automatically after every update, as long as the PyTorch version hasn't changed.
+
+If the PyTorch version does change in a new release, the Settings tab will show: "GPU pack version mismatch — reinstall the GPU pack for this version." Repeat Steps 1–6 with the new version number to get back on GPU.
+
+## Roll back to CPU
 
 If the app crashes on launch, refuses to detect frames, or behaves weirdly:
 
 1. Quit Star Trail CleanR.
-2. In `_internal`, **delete** the four CUDA folders you just copied in.
-3. **Rename** the four `.cpu.bak` folders back to their original names (drop the `.cpu.bak` suffix).
+2. Open `%LOCALAPPDATA%\StarTrailCleanR\`.
+3. Rename `gpu_override` to `gpu_override.bak` (or delete it entirely).
 4. Launch the app. You're back to the CPU build, no harm done.
 
 ## Please report

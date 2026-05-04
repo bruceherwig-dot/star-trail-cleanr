@@ -121,6 +121,7 @@ cmd = [
     '--collect-all', 'ultralytics',
     '--collect-all', 'skimage',
     '--collect-all', 'tifffile',
+    '--runtime-hook', 'rthooks/pyi_rthook_gpu_override.py',
 ]
 # Force PyInstaller to exclude the same skip list at the module-analysis level,
 # not just the data-file walker. This stops transitive imports from pulling
@@ -527,6 +528,18 @@ if sys.platform == 'win32':
         print(f'\nWinSparkle.dll copied into bundle ({sz:.1f} MB)')
     else:
         print(f'\nWARNING: vendored WinSparkle.dll not found at {winsparkle_src}')
+
+    # Write the bundled torch version into _internal so the GPU override runtime
+    # hook can version-check a user's CUDA pack against the correct PyTorch build.
+    try:
+        import torch as _torch
+        _torch_ver = _torch.__version__
+        _ver_dest = os.path.join(dist_root, '_internal', 'stc_expected_torch_version.txt')
+        with open(_ver_dest, 'w') as _f:
+            _f.write(_torch_ver)
+        print(f'\nWrote stc_expected_torch_version.txt: {_torch_ver}')
+    except Exception as _e:
+        print(f'\nWARNING: could not write stc_expected_torch_version.txt: {_e}')
 
 after = dir_size_mb(os.path.join('dist'))
 print(f'\nAfter cleanup: {after:.1f} MB  (saved {before - after:.1f} MB)')

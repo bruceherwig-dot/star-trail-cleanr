@@ -2053,13 +2053,18 @@ class MainWindow(QMainWindow):
         import platform as _pl
         device = self._compute_device
         outcome = self._nvidia_outcome
+        gpu_mismatch = bool(os.environ.get('STC_GPU_VERSION_MISMATCH'))
 
         if device == "mps":
             status = "Apple MPS — GPU acceleration active"
         elif device == "cuda":
             status = "NVIDIA CUDA — GPU acceleration active"
+        elif device == "cpu" and outcome == "yes" and gpu_mismatch:
+            status = ("CPU — GPU pack version mismatch. "
+                      "Reinstall the GPU pack for this version of Star Trail CleanR "
+                      "to re-enable acceleration.")
         elif device == "cpu" and outcome == "yes":
-            status = "CPU — NVIDIA GPU detected but standard build is running"
+            status = "CPU — NVIDIA GPU detected. Install the GPU pack for faster processing."
         elif device == "cpu":
             status = "CPU — no GPU acceleration"
         else:
@@ -2070,6 +2075,7 @@ class MainWindow(QMainWindow):
             _pl.system() == "Windows"
             and outcome == "yes"
             and device == "cpu"
+            and not gpu_mismatch
         )
         self._gpu_upgrade_browser.setVisible(show_upgrade)
         self._gpu_download_btn.setVisible(show_upgrade)
