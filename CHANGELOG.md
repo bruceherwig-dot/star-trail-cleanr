@@ -2,6 +2,11 @@
 
 ---
 
+## v2.12-beta
+- **In-app GPU support installer (Windows).** When Star Trail CleanR detects an NVIDIA GPU and GPU support is not yet installed, a prompt appears offering to install it automatically. Clicking Install downloads approximately 3-4 GB from pytorch.org, extracts it into a permanent folder the app installer never touches, and asks you to restart. After restarting, the trail detector runs on your GPU automatically. This is a one-time setup — every future app update picks up GPU support without needing to reinstall it.
+- **Fix: GPU support button now works.** The "Install GPU Support" button in Settings (and the banner that appears when an NVIDIA GPU is detected) previously opened the GitHub releases page, which had no NVIDIA download on it. The button now launches the in-app installer described above.
+- **Smoke tests:** 132 passing.
+
 ## v2.11-beta
 - **Settings polish.** "Compute Device" renamed to "GPU Acceleration." "Second Scrub" renamed to "Second ScrubbeR" throughout Settings. "Trail Detector" updated to "Trail DetectoR" in the header, run log, and Settings.
 - **Second ScrubbeR trail count fix.** Trails found during the Second ScrubbeR pass are now included in the Trails Detected counter in the upper right. Previously only first-pass trails were counted.

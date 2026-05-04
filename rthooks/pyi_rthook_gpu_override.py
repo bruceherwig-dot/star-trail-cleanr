@@ -20,6 +20,13 @@ else:
                     _expected_ver = _f.read().strip().split('+')[0]
 
             if _expected_ver and _override_ver == _expected_ver:
+                # Tell Windows where to find the CUDA DLLs before any import
+                _torch_lib = os.path.join(_override_dir, 'torch', 'lib')
+                if os.path.isdir(_torch_lib):
+                    try:
+                        os.add_dll_directory(_torch_lib)
+                    except (AttributeError, OSError):
+                        pass
                 sys.path.insert(0, _override_dir)
             else:
                 os.environ['STC_GPU_VERSION_MISMATCH'] = '1'

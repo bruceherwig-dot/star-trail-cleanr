@@ -529,8 +529,8 @@ if sys.platform == 'win32':
     else:
         print(f'\nWARNING: vendored WinSparkle.dll not found at {winsparkle_src}')
 
-    # Write the bundled torch version into _internal so the GPU override runtime
-    # hook can version-check a user's CUDA pack against the correct PyTorch build.
+    # Write bundled torch + torchvision versions into _internal so the GPU override
+    # runtime hook and in-app installer can match the correct CUDA wheels.
     try:
         import torch as _torch
         _torch_ver = _torch.__version__
@@ -540,6 +540,15 @@ if sys.platform == 'win32':
         print(f'\nWrote stc_expected_torch_version.txt: {_torch_ver}')
     except Exception as _e:
         print(f'\nWARNING: could not write stc_expected_torch_version.txt: {_e}')
+    try:
+        import torchvision as _tv
+        _tv_ver = _tv.__version__
+        _tv_dest = os.path.join(dist_root, '_internal', 'stc_expected_torchvision_version.txt')
+        with open(_tv_dest, 'w') as _f:
+            _f.write(_tv_ver)
+        print(f'Wrote stc_expected_torchvision_version.txt: {_tv_ver}')
+    except Exception as _e:
+        print(f'WARNING: could not write stc_expected_torchvision_version.txt: {_e}')
 
 after = dir_size_mb(os.path.join('dist'))
 print(f'\nAfter cleanup: {after:.1f} MB  (saved {before - after:.1f} MB)')

@@ -93,8 +93,7 @@ BRAND_QUIT_RED        = "#d93025"
 BRAND_QUIT_RED_HOVER  = "#b8271b"
 BRAND_NOTICE_ORANGE   = "#e68a00"   # update banner, model card, NVIDIA banner
 BRAND_NOTICE_HOVER    = "#fdf6e3"
-# Updated to specific GPU installer URL when the NVIDIA-Accelerated Build ships.
-_GPU_BUILD_URL = "https://github.com/bruceherwig-dot/star-trail-cleanr/releases"
+_GPU_BUILD_URL = "https://github.com/bruceherwig-dot/star-trail-cleanr/blob/main/docs/nvidia_gpu_setup.md"
 BRAND_SUPPORT_BG      = "#d0e4f5"
 BRAND_SUPPORT_FG      = "#1a3a5c"
 BRAND_SUPPORT_BORDER  = "#a0c4e0"
@@ -1203,6 +1202,96 @@ class ModelDownloadThread(QThread):
             self.failed.emit(str(e))
 
 
+class GpuPackInstallThread(QThread):
+    """Downloads the CUDA PyTorch wheels and extracts them into the GPU override folder.
+
+    Emits progress(label, bytes_done, total_bytes) during download.
+    label changes per step; total_bytes=0 signals an indeterminate phase.
+    """
+    progress = Signal(str, int, int)
+    finished_ok = Signal()
+    failed = Signal(str)
+
+    def _download(self, label, url, dest_path):
+        import urllib.request
+        req = urllib.request.Request(url, headers={"User-Agent": "StarTrailCleanR-GpuPack"})
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                total = int(resp.headers.get("Content-Length") or 0)
+                done = 0
+                with open(str(dest_path), "wb") as f:
+                    while True:
+                        chunk = resp.read(131072)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        done += len(chunk)
+                        self.progress.emit(label, done, total)
+        except Exception as e:
+            raise RuntimeError(f"{label} failed: {e}") from e
+
+    def run(self):
+        import zipfile
+        from modules.gpu_pack import get_download_urls, get_override_dir, write_version_tag
+
+        urls = get_download_urls()
+        if not urls:
+            self.failed.emit(
+                "Cannot determine download URLs for this build.\n"
+                "Try updating Star Trail CleanR first, then install GPU support again."
+            )
+            return
+
+        torch_url, tv_url, torch_ver, _ = urls
+        override_dir = get_override_dir()
+
+        try:
+            override_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            self.failed.emit(
+                f"Cannot create the GPU support folder:\n{override_dir}\n\n{e}\n\n"
+                "Check that you have permission to write to your AppData folder."
+            )
+            return
+
+        torch_whl = override_dir / "torch_pack.whl"
+        tv_whl = override_dir / "torchvision_pack.whl"
+
+        try:
+            self._download("Downloading GPU support (1 of 2)", torch_url, torch_whl)
+            self.progress.emit("Installing GPU support (1 of 2)...", 0, 0)
+            with zipfile.ZipFile(str(torch_whl), "r") as zf:
+                zf.extractall(str(override_dir))
+            torch_whl.unlink(missing_ok=True)
+
+            self._download("Downloading GPU support (2 of 2)", tv_url, tv_whl)
+            self.progress.emit("Installing GPU support (2 of 2)...", 0, 0)
+            with zipfile.ZipFile(str(tv_whl), "r") as zf:
+                zf.extractall(str(override_dir))
+            tv_whl.unlink(missing_ok=True)
+
+            if not write_version_tag(torch_ver):
+                raise RuntimeError(
+                    "Files downloaded successfully but could not write the version tag.\n"
+                    "GPU support may not activate on restart. Try reinstalling."
+                )
+            self.finished_ok.emit()
+
+        except Exception as e:
+            for whl in (torch_whl, tv_whl):
+                try:
+                    whl.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            msg = str(e)
+            if "urlopen error" in msg or "ConnectionReset" in msg or "timed out" in msg:
+                msg = (
+                    "Download failed. Check your internet connection and try again.\n\n"
+                    f"Details: {e}"
+                )
+            self.failed.emit(msg)
+
+
 class _XCloseButton(QPushButton):
     """Close button that paints two diagonal white lines via QPainter for
     pixel-perfect centering at any size. Avoids font-metric drift that left
@@ -1502,18 +1591,18 @@ class MainWindow(QMainWindow):
         gpu_upgrade_browser.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         gpu_upgrade_browser.setHtml(f"""
         <html><body style='font-family: Inter, -apple-system, Segoe UI, sans-serif; line-height: 1.5; margin:0; padding:0; color:{BROWSER_TEXT}; background-color:{BROWSER_BG};'>
-        <p style='margin-top:8px;'>An NVIDIA GPU is available. The NVIDIA-Accelerated Build runs the trail detector on your GPU for significantly faster processing.</p>
+        <p style='margin-top:8px;'>An NVIDIA GPU is available. Installing GPU support downloads approximately 3-4 GB from pytorch.org. This is a one-time download that survives app updates automatically.</p>
         </body></html>
         """)
-        gpu_upgrade_browser.setFixedHeight(68)
+        gpu_upgrade_browser.setFixedHeight(78)
         gpu_upgrade_browser.setVisible(False)
         self._gpu_upgrade_browser = gpu_upgrade_browser
         layout.addSpacing(4)
         layout.addWidget(gpu_upgrade_browser)
 
-        gpu_btn = QPushButton("Download NVIDIA-Accelerated Build")
+        gpu_btn = QPushButton("Install GPU Support")
         gpu_btn.setFixedHeight(40)
-        gpu_btn.setFixedWidth(300)
+        gpu_btn.setFixedWidth(220)
         gpu_btn.setCursor(Qt.PointingHandCursor)
         gpu_btn.setStyleSheet(
             f"QPushButton {{ background-color: {SECONDARY_BTN_BG}; color: white; "
@@ -1530,6 +1619,42 @@ class MainWindow(QMainWindow):
         gpu_btn_row.addStretch()
         layout.addSpacing(4)
         layout.addLayout(gpu_btn_row)
+
+        from PySide6.QtWidgets import QProgressBar
+        gpu_progress = QProgressBar()
+        gpu_progress.setRange(0, 100)
+        gpu_progress.setValue(0)
+        gpu_progress.setFixedHeight(20)
+        gpu_progress.setVisible(False)
+        self._gpu_progress = gpu_progress
+        layout.addSpacing(8)
+        layout.addWidget(gpu_progress)
+
+        gpu_progress_label = QLabel("")
+        gpu_progress_label.setStyleSheet(f"color: {MUTED_TEXT}; font-size: 13px; margin-left: 4px;")
+        gpu_progress_label.setVisible(False)
+        self._gpu_progress_label = gpu_progress_label
+        layout.addSpacing(2)
+        layout.addWidget(gpu_progress_label)
+
+        gpu_restart_btn = QPushButton("Restart Now to Activate GPU Support")
+        gpu_restart_btn.setFixedHeight(40)
+        gpu_restart_btn.setFixedWidth(320)
+        gpu_restart_btn.setCursor(Qt.PointingHandCursor)
+        gpu_restart_btn.setStyleSheet(
+            f"QPushButton {{ background-color: {SECONDARY_BTN_BG}; color: white; "
+            f"font-size: 15px; font-weight: bold; border-radius: 6px; border: none; }}"
+            f"QPushButton:hover {{ background-color: {DISABLED_BTN_HOVER}; }}"
+        )
+        gpu_restart_btn.clicked.connect(self._relaunch)
+        gpu_restart_btn.setVisible(False)
+        self._gpu_restart_btn = gpu_restart_btn
+        restart_row = QHBoxLayout()
+        restart_row.setContentsMargins(20, 0, 0, 0)
+        restart_row.addWidget(gpu_restart_btn)
+        restart_row.addStretch()
+        layout.addSpacing(8)
+        layout.addLayout(restart_row)
 
         layout.addSpacing(24)
 
@@ -2016,7 +2141,7 @@ class MainWindow(QMainWindow):
         layout.setSpacing(12)
 
         self._nvidia_label = QLabel(
-            "NVIDIA GPU detected. Download the NVIDIA-Accelerated Build for faster processing."
+            "NVIDIA GPU detected. Install GPU support for faster processing."
         )
         self._nvidia_label.setStyleSheet(
             "color: white; font-size: 14px; font-weight: bold; background: transparent;"
@@ -2024,7 +2149,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._nvidia_label)
         layout.addStretch()
 
-        download_btn = QPushButton("Download")
+        download_btn = QPushButton("Install")
         download_btn.setFixedHeight(28)
         download_btn.setStyleSheet(
             f"QPushButton {{ background-color: white; color: {BRAND_NOTICE_ORANGE}; font-size: 13px; "
@@ -2067,9 +2192,63 @@ class MainWindow(QMainWindow):
         self._refresh_compute_section()
 
     def _on_nvidia_download_clicked(self):
-        from PySide6.QtGui import QDesktopServices
-        from PySide6.QtCore import QUrl
-        QDesktopServices.openUrl(QUrl(_GPU_BUILD_URL))
+        from PySide6.QtWidgets import QMessageBox
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Install GPU Support")
+        msg.setText(
+            "GPU support requires a one-time download of approximately 3-4 GB from pytorch.org.\n\n"
+            "Once installed, it survives Star Trail CleanR updates automatically.\n\n"
+            "Star Trail CleanR will need to restart after installation to activate GPU support."
+        )
+        msg.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
+        msg.button(QMessageBox.Ok).setText("Install")
+        msg.button(QMessageBox.Cancel).setText("Not Now")
+        if msg.exec() != QMessageBox.Ok:
+            return
+
+        self._nvidia_banner.setVisible(False)
+        self._gpu_download_btn.setVisible(False)
+        self._gpu_upgrade_browser.setVisible(False)
+        self._gpu_progress.setRange(0, 100)
+        self._gpu_progress.setValue(0)
+        self._gpu_progress.setFormat("%p%")
+        self._gpu_progress.setVisible(True)
+        self._gpu_progress_label.setText("Starting download...")
+        self._gpu_progress_label.setVisible(True)
+
+        self._gpu_install_thread = GpuPackInstallThread(self)
+        self._gpu_install_thread.progress.connect(self._on_gpu_install_progress)
+        self._gpu_install_thread.finished_ok.connect(self._on_gpu_install_finished)
+        self._gpu_install_thread.failed.connect(self._on_gpu_install_failed)
+        self._gpu_install_thread.start()
+
+    def _on_gpu_install_progress(self, label, done, total):
+        if total > 0:
+            self._gpu_progress.setRange(0, 100)
+            self._gpu_progress.setValue(int(done * 100 / total))
+        else:
+            self._gpu_progress.setRange(0, 0)
+        self._gpu_progress_label.setText(label)
+
+    def _on_gpu_install_finished(self):
+        self._gpu_progress.setVisible(False)
+        self._gpu_progress_label.setVisible(False)
+        self._gpu_restart_btn.setVisible(True)
+        self._compute_status_label.setText("GPU support installed. Restart to activate.")
+
+    def _on_gpu_install_failed(self, err):
+        from PySide6.QtWidgets import QMessageBox
+        self._gpu_progress.setVisible(False)
+        self._gpu_progress_label.setVisible(False)
+        self._gpu_download_btn.setVisible(True)
+        self._gpu_upgrade_browser.setVisible(True)
+        QMessageBox.critical(
+            self,
+            "GPU Installation Failed",
+            f"GPU support could not be installed.\n\n{err}\n\n"
+            "You can try again. If the problem continues, check your internet connection "
+            "and make sure you have enough free disk space (4 GB needed)."
+        )
 
     def _on_nvidia_later_clicked(self):
         SETTINGS.setValue("nvidia_banner_dismissed", True)
