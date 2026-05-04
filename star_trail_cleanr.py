@@ -1257,6 +1257,21 @@ class GpuPackInstallThread(QThread):
         torch_whl = override_dir / "torch_pack.whl"
         tv_whl = override_dir / "torchvision_pack.whl"
 
+        # Clean up any partial files from a previous failed attempt so
+        # Windows doesn't deny overwriting locked .pyd files on retry.
+        import shutil as _shutil
+        for _stale in (override_dir / "torch", override_dir / "torchvision"):
+            if _stale.is_dir():
+                try:
+                    _shutil.rmtree(str(_stale))
+                except Exception:
+                    pass
+        for _stale_whl in (torch_whl, tv_whl):
+            try:
+                _stale_whl.unlink(missing_ok=True)
+            except Exception:
+                pass
+
         try:
             self._download("Downloading GPU support (1 of 2)", torch_url, torch_whl)
             self.progress.emit("Installing GPU support (1 of 2)...", 0, 0)
@@ -1284,7 +1299,14 @@ class GpuPackInstallThread(QThread):
                 except Exception:
                     pass
             msg = str(e)
-            if "urlopen error" in msg or "ConnectionReset" in msg or "timed out" in msg:
+            if "Errno 13" in msg or "Permission denied" in msg or "Access is denied" in msg:
+                msg = (
+                    "Installation failed: Windows denied access to a file.\n\n"
+                    "This usually means a previous install attempt left partial files behind. "
+                    "Try clicking Install again — the installer will clean those up first.\n\n"
+                    f"Details: {e}"
+                )
+            elif "urlopen error" in msg or "ConnectionReset" in msg or "timed out" in msg:
                 msg = (
                     "Download failed. Check your internet connection and try again.\n\n"
                     f"Details: {e}"
@@ -1446,7 +1468,7 @@ class MainWindow(QMainWindow):
         <h2 style='color:{BRAND_HEADING_BLUE}; margin-top:0; margin-bottom:2px;'>Why Star Trail CleanR?</h2>
         <p style='margin-top:2px;'>Star Trail CleanR removes airplane and satellite trails
         from astrophotography sequences while preserving the real stars. The result is a
-        clean set of frames you can stack into a perfect star trail composite.</p>
+        clean set of frames you can stack into a star trail composite. (That's the goal, anyway.)</p>
 
         <h2 style='color:{BRAND_HEADING_BLUE}; margin-bottom:2px;'>Trail Detection</h2>
         <p style='margin-top:2px;'>Each frame is run through a YOLO segmentation model
@@ -1569,10 +1591,9 @@ class MainWindow(QMainWindow):
         <html><body style='font-family: Inter, -apple-system, Segoe UI, sans-serif; line-height: 1.5; margin:0; padding:0; color:{BROWSER_TEXT}; background-color:{BROWSER_BG};'>
         <p style='margin:0; padding:0; line-height:0; font-size:1px; height:0;'></p>
         <h2 style='color:{BRAND_HEADING_BLUE}; margin-top:0; margin-bottom:2px;'>GPU Acceleration</h2>
-        <p style='margin-top:2px;'>What Star Trail CleanR is using to run the AI trail detector on this machine.</p>
         </body></html>
         """)
-        compute_browser.setFixedHeight(90)
+        compute_browser.setFixedHeight(60)
         layout.addWidget(compute_browser)
 
         compute_status = QLabel("Detecting...")
@@ -2272,8 +2293,10 @@ class MainWindow(QMainWindow):
                       "to re-enable acceleration.")
         elif device == "cpu" and outcome == "yes":
             status = "CPU — NVIDIA GPU detected. Install the GPU pack for faster processing."
-        elif device == "cpu":
+        elif device == "cpu" and _pl.system() == "Windows":
             status = "CPU — no GPU acceleration"
+        elif device == "cpu":
+            status = "CPU processing only — GPU acceleration not available on this device"
         else:
             return
 

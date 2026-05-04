@@ -2,6 +2,14 @@
 
 ---
 
+## v2.13-beta
+- **Fix: GPU support retry now works after a failed install (Windows).** If the first GPU support installation attempt failed partway through, clicking Install again would hit a "Permission denied" error because Windows locked the partially-extracted files. The installer now clears any leftover files before each attempt, so retrying always starts clean.
+- **Clearer GPU installation error messages.** A Windows permission error now explains what happened and what to do ("Try clicking Install again"), instead of incorrectly suggesting an internet or disk space problem.
+- **Cleaned output files now appear in macOS Finder Comments.** After cleaning, each output file's Finder Comments field (visible in Get Info) shows the Star Trail CleanR version, Trail DetectoR version, and website — the same stamp already written to the EXIF Software tag. Skipped if the file already has a comment. Mac only.
+- **Settings polish.** GPU Acceleration section no longer shows a redundant description sentence — the status line below it says the same thing. Mac Intel and Linux users see "CPU processing only — GPU acceleration not available on this device" instead of the ambiguous "CPU — no GPU acceleration."
+- **FAQ wording.** "The result is a clean set of frames you can stack into a perfect star trail composite" softened to "...star trail composite. (That's the goal, anyway.)"
+- **Smoke tests:** 132 passing.
+
 ## v2.12-beta
 - **In-app GPU support installer (Windows).** When Star Trail CleanR detects an NVIDIA GPU and GPU support is not yet installed, a prompt appears offering to install it automatically. Clicking Install downloads approximately 3-4 GB from pytorch.org, extracts it into a permanent folder the app installer never touches, and asks you to restart. After restarting, the trail detector runs on your GPU automatically. This is a one-time setup — every future app update picks up GPU support without needing to reinstall it.
 - **Fix: GPU support button now works.** The "Install GPU Support" button in Settings (and the banner that appears when an NVIDIA GPU is detected) previously opened the GitHub releases page, which had no NVIDIA download on it. The button now launches the in-app installer described above.

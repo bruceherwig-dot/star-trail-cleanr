@@ -311,7 +311,8 @@ def main():
                 save_kwargs["exif"] = _jpeg_exif
             if dpi:
                 save_kwargs["dpi"] = dpi
-            pil.save(str(cleaned_dir / (stem + ".jpg")), "JPEG", **save_kwargs)
+            out_path = str(cleaned_dir / (stem + ".jpg"))
+            pil.save(out_path, "JPEG", **save_kwargs)
         elif args.output_format == "tif8":
             out = img if img.dtype == np.uint8 else (img >> 8).astype(np.uint8)
             rgb = cv2.cvtColor(out, cv2.COLOR_BGR2RGB)
@@ -323,7 +324,8 @@ def main():
                 save_kwargs["exif"] = exif_bytes
             if dpi:
                 save_kwargs["dpi"] = dpi
-            pil.save(str(cleaned_dir / (stem + ".tif")), "TIFF", **save_kwargs)
+            out_path = str(cleaned_dir / (stem + ".tif"))
+            pil.save(out_path, "TIFF", **save_kwargs)
         else:  # tif16
             # PIL has no first-class 16-bit RGB image mode, so its fromarray
             # raises KeyError on uint16 RGB arrays. Use tifffile (a scientific
@@ -348,7 +350,9 @@ def main():
                 # tifffile expects (xres, yres) floats and a unit string.
                 tiff_kwargs["resolution"] = (float(dpi[0]), float(dpi[1]))
                 tiff_kwargs["resolutionunit"] = "inch"
-            tifffile.imwrite(str(cleaned_dir / (stem + ".tif")), rgb, **tiff_kwargs)
+            out_path = str(cleaned_dir / (stem + ".tif"))
+            tifffile.imwrite(out_path, rgb, **tiff_kwargs)
+        _write_finder_comment(out_path)
     cleaned_dir = output_dir
     cleaned_dir.mkdir(parents=True, exist_ok=True)
     masks_dir = output_dir / "masks" if args.save_masks else None
@@ -431,6 +435,25 @@ def main():
             return ex.tobytes()
         except Exception:
             return source_bytes
+
+    def _write_finder_comment(out_path: str) -> None:
+        """Write _stamp to macOS Finder Comments field. No-op if already set or not macOS."""
+        if sys.platform != 'darwin':
+            return
+        try:
+            import subprocess as _sp
+            r = _sp.run(
+                ['xattr', '-p', 'com.apple.metadata:kMDItemFinderComment', out_path],
+                capture_output=True, timeout=3,
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                return
+            _sp.run(
+                ['xattr', '-w', 'com.apple.metadata:kMDItemFinderComment', _stamp, out_path],
+                capture_output=True, timeout=3,
+            )
+        except Exception:
+            pass
 
     def _fit_exif_for_jpeg(exif_bytes):
         """Ensure EXIF fits in JPEG's 65535-byte APP1 limit. Customer data takes priority.
