@@ -657,6 +657,15 @@ def main():
                     print(f"  second scrub {core_num}/{n}: {fp.name} - {trail_count} trail{'s' if trail_count != 1 else ''}", flush=True)
         except Exception as e:
             print(f"  WARN: second scrub failed ({e}) - continuing with first-pass results only", flush=True)
+        else:
+            updated_total = 0
+            for mask in masks_all[core_start:core_end]:
+                if mask.max() > 0:
+                    n_cc, _ = cv2.connectedComponents((mask > 0).astype(np.uint8))
+                    updated_total += max(0, n_cc - 1)
+            if updated_total > running_trail_total:
+                running_trail_total = updated_total
+                print(f"FRAME_TRAIL_COUNT: {running_trail_total}", flush=True)
 
     masks_per_frame = masks_all[core_start:core_end]
     trail_frames = sum(1 for m in masks_per_frame if m.max() > 0)

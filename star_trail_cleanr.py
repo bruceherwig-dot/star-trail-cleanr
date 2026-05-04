@@ -1479,7 +1479,7 @@ class MainWindow(QMainWindow):
         compute_browser.setHtml(f"""
         <html><body style='font-family: Inter, -apple-system, Segoe UI, sans-serif; line-height: 1.5; margin:0; padding:0; color:{BROWSER_TEXT}; background-color:{BROWSER_BG};'>
         <p style='margin:0; padding:0; line-height:0; font-size:1px; height:0;'></p>
-        <h2 style='color:{BRAND_HEADING_BLUE}; margin-top:0; margin-bottom:2px;'>Compute Device</h2>
+        <h2 style='color:{BRAND_HEADING_BLUE}; margin-top:0; margin-bottom:2px;'>GPU Acceleration</h2>
         <p style='margin-top:2px;'>What Star Trail CleanR is using to run the AI trail detector on this machine.</p>
         </body></html>
         """)
@@ -1543,14 +1543,14 @@ class MainWindow(QMainWindow):
         scrub_browser.setHtml(f"""
         <html><body style='font-family: Inter, -apple-system, Segoe UI, sans-serif; line-height: 1.5; margin:0; padding:0; color:{BROWSER_TEXT}; background-color:{BROWSER_BG};'>
         <p style='margin:0; padding:0; line-height:0; font-size:1px; height:0;'></p>
-        <h2 style='color:{BRAND_HEADING_BLUE}; margin-top:0; margin-bottom:2px;'>Second Scrub</h2>
+        <h2 style='color:{BRAND_HEADING_BLUE}; margin-top:0; margin-bottom:2px;'>Second ScrubbeR</h2>
         <p style='margin-top:2px;'>Runs the trail detector a second time on each frame after rotating it 180&deg;. Catches trails the first pass tends to miss. Detection takes roughly twice as long.</p>
         </body></html>
         """)
         scrub_browser.setFixedHeight(105)
         layout.addWidget(scrub_browser)
 
-        scrub_chk = QCheckBox("Enable Second Scrub")
+        scrub_chk = QCheckBox("Enable Second ScrubbeR")
         scrub_chk.setStyleSheet(f"QCheckBox {{ font-size: 15px; color: {BROWSER_TEXT}; margin-left: 20px; }}")
         scrub_chk.setChecked(SETTINGS.value("second_scrub_enabled", False, type=bool))
         scrub_chk.toggled.connect(lambda v: SETTINGS.setValue("second_scrub_enabled", v))
@@ -1916,7 +1916,7 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _model_display_name(tag):
-        """'model-v2' becomes 'Trail Detector v2'. Falls back to the raw tag on parse failure."""
+        """'model-v2' becomes 'Trail DetectoR v2'. Falls back to the raw tag on parse failure."""
         if not tag:
             return "New model"
         m = re.match(r"^model-v(\d+(?:\.\d+)?)", tag)
@@ -1925,10 +1925,10 @@ class MainWindow(QMainWindow):
         num = m.group(1)
         if "." in num:
             num = num.rstrip("0").rstrip(".")
-        return f"Trail Detector v{num}"
+        return f"Trail DetectoR v{num}"
 
     def _current_model_display_name(self):
-        """Return 'Trail Detector N' for the currently-active model. Empty string on failure."""
+        """Return 'Trail DetectoR N' for the currently-active model. Empty string on failure."""
         try:
             from modules.model_update import local_model_version
             return self._model_display_name(local_model_version())
@@ -3717,7 +3717,7 @@ class MainWindow(QMainWindow):
             f"Finished:              {end.strftime('%H:%M:%S')}",
             "",
             f"App version:           Beta v{VERSION}",
-            f"Trail Detector:        {detector}",
+            f"Trail DetectoR:        {detector}",
             "",
             "Camera Info",
             f"  Camera:              {exif['camera']}",
