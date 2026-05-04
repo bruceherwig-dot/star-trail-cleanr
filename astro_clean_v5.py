@@ -304,8 +304,9 @@ def main():
             save_kwargs = {"quality": int(args.jpeg_quality), "subsampling": 0}
             if icc_profile:
                 save_kwargs["icc_profile"] = icc_profile
-            if exif_bytes:
-                save_kwargs["exif"] = exif_bytes
+            _jpeg_exif = _fit_exif_for_jpeg(exif_bytes)
+            if _jpeg_exif:
+                save_kwargs["exif"] = _jpeg_exif
             if dpi:
                 save_kwargs["dpi"] = dpi
             pil.save(str(cleaned_dir / (stem + ".jpg")), "JPEG", **save_kwargs)
@@ -418,23 +419,36 @@ def main():
     _stamp = f"Star Trail CleanR v{_resolve_app_version()} / Trail Detector {_resolve_model_version()} / www.startrailcleanr.com"
 
     def _stamp_exif(source_bytes):
-        """Return EXIF bytes with our stamp in three places for max viewer
-        compatibility. Preserves all other EXIF unchanged.
-            0x010E ImageDescription — shown as "Description/Caption" in Preview, Photoshop, Lightroom
-            0x0131 Software         — shown in EXIF viewers, Lightroom, Photoshop Origin panel
-            0x9C9C XPComment        — shown in Windows Explorer "Comments" column (UTF-16LE encoded)
-        """
+        """Return EXIF bytes with Software stamp added. Preserves all source EXIF unchanged."""
         try:
             from PIL import Image as _PILImage
             ex = _PILImage.Exif()
             if source_bytes:
                 ex.load(source_bytes)
-            ex[0x010E] = _stamp  # ImageDescription (ASCII)
-            ex[0x0131] = _stamp  # Software (ASCII)
-            ex[0x9C9C] = _stamp.encode('utf-16le') + b'\x00\x00'  # XPComment (UTF-16LE, null-terminated)
+            ex[0x0131] = _stamp  # Software tag — shown in Lightroom, Photoshop, and EXIF viewers
             return ex.tobytes()
         except Exception:
             return source_bytes
+
+    def _fit_exif_for_jpeg(exif_bytes):
+        """Ensure EXIF fits in JPEG's 65535-byte APP1 limit. Customer data takes priority.
+        Falls back: full EXIF > MakerNote-stripped EXIF > no EXIF (never crashes).
+        MakerNote (0x927C) is manufacturer binary data no standard tool can read.
+        """
+        _JPEG_EXIF_MAX = 65000
+        if not exif_bytes or len(exif_bytes) <= _JPEG_EXIF_MAX:
+            return exif_bytes
+        try:
+            from PIL import Image as _PILImage
+            ex = _PILImage.Exif()
+            ex.load(exif_bytes)
+            ex.pop(0x927C, None)
+            trimmed = ex.tobytes()
+            if len(trimmed) <= _JPEG_EXIF_MAX:
+                return trimmed
+        except Exception:
+            pass
+        return None  # save without EXIF rather than crash; originals are untouched
 
     exif_bytes = _stamp_exif(exif_bytes)
 

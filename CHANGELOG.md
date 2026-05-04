@@ -2,6 +2,10 @@
 
 ---
 
+## v2.09-beta
+- **Crash fix: large camera EXIF no longer kills the save step.** Some cameras (especially Sony and certain Canon bodies) write very large blocks of manufacturer-specific data into their EXIF. When that data was close to JPEG's built-in size limit and we added our Software stamp on top, the save failed with a crash. The fix trims only the unreadable manufacturer blob if needed — all the meaningful metadata (camera model, lens, f-stop, shutter speed, ISO, timestamps, GPS) is preserved. If somehow even that isn't enough, the file saves cleanly without EXIF rather than crashing. Original source files are never affected.
+- **Smoke tests:** 132 passing.
+
 ## v2.08-beta
 - **GPU pack survives updates (Windows).** NVIDIA GPU users previously had to redo the 4 GB CUDA swap after every Star Trail CleanR update, because the installer overwrote the app folder. The GPU files now live in a permanent folder the installer never touches. Set it up once, and every future update continues to use your GPU automatically. If a future release requires a different PyTorch version, the app detects the mismatch, falls back to CPU, and tells you exactly what to do in Settings.
 - **Smoke tests:** 132 passing.
