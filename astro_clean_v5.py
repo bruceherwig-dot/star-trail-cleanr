@@ -274,6 +274,8 @@ def main():
                         help="Expected image width — when provided, skips per-batch resolution detection")
     parser.add_argument("--expected-height", type=int, default=None,
                         help="Expected image height")
+    parser.add_argument("--second-scrub", action="store_true",
+                        help="Run detection a second time on each frame rotated 180°, merging any new trails found")
     args = parser.parse_args()
 
     input_dir = Path(args.input_dir)
@@ -629,6 +631,32 @@ def main():
             print(f"  detecting {core_num}/{n}: {fp.name} - {trail_label}", flush=True)
             running_trail_total += trail_count
             print(f"FRAME_TRAIL_COUNT: {running_trail_total}", flush=True)
+
+    if args.second_scrub:
+        print("\nStep 1b - second scrub (180-degree rotation)", flush=True)
+        try:
+            for i, fp in enumerate(frame_files_all):
+                rotated = np.rot90(frames_8bit_all[i], 2)
+                mask2 = detect_frame(model, rotated, args.tile_size, args.overlap, args.dilate)
+                if mask2 is None:
+                    continue
+                mask2 = np.rot90(mask2, 2)
+                if sky_mask is not None:
+                    mask2 = apply_sky_mask(mask2, sky_mask)
+                if min_area_scaled > 0 and mask2.max() > 0:
+                    mask2 = filter_small_components(mask2, frames_8bit_all[i], min_area_scaled)
+                masks_all[i] = np.maximum(masks_all[i], mask2)
+                is_neighbor = i < core_start or i >= core_end
+                if not is_neighbor:
+                    core_num = i - core_start + 1
+                    if masks_all[i].max() > 0:
+                        n_cc, _ = cv2.connectedComponents((masks_all[i] > 0).astype(np.uint8))
+                        trail_count = max(0, n_cc - 1)
+                    else:
+                        trail_count = 0
+                    print(f"  second scrub {core_num}/{n}: {fp.name} - {trail_count} trail{'s' if trail_count != 1 else ''}", flush=True)
+        except Exception as e:
+            print(f"  WARN: second scrub failed ({e}) - continuing with first-pass results only", flush=True)
 
     masks_per_frame = masks_all[core_start:core_end]
     trail_frames = sum(1 for m in masks_per_frame if m.max() > 0)

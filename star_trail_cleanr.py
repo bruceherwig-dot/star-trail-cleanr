@@ -849,6 +849,8 @@ class CleanerWorker(QThread):
                             "--jpeg-quality", str(self.jpeg_quality)])
                 cmd.extend(["--expected-width", str(dominant[0]),
                             "--expected-height", str(dominant[1])])
+                if SETTINGS.value("second_scrub_enabled", False, type=bool):
+                    cmd.append("--second-scrub")
 
                 worker_env = os.environ.copy()
                 if (SETTINGS.value("crash_reporting_enabled", False, type=bool)
@@ -1528,6 +1530,32 @@ class MainWindow(QMainWindow):
         gpu_btn_row.addStretch()
         layout.addSpacing(4)
         layout.addLayout(gpu_btn_row)
+
+        layout.addSpacing(24)
+
+        scrub_browser = QTextBrowser()
+        scrub_browser.setOpenExternalLinks(False)
+        scrub_browser.document().setDocumentMargin(20)
+        scrub_browser.setStyleSheet(
+            f"QTextBrowser {{ background: {BROWSER_BG}; color: {BROWSER_TEXT}; border: none; font-size: 15px; }}"
+        )
+        scrub_browser.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scrub_browser.setHtml(f"""
+        <html><body style='font-family: Inter, -apple-system, Segoe UI, sans-serif; line-height: 1.5; margin:0; padding:0; color:{BROWSER_TEXT}; background-color:{BROWSER_BG};'>
+        <p style='margin:0; padding:0; line-height:0; font-size:1px; height:0;'></p>
+        <h2 style='color:{BRAND_HEADING_BLUE}; margin-top:0; margin-bottom:2px;'>Second Scrub</h2>
+        <p style='margin-top:2px;'>Runs the trail detector a second time on each frame after rotating it 180&deg;. Catches trails the first pass tends to miss. Detection takes roughly twice as long.</p>
+        </body></html>
+        """)
+        scrub_browser.setFixedHeight(105)
+        layout.addWidget(scrub_browser)
+
+        scrub_chk = QCheckBox("Enable Second Scrub")
+        scrub_chk.setStyleSheet(f"QCheckBox {{ font-size: 15px; color: {BROWSER_TEXT}; margin-left: 20px; }}")
+        scrub_chk.setChecked(SETTINGS.value("second_scrub_enabled", False, type=bool))
+        scrub_chk.toggled.connect(lambda v: SETTINGS.setValue("second_scrub_enabled", v))
+        layout.addSpacing(4)
+        layout.addWidget(scrub_chk)
 
         layout.addStretch()
         return wrap

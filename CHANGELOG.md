@@ -2,6 +2,10 @@
 
 ---
 
+## v2.10-beta
+- **New: Second Scrub option in Settings.** Runs the trail detector a second time on each frame after rotating it 180 degrees, then merges any newly found trails into the repair pass. Catches trails the first pass tends to miss, especially those at angles the detector underweights. Detection takes roughly twice as long — repair time is unchanged. Turn it on in Settings. Works on CPU and GPU builds. If the second pass fails for any reason, the run continues normally on first-pass results with a warning in the log.
+- **Smoke tests:** 132 passing.
+
 ## v2.09-beta
 - **Crash fix: large camera EXIF no longer kills the save step.** Some cameras (especially Sony and certain Canon bodies) write very large blocks of manufacturer-specific data into their EXIF. When that data was close to JPEG's built-in size limit and we added our Software stamp on top, the save failed with a crash. The fix trims only the unreadable manufacturer blob if needed — all the meaningful metadata (camera model, lens, f-stop, shutter speed, ISO, timestamps, GPS) is preserved. If somehow even that isn't enough, the file saves cleanly without EXIF rather than crashing. Original source files are never affected.
 - **Smoke tests:** 132 passing.
