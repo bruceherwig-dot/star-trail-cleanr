@@ -2,6 +2,10 @@
 
 ---
 
+## v2.14-beta
+- **Settings: Crash Reporting toggle.** A new Crash Reporting section in Settings shows whether anonymous crash reporting is turned on or off, and lets you change it at any time. The choice you made at first launch is reflected immediately.
+- **Smoke tests:** 132 passing.
+
 ## v2.13-beta
 - **Fix: GPU support retry now works after a failed install (Windows).** If the first GPU support installation attempt failed partway through, clicking Install again would hit a "Permission denied" error because Windows locked the partially-extracted files. The installer now clears any leftover files before each attempt, so retrying always starts clean.
 - **Clearer GPU installation error messages.** A Windows permission error now explains what happened and what to do ("Try clicking Install again"), instead of incorrectly suggesting an internet or disk space problem.

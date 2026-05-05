@@ -1703,6 +1703,38 @@ class MainWindow(QMainWindow):
         layout.addSpacing(4)
         layout.addWidget(scrub_chk)
 
+        layout.addSpacing(24)
+
+        crash_browser = QTextBrowser()
+        crash_browser.setOpenExternalLinks(False)
+        crash_browser.document().setDocumentMargin(20)
+        crash_browser.setStyleSheet(
+            f"QTextBrowser {{ background: {BROWSER_BG}; color: {BROWSER_TEXT}; border: none; font-size: 15px; }}"
+        )
+        crash_browser.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        crash_browser.setHtml(f"""
+        <html><body style='font-family: Inter, -apple-system, Segoe UI, sans-serif; line-height: 1.5; margin:0; padding:0; color:{BROWSER_TEXT}; background-color:{BROWSER_BG};'>
+        <p style='margin:0; padding:0; line-height:0; font-size:1px; height:0;'></p>
+        <h2 style='color:{BRAND_HEADING_BLUE}; margin-top:0; margin-bottom:2px;'>Crash Reporting</h2>
+        <p style='margin-top:2px;'>Sends anonymous crash reports to help find and fix bugs. Reports contain technical details like error messages and basic image dimensions.</p>
+        </body></html>
+        """)
+        crash_browser.setFixedHeight(90)
+        layout.addWidget(crash_browser)
+
+        crash_chk = QCheckBox("Send anonymous crash reports")
+        crash_chk.setStyleSheet(f"QCheckBox {{ font-size: 15px; color: {BROWSER_TEXT}; margin-left: 20px; }}")
+        crash_chk.setChecked(SETTINGS.value("crash_reporting_enabled", False, type=bool))
+
+        def _on_crash_chk_toggled(v):
+            SETTINGS.setValue("crash_reporting_enabled", v)
+            if v:
+                _maybe_init_sentry()
+
+        crash_chk.toggled.connect(_on_crash_chk_toggled)
+        layout.addSpacing(4)
+        layout.addWidget(crash_chk)
+
         layout.addStretch()
         return wrap
 
