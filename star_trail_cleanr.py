@@ -1208,7 +1208,7 @@ class GpuPackInstallThread(QThread):
     Emits progress(label, bytes_done, total_bytes) during download.
     label changes per step; total_bytes=0 signals an indeterminate phase.
     """
-    progress = Signal(str, int, int)
+    progress = Signal(str, float, float)
     finished_ok = Signal()
     failed = Signal(str)
 
@@ -1217,8 +1217,8 @@ class GpuPackInstallThread(QThread):
         req = urllib.request.Request(url, headers={"User-Agent": "StarTrailCleanR-GpuPack"})
         try:
             with urllib.request.urlopen(req, timeout=60) as resp:
-                total = int(resp.headers.get("Content-Length") or 0)
-                done = 0
+                total = float(resp.headers.get("Content-Length") or 0)
+                done = 0.0
                 with open(str(dest_path), "wb") as f:
                     while True:
                         chunk = resp.read(131072)

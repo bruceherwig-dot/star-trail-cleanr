@@ -2,6 +2,10 @@
 
 ---
 
+## v2.16-beta
+- **Fix: GPU installer no longer crashes on large downloads (Windows).** The progress signal used a 32-bit integer that overflows at 2.1 GB. The PyTorch CUDA wheel is 2.75 GB, so the app crashed every time partway through the download. Fixed — the installer now completes the full download without crashing.
+- **Smoke tests:** 132 passing.
+
 ## v2.15-beta
 - **Fix: Finder Comments now actually appear on Mac.** Cleaned files have always been stamped with the Star Trail CleanR version and website in the EXIF Software tag. The Finder Comments field (Get Info) was supposed to show the same stamp but was always blank. The previous code wrote plain text, which Finder ignores — the fix writes the binary plist format Finder expects.
 - **Settings tab spacing fixed.** Each section had a large blank gap below its heading. Replaced the fixed-height text boxes that caused it with auto-sizing labels — spacing is now even across all four sections.
