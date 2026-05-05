@@ -1371,6 +1371,7 @@ class MainWindow(QMainWindow):
         self._mask_window = None
         self._nvidia_outcome = None
         self._compute_device = None
+        self._gpu_install_via_banner = False
 
         # Main stacked widget: page 0 = setup, page 1 = processing
         self._stack = QStackedWidget()
@@ -2228,6 +2229,7 @@ class MainWindow(QMainWindow):
         )
         download_btn.clicked.connect(self._on_nvidia_download_clicked)
         layout.addWidget(download_btn)
+        self._nvidia_install_btn = download_btn
 
         later_btn = QPushButton("Later")
         later_btn.setFixedHeight(28)
@@ -2238,6 +2240,29 @@ class MainWindow(QMainWindow):
         )
         later_btn.clicked.connect(self._on_nvidia_later_clicked)
         layout.addWidget(later_btn)
+        self._nvidia_later_btn = later_btn
+
+        from PySide6.QtWidgets import QProgressBar
+        nvidia_progress = QProgressBar()
+        nvidia_progress.setFixedHeight(16)
+        nvidia_progress.setFixedWidth(220)
+        nvidia_progress.setRange(0, 100)
+        nvidia_progress.setValue(0)
+        nvidia_progress.setVisible(False)
+        nvidia_progress.setStyleSheet(
+            "QProgressBar { background: rgba(255,255,255,0.3); border-radius: 4px; border: none; }"
+            "QProgressBar::chunk { background: white; border-radius: 4px; }"
+        )
+        layout.addWidget(nvidia_progress)
+        self._nvidia_banner_progress = nvidia_progress
+
+        nvidia_progress_label = QLabel("")
+        nvidia_progress_label.setStyleSheet(
+            "color: white; font-size: 12px; background: transparent;"
+        )
+        nvidia_progress_label.setVisible(False)
+        layout.addWidget(nvidia_progress_label)
+        self._nvidia_banner_label = nvidia_progress_label
 
         self._nvidia_banner = banner
         return banner
@@ -2253,7 +2278,10 @@ class MainWindow(QMainWindow):
     def _on_nvidia_detect_result(self, outcome, detail):
         print(f"[nvidia-detect] outcome={outcome} detail={detail}", flush=True)
         self._nvidia_outcome = outcome
-        if outcome == "yes" and not SETTINGS.value("nvidia_banner_dismissed", False, type=bool):
+        from modules.gpu_pack import is_installed as _gpu_installed
+        if (outcome == "yes"
+                and not _gpu_installed()
+                and not SETTINGS.value("nvidia_banner_dismissed", False, type=bool)):
             self._nvidia_banner.setVisible(True)
         self._refresh_compute_section()
 
@@ -2276,7 +2304,16 @@ class MainWindow(QMainWindow):
         if msg.exec() != QMessageBox.Ok:
             return
 
-        self._nvidia_banner.setVisible(False)
+        self._gpu_install_via_banner = self._nvidia_banner.isVisible()
+        if self._gpu_install_via_banner:
+            self._nvidia_label.setVisible(False)
+            self._nvidia_install_btn.setVisible(False)
+            self._nvidia_later_btn.setVisible(False)
+            self._nvidia_banner_progress.setRange(0, 100)
+            self._nvidia_banner_progress.setValue(0)
+            self._nvidia_banner_progress.setVisible(True)
+            self._nvidia_banner_label.setText("Starting download...")
+            self._nvidia_banner_label.setVisible(True)
         self._gpu_download_btn.setVisible(False)
         self._gpu_upgrade_browser.setVisible(False)
         self._gpu_progress.setRange(0, 100)
@@ -2294,13 +2331,28 @@ class MainWindow(QMainWindow):
 
     def _on_gpu_install_progress(self, label, done, total):
         if total > 0:
+            pct = int(done * 100 / total)
             self._gpu_progress.setRange(0, 100)
-            self._gpu_progress.setValue(int(done * 100 / total))
+            self._gpu_progress.setValue(pct)
+            if self._gpu_install_via_banner:
+                self._nvidia_banner_progress.setRange(0, 100)
+                self._nvidia_banner_progress.setValue(pct)
         else:
             self._gpu_progress.setRange(0, 0)
+            if self._gpu_install_via_banner:
+                self._nvidia_banner_progress.setRange(0, 0)
         self._gpu_progress_label.setText(label)
+        if self._gpu_install_via_banner:
+            self._nvidia_banner_label.setText(label)
 
     def _on_gpu_install_finished(self):
+        if self._gpu_install_via_banner:
+            self._nvidia_banner.setVisible(False)
+            self._nvidia_label.setVisible(True)
+            self._nvidia_install_btn.setVisible(True)
+            self._nvidia_later_btn.setVisible(True)
+            self._nvidia_banner_progress.setVisible(False)
+            self._nvidia_banner_label.setVisible(False)
         self._gpu_progress.setVisible(False)
         self._gpu_progress_label.setVisible(False)
         self._gpu_restart_btn.setVisible(True)
@@ -2308,6 +2360,12 @@ class MainWindow(QMainWindow):
 
     def _on_gpu_install_failed(self, err):
         from PySide6.QtWidgets import QMessageBox
+        if self._gpu_install_via_banner:
+            self._nvidia_banner_progress.setVisible(False)
+            self._nvidia_banner_label.setVisible(False)
+            self._nvidia_label.setVisible(True)
+            self._nvidia_install_btn.setVisible(True)
+            self._nvidia_later_btn.setVisible(True)
         self._gpu_progress.setVisible(False)
         self._gpu_progress_label.setVisible(False)
         self._gpu_download_btn.setVisible(True)
