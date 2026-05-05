@@ -638,7 +638,7 @@ class CleanerWorker(QThread):
                     "mismatched_sample": [os.path.basename(p) for p in mismatched[:5]],
                     "unreadable_sample": [os.path.basename(p) for p in unreadable_sorted[:5]],
                 })
-                self._frames_filter_event.wait()
+                self._frames_filter_event.wait(timeout=300)
                 if self._frames_filter_response != "CONTINUE" or self._cancelled:
                     self.error.emit(
                         "Run cancelled because some frames in this folder "
@@ -906,7 +906,7 @@ class CleanerWorker(QThread):
                             self._bad_file_response = None
                             self._bad_file_event.clear()
                             self.bad_file_prompt.emit(path, diag)
-                            self._bad_file_event.wait()
+                            self._bad_file_event.wait(timeout=300)
                             decision = self._bad_file_response or "STOP"
                             if decision == "CONTINUE":
                                 self._run_skip_count += 1
@@ -1267,9 +1267,10 @@ class GpuPackInstallThread(QThread):
         _ok, _err = clear_gpu_files()
         for _stale in (override_dir / "torch", override_dir / "torchvision"):
             if _stale.is_dir():
+                detail = f"\n\nDetails: {_err}" if _err else ""
                 self.failed.emit(
                     "Installation blocked: GPU support files from a previous install "
-                    "could not be removed. Windows is holding them open.\n\n"
+                    f"could not be removed. Windows is holding them open.{detail}\n\n"
                     "Click 'Clear GPU Support Files' in Settings, then try installing again."
                 )
                 return
@@ -3374,6 +3375,7 @@ class MainWindow(QMainWindow):
 
         fmt_map = {"JPG": "jpg", "TIFF 8-bit": "tif8", "TIFF 16-bit": "tif16"}
         out_fmt = fmt_map.get(self._format_combo.currentText(), "jpg")
+        self._run_cancelled = False
         self.worker = CleanerWorker(
             folder, output, self._frame_limit.currentText(), self._mask_path,
             output_format=out_fmt,
@@ -3403,6 +3405,7 @@ class MainWindow(QMainWindow):
 
     def _cancel_run(self):
         if self.worker and self.worker.isRunning():
+            self._run_cancelled = True
             self.worker.cancel()
             self._cancel_btn.setEnabled(False)
             self._cancel_btn.setText("Cancelling\u2026")
@@ -3449,6 +3452,8 @@ class MainWindow(QMainWindow):
             self._time_label.setText(f"Estimating{dots}")
 
     def _on_progress(self, pct, total, remaining_str):
+        if getattr(self, "_run_cancelled", False):
+            return
         self._progress_bar.setRange(0, 100)
         pct = max(0, min(100, pct))
         self._progress_bar.setValue(pct)
@@ -3477,6 +3482,8 @@ class MainWindow(QMainWindow):
         self._step2_bar.setStyleSheet(step1_style)
 
     def _on_step_progress(self, step, current, total):
+        if getattr(self, "_run_cancelled", False):
+            return
         green_style = (
             f"QProgressBar {{ border: 1px solid {CARD_BORDER}; border-radius: 8px; "
             f"background: {CARD_BG}; text-align: center; font-weight: bold; font-size: 13px; color: {CARD_TEXT}; }}"

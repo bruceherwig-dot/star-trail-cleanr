@@ -2,6 +2,12 @@
 
 ---
 
+## v2.18-beta
+- **Fix: Progress bar stays "Cancelled" after you cancel a run.** Previously the bar could flicker back to a stale percentage while the subprocess was finishing up. It now locks the moment you click Cancel.
+- **Fix: GPU installer now shows which files blocked cleanup.** If a previous GPU install left locked files behind, the error message now names the specific files Windows couldn't remove instead of giving a generic message.
+- **Fix: Background worker no longer hangs if a dialog is force-closed.** Two dialogs (mixed-resolution warning, unreadable file prompt) waited indefinitely for user input with no timeout. They now release the worker after 5 minutes if no response, stopping the run gracefully.
+- **Smoke tests:** 132 passing.
+
 ## v2.17-beta
 - **GPU installer now shows download progress on the Main screen (Windows).** When you click Install from the orange banner, the banner transforms in place to show a live download progress bar. No need to switch to the Settings tab to see what's happening. Settings still shows progress too for users who install from there.
 - **Fix: Orange GPU banner no longer reappears after a successful install.** After installing GPU support and restarting, the "NVIDIA GPU detected" banner now stays gone — it only appears when GPU support genuinely isn't installed yet.
