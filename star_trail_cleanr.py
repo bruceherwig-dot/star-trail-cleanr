@@ -46,7 +46,7 @@ from PySide6.QtWidgets import (
     QSpinBox, QTabWidget, QTextBrowser, QScrollArea, QMessageBox,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QSettings, QTimer
-from PySide6.QtGui import QFont, QPixmap, QIcon, QPalette, QColor
+from PySide6.QtGui import QFont, QPixmap, QIcon, QPalette, QColor, QPainter
 
 from mask_painter import MaskPainterWidget
 
@@ -1234,6 +1234,10 @@ class GpuPackInstallThread(QThread):
         import zipfile
         from modules.gpu_pack import get_download_urls, get_override_dir, write_version_tag
 
+        from modules.gpu_pack import (get_download_urls, get_override_dir,
+                                       write_version_tag, clear_gpu_files,
+                                       chmod_extracted_files)
+
         urls = get_download_urls()
         if not urls:
             self.failed.emit(
@@ -1257,20 +1261,18 @@ class GpuPackInstallThread(QThread):
         torch_whl = override_dir / "torch_pack.whl"
         tv_whl = override_dir / "torchvision_pack.whl"
 
-        # Clean up any partial files from a previous failed attempt so
-        # Windows doesn't deny overwriting locked .pyd files on retry.
-        import shutil as _shutil
+        # Robust cleanup: onerror handler + shell fallback + 3-retry loop.
+        # Handles read-only files from zip extraction and transient AV locks.
+        self.progress.emit("Preparing...", 0, 0)
+        _ok, _err = clear_gpu_files()
         for _stale in (override_dir / "torch", override_dir / "torchvision"):
             if _stale.is_dir():
-                try:
-                    _shutil.rmtree(str(_stale))
-                except Exception:
-                    pass
-        for _stale_whl in (torch_whl, tv_whl):
-            try:
-                _stale_whl.unlink(missing_ok=True)
-            except Exception:
-                pass
+                self.failed.emit(
+                    "Installation blocked: GPU support files from a previous install "
+                    "could not be removed. Windows is holding them open.\n\n"
+                    "Click 'Clear GPU Support Files' in Settings, then try installing again."
+                )
+                return
 
         try:
             self._download("Downloading GPU support (1 of 2)", torch_url, torch_whl)
@@ -1278,17 +1280,19 @@ class GpuPackInstallThread(QThread):
             with zipfile.ZipFile(str(torch_whl), "r") as zf:
                 zf.extractall(str(override_dir))
             torch_whl.unlink(missing_ok=True)
+            chmod_extracted_files(override_dir)
 
             self._download("Downloading GPU support (2 of 2)", tv_url, tv_whl)
             self.progress.emit("Installing GPU support (2 of 2)...", 0, 0)
             with zipfile.ZipFile(str(tv_whl), "r") as zf:
                 zf.extractall(str(override_dir))
             tv_whl.unlink(missing_ok=True)
+            chmod_extracted_files(override_dir)
 
             if not write_version_tag(torch_ver):
                 raise RuntimeError(
                     "Files downloaded successfully but could not write the version tag.\n"
-                    "GPU support may not activate on restart. Try reinstalling."
+                    "GPU support may not activate on restart. Try installing again."
                 )
             self.finished_ok.emit()
 
@@ -1302,8 +1306,7 @@ class GpuPackInstallThread(QThread):
             if "Errno 13" in msg or "Permission denied" in msg or "Access is denied" in msg:
                 msg = (
                     "Installation failed: Windows denied access to a file.\n\n"
-                    "This usually means a previous install attempt left partial files behind. "
-                    "Try clicking Install again — the installer will clean those up first.\n\n"
+                    "Click 'Clear GPU Support Files' in Settings, then try installing again.\n\n"
                     f"Details: {e}"
                 )
             elif "urlopen error" in msg or "ConnectionReset" in msg or "timed out" in msg:
@@ -1372,7 +1375,7 @@ class MainWindow(QMainWindow):
         # Main stacked widget: page 0 = setup, page 1 = processing
         self._stack = QStackedWidget()
 
-        # Tabs: Main / FAQ / About
+        # Tabs: Main / FAQ / About / Settings
         self._tabs = QTabWidget()
         self._tabs.tabBar().setExpanding(True)
         self._tabs.tabBar().setDocumentMode(True)
@@ -1380,14 +1383,15 @@ class MainWindow(QMainWindow):
             f"QTabWidget::pane {{ border: none; background: palette(window); }}"
             "QTabBar { qproperty-drawBase: 0; }"
             f"QTabBar::tab {{ background: {BRAND_TAB_INACTIVE_BG}; color: {BRAND_TAB_INACTIVE_FG}; padding: 14px 20px; "
-            "font-size: 19px; font-weight: bold; border: none; min-width: 200px; }"
+            "font-size: 19px; font-weight: bold; border: none; min-width: 200px; }}"
             f"QTabBar::tab:selected {{ background: {BRAND_TAB_ACTIVE_BG}; color: {BRAND_TAB_ACTIVE_FG}; }}"
             f"QTabBar::tab:hover:!selected {{ background: {BRAND_TAB_HOVER_BG}; color: {BRAND_TAB_ACTIVE_FG}; }}"
         )
         self._tabs.addTab(self._stack, "Main")
         self._tabs.addTab(self._build_faq_tab(), "FAQ")
-        self._tabs.addTab(self._build_settings_tab(), "Settings")
         self._tabs.addTab(self._build_about_tab(), "About")
+        self._tabs.addTab(self._build_settings_tab(), "Settings")
+        self._tabs.tabBar().setUsesScrollButtons(True)
 
         # Container: banner on top, tabs below
         container = QWidget()
@@ -1454,13 +1458,13 @@ class MainWindow(QMainWindow):
     def _build_faq_tab(self):
         wrap = QWidget()
         wrap_layout = QVBoxLayout(wrap)
-        wrap_layout.setContentsMargins(24, 24, 24, 24)
+        wrap_layout.setContentsMargins(16, 16, 16, 16)
         wrap_layout.setSpacing(0)
         browser = QTextBrowser()
         browser.setOpenExternalLinks(True)
-        browser.document().setDocumentMargin(20)
+        browser.document().setDocumentMargin(16)
         browser.setStyleSheet(
-            f"QTextBrowser {{ background: {BROWSER_BG}; color: {BROWSER_TEXT}; border: none; font-size: 15px; }}"
+            f"QTextBrowser {{ background: {BROWSER_BG}; color: {BROWSER_TEXT}; border: none; font-size: 13px; }}"
         )
         browser.setHtml(f"""
         <html><body style='font-family: Inter, -apple-system, Segoe UI, sans-serif; line-height: 1.5; margin:0; padding:0; color:{BROWSER_TEXT}; background-color:{BROWSER_BG};'>
@@ -1530,34 +1534,26 @@ class MainWindow(QMainWindow):
     def _build_settings_tab(self):
         wrap = QWidget()
         layout = QVBoxLayout(wrap)
-        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(0)
         layout.setAlignment(Qt.AlignTop)
 
-        browser = QTextBrowser()
-        browser.setOpenExternalLinks(False)
-        browser.document().setDocumentMargin(20)
-        browser.setStyleSheet(
-            f"QTextBrowser {{ background: {BROWSER_BG}; color: {BROWSER_TEXT}; border: none; font-size: 15px; }}"
-        )
-        browser.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        browser.setHtml(f"""
-        <html><body style='font-family: Inter, -apple-system, Segoe UI, sans-serif; line-height: 1.5; margin:0; padding:0; color:{BROWSER_TEXT}; background-color:{BROWSER_BG};'>
-        <p style='margin:0; padding:0; line-height:0; font-size:1px; height:0;'></p>
-        <h2 style='color:{BRAND_HEADING_BLUE}; margin-top:0; margin-bottom:2px;'>Updates</h2>
-        <p style='margin-top:2px;'>Star Trail CleanR checks for a new version every time you open it. Use this to check right now.</p>
-        </body></html>
-        """)
-        browser.setFixedHeight(90)
-        layout.addWidget(browser)
+        _h = QLabel("Updates")
+        _h.setStyleSheet(f"color: {BRAND_HEADING_BLUE}; font-size: 18px; font-weight: bold;")
+        layout.addWidget(_h)
+        layout.addSpacing(4)
+        _d = QLabel("Star Trail CleanR checks for a new version every time you open it. Use this to check right now.")
+        _d.setStyleSheet(f"color: {BROWSER_TEXT}; font-size: 13px;")
+        _d.setWordWrap(True)
+        layout.addWidget(_d)
 
         check_btn = QPushButton("Check for Updates")
-        check_btn.setFixedHeight(40)
+        check_btn.setFixedHeight(34)
         check_btn.setFixedWidth(200)
         check_btn.setCursor(Qt.PointingHandCursor)
         check_btn.setStyleSheet(
             f"QPushButton {{ background-color: {SECONDARY_BTN_BG}; color: white; "
-            f"font-size: 15px; font-weight: bold; border-radius: 6px; border: none; }}"
+            f"font-size: 13px; font-weight: bold; border-radius: 6px; border: none; }}"
             f"QPushButton:hover {{ background-color: {DISABLED_BTN_HOVER}; }}"
             f"QPushButton:disabled {{ background-color: {DISABLED_BTN_BG}; color: {MUTED_TEXT}; }}"
         )
@@ -1565,49 +1561,46 @@ class MainWindow(QMainWindow):
         self._check_updates_btn = check_btn
 
         run_hint = QLabel("A run is in progress. Updates are paused until it finishes.")
-        run_hint.setStyleSheet(f"color: {MUTED_TEXT}; font-size: 13px;")
+        run_hint.setStyleSheet(f"color: {MUTED_TEXT}; font-size: 12px;")
         run_hint.setVisible(False)
         self._check_updates_run_hint = run_hint
 
         btn_row = QHBoxLayout()
-        btn_row.setContentsMargins(20, 0, 0, 0)
+        btn_row.setContentsMargins(16, 0, 0, 0)
         btn_row.addWidget(check_btn)
-        btn_row.addSpacing(14)
+        btn_row.addSpacing(12)
         btn_row.addWidget(run_hint)
         btn_row.addStretch()
         layout.addSpacing(4)
         layout.addLayout(btn_row)
 
-        layout.addSpacing(24)
+        layout.addSpacing(14)
 
-        compute_browser = QTextBrowser()
-        compute_browser.setOpenExternalLinks(False)
-        compute_browser.document().setDocumentMargin(20)
-        compute_browser.setStyleSheet(
-            f"QTextBrowser {{ background: {BROWSER_BG}; color: {BROWSER_TEXT}; border: none; font-size: 15px; }}"
-        )
-        compute_browser.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        compute_browser.setHtml(f"""
-        <html><body style='font-family: Inter, -apple-system, Segoe UI, sans-serif; line-height: 1.5; margin:0; padding:0; color:{BROWSER_TEXT}; background-color:{BROWSER_BG};'>
-        <p style='margin:0; padding:0; line-height:0; font-size:1px; height:0;'></p>
-        <h2 style='color:{BRAND_HEADING_BLUE}; margin-top:0; margin-bottom:2px;'>GPU Acceleration</h2>
-        </body></html>
-        """)
-        compute_browser.setFixedHeight(60)
-        layout.addWidget(compute_browser)
+        _h = QLabel("GPU Acceleration")
+        _h.setStyleSheet(f"color: {BRAND_HEADING_BLUE}; font-size: 18px; font-weight: bold;")
+        layout.addWidget(_h)
 
         compute_status = QLabel("Detecting...")
-        compute_status.setStyleSheet(f"color: {MUTED_TEXT}; font-size: 14px; margin-left: 20px;")
+        compute_status.setStyleSheet(f"color: {MUTED_TEXT}; font-size: 13px; margin-left: 16px;")
         compute_status.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self._compute_status_label = compute_status
         layout.addSpacing(4)
         layout.addWidget(compute_status)
 
+        # GPU install controls wrapped in a container so when hidden they
+        # leave no dead spacing in the layout.
+        gpu_install_widget = QWidget()
+        gpu_install_layout = QVBoxLayout(gpu_install_widget)
+        gpu_install_layout.setContentsMargins(0, 0, 0, 0)
+        gpu_install_layout.setSpacing(0)
+        gpu_install_widget.setVisible(False)
+        self._gpu_install_widget = gpu_install_widget
+
         gpu_upgrade_browser = QTextBrowser()
         gpu_upgrade_browser.setOpenExternalLinks(False)
-        gpu_upgrade_browser.document().setDocumentMargin(20)
+        gpu_upgrade_browser.document().setDocumentMargin(4)
         gpu_upgrade_browser.setStyleSheet(
-            f"QTextBrowser {{ background: {BROWSER_BG}; color: {BROWSER_TEXT}; border: none; font-size: 15px; }}"
+            f"QTextBrowser {{ background: {BROWSER_BG}; color: {BROWSER_TEXT}; border: none; font-size: 13px; }}"
         )
         gpu_upgrade_browser.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         gpu_upgrade_browser.setHtml(f"""
@@ -1615,31 +1608,47 @@ class MainWindow(QMainWindow):
         <p style='margin-top:8px;'>An NVIDIA GPU is available. Installing GPU support downloads approximately 3-4 GB from pytorch.org. This is a one-time download that survives app updates automatically.</p>
         </body></html>
         """)
-        gpu_upgrade_browser.setFixedHeight(78)
-        gpu_upgrade_browser.setVisible(False)
+        gpu_upgrade_browser.setFixedHeight(50)
         self._gpu_upgrade_browser = gpu_upgrade_browser
-        layout.addSpacing(4)
-        layout.addWidget(gpu_upgrade_browser)
+        gpu_install_layout.addSpacing(4)
+        gpu_install_layout.addWidget(gpu_upgrade_browser)
 
         gpu_btn = QPushButton("Install GPU Support")
-        gpu_btn.setFixedHeight(40)
-        gpu_btn.setFixedWidth(220)
+        gpu_btn.setFixedHeight(34)
+        gpu_btn.setFixedWidth(200)
         gpu_btn.setCursor(Qt.PointingHandCursor)
         gpu_btn.setStyleSheet(
             f"QPushButton {{ background-color: {SECONDARY_BTN_BG}; color: white; "
-            f"font-size: 15px; font-weight: bold; border-radius: 6px; border: none; }}"
+            f"font-size: 13px; font-weight: bold; border-radius: 6px; border: none; }}"
             f"QPushButton:hover {{ background-color: {DISABLED_BTN_HOVER}; }}"
         )
         gpu_btn.clicked.connect(self._on_nvidia_download_clicked)
-        gpu_btn.setVisible(False)
         self._gpu_download_btn = gpu_btn
 
         gpu_btn_row = QHBoxLayout()
-        gpu_btn_row.setContentsMargins(20, 0, 0, 0)
+        gpu_btn_row.setContentsMargins(16, 0, 0, 0)
         gpu_btn_row.addWidget(gpu_btn)
         gpu_btn_row.addStretch()
-        layout.addSpacing(4)
-        layout.addLayout(gpu_btn_row)
+        gpu_install_layout.addSpacing(4)
+        gpu_install_layout.addLayout(gpu_btn_row)
+
+        gpu_clear_btn = QPushButton("Clear GPU Support Files")
+        gpu_clear_btn.setFixedHeight(28)
+        gpu_clear_btn.setFixedWidth(200)
+        gpu_clear_btn.setCursor(Qt.PointingHandCursor)
+        gpu_clear_btn.setStyleSheet(
+            f"QPushButton {{ background-color: transparent; color: {MUTED_TEXT}; "
+            f"font-size: 12px; border: none; text-decoration: underline; }}"
+            f"QPushButton:hover {{ color: {BROWSER_TEXT}; }}"
+        )
+        gpu_clear_btn.clicked.connect(self._on_gpu_clear_clicked)
+        self._gpu_clear_btn = gpu_clear_btn
+        gpu_clear_row = QHBoxLayout()
+        gpu_clear_row.setContentsMargins(16, 0, 0, 0)
+        gpu_clear_row.addWidget(gpu_clear_btn)
+        gpu_clear_row.addStretch()
+        gpu_install_layout.addSpacing(2)
+        gpu_install_layout.addLayout(gpu_clear_row)
 
         from PySide6.QtWidgets import QProgressBar
         gpu_progress = QProgressBar()
@@ -1648,82 +1657,82 @@ class MainWindow(QMainWindow):
         gpu_progress.setFixedHeight(20)
         gpu_progress.setVisible(False)
         self._gpu_progress = gpu_progress
-        layout.addSpacing(8)
-        layout.addWidget(gpu_progress)
+        gpu_install_layout.addSpacing(8)
+        gpu_install_layout.addWidget(gpu_progress)
 
         gpu_progress_label = QLabel("")
-        gpu_progress_label.setStyleSheet(f"color: {MUTED_TEXT}; font-size: 13px; margin-left: 4px;")
+        gpu_progress_label.setStyleSheet(f"color: {MUTED_TEXT}; font-size: 12px; margin-left: 4px;")
         gpu_progress_label.setVisible(False)
         self._gpu_progress_label = gpu_progress_label
-        layout.addSpacing(2)
-        layout.addWidget(gpu_progress_label)
+        gpu_install_layout.addSpacing(2)
+        gpu_install_layout.addWidget(gpu_progress_label)
 
         gpu_restart_btn = QPushButton("Restart Now to Activate GPU Support")
-        gpu_restart_btn.setFixedHeight(40)
-        gpu_restart_btn.setFixedWidth(320)
+        gpu_restart_btn.setFixedHeight(34)
+        gpu_restart_btn.setFixedWidth(290)
         gpu_restart_btn.setCursor(Qt.PointingHandCursor)
         gpu_restart_btn.setStyleSheet(
             f"QPushButton {{ background-color: {SECONDARY_BTN_BG}; color: white; "
-            f"font-size: 15px; font-weight: bold; border-radius: 6px; border: none; }}"
+            f"font-size: 13px; font-weight: bold; border-radius: 6px; border: none; }}"
             f"QPushButton:hover {{ background-color: {DISABLED_BTN_HOVER}; }}"
         )
         gpu_restart_btn.clicked.connect(self._relaunch)
         gpu_restart_btn.setVisible(False)
         self._gpu_restart_btn = gpu_restart_btn
         restart_row = QHBoxLayout()
-        restart_row.setContentsMargins(20, 0, 0, 0)
+        restart_row.setContentsMargins(16, 0, 0, 0)
         restart_row.addWidget(gpu_restart_btn)
         restart_row.addStretch()
-        layout.addSpacing(8)
-        layout.addLayout(restart_row)
+        gpu_install_layout.addSpacing(8)
+        gpu_install_layout.addLayout(restart_row)
 
-        layout.addSpacing(24)
+        layout.addSpacing(4)
+        layout.addWidget(gpu_install_widget)
 
-        scrub_browser = QTextBrowser()
-        scrub_browser.setOpenExternalLinks(False)
-        scrub_browser.document().setDocumentMargin(20)
-        scrub_browser.setStyleSheet(
-            f"QTextBrowser {{ background: {BROWSER_BG}; color: {BROWSER_TEXT}; border: none; font-size: 15px; }}"
-        )
-        scrub_browser.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scrub_browser.setHtml(f"""
-        <html><body style='font-family: Inter, -apple-system, Segoe UI, sans-serif; line-height: 1.5; margin:0; padding:0; color:{BROWSER_TEXT}; background-color:{BROWSER_BG};'>
-        <p style='margin:0; padding:0; line-height:0; font-size:1px; height:0;'></p>
-        <h2 style='color:{BRAND_HEADING_BLUE}; margin-top:0; margin-bottom:2px;'>Second ScrubbeR</h2>
-        <p style='margin-top:2px;'>Runs the trail detector a second time on each frame after rotating it 180&deg;. Catches trails the first pass tends to miss. Detection takes roughly twice as long.</p>
-        </body></html>
-        """)
-        scrub_browser.setFixedHeight(105)
-        layout.addWidget(scrub_browser)
+        layout.addSpacing(14)
+
+        _h = QLabel("Second ScrubbeR")
+        _h.setStyleSheet(f"color: {BRAND_HEADING_BLUE}; font-size: 18px; font-weight: bold;")
+        layout.addWidget(_h)
+        layout.addSpacing(4)
+        _d = QLabel("Runs the trail detector a second time on each frame after rotating it 180°. Catches trails the first pass tends to miss. Detection takes roughly twice as long.")
+        _d.setStyleSheet(f"color: {BROWSER_TEXT}; font-size: 13px;")
+        _d.setWordWrap(True)
+        layout.addWidget(_d)
 
         scrub_chk = QCheckBox("Enable Second ScrubbeR")
-        scrub_chk.setStyleSheet(f"QCheckBox {{ font-size: 15px; color: {BROWSER_TEXT}; margin-left: 20px; }}")
+        scrub_chk.setStyleSheet(f"QCheckBox {{ font-size: 13px; color: {BROWSER_TEXT}; margin-left: 16px; }}")
         scrub_chk.setChecked(SETTINGS.value("second_scrub_enabled", False, type=bool))
         scrub_chk.toggled.connect(lambda v: SETTINGS.setValue("second_scrub_enabled", v))
+        self._scrub_chk = scrub_chk
+
+        scrub_run_hint = QLabel("A run is in progress. Setting locked until it finishes.")
+        scrub_run_hint.setStyleSheet(f"color: {MUTED_TEXT}; font-size: 12px;")
+        scrub_run_hint.setVisible(False)
+        self._scrub_run_hint = scrub_run_hint
+
+        scrub_row = QHBoxLayout()
+        scrub_row.setContentsMargins(16, 0, 0, 0)
+        scrub_row.addWidget(scrub_chk)
+        scrub_row.addSpacing(12)
+        scrub_row.addWidget(scrub_run_hint)
+        scrub_row.addStretch()
         layout.addSpacing(4)
-        layout.addWidget(scrub_chk)
+        layout.addLayout(scrub_row)
 
-        layout.addSpacing(24)
+        layout.addSpacing(14)
 
-        crash_browser = QTextBrowser()
-        crash_browser.setOpenExternalLinks(False)
-        crash_browser.document().setDocumentMargin(20)
-        crash_browser.setStyleSheet(
-            f"QTextBrowser {{ background: {BROWSER_BG}; color: {BROWSER_TEXT}; border: none; font-size: 15px; }}"
-        )
-        crash_browser.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        crash_browser.setHtml(f"""
-        <html><body style='font-family: Inter, -apple-system, Segoe UI, sans-serif; line-height: 1.5; margin:0; padding:0; color:{BROWSER_TEXT}; background-color:{BROWSER_BG};'>
-        <p style='margin:0; padding:0; line-height:0; font-size:1px; height:0;'></p>
-        <h2 style='color:{BRAND_HEADING_BLUE}; margin-top:0; margin-bottom:2px;'>Crash Reporting</h2>
-        <p style='margin-top:2px;'>Sends anonymous crash reports to help find and fix bugs. Reports contain technical details like error messages and basic image dimensions.</p>
-        </body></html>
-        """)
-        crash_browser.setFixedHeight(90)
-        layout.addWidget(crash_browser)
+        _h = QLabel("Crash Reporting")
+        _h.setStyleSheet(f"color: {BRAND_HEADING_BLUE}; font-size: 18px; font-weight: bold;")
+        layout.addWidget(_h)
+        layout.addSpacing(4)
+        _d = QLabel("Sends anonymous crash reports to help find and fix bugs. Reports contain technical details like error messages and basic image dimensions.")
+        _d.setStyleSheet(f"color: {BROWSER_TEXT}; font-size: 13px;")
+        _d.setWordWrap(True)
+        layout.addWidget(_d)
 
         crash_chk = QCheckBox("Send anonymous crash reports")
-        crash_chk.setStyleSheet(f"QCheckBox {{ font-size: 15px; color: {BROWSER_TEXT}; margin-left: 20px; }}")
+        crash_chk.setStyleSheet(f"QCheckBox {{ font-size: 13px; color: {BROWSER_TEXT}; margin-left: 16px; }}")
         crash_chk.setChecked(SETTINGS.value("crash_reporting_enabled", False, type=bool))
 
         def _on_crash_chk_toggled(v):
@@ -1732,8 +1741,13 @@ class MainWindow(QMainWindow):
                 _maybe_init_sentry()
 
         crash_chk.toggled.connect(_on_crash_chk_toggled)
+
+        crash_row = QHBoxLayout()
+        crash_row.setContentsMargins(16, 0, 0, 0)
+        crash_row.addWidget(crash_chk)
+        crash_row.addStretch()
         layout.addSpacing(4)
-        layout.addWidget(crash_chk)
+        layout.addLayout(crash_row)
 
         layout.addStretch()
         return wrap
@@ -1742,6 +1756,9 @@ class MainWindow(QMainWindow):
         if hasattr(self, '_check_updates_btn'):
             self._check_updates_btn.setEnabled(not running)
             self._check_updates_run_hint.setVisible(running)
+        if hasattr(self, '_scrub_chk'):
+            self._scrub_chk.setEnabled(not running)
+            self._scrub_run_hint.setVisible(running)
 
     def _on_check_for_updates(self):
         if getattr(sys, 'frozen', False):
@@ -1779,9 +1796,9 @@ class MainWindow(QMainWindow):
         bio = QTextBrowser()
         bio.setOpenExternalLinks(True)
         bio.setStyleSheet(
-            f"QTextBrowser {{ background: {BROWSER_BG}; color: {BROWSER_TEXT}; border: none; font-size: 15px; }}"
+            f"QTextBrowser {{ background: {BROWSER_BG}; color: {BROWSER_TEXT}; border: none; font-size: 13px; }}"
         )
-        bio.document().setDocumentMargin(20)
+        bio.document().setDocumentMargin(16)
         bio.setHtml(f"""
         <html><body style='font-family: Inter, -apple-system, Segoe UI, sans-serif; line-height: 1.5; margin:0; padding:0; color:{BROWSER_TEXT}; background-color:{BROWSER_BG};'>
         <p style='margin:0; padding:0; line-height:0; font-size:1px; height:0;'></p>
@@ -2303,6 +2320,36 @@ class MainWindow(QMainWindow):
             "and make sure you have enough free disk space (4 GB needed)."
         )
 
+    def _on_gpu_clear_clicked(self):
+        from PySide6.QtWidgets import QMessageBox
+        from modules.gpu_pack import clear_gpu_files, get_override_dir
+        confirm = QMessageBox.question(
+            self,
+            "Clear GPU Support Files",
+            "This will delete the GPU support files so you can start a fresh install.\n\n"
+            "You can reinstall them at any time from this Settings page.\n\n"
+            "Continue?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        ok, detail = clear_gpu_files()
+        if ok:
+            QMessageBox.information(
+                self,
+                "GPU Support Files Cleared",
+                "GPU support files have been removed. Click Install GPU Support to start fresh."
+            )
+        else:
+            override_dir = get_override_dir()
+            QMessageBox.critical(
+                self,
+                "Could Not Clear GPU Files",
+                f"Some files could not be removed. You can delete this folder manually:\n\n"
+                f"{override_dir}\n\n"
+                f"Details: {detail}"
+            )
+
     def _on_nvidia_later_clicked(self):
         SETTINGS.setValue("nvidia_banner_dismissed", True)
         self._nvidia_banner.setVisible(False)
@@ -2339,8 +2386,11 @@ class MainWindow(QMainWindow):
             and device == "cpu"
             and not gpu_mismatch
         )
+        self._gpu_install_widget.setVisible(show_upgrade)
         self._gpu_upgrade_browser.setVisible(show_upgrade)
         self._gpu_download_btn.setVisible(show_upgrade)
+        if hasattr(self, '_gpu_clear_btn'):
+            self._gpu_clear_btn.setVisible(show_upgrade)
 
     def _relaunch(self):
         """Close and reopen the app."""

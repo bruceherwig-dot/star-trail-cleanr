@@ -95,3 +95,88 @@ def write_version_tag(torch_ver: str) -> bool:
         return True
     except OSError:
         return False
+
+
+def clear_gpu_files() -> tuple:
+    """Remove all GPU pack files from the override directory.
+
+    Uses an onerror handler + Windows shell fallback + 3-retry loop to handle
+    read-only files and transient antivirus locks.
+
+    Returns (success: bool, error_detail: str).
+    """
+    import shutil
+    import stat
+    import time
+    import subprocess as _sp
+
+    override_dir = get_override_dir()
+    if not override_dir.exists():
+        return True, ""
+
+    def _onerror(func, path, exc_info):
+        try:
+            os.chmod(path, stat.S_IWRITE)
+            func(path)
+        except Exception:
+            pass
+
+    def _try_remove(target: Path) -> bool:
+        if not target.exists():
+            return True
+        for attempt in range(3):
+            try:
+                if target.is_dir():
+                    shutil.rmtree(str(target), onerror=_onerror)
+                else:
+                    try:
+                        os.chmod(str(target), stat.S_IWRITE)
+                    except Exception:
+                        pass
+                    target.unlink(missing_ok=True)
+                if not target.exists():
+                    return True
+            except Exception:
+                pass
+            try:
+                if target.is_dir():
+                    _sp.run(["cmd", "/c", "rmdir", "/s", "/q", str(target)],
+                            capture_output=True, timeout=10)
+                else:
+                    _sp.run(["cmd", "/c", "del", "/f", "/q", str(target)],
+                            capture_output=True, timeout=10)
+                if not target.exists():
+                    return True
+            except Exception:
+                pass
+            if attempt < 2:
+                time.sleep(0.5)
+        return not target.exists()
+
+    targets = ["torch", "torchvision", "torch_version.txt",
+               "torch_pack.whl", "torchvision_pack.whl"]
+    failed = [t for t in targets if not _try_remove(override_dir / t)]
+    if failed:
+        return False, f"Could not remove: {', '.join(failed)}\n\nFolder: {override_dir}"
+    return True, ""
+
+
+def chmod_extracted_files(override_dir: Path) -> None:
+    """Set write permission on every .pyd and .dll in the override dir.
+
+    Called after extraction so future cleanup is never blocked by read-only
+    flags that zipfile preserves from inside the wheel archive.
+    """
+    import stat
+    for subdir in ("torch", "torchvision"):
+        target = override_dir / subdir
+        if not target.is_dir():
+            continue
+        for root, _dirs, files in os.walk(str(target)):
+            for fname in files:
+                if fname.endswith((".pyd", ".dll")):
+                    try:
+                        os.chmod(os.path.join(root, fname),
+                                 stat.S_IWRITE | stat.S_IREAD)
+                    except Exception:
+                        pass

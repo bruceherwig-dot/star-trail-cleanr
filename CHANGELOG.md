@@ -2,6 +2,16 @@
 
 ---
 
+## v2.15-beta
+- **Fix: Finder Comments now actually appear on Mac.** Cleaned files have always been stamped with the Star Trail CleanR version and website in the EXIF Software tag. The Finder Comments field (Get Info) was supposed to show the same stamp but was always blank. The previous code wrote plain text, which Finder ignores — the fix writes the binary plist format Finder expects.
+- **Settings tab spacing fixed.** Each section had a large blank gap below its heading. Replaced the fixed-height text boxes that caused it with auto-sizing labels — spacing is now even across all four sections.
+- **Checkbox alignment.** Second ScrubbeR and Crash Reporting checkboxes now have matching left indent.
+- **Second ScrubbeR locks during a run.** The checkbox grays out and shows a message while a run is in progress so you can't change it mid-job.
+- **Tabs now fill edge to edge.** The four tabs stretch evenly to fill the window width. The first tab no longer disappears when the window is narrow.
+- **GPU installer cleanup is more reliable (Windows).** Before installing GPU support, leftover files from a previous attempt are cleared with a 3-attempt retry loop that handles read-only files and Windows antivirus locks. If cleanup still fails, the error now tells you exactly what to do.
+- **New: Clear GPU Support Files button (Windows).** In the GPU Acceleration section of Settings — removes all GPU support files so you can start a clean install. If it can't delete everything, it shows you the folder path to delete manually.
+- **Smoke tests:** 132 passing.
+
 ## v2.14-beta
 - **Settings: Crash Reporting toggle.** A new Crash Reporting section in Settings shows whether anonymous crash reporting is turned on or off, and lets you change it at any time. The choice you made at first launch is reflected immediately.
 - **Smoke tests:** 132 passing.
