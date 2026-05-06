@@ -2,6 +2,12 @@
 
 ---
 
+## v2.19-beta
+- **Fix: Saving as 8-bit TIFF no longer crashes when source files are TIFFs.** The error (RuntimeError: Error setting from dictionary) happened because reading EXIF from a TIFF source pulled in image-structure tags that the TIFF writer already owns internally. The fix strips those tags before writing and adds a safety-net fallback — the same multi-step approach used for JPEG EXIF since v2.09. Camera metadata (make, model, lens, ISO, GPS, date) is preserved intact.
+- **New: Low disk space warning before a run starts.** Star Trail CleanR estimates how much space the cleaned output will need based on your first source frame, checks the output drive, and warns you if it looks tight. You can cancel and pick a different output folder, or continue anyway.
+- **Splash screen status text is larger and easier to read.**
+- **Smoke tests:** 132 passing.
+
 ## v2.18-beta
 - **Fix: Progress bar stays "Cancelled" after you cancel a run.** Previously the bar could flicker back to a stale percentage while the subprocess was finishing up. It now locks the moment you click Cancel.
 - **Fix: GPU installer now shows which files blocked cleanup.** If a previous GPU install left locked files behind, the error message now names the specific files Windows couldn't remove instead of giving a generic message.

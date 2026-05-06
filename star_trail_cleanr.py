@@ -3259,6 +3259,37 @@ class MainWindow(QMainWindow):
             )
             return None
 
+        # Disk space check: estimate total output size from the first frame's
+        # file size and warn if the output drive looks too tight.
+        try:
+            import shutil as _shutil
+            _exts = ["*.jpg", "*.jpeg", "*.png", "*.tif", "*.tiff",
+                     "*.JPG", "*.JPEG", "*.PNG", "*.TIF", "*.TIFF"]
+            _frames = sorted(set(
+                f for e in _exts for f in glob.glob(os.path.join(folder, e))
+            ))
+            if _frames:
+                _estimated_bytes = os.path.getsize(_frames[0]) * len(_frames)
+                _free_bytes = _shutil.disk_usage(output).free
+                if _free_bytes < _estimated_bytes * 1.2:
+                    def _fmt_gb(b):
+                        return f"{b / 1_073_741_824:.1f} GB"
+                    from PySide6.QtWidgets import QMessageBox as _QMB
+                    resp = _QMB.warning(
+                        self,
+                        "Low disk space",
+                        f"The output drive may not have enough space for this run.\n\n"
+                        f"Estimated space needed:  {_fmt_gb(_estimated_bytes)}\n"
+                        f"Free space available:      {_fmt_gb(_free_bytes)}\n\n"
+                        "You can continue anyway or cancel and pick a different output folder.",
+                        _QMB.Ok | _QMB.Cancel,
+                        _QMB.Cancel,
+                    )
+                    if resp == _QMB.Cancel:
+                        return None
+        except Exception:
+            pass  # best-effort, never block a run on a failed disk check
+
         # Pre-flight mask check: if a mask was saved but can't be read now,
         # ask the user whether to proceed without it rather than crashing mid-run.
         if self._mask_path:
@@ -4401,7 +4432,7 @@ if __name__ == '__main__':
     )
     _splash_text_col.addWidget(_splash_bar)
     _splash_status = QLabel("Initializing…")
-    _splash_status.setStyleSheet("font-size: 11pt; color: #6b7280; background: transparent; border: none;")
+    _splash_status.setStyleSheet("font-size: 18pt; color: #6b7280; background: transparent; border: none;")
     _splash_text_col.addWidget(_splash_status)
     _splash_text_col.addStretch(1)
     _splash_row.addLayout(_splash_text_col, 1)
