@@ -320,12 +320,17 @@ def main():
             save_kwargs = {"compression": "tiff_deflate"}
             if icc_profile:
                 save_kwargs["icc_profile"] = icc_profile
-            if exif_bytes:
-                save_kwargs["exif"] = exif_bytes
+            _tiff_exif = _fit_exif_for_tiff(exif_bytes)
+            if _tiff_exif:
+                save_kwargs["exif"] = _tiff_exif
             if dpi:
                 save_kwargs["dpi"] = dpi
             out_path = str(cleaned_dir / (stem + ".tif"))
-            pil.save(out_path, "TIFF", **save_kwargs)
+            try:
+                pil.save(out_path, "TIFF", **save_kwargs)
+            except RuntimeError:
+                save_kwargs.pop("exif", None)
+                pil.save(out_path, "TIFF", **save_kwargs)
         else:  # tif16
             # PIL has no first-class 16-bit RGB image mode, so its fromarray
             # raises KeyError on uint16 RGB arrays. Use tifffile (a scientific
@@ -476,6 +481,44 @@ def main():
         except Exception:
             pass
         return None  # save without EXIF rather than crash; originals are untouched
+
+    def _fit_exif_for_tiff(exif_bytes):
+        """Strip tags that libtiff owns on the output file and MakerNote from TIFF EXIF.
+        Structural tags (width, height, compression, etc.) describe the source file's
+        geometry and conflict with libtiff's internal state on a new file. MakerNote
+        contains proprietary binary data with internal offsets into the source file.
+        Returns cleaned bytes; on any error returns the original so the save still runs.
+        """
+        if not exif_bytes:
+            return exif_bytes
+        # Tags libtiff sets itself when writing a new TIFF — passing them causes
+        # RuntimeError: Error setting from dictionary
+        _TIFF_STRUCTURAL = {
+            256,  # ImageWidth
+            257,  # ImageLength
+            258,  # BitsPerSample
+            259,  # Compression
+            262,  # PhotometricInterpretation
+            273,  # StripOffsets
+            277,  # SamplesPerPixel
+            278,  # RowsPerStrip
+            279,  # StripByteCounts
+            284,  # PlanarConfiguration
+            322,  # TileWidth
+            323,  # TileLength
+            324,  # TileOffsets
+            325,  # TileByteCounts
+            0x927C,  # MakerNote — proprietary binary with source-file offsets
+        }
+        try:
+            from PIL import Image as _PILImage
+            ex = _PILImage.Exif()
+            ex.load(exif_bytes)
+            for tag in _TIFF_STRUCTURAL:
+                ex.pop(tag, None)
+            return ex.tobytes()
+        except Exception:
+            return exif_bytes
 
     exif_bytes = _stamp_exif(exif_bytes)
 
