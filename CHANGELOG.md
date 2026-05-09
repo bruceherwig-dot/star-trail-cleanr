@@ -2,6 +2,12 @@
 
 ---
 
+## v2.20-beta
+- **New: Run details appear at the top of the Star Log when a run starts.** The log now shows which AI model is running, which processor (Apple Silicon, CPU, or GPU), the output format, and whether Second ScrubbeR is on — so you have the full picture without digging through Settings.
+- **New: The "Email Me" support link includes your Star Log, version, and OS automatically.** Clicking the link opens a pre-filled email with the last 1,500 characters of your Star Log, your app version, and your OS. Much easier to get the right information for a bug report.
+- **Fix: Low memory warning now leads with the right advice.** The warning now tells you to close other open programs first, then reduce the number of images only if that isn't enough. The old message led with reducing frames, which most people don't want to hear.
+- **Smoke tests:** 132 passing.
+
 ## v2.19-beta
 - **Fix: Saving as 8-bit TIFF no longer crashes when source files are TIFFs.** The error (RuntimeError: Error setting from dictionary) happened because reading EXIF from a TIFF source pulled in image-structure tags that the TIFF writer already owns internally. The fix strips those tags before writing and adds a safety-net fallback — the same multi-step approach used for JPEG EXIF since v2.09. Camera metadata (make, model, lens, ISO, GPS, date) is preserved intact.
 - **New: Low disk space warning before a run starts.** Star Trail CleanR estimates how much space the cleaned output will need based on your first source frame, checks the output drive, and warns you if it looks tight. You can cancel and pick a different output folder, or continue anyway.

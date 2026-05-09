@@ -3373,8 +3373,8 @@ class MainWindow(QMainWindow):
                             f"and could cause it to slow down or freeze.\n\n"
                             f"Estimated RAM needed:  {_fmt_gb(_peak_bytes)}\n"
                             f"RAM available now:        {_fmt_gb(_available)}\n\n"
-                            "Try setting 'Number of images' to a smaller value, "
-                            "or close other apps before running.\n\n"
+                            "Close any other open programs to free up memory before running. "
+                            "If you still see this warning, try setting 'Number of images' to a smaller value.\n\n"
                             "You can continue anyway or cancel.",
                             _QMB.Ok | _QMB.Cancel,
                             _QMB.Cancel,
