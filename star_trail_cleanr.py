@@ -676,6 +676,30 @@ class CleanerWorker(QThread):
                       + (f" \u2014 skipped {skipped_total} file(s)" if skipped_total else ""))
             header += f"\n{n_batches} batch{'es' if n_batches > 1 else ''} to run"
             self.status.emit(header + "\nStarting\u2026")
+
+            # Run settings summary \u2014 always logged before the first subprocess
+            # launches so it survives silent worker crashes and lands in emails.
+            try:
+                from modules.detect_trails import best_device as _best_device
+                _dev = _best_device()
+                _device_str = {"mps": "GPU (Apple)", "cuda": "GPU (NVIDIA)"}.get(_dev, "CPU")
+            except Exception:
+                _device_str = "unknown device"
+            try:
+                from modules.user_folder import get_installed_model_version as _gmv
+                _mv = _gmv()
+                _mm = re.match(r"model-v(\d+(?:\.\d+)?)", _mv or "")
+                _model_str = f"Trail DetectoR v{_mm.group(1)}" if _mm else (_mv or "bundled model")
+            except Exception:
+                _model_str = "unknown model"
+            _scrub_str = ("Second ScrubbeR on"
+                          if SETTINGS.value("second_scrub_enabled", False, type=bool)
+                          else "Second ScrubbeR off")
+            self.status.emit(
+                f"{_model_str}  |  {_device_str}  |  {self.output_format.upper()} output"
+                f"  |  {_scrub_str}"
+            )
+
             self.progress.emit(0, 100, "")
             self.frame_count.emit(0, total)
 
@@ -1015,7 +1039,15 @@ class CleanerWorker(QThread):
                 if self._proc.returncode != 0:
                     stderr_text = self._proc.stderr.read().strip()
                     err_lines = [l for l in stderr_text.splitlines() if l.strip()]
-                    err_msg = err_lines[-1] if err_lines else "unknown error"
+                    if err_lines:
+                        err_msg = err_lines[-1]
+                    else:
+                        # Error was printed to stdout (e.g. mixed bit-depth check).
+                        # Find the last ERROR: line, or fall back to last stdout line.
+                        stdout_err = [l for l in proc_stdout_lines if l.startswith("ERROR:")]
+                        err_msg = stdout_err[-1] if stdout_err else (
+                            proc_stdout_lines[-1] if proc_stdout_lines else "unknown error"
+                        )
 
                     def _head_tail(lines, n=50):
                         """Return first n + last n lines joined, with a marker
@@ -1046,6 +1078,7 @@ class CleanerWorker(QThread):
                             os_tag = f"{sysname} {rel} ({_plat.machine()})"
                             with sentry_sdk.push_scope() as scope:
                                 scope.set_tag("component", "gui_worker_capture")
+                                scope.set_tag("app_version", VERSION)
                                 scope.set_tag("batch_index", str(i + 1))
                                 scope.set_tag("n_batches", str(n_batches))
                                 scope.set_tag("image_w", str(dominant[0]))
@@ -3053,9 +3086,32 @@ class MainWindow(QMainWindow):
         pre-filled. A short status line confirms the click registered."""
         from PySide6.QtCore import QUrl as _QUrl
         from PySide6.QtGui import QDesktopServices as _QDS
+        import urllib.parse as _urlp
+        import platform as _plat
 
         QApplication.clipboard().setText(self._support_email)
-        _QDS.openUrl(_QUrl(url))
+
+        log_text = self._status_out.toPlainText() if hasattr(self, '_status_out') else ""
+        if len(log_text) > 1500:
+            log_text = "...(truncated)\n" + log_text[-1500:]
+
+        sysname = _plat.system()
+        machine = _plat.machine()
+        subject = "Star Trail CleanR error report"
+        body = (
+            "Hi Bruce,\n\n"
+            "[Describe what happened]\n\n"
+            f"App version: Beta v{VERSION}\n"
+            f"OS: {sysname} ({machine})\n\n"
+            "--- Star Log ---\n"
+            f"{log_text}\n"
+        )
+        mailto_url = (
+            f"mailto:{self._support_email}"
+            f"?subject={_urlp.quote(subject)}"
+            f"&body={_urlp.quote(body)}"
+        )
+        _QDS.openUrl(_QUrl(mailto_url))
         self._community_status.setText("Email copied. Paste it anywhere.")
         QTimer.singleShot(
             3000, lambda: self._community_status.setText("")
@@ -3259,8 +3315,7 @@ class MainWindow(QMainWindow):
             )
             return None
 
-        # Disk space check: estimate total output size from the first frame's
-        # file size and warn if the output drive looks too tight.
+        # Disk space + memory check: estimate resources needed before the run starts.
         try:
             import shutil as _shutil
             _exts = ["*.jpg", "*.jpeg", "*.png", "*.tif", "*.tiff",
@@ -3269,11 +3324,27 @@ class MainWindow(QMainWindow):
                 f for e in _exts for f in glob.glob(os.path.join(folder, e))
             ))
             if _frames:
-                _estimated_bytes = os.path.getsize(_frames[0]) * len(_frames)
+                _lim_text = self._frame_limit.currentText()
+                _total_frames = (len(_frames) if _lim_text == "All Frames"
+                                 else min(int(_lim_text), len(_frames)))
+
+                with Image.open(_frames[0]) as _im:
+                    _w, _h = _im.size
+
+                _out_fmt = self._format_combo.currentText()
+                if _out_fmt == "TIFF 16-bit":
+                    _bpp = 6.0
+                elif _out_fmt == "TIFF 8-bit":
+                    _bpp = 3.0
+                else:
+                    _bpp = 0.6  # conservative for JPG quality 95
+                _estimated_bytes = int(_w * _h * _bpp * _total_frames)
+
+                def _fmt_gb(b):
+                    return f"{b / 1_073_741_824:.1f} GB"
+
                 _free_bytes = _shutil.disk_usage(output).free
-                if _free_bytes < _estimated_bytes * 1.2:
-                    def _fmt_gb(b):
-                        return f"{b / 1_073_741_824:.1f} GB"
+                if _free_bytes < _estimated_bytes * 1.5:
                     from PySide6.QtWidgets import QMessageBox as _QMB
                     resp = _QMB.warning(
                         self,
@@ -3287,8 +3358,33 @@ class MainWindow(QMainWindow):
                     )
                     if resp == _QMB.Cancel:
                         return None
+
+                try:
+                    import psutil as _psutil
+                    _batch_frames = min(22, _total_frames)  # batch (20) + 2 neighbor frames
+                    _peak_bytes = int(_batch_frames * _w * _h * 3 * 4) + 1_500_000_000
+                    _available = _psutil.virtual_memory().available
+                    if _peak_bytes > _available * 0.85:
+                        from PySide6.QtWidgets import QMessageBox as _QMB
+                        resp = _QMB.warning(
+                            self,
+                            "Low memory",
+                            f"This run may use more RAM than your computer has available "
+                            f"and could cause it to slow down or freeze.\n\n"
+                            f"Estimated RAM needed:  {_fmt_gb(_peak_bytes)}\n"
+                            f"RAM available now:        {_fmt_gb(_available)}\n\n"
+                            "Try setting 'Number of images' to a smaller value, "
+                            "or close other apps before running.\n\n"
+                            "You can continue anyway or cancel.",
+                            _QMB.Ok | _QMB.Cancel,
+                            _QMB.Cancel,
+                        )
+                        if resp == _QMB.Cancel:
+                            return None
+                except ImportError:
+                    pass
         except Exception:
-            pass  # best-effort, never block a run on a failed disk check
+            pass  # best-effort, never block a run on a failed resource check
 
         # Pre-flight mask check: if a mask was saved but can't be read now,
         # ask the user whether to proceed without it rather than crashing mid-run.
@@ -3667,8 +3763,12 @@ class MainWindow(QMainWindow):
         self._cancel_btn.clicked.connect(self._go_to_setup)
 
     def _on_error(self, msg):
+        import platform as _plat
         self._stop_elapsed_timer()
-        self._status_out.setText(f"ERROR: {msg}")
+        self._status_out.append(f"\nERROR: {msg}")
+        self._status_out.append(
+            f"App: Beta v{VERSION}  |  {_plat.system()} {_plat.machine()}"
+        )
         self._switch_to_back_btn()
 
     def _on_bad_file_prompt(self, path, diagnosis):
