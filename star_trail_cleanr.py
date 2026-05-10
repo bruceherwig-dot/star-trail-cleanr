@@ -3328,6 +3328,20 @@ class MainWindow(QMainWindow):
                 _total_frames = (len(_frames) if _lim_text == "All Frames"
                                  else min(int(_lim_text), len(_frames)))
 
+                if _total_frames < 3:
+                    from PySide6.QtWidgets import QMessageBox as _QMB
+                    _QMB.warning(
+                        self,
+                        "Not enough frames",
+                        f"Star Trail CleanR needs at least 3 frames to run.\n\n"
+                        f"Your folder has {_total_frames} image(s). "
+                        "Add more frames and try again.\n\n"
+                        "Star Trail CleanR works on individual frames before "
+                        "stacking, not on a finished star trail image.",
+                        _QMB.Ok,
+                    )
+                    return None
+
                 with Image.open(_frames[0]) as _im:
                     _w, _h = _im.size
 
@@ -3667,7 +3681,7 @@ class MainWindow(QMainWindow):
             # warm up): show a steady "still warming up" line so the
             # rotation doesn't loop back to "Studying your stars" looking
             # like the run restarted.
-            text = "Still warming up the AI trail detector"
+            text = "Warming up the AI trail detector"
         if sub_step == 0:
             self._status_out.append("  " + text + "...")
             sb = self._status_out.verticalScrollBar()

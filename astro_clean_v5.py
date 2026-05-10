@@ -442,21 +442,15 @@ def main():
             return source_bytes
 
     def _write_finder_comment(out_path: str) -> None:
-        """Write _stamp to macOS Finder Comments field via binary plist xattr. No-op if already set or not macOS."""
+        """Write _stamp to macOS Finder Comments field via Finder AppleScript. No-op if not macOS."""
         if sys.platform != 'darwin':
             return
         try:
             import subprocess as _sp
-            import plistlib
-            r = _sp.run(
-                ['xattr', '-p', 'com.apple.metadata:kMDItemFinderComment', out_path],
-                capture_output=True, timeout=3,
-            )
-            if r.returncode == 0 and r.stdout.strip():
-                return
-            data = plistlib.dumps(_stamp, fmt=plistlib.FMT_BINARY)
+            _safe = _stamp.replace('"', '')
             _sp.run(
-                ['xattr', '-wx', 'com.apple.metadata:kMDItemFinderComment', data.hex(), out_path],
+                ['osascript', '-e',
+                 f'tell application "Finder" to set comment of (POSIX file "{out_path}" as alias) to "{_safe}"'],
                 capture_output=True, timeout=5,
             )
         except Exception:

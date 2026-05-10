@@ -2,6 +2,12 @@
 
 ---
 
+## v2.21-beta
+- **Fix: Finder Comments now write correctly on Mac.** Cleaned files now show the Star Trail CleanR stamp in the Comments field in macOS Get Info. The previous approach was unreliable; it now uses the same mechanism Finder uses internally.
+- **Fix: Friendly message when fewer than 3 frames are selected.** Instead of crashing silently, the app now shows a clear dialog explaining the minimum and noting that Star Trail CleanR works on individual frames before stacking, not a finished star trail image.
+- **Tweak: "Warming up the AI trail detector" wording cleaned up.** Removed the word "Still" from the fallback warmup message in the Star Log.
+- **Smoke tests:** 132 passing.
+
 ## v2.20-beta
 - **New: Run details appear at the top of the Star Log when a run starts.** The log now shows which AI model is running, which processor (Apple Silicon, CPU, or GPU), the output format, and whether Second ScrubbeR is on — so you have the full picture without digging through Settings.
 - **New: The "Email Me" support link includes your Star Log, version, and OS automatically.** Clicking the link opens a pre-filled email with the last 1,500 characters of your Star Log, your app version, and your OS. Much easier to get the right information for a bug report.
