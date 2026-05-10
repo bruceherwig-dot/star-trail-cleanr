@@ -2462,6 +2462,9 @@ class MainWindow(QMainWindow):
             status = ("CPU — GPU pack version mismatch. "
                       "Reinstall the GPU pack for this version of Star Trail CleanR "
                       "to re-enable acceleration.")
+        elif device == "cpu" and outcome == "yes" and os.environ.get('STC_CUDA_UNSUPPORTED'):
+            status = ("NVIDIA GPU detected but your card isn't supported by the current "
+                      "GPU pack — running on CPU.")
         elif device == "cpu" and outcome == "yes":
             status = "CPU — NVIDIA GPU detected. Install the GPU pack for faster processing."
         elif device == "cpu" and _pl.system() == "Windows":
@@ -2477,6 +2480,7 @@ class MainWindow(QMainWindow):
             and outcome == "yes"
             and device == "cpu"
             and not gpu_mismatch
+            and not os.environ.get('STC_CUDA_UNSUPPORTED')
         )
         self._gpu_install_widget.setVisible(show_upgrade)
         self._gpu_upgrade_browser.setVisible(show_upgrade)

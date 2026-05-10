@@ -1,6 +1,7 @@
 """YOLO/SAHI trail detection."""
 import cv2
 import numpy as np
+import os
 from typing import Optional
 
 from .io_safe import robust_imread
@@ -11,7 +12,14 @@ def best_device() -> str:
     try:
         import torch
         if torch.cuda.is_available():
-            return "cuda"
+            try:
+                _t = torch.zeros(1, device='cuda')
+                _ = _t + _t
+                torch.cuda.synchronize()
+                del _t
+                return "cuda"
+            except Exception:
+                os.environ['STC_CUDA_UNSUPPORTED'] = '1'
         if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
             return "mps"
     except Exception:
@@ -29,12 +37,24 @@ def load_model(model_path: str, confidence: float = 0.25,
     if not device or device == "auto":
         device = best_device()
     from sahi import AutoDetectionModel
-    model = AutoDetectionModel.from_pretrained(
-        model_type="ultralytics",
-        model_path=str(model_path),
-        confidence_threshold=confidence,
-        device=device,
-    )
+    try:
+        model = AutoDetectionModel.from_pretrained(
+            model_type="ultralytics",
+            model_path=str(model_path),
+            confidence_threshold=confidence,
+            device=device,
+        )
+    except Exception:
+        if device != "cpu":
+            os.environ['STC_CUDA_UNSUPPORTED'] = '1'
+            model = AutoDetectionModel.from_pretrained(
+                model_type="ultralytics",
+                model_path=str(model_path),
+                confidence_threshold=confidence,
+                device="cpu",
+            )
+        else:
+            raise
     return model
 
 

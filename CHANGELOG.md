@@ -2,6 +2,10 @@
 
 ---
 
+## v2.22-beta
+- **Fix: App no longer crashes on incompatible NVIDIA GPUs (Windows).** Some GPU cards aren't supported by the PyTorch CUDA build we ship. Previously this caused a crash on startup. The app now tests CUDA before committing to it, falls back to CPU automatically, and shows an honest status in Settings: "NVIDIA GPU detected but your card isn't supported by the current GPU pack — running on CPU." When a compatible GPU pack becomes available, the app picks it up automatically on next launch with no action required.
+- **Smoke tests:** 132 passing.
+
 ## v2.21-beta
 - **Fix: Finder Comments now write correctly on Mac.** Cleaned files now show the Star Trail CleanR stamp in the Comments field in macOS Get Info. The previous approach was unreliable; it now uses the same mechanism Finder uses internally.
 - **Fix: Friendly message when fewer than 3 frames are selected.** Instead of crashing silently, the app now shows a clear dialog explaining the minimum and noting that Star Trail CleanR works on individual frames before stacking, not a finished star trail image.
