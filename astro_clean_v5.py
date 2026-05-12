@@ -573,8 +573,17 @@ def main():
         # it, producing (H,W,4) arrays that crash Star Bridge repair when mixed
         # with normal (H,W,3) neighbor frames. Strip the alpha here.
         if img.ndim == 3 and img.shape[2] == 4:
+            alpha = img[:, :, 3]
+            if alpha.min() < 255:
+                print(
+                    f"  Warning: {fp.name} has a transparency layer that was ignored."
+                    f" If you masked this image intentionally, re-export it as a"
+                    f" standard RGB TIFF and try again.",
+                    flush=True,
+                )
+            else:
+                print(f"  Note: stripped alpha channel from {fp.name} - RGB data is intact", flush=True)
             img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
-            print(f"  Note: stripped alpha channel from {fp.name} - RGB data is intact", flush=True)
 
         frames_all.append(img)
         files_kept.append(fp)
