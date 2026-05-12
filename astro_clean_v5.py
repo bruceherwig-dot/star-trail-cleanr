@@ -525,10 +525,6 @@ def main():
     for fi, fp in enumerate(frame_files_all):
         is_core = core_start <= fi < core_end
         is_before_core = fi < core_start
-        if is_core:
-            core_pos = fi - core_start + 1
-            print(f"  loading {core_pos}/{n}: {fp.name}", flush=True)
-
         img, diag = robust_imread_diag(fp, cv2.IMREAD_UNCHANGED)
         if img is None:
             # Best-effort developer telemetry — captured before we ask the GUI
@@ -584,6 +580,12 @@ def main():
             else:
                 print(f"  Note: stripped alpha channel from {fp.name} - RGB data is intact", flush=True)
             img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+
+        if is_core:
+            core_pos = fi - core_start + 1
+            h, w = img.shape[:2]
+            ch = img.shape[2] if img.ndim == 3 else 1
+            print(f"  loading {core_pos}/{n}: {fp.name} ({w}x{h}, {ch}ch)", flush=True)
 
         frames_all.append(img)
         files_kept.append(fp)
