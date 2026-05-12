@@ -568,6 +568,14 @@ def main():
             img_exif = robust_imread(fp, cv2.IMREAD_COLOR)
             if img_exif is not None and img_exif.shape[:2] != img.shape[:2]:
                 img = img_exif
+
+        # Some TIFFs carry an embedded alpha channel. IMREAD_UNCHANGED preserves
+        # it, producing (H,W,4) arrays that crash Star Bridge repair when mixed
+        # with normal (H,W,3) neighbor frames. Strip the alpha here.
+        if img.ndim == 3 and img.shape[2] == 4:
+            img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+            print(f"  Note: stripped alpha channel from {fp.name} - RGB data is intact", flush=True)
+
         frames_all.append(img)
         files_kept.append(fp)
 

@@ -2,6 +2,10 @@
 
 ---
 
+## v2.23-beta
+- **Fix: App no longer crashes on image sets that include TIFF files with an embedded alpha channel.** Some software exports TIFFs with a transparency layer that Star Trail CleanR doesn't need. The app now strips the alpha automatically and notes it in the Star Log, so the run continues without interruption.
+- **Smoke tests:** 133 passing.
+
 ## v2.22-beta
 - **Fix: App no longer crashes on incompatible NVIDIA GPUs (Windows).** Some GPU cards aren't supported by the PyTorch CUDA build we ship. Previously this caused a crash on startup. The app now tests CUDA before committing to it, falls back to CPU automatically, and shows an honest status in Settings: "NVIDIA GPU detected but your card isn't supported by the current GPU pack — running on CPU." When a compatible GPU pack becomes available, the app picks it up automatically on next launch with no action required.
 - **Smoke tests:** 132 passing.
