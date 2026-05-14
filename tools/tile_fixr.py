@@ -273,6 +273,9 @@ def build_tile_entries(by_frame, frame_names, progress_cb=None):
     if not img_files:
         raise SystemExit(f"No source frames in {IMG_DIR}")
 
+    # Name-based lookup so deleted or missing frames don't shift positions.
+    img_by_name = {p.name: p for p in img_files}
+
     stride = int(TILE_SIZE * (1 - OVERLAP))
     entries = []
 
@@ -286,9 +289,11 @@ def build_tile_entries(by_frame, frame_names, progress_cb=None):
 
     frame_list = SUSPECT_FRAMES if SUSPECT_FRAMES else list(range(FRAME_START, FRAME_END))
     for pos, frame_idx in enumerate(frame_list):
-        if frame_idx >= len(img_files):
+        if frame_idx >= len(frame_names):
             continue
-        img_path = img_files[frame_idx]
+        img_path = img_by_name.get(frame_names[frame_idx])
+        if img_path is None:
+            continue
         stem = img_path.stem
         sys.stdout.write(f"\r  Frame {pos + 1}/{len(frame_list)}  {img_path.name}   ")
         sys.stdout.flush()
@@ -399,6 +404,8 @@ class ZoomableImageView(QGraphicsView):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.setMinimumHeight(400)
         self._zoom_level = 0
+        self.draw_mode = False   # when True, clicks outside image bounds are allowed
+        self._rb_line  = None   # QGraphicsLineItem for the add-mode rubber-band
         self._press_pos = None
         self._press_button = None
         self._is_dragging = False
@@ -407,10 +414,13 @@ class ZoomableImageView(QGraphicsView):
         self.setMouseTracking(True)
         self.viewport().setMouseTracking(True)
 
+    _DRAW_PAD = 24
+
     def set_pixmap(self, pixmap):
         """Replace the pixmap AND reset view to fit (use on entry change)."""
         self._pixmap_item.setPixmap(pixmap)
-        self._scene.setSceneRect(QRectF(pixmap.rect()))
+        pad = self._DRAW_PAD
+        self._scene.setSceneRect(QRectF(pixmap.rect()).adjusted(-pad, -pad, pad, pad))
         self._zoom_level = 0
         self.resetTransform()
         self.fitInView(self._scene.sceneRect(), Qt.KeepAspectRatio)
@@ -420,7 +430,6 @@ class ZoomableImageView(QGraphicsView):
         Use this for incremental redraws during a vertex drag so the user's
         zoom/pan stays put."""
         self._pixmap_item.setPixmap(pixmap)
-        self._scene.setSceneRect(QRectF(pixmap.rect()))
 
     def event(self, event):
         if event.type() == QEvent.Gesture:
@@ -448,6 +457,10 @@ class ZoomableImageView(QGraphicsView):
         """Current view-to-scene scale factor (>1 = zoomed in)."""
         return float(self.transform().m11()) or 1.0
 
+    def _to_scene_xy(self, qpoint):
+        scene_pt = self.mapToScene(qpoint)
+        return int(scene_pt.x()), int(scene_pt.y())
+
     def _to_image_xy(self, qpoint):
         scene_pt = self.mapToScene(qpoint)
         ix = int(scene_pt.x())
@@ -457,9 +470,25 @@ class ZoomableImageView(QGraphicsView):
             return None
         return ix, iy
 
+    def set_rubber_band(self, x1, y1, x2, y2):
+        pen = QPen(QColor(50, 255, 50), 1, Qt.SolidLine)
+        pen.setCosmetic(True)
+        if self._rb_line is None:
+            self._rb_line = self._scene.addLine(x1, y1, x2, y2, pen)
+        else:
+            self._rb_line.setLine(x1, y1, x2, y2)
+            self._rb_line.setPen(pen)
+
+    def clear_rubber_band(self):
+        if self._rb_line is not None:
+            self._scene.removeItem(self._rb_line)
+            self._rb_line = None
+
     def mousePressEvent(self, event):
         pos = event.position().toPoint()
         xy = self._to_image_xy(pos)
+        if xy is None and self.draw_mode:
+            xy = self._to_scene_xy(pos)
         if event.button() == Qt.LeftButton and xy is not None:
             self._press_pos = pos
             self._press_button = Qt.LeftButton
@@ -480,6 +509,8 @@ class ZoomableImageView(QGraphicsView):
         if self._press_button == Qt.LeftButton and self._press_pos is not None:
             pos = event.position().toPoint()
             xy = self._to_image_xy(pos)
+            if xy is None and self.draw_mode:
+                xy = self._to_scene_xy(pos)
             if xy is not None:
                 dx = pos.x() - self._press_pos.x()
                 dy = pos.y() - self._press_pos.y()
@@ -500,6 +531,8 @@ class ZoomableImageView(QGraphicsView):
             return
         # No button: hover — emit so parent can update cursor over handles
         xy = self._to_image_xy(event.position().toPoint())
+        if xy is None and self.draw_mode:
+            xy = self._to_scene_xy(event.position().toPoint())
         if xy is not None:
             self.hovered_at_image_xy.emit(xy[0], xy[1])
         super().mouseMoveEvent(event)
@@ -508,6 +541,8 @@ class ZoomableImageView(QGraphicsView):
         if event.button() == Qt.LeftButton and self._press_pos is not None:
             release_pos = event.position().toPoint()
             xy = self._to_image_xy(release_pos)
+            if xy is None and self.draw_mode:
+                xy = self._to_scene_xy(release_pos)
             if xy is not None:
                 if not self._is_dragging:
                     dx = release_pos.x() - self._press_pos.x()
@@ -589,9 +624,11 @@ def save_last_pick(task_id, first_frame, last_frame):
 class TaskPickerDialog(QDialog):
     """Modal dialog shown at launch — pick a CVAT task + how many frames to load."""
 
-    def __init__(self, tasks, last_task_id, last_first, last_last):
+    def __init__(self, tasks, last_task_id, last_first, last_last, auth=None):
         super().__init__()
-        self.tasks = tasks
+        self.tasks        = tasks
+        self.auth         = auth
+        self.last_task_id = last_task_id
         self.setWindowTitle("TileFixR — Pick CVAT task")
         self.setMinimumWidth(560)
 
@@ -664,15 +701,34 @@ class TaskPickerDialog(QDialog):
         task = self.tasks[idx] if 0 <= idx < len(self.tasks) else None
         if task is None:
             return
-        # Clamp range to task size (sizes are 1-based count, indices 0..size-1)
-        if task["size"] > 0:
-            max_frames = task["size"]
+        # Fetch deleted_frames to get accurate count, then update the combo label.
+        effective_size = task["size"]
+        if self.auth and task["size"] > 0:
+            try:
+                meta = requests.get(
+                    f"{CVAT_URL}/api/tasks/{task['id']}/data/meta",
+                    auth=self.auth).json()
+                deleted = meta.get("deleted_frames", [])
+                effective_size = task["size"] - len(deleted)
+                new_label = (f"{task['id']:>3}  —  {task['name']}  "
+                             f"({effective_size} frames)")
+                self.task_combo.setItemText(idx, new_label)
+            except Exception:
+                pass
+        # Reset to 1/max when switching to a different task; restore saved values
+        # when reopening on the same task.
+        if effective_size > 0:
+            max_frames = effective_size
             self.first_spin.setMaximum(max_frames)
             self.last_spin.setMaximum(max_frames)
-            if self.first_spin.value() > max_frames:
+            if task["id"] != self.last_task_id:
                 self.first_spin.setValue(1)
-            if self.last_spin.value() > max_frames:
                 self.last_spin.setValue(max_frames)
+            else:
+                if self.first_spin.value() > max_frames:
+                    self.first_spin.setValue(1)
+                if self.last_spin.value() > max_frames:
+                    self.last_spin.setValue(max_frames)
         self._on_range_changed()
         # Resolve image dir; warn if missing
         img_dir = resolve_image_dir(task["name"])
@@ -703,12 +759,12 @@ class TaskPickerDialog(QDialog):
         return int(self.last_spin.value())
 
     def _on_range_changed(self):
-        # Auto-correct: clamp last >= first
-        if self.last_spin.value() < self.first_spin.value():
+        if (self.last_spin.value() < self.first_spin.value()
+                and not self.last_spin.hasFocus()):
             self.last_spin.blockSignals(True)
             self.last_spin.setValue(self.first_spin.value())
             self.last_spin.blockSignals(False)
-        n = self.last_spin.value() - self.first_spin.value() + 1
+        n = max(1, self.last_spin.value() - self.first_spin.value() + 1)
         self.range_label.setText(
             f"  → loading {n} frame{'s' if n != 1 else ''} "
             f"({self.first_spin.value()}–{self.last_spin.value()})")
@@ -826,6 +882,12 @@ class CvatSendWorker(QThread):
             })
         except Exception as exc:
             self.error.emit(str(exc))
+
+
+def _play_end_sound():
+    subprocess.Popen(["afplay", "-v", "0.1",
+                      "/System/Library/Sounds/Tink.aiff"],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 # ── Main window ─────────────────────────────────────────────────────────────
@@ -1023,7 +1085,7 @@ class TileFixR(QMainWindow):
 
     def _build_banner(self):
         banner = QWidget()
-        banner.setFixedHeight(64)
+        banner.setFixedHeight(48)
         banner.setStyleSheet("background-color: #0a1e3f;")
         layout = QHBoxLayout(banner)
         layout.setContentsMargins(16, 0, 12, 0)
@@ -1031,7 +1093,7 @@ class TileFixR(QMainWindow):
 
         title = QLabel("TileFixR")
         title.setStyleSheet(
-            "color: white; font-size: 22px; font-weight: bold; background: transparent;"
+            "color: white; font-size: 18px; font-weight: bold; background: transparent;"
         )
         layout.addWidget(title)
 
@@ -1055,7 +1117,7 @@ class TileFixR(QMainWindow):
 
         # Send-to-CVAT button (upper right, count updates dynamically)
         self.send_btn = QPushButton("Send 0 changes to CVAT")
-        self.send_btn.setFixedHeight(34)
+        self.send_btn.setFixedHeight(28)
         self.send_btn.setStyleSheet(
             "QPushButton { background-color: #c0392b; color: white; font-size: 12px; "
             "font-weight: bold; border-radius: 17px; border: none; padding: 0 16px; }"
@@ -1067,7 +1129,7 @@ class TileFixR(QMainWindow):
         layout.addWidget(self.send_btn)
 
         relaunch_btn = QPushButton("Relaunch")
-        relaunch_btn.setFixedHeight(30)
+        relaunch_btn.setFixedHeight(26)
         relaunch_btn.setStyleSheet(
             "QPushButton { background-color: #d0e4f5; color: #1a3a5c; font-size: 12px; "
             "font-weight: bold; border-radius: 15px; border: 1px solid #a0c4e0; "
@@ -1097,8 +1159,8 @@ class TileFixR(QMainWindow):
         toolbar = QWidget()
         toolbar.setStyleSheet(f"background: {PANEL_BG};")
         layout = QVBoxLayout(toolbar)
-        layout.setContentsMargins(16, 8, 16, 8)
-        layout.setSpacing(8)
+        layout.setContentsMargins(16, 5, 16, 5)
+        layout.setSpacing(5)
 
         # Row 1 — filter pills
         row1 = QHBoxLayout()
@@ -1145,6 +1207,7 @@ class TileFixR(QMainWindow):
         self.tile_input.setPlaceholderText("E5")
         self.tile_input.setAlignment(Qt.AlignCenter)
         self.tile_input.returnPressed.connect(self._on_tile_filter_apply)
+        self.tile_input.installEventFilter(self)
         row1.addWidget(self.tile_input)
         go_btn = QPushButton("Go")
         go_btn.setFixedHeight(26)
@@ -1371,12 +1434,12 @@ class TileFixR(QMainWindow):
         bar = QWidget()
         bar.setStyleSheet(f"background: {PANEL_BG};")
         layout = QHBoxLayout(bar)
-        layout.setContentsMargins(16, 8, 16, 8)
+        layout.setContentsMargins(16, 4, 16, 4)
         layout.setSpacing(12)
 
         self.mark_btn = QPushButton("Mark for delete  (Del)")
         self.mark_btn.setCheckable(True)
-        self.mark_btn.setFixedHeight(48)
+        self.mark_btn.setFixedHeight(36)
         self.mark_btn.setMinimumWidth(180)
         self.mark_btn.setStyleSheet("""
             QPushButton {
@@ -1401,7 +1464,7 @@ class TileFixR(QMainWindow):
 
         self.add_btn = QPushButton("Add polygon  (A)")
         self.add_btn.setCheckable(True)
-        self.add_btn.setFixedHeight(48)
+        self.add_btn.setFixedHeight(36)
         self.add_btn.setMinimumWidth(180)
         self.add_btn.setStyleSheet("""
             QPushButton {
@@ -1430,7 +1493,7 @@ class TileFixR(QMainWindow):
         layout.addWidget(self.pending_label)
 
         self.copy_btn = QPushButton("Copy reference")
-        self.copy_btn.setFixedHeight(48)
+        self.copy_btn.setFixedHeight(36)
         self.copy_btn.setStyleSheet(
             "QPushButton { background-color: #d0e4f5; color: #1a3a5c; font-size: 13px; "
             "font-weight: bold; border-radius: 8px; border: 1px solid #a0c4e0; "
@@ -1444,7 +1507,7 @@ class TileFixR(QMainWindow):
         layout.addWidget(self.copy_btn)
 
         self.undo_btn = QPushButton("Undo (0)")
-        self.undo_btn.setFixedHeight(48)
+        self.undo_btn.setFixedHeight(36)
         self.undo_btn.setStyleSheet(
             "QPushButton { background-color: #e8eef5; color: #1a3a5c; font-size: 13px; "
             "font-weight: bold; border-radius: 8px; border: 1px solid #a0c4e0; "
@@ -1459,7 +1522,7 @@ class TileFixR(QMainWindow):
         layout.addWidget(self.undo_btn)
 
         self.mask_checkr_btn = QPushButton("Mask CheckR")
-        self.mask_checkr_btn.setFixedHeight(48)
+        self.mask_checkr_btn.setFixedHeight(36)
         self.mask_checkr_btn.setStyleSheet(
             "QPushButton { background-color: #eaeaea; color: #444; font-size: 13px; "
             "font-weight: bold; border-radius: 8px; border: 1px solid #aaa; "
@@ -1479,7 +1542,7 @@ class TileFixR(QMainWindow):
         bar = QWidget()
         bar.setStyleSheet(f"background: {PANEL_BG};")
         layout = QHBoxLayout(bar)
-        layout.setContentsMargins(16, 8, 16, 14)
+        layout.setContentsMargins(16, 4, 16, 6)
         layout.setSpacing(12)
 
         nav_style = (
@@ -1705,6 +1768,8 @@ class TileFixR(QMainWindow):
             self.selected_id = None
             self._save_state()
             self.refresh_view()
+        else:
+            _play_end_sound()
 
     def go_next(self):
         idx = self.filtered_indices()
@@ -1719,12 +1784,18 @@ class TileFixR(QMainWindow):
             self.selected_id = None
             self._save_state()
             self.refresh_view()
+        else:
+            _play_end_sound()
 
     def _go_adjacent(self, dr, dc):
         """Jump to the neighboring tile (dr/dc = row/col delta) at the same frame."""
-        if self.tile_filter is None or not self.entries:
+        if not self.entries:
             return
-        tr, tc = self.tile_filter
+        if self.tile_filter is not None:
+            tr, tc = self.tile_filter
+        else:
+            e = self.entries[self.current_idx]
+            tr, tc = e["tile_row"], e["tile_col"]
         new_tr, new_tc = tr + dr, tc + dc
         if not any(e["tile_row"] == new_tr and e["tile_col"] == new_tc
                    for e in self.entries):
@@ -1748,11 +1819,15 @@ class TileFixR(QMainWindow):
         """Enable/disable the four adjacent-tile arrows based on what exists."""
         if not hasattr(self, 'adj_up'):
             return
-        if self.tile_filter is None or not self.entries:
+        if not self.entries:
             for btn in (self.adj_up, self.adj_down, self.adj_left, self.adj_right):
                 btn.setEnabled(False)
             return
-        tr, tc = self.tile_filter
+        if self.tile_filter is not None:
+            tr, tc = self.tile_filter
+        else:
+            e = self.entries[self.current_idx]
+            tr, tc = e["tile_row"], e["tile_col"]
         def has_tile(r, c):
             return any(e["tile_row"] == r and e["tile_col"] == c
                        for e in self.entries)
@@ -1760,6 +1835,16 @@ class TileFixR(QMainWindow):
         self.adj_down.setEnabled(has_tile(tr + 1, tc))
         self.adj_left.setEnabled(has_tile(tr, tc - 1))
         self.adj_right.setEnabled(has_tile(tr, tc + 1))
+
+    def eventFilter(self, obj, event):
+        if obj is self.tile_input and event.type() == QEvent.KeyPress:
+            if event.key() == Qt.Key_Left:
+                self.go_prev()
+                return True
+            if event.key() == Qt.Key_Right:
+                self.go_next()
+                return True
+        return super().eventFilter(obj, event)
 
     def _on_scrubber_changed(self, value):
         idx = self.filtered_indices()
@@ -1824,6 +1909,24 @@ class TileFixR(QMainWindow):
             """Same as s() but allow float radii (for circle).
             Floor at 1.0 so cv2 still draws."""
             return max(1.0, n * zinv)
+        # Edge indicators: orange line on any side where no neighboring tile exists
+        ch, cw = crop.shape[:2]
+        EDGE_T = 10
+        EDGE_COLOR = (0, 165, 255)  # bright orange (BGR)
+        if self.tile_filter is not None and self.entries:
+            tr, tc = self.tile_filter
+            def _has_tile(r, c):
+                return any(e["tile_row"] == r and e["tile_col"] == c
+                           for e in self.entries)
+            if not _has_tile(tr, tc - 1):  # nothing to the left
+                cv2.line(crop, (0, 0), (0, ch - 1), EDGE_COLOR, EDGE_T)
+            if not _has_tile(tr, tc + 1):  # nothing to the right
+                cv2.line(crop, (cw - 1, 0), (cw - 1, ch - 1), EDGE_COLOR, EDGE_T)
+            if not _has_tile(tr - 1, tc):  # nothing above
+                cv2.line(crop, (0, 0), (cw - 1, 0), EDGE_COLOR, EDGE_T)
+            if not _has_tile(tr + 1, tc):  # nothing below
+                cv2.line(crop, (0, ch - 1), (cw - 1, ch - 1), EDGE_COLOR, EDGE_T)
+
         # Draw each polygon in its assigned color, plus tiny vertex hints
         for p in entry["polys"]:
             color = POLY_COLORS[p["color_index"] % len(POLY_COLORS)]
@@ -1913,16 +2016,13 @@ class TileFixR(QMainWindow):
             for i in range(len(pts) - 1):
                 cv2.line(crop, tuple(pts[i]), tuple(pts[i + 1]),
                           line_color, s(1), cv2.LINE_AA)
-            if self.add_hover_xy is not None:
-                last = (int(pts[-1][0]), int(pts[-1][1]))
-                hx, hy = self.add_hover_xy
-                snap_close = False
-                if len(pts) >= 3:
-                    fx, fy = int(pts[0][0]), int(pts[0][1])
-                    if (fx - hx) ** 2 + (fy - hy) ** 2 <= 14 ** 2:
-                        snap_close = True
-                cv2.line(crop, last, (hx, hy), (50, 255, 50), s(1), cv2.LINE_AA)
-                if snap_close:
+            # Snap-close highlight: when cursor is near first vertex, show cyan line
+            rb = self.image_view._rb_line
+            if rb is not None and len(pts) >= 3:
+                line = rb.line()
+                hx, hy = int(line.x2()), int(line.y2())
+                fx, fy = int(pts[0][0]), int(pts[0][1])
+                if (fx - hx) ** 2 + (fy - hy) ** 2 <= 14 ** 2:
                     cv2.line(crop, (hx, hy), (fx, fy),
                               (0, 200, 255), s(2), cv2.LINE_AA)
             for vi, (vx, vy) in enumerate(pts):
@@ -2432,10 +2532,13 @@ class TileFixR(QMainWindow):
             self.refresh_view()
 
     def _on_image_hovered(self, ix, iy):
-        # In add mode, track the cursor for the rubber-band preview line
+        # In add mode, draw a scene rubber-band from the last vertex to the cursor.
+        # Using a QGraphicsLineItem means the line extends into the gray area beyond
+        # the tile boundary, not just within the 640px cv2 image.
         if self.add_mode:
             if self.add_pts_local:
-                self.add_hover_xy = (ix, iy)
+                lx, ly = self.add_pts_local[-1]
+                self.image_view.set_rubber_band(lx, ly, ix, iy)
                 self.refresh_view()
             return
         if self._drag_active or self._extend_active:
@@ -2484,6 +2587,7 @@ class TileFixR(QMainWindow):
 
     def _toggle_add_mode(self):
         self.add_mode = not self.add_mode
+        self.image_view.draw_mode = self.add_mode
         self.add_btn.blockSignals(True)
         self.add_btn.setChecked(self.add_mode)
         self.add_btn.blockSignals(False)
@@ -2493,6 +2597,7 @@ class TileFixR(QMainWindow):
         else:
             self.image_view.viewport().unsetCursor()
             self.add_pts_local = []
+            self.image_view.clear_rubber_band()
         self.add_hover_xy = None
         self.refresh_view()
 
@@ -2527,6 +2632,7 @@ class TileFixR(QMainWindow):
         self._push_undo(("add", temp_id))
         # Exit add mode
         self.add_pts_local = []
+        self.image_view.clear_rubber_band()
         self.selected_id = temp_id
         self._toggle_add_mode()  # switches off add_mode + restores cursor
 
@@ -2642,6 +2748,13 @@ class TileFixR(QMainWindow):
         self.refresh_view()
 
     def _launch_mask_checkr(self):
+        last_pick = Path.home() / ".star_trail_cleanr" / "mask_checkr_last.json"
+        last_pick.parent.mkdir(parents=True, exist_ok=True)
+        last_pick.write_text(json.dumps({
+            "task_id": CVAT_TASK_ID,
+            "first_frame": 1,
+            "last_frame": len(self.frame_names),
+        }))
         script = Path(__file__).parent / "mask_checkr.py"
         subprocess.Popen([sys.executable, str(script)])
 
@@ -2667,7 +2780,9 @@ class TileFixR(QMainWindow):
             for p in edits
         ]
 
-        self._pending_send_frames = {p["frame_idx"] for p in adds + edits}
+        deleted_frames = {p["frame_idx"] for p in self.polygons_by_id.values()
+                          if p["server_id"] in self.marked_ids}
+        self._pending_send_frames = {p["frame_idx"] for p in adds + edits} | deleted_frames
 
         password = read_cvat_password()
         auth = (CVAT_USER, password)
@@ -2740,9 +2855,15 @@ class TileFixR(QMainWindow):
         self.pull_btn.setText("Pulling...")
         QApplication.processEvents()
         try:
-            frame_idx = self.entries[self.current_idx]["frame_idx"]
             auth = (CVAT_USER, read_cvat_password())
-            self._refresh_frame_from_cvat(frame_idx, auth)
+            ann_resp = requests.get(
+                f"{CVAT_URL}/api/jobs/{self.job_id}/annotations",
+                auth=auth).json()
+            current_frame_idx = self.entries[self.current_idx]["frame_idx"]
+            frame_indices = sorted({e["frame_idx"] for e in self.entries
+                                    if abs(e["frame_idx"] - current_frame_idx) <= 10})
+            for frame_idx in frame_indices:
+                self._refresh_frame_from_cvat(frame_idx, auth, ann_resp=ann_resp)
         except Exception as exc:
             QMessageBox.critical(self, "CVAT error", f"Pull failed:\n{exc}")
         finally:
@@ -2750,11 +2871,12 @@ class TileFixR(QMainWindow):
             self.pull_btn.setText("Pull from CVAT")
         self.refresh_view()
 
-    def _refresh_frame_from_cvat(self, frame_idx, auth):
+    def _refresh_frame_from_cvat(self, frame_idx, auth, ann_resp=None):
         try:
-            ann_resp = requests.get(
-                f"{CVAT_URL}/api/jobs/{self.job_id}/annotations",
-                auth=auth).json()
+            if ann_resp is None:
+                ann_resp = requests.get(
+                    f"{CVAT_URL}/api/jobs/{self.job_id}/annotations",
+                    auth=auth).json()
         except Exception:
             return
         fresh_shapes = [s for s in ann_resp.get("shapes", [])
@@ -3039,11 +3161,11 @@ class SplashWindow(QWidget):
         super().__init__()
         self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground, False)
-        self.setFixedSize(420, 160)
+        self.setFixedSize(420, 185)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(28, 24, 28, 24)
-        layout.setSpacing(10)
+        layout.setContentsMargins(28, 16, 28, 16)
+        layout.setSpacing(8)
 
         title = QLabel("TileFixR")
         title.setStyleSheet("font-size: 22px; font-weight: bold; color: white;")
@@ -3128,6 +3250,7 @@ def main():
         tasks, last["task_id"],
         last.get("first_frame", 1),
         last.get("last_frame", 9999),
+        auth=auth,
     )
     if picker.exec() != QDialog.Accepted:
         print("Cancelled.")

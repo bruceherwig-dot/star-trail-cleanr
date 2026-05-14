@@ -48,6 +48,7 @@ Regression safety net for Claude's edits — Bruce does not run these himself.
 - Hot pixels: `modules/hot_pixels.py`
 - Build: `build_helper.py` (PyInstaller)
 - Tools: `tools/` folder (inference, training, LabelMe utilities)
+- Mask CheckR: `tools/mask_checkr.py` — picks a CVAT task + frame range, fetches reviewed polygons directly from CVAT API (NOT from local labelme_json files — those are stale pre-annotation starting points and never reflect Bruce's CVAT review work), black-fills each polygon, lighten-max stacks all frames; any visible trail = missed annotation. Outputs two JPEGs: plain stack and tile-grid overlay with A1/B2-style labels. Single-instance locked. Output folder: `mask_checkr_output/`
 
 ## Trained YOLO models
 All trained models live on the **local Mac** at `/Users/bruceherwig/Documents/yolo_runs/` — NOT on T7 Shield. Default ultralytics output path.
