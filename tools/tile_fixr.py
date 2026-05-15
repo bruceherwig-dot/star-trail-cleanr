@@ -72,6 +72,9 @@ def _refresh_paths():
 TASK_FOLDER_ALIASES = {
     "My First Star Trail": "Bruce Herwig - first star trail data",
     "Thomas Jackson - Borrego": "Thomas Jackson Star Trails Borrego",
+    "Greg Meyer - Arizona": "Greg Meyer Arizona",
+    "Bruce Herwig - Pioneertown Fisheye": "Pioneertown 6mm Fisheye Training",
+    "Bruce Herwig - Borrego Springs 1": "borrego_springs_1",
 }
 
 
@@ -104,7 +107,7 @@ def resolve_image_dir(task_name):
 
 
 POLY_COLORS = [
-    (0, 255, 255),    # cyan
+    (0, 0, 255),      # red
     (255, 0, 255),    # magenta
     (0, 255, 0),      # green
     (0, 165, 255),    # orange
@@ -972,6 +975,8 @@ class TileFixR(QMainWindow):
         self._send_worker = None
         self._send_anim_timer = None
         self._send_anim_step = 0
+        self._maskcheckr_anim_timer = None
+        self._maskcheckr_anim_step = 0
         self._load_marks()
         saved_state = self._load_saved_state()
         self.filter_mode = saved_state.get("filter_mode", "all")
@@ -1930,13 +1935,13 @@ class TileFixR(QMainWindow):
         # Draw each polygon in its assigned color, plus tiny vertex hints
         for p in entry["polys"]:
             color = POLY_COLORS[p["color_index"] % len(POLY_COLORS)]
-            cv2.polylines(crop, [p["tile_local_pts"]], True, color, s(1))
+            cv2.polylines(crop, [p["tile_local_pts"]], True, color, s(2))
             for vx, vy in p["tile_local_pts"]:
                 cv2.circle(crop, (int(vx), int(vy)), s(2), color, -1, cv2.LINE_AA)
         # Marked-for-delete overlay (thinnest red outline + faint red fill)
         for p in entry["polys"]:
             if p["server_id"] in self.marked_ids:
-                cv2.polylines(crop, [p["tile_local_pts"]], True, DELETE_COLOR, s(1))
+                cv2.polylines(crop, [p["tile_local_pts"]], True, DELETE_COLOR, s(2))
                 overlay = crop.copy()
                 cv2.fillPoly(overlay, [p["tile_local_pts"]], DELETE_COLOR)
                 crop = cv2.addWeighted(overlay, 0.20, crop, 0.80, 0)
@@ -1946,15 +1951,15 @@ class TileFixR(QMainWindow):
             if poly_meta is None:
                 continue
             if poly_meta["status"] == "edited":
-                cv2.polylines(crop, [p["tile_local_pts"]], True, (0, 255, 255), s(1))
+                cv2.polylines(crop, [p["tile_local_pts"]], True, (0, 255, 255), s(2))
             elif poly_meta["status"] == "added":
-                cv2.polylines(crop, [p["tile_local_pts"]], True, (0, 255, 0), s(1))
+                cv2.polylines(crop, [p["tile_local_pts"]], True, (0, 255, 0), s(2))
         # Selected polygon — thicker white outline + small handles
         hovered_vert = (self.hovered_handle if self.hovered_handle and
                           self.hovered_handle[0] == "vertex" else None)
         for p in entry["polys"]:
             if p["server_id"] == self.selected_id:
-                cv2.polylines(crop, [p["tile_local_pts"]], True, SELECTED_COLOR, s(2))
+                cv2.polylines(crop, [p["tile_local_pts"]], True, SELECTED_COLOR, s(3))
                 for vi, (vx, vy) in enumerate(p["tile_local_pts"]):
                     is_hovered = (hovered_vert is not None
                                    and hovered_vert[1] == p["server_id"]
@@ -2015,7 +2020,7 @@ class TileFixR(QMainWindow):
             line_color = (50, 255, 50)
             for i in range(len(pts) - 1):
                 cv2.line(crop, tuple(pts[i]), tuple(pts[i + 1]),
-                          line_color, s(1), cv2.LINE_AA)
+                          line_color, s(2), cv2.LINE_AA)
             # Snap-close highlight: when cursor is near first vertex, show cyan line
             rb = self.image_view._rb_line
             if rb is not None and len(pts) >= 3:
@@ -2750,13 +2755,29 @@ class TileFixR(QMainWindow):
     def _launch_mask_checkr(self):
         last_pick = Path.home() / ".star_trail_cleanr" / "mask_checkr_last.json"
         last_pick.parent.mkdir(parents=True, exist_ok=True)
-        last_pick.write_text(json.dumps({
-            "task_id": CVAT_TASK_ID,
-            "first_frame": 1,
-            "last_frame": len(self.frame_names),
-        }))
+        try:
+            state = json.loads(last_pick.read_text())
+        except Exception:
+            state = {}
+        state["task_id"] = CVAT_TASK_ID
+        last_pick.write_text(json.dumps(state))
         script = Path(__file__).parent / "mask_checkr.py"
         subprocess.Popen([sys.executable, str(script)])
+        self._maskcheckr_anim_step = 0
+        self._maskcheckr_anim_timer = QTimer(self)
+        self._maskcheckr_anim_timer.setInterval(400)
+        self._maskcheckr_anim_timer.timeout.connect(self._tick_maskcheckr_animation)
+        self._maskcheckr_anim_timer.start()
+        self._tick_maskcheckr_animation()
+
+    def _tick_maskcheckr_animation(self):
+        labels = ["Opening", "Opening.", "Opening..", "Opening..."]
+        self.mask_checkr_btn.setText(labels[self._maskcheckr_anim_step % len(labels)])
+        self._maskcheckr_anim_step += 1
+        if self._maskcheckr_anim_step >= len(labels):
+            self._maskcheckr_anim_timer.stop()
+            self._maskcheckr_anim_timer = None
+            self.mask_checkr_btn.setText("Mask CheckR")
 
     # ── Send to CVAT ────────────────────────────────────────────────────────
 
