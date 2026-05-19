@@ -52,6 +52,8 @@ CVAT_TASK_ID = 16
 FRAME_START = 0
 FRAME_END = 9999            # exclusive; overridden by picker or SUSPECT_FRAMES
 IMG_DIR = GKYLE_STAGING
+TASK_NAME = ""
+WEIRDR_PATH = Path(__file__).parent.parent / "weirdr_list.json"
 
 # When non-empty, only these CVAT frame indices are loaded and tiled.
 SUSPECT_FRAMES = []
@@ -301,9 +303,10 @@ def build_tile_entries(by_frame, frame_names, progress_cb=None):
         sys.stdout.write(f"\r  Frame {pos + 1}/{len(frame_list)}  {img_path.name}   ")
         sys.stdout.flush()
         if progress_cb and (pos % 5 == 0):
-            progress_cb(
-                f"Building tiles: frame {pos + 1} of {len(frame_list)}...",
-                pos + 1, len(frame_list))
+            if progress_cb(
+                    f"Building tiles: frame {pos + 1} of {len(frame_list)}...",
+                    pos + 1, len(frame_list)):
+                return [], []
 
         img = cv2.imread(str(img_path))
         if img is None:
@@ -950,6 +953,10 @@ class TileFixR(QMainWindow):
         self._drag_polygon_id = None
         self._drag_vertex_idx = None
         self._drag_active = False
+        self._drag_pending = False   # grabbed vertex but not yet past deadzone
+        self._drag_press_ix = None
+        self._drag_press_iy = None
+        self.DRAG_DEADZONE_PX = 5    # image pixels before drag activates
         # Add-polygon-mode state
         self.add_mode = False
         self.add_pts_local = []   # in tile-local coords of current tile
@@ -977,6 +984,8 @@ class TileFixR(QMainWindow):
         self._send_anim_step = 0
         self._maskcheckr_anim_timer = None
         self._maskcheckr_anim_step = 0
+        self._weirdr_anim_timer = None
+        self._weirdr_anim_step = 0
         self._load_marks()
         saved_state = self._load_saved_state()
         self.filter_mode = saved_state.get("filter_mode", "all")
@@ -1537,9 +1546,65 @@ class TileFixR(QMainWindow):
         self.mask_checkr_btn.clicked.connect(self._launch_mask_checkr)
         layout.addWidget(self.mask_checkr_btn)
 
+        self.weirdr_btn = QPushButton("Add To WeirdR")
+        self.weirdr_btn.setFixedHeight(36)
+        self.weirdr_btn.setStyleSheet(
+            "QPushButton { background-color: #ede0f5; color: #4a1a6a; font-size: 13px; "
+            "font-weight: bold; border-radius: 8px; border: 1px solid #c0a0e0; "
+            "padding: 8px 18px; }"
+            "QPushButton:hover { background-color: #ddd0f0; }"
+        )
+        self.weirdr_btn.clicked.connect(self._add_to_weirdr)
+        layout.addWidget(self.weirdr_btn)
+
         layout.addStretch()
         # Send button lives in the banner (upper right) — see _build_banner().
         return bar
+
+    def _add_to_weirdr(self):
+        if not self.entries or self.current_idx >= len(self.entries):
+            return
+        entry = self.entries[self.current_idx]
+        tag = entry["tile_id"]
+        try:
+            weirdr = json.loads(WEIRDR_PATH.read_text()) if WEIRDR_PATH.exists() else []
+        except Exception:
+            weirdr = []
+        already = any(e.get("tag") == tag for e in weirdr)
+        if not already:
+            weirdr.append({
+                "source": "tile_fixr",
+                "tag": tag,
+                "filename": entry["img_filename"],
+                "dataset": TASK_NAME,
+                "tile_x": entry["tile_x"],
+                "tile_y": entry["tile_y"],
+                "job_id": self.job_id,
+                "reason": "",
+                "added": time.strftime("%Y-%m-%d"),
+            })
+            WEIRDR_PATH.write_text(json.dumps(weirdr, indent=2))
+        if already:
+            self.weirdr_btn.setText("Already listed")
+            QTimer.singleShot(1500, lambda: self.weirdr_btn.setText("Add To WeirdR"))
+        else:
+            self.weirdr_btn.setEnabled(False)
+            self._weirdr_anim_step = 0
+            self._weirdr_anim_timer = QTimer(self)
+            self._weirdr_anim_timer.setInterval(200)
+            self._weirdr_anim_timer.timeout.connect(self._tick_weirdr_animation)
+            self._weirdr_anim_timer.start()
+            self._tick_weirdr_animation()
+
+    def _tick_weirdr_animation(self):
+        labels = ["Adding.", "Adding..", "Adding...", "Added!"]
+        step = self._weirdr_anim_step
+        self.weirdr_btn.setText(labels[min(step, len(labels) - 1)])
+        self._weirdr_anim_step += 1
+        if step >= len(labels) - 1:
+            self._weirdr_anim_timer.stop()
+            self._weirdr_anim_timer = None
+            QTimer.singleShot(800, lambda: self.weirdr_btn.setEnabled(True))
 
     # ── Nav bar ─────────────────────────────────────────────────────────────
 
@@ -2387,11 +2452,13 @@ class TileFixR(QMainWindow):
         if n_sid != self.selected_id:
             self.selected_id = n_sid
         self.image_view.setDragMode(QGraphicsView.NoDrag)
-        self.image_view.viewport().setCursor(Qt.ClosedHandCursor)
         self.selected_id = n_sid
         self._drag_polygon_id = n_sid
         self._drag_vertex_idx = n_vi
-        self._drag_active = True
+        self._drag_pending = True
+        self._drag_active = False
+        self._drag_press_ix = ix
+        self._drag_press_iy = iy
         self._drag_full_idx = None
         # Snapshot polygon shape now so undo can restore it on release
         poly = self.polygons_by_id.get(n_sid)
@@ -2445,6 +2512,13 @@ class TileFixR(QMainWindow):
                 f"move: extend free 2D by ({dx:+.1f},{dy:+.1f})px "
                 f"({len(self._extend_indices)} verts moved)")
             return
+        if self._drag_pending:
+            dist = ((ix - self._drag_press_ix) ** 2 + (iy - self._drag_press_iy) ** 2) ** 0.5
+            if dist < self.DRAG_DEADZONE_PX:
+                return
+            self._drag_active = True
+            self._drag_pending = False
+            self.image_view.viewport().setCursor(Qt.ClosedHandCursor)
         if not self._drag_active:
             self.debug_move_label.setText(
                 f"move: ({ix},{iy}) — drag_active=False, ignored")
@@ -2500,6 +2574,9 @@ class TileFixR(QMainWindow):
             self.refresh_view()
             return
         was_dragging = self._drag_active
+        self._drag_pending = False
+        self._drag_press_ix = None
+        self._drag_press_iy = None
         # If a vertex drag actually moved the polygon, push the snapshot to
         # the undo stack now that the gesture is complete.
         if (was_dragging and self._is_drag_committed()
@@ -3180,6 +3257,7 @@ def make_pill(text, color_key="blue"):
 class SplashWindow(QWidget):
     def __init__(self):
         super().__init__()
+        self.cancelled = False
         self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground, False)
         self.setFixedSize(420, 185)
@@ -3221,7 +3299,7 @@ class SplashWindow(QWidget):
             "border: 1px solid #1a3a5c; border-radius: 4px; padding: 0 16px; }"
             "QPushButton:hover { color: white; border-color: #4a7cbf; }"
         )
-        cancel_btn.clicked.connect(lambda: QApplication.instance().quit())
+        cancel_btn.clicked.connect(lambda: setattr(self, "cancelled", True))
         btn_row = QHBoxLayout()
         btn_row.addStretch()
         btn_row.addWidget(cancel_btn)
@@ -3238,10 +3316,11 @@ class SplashWindow(QWidget):
         else:
             self.progress.setRange(0, 0)
         QApplication.processEvents()
+        return self.cancelled
 
 
 def main():
-    global CVAT_TASK_ID, FRAME_START, FRAME_END, IMG_DIR
+    global CVAT_TASK_ID, FRAME_START, FRAME_END, IMG_DIR, TASK_NAME
     print("TileFixR")
     print("=" * 60, flush=True)
 
@@ -3290,6 +3369,7 @@ def main():
             f"{TRAILS_ROOT}. Pick a different task or fix the folder mapping.")
         return
     CVAT_TASK_ID = chosen["id"]
+    TASK_NAME = chosen["name"]
     FRAME_START = first_f - 1
     FRAME_END = last_f
     IMG_DIR = img_dir
@@ -3308,6 +3388,12 @@ def main():
 
     by_frame, frame_names, job_id = load_cvat_polygons(progress_cb=splash.update_progress)
     entries, all_polys = build_tile_entries(by_frame, frame_names, progress_cb=splash.update_progress)
+
+    if splash.cancelled:
+        splash.close()
+        print("Cancelled.")
+        return
+
     print(f"\nLoaded {len(entries)} tiles, {len(all_polys)} polygons.")
 
     if not entries:

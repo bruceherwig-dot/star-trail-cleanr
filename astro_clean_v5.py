@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import List
 
 from modules.detect_trails import (
-    load_model, detect_frame, apply_sky_mask, filter_small_components
+    load_model, detect_frame_polygon, apply_sky_mask, filter_small_components
 )
 from modules.repair import repair_frame
 from modules.io_safe import robust_imread, robust_imread_diag, robust_imwrite
@@ -685,8 +685,8 @@ def main():
     masks_all = []
     running_trail_total = 0
     for i, fp in enumerate(frame_files_all):
-        mask = detect_frame(model, frames_8bit_all[i], args.tile_size,
-                            args.overlap, args.dilate)
+        mask = detect_frame_polygon(model, frames_8bit_all[i], args.tile_size,
+                                    args.overlap, args.dilate)
         if mask is None:
             masks_all.append(np.zeros((h, w), dtype=np.uint8))
             continue
@@ -718,7 +718,7 @@ def main():
         try:
             for i, fp in enumerate(frame_files_all):
                 rotated = np.rot90(frames_8bit_all[i], 2)
-                mask2 = detect_frame(model, rotated, args.tile_size, args.overlap, args.dilate)
+                mask2 = detect_frame_polygon(model, rotated, args.tile_size, args.overlap, args.dilate)
                 if mask2 is None:
                     continue
                 mask2 = np.rot90(mask2, 2)

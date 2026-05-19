@@ -46,7 +46,7 @@ from PySide6.QtWidgets import (
     QSpinBox, QTabWidget, QTextBrowser, QScrollArea, QMessageBox,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QSettings, QTimer
-from PySide6.QtGui import QFont, QPixmap, QIcon, QPalette, QColor, QPainter
+from PySide6.QtGui import QFont, QPixmap, QIcon, QPalette, QColor, QPainter, QIntValidator
 
 from mask_painter import MaskPainterWidget
 
@@ -564,8 +564,11 @@ class CleanerWorker(QThread):
                 return
 
             total = len(frames)
-            if self.frame_limit != "All Frames":
-                total = min(total, int(self.frame_limit))
+            if self.frame_limit not in ("All Frames", ""):
+                try:
+                    total = min(total, int(self.frame_limit))
+                except ValueError:
+                    pass
                 frames = frames[:total]
 
             def _img_size(path):
@@ -1304,7 +1307,8 @@ class GpuPackInstallThread(QThread):
                 self.failed.emit(
                     "Installation blocked: GPU support files from a previous install "
                     f"could not be removed. Windows is holding them open.{detail}\n\n"
-                    "Click 'Clear GPU Support Files' in Settings, then try installing again."
+                    "Reboot your computer, then reopen Star Trail CleanR and click "
+                    "Install GPU Support again. The reboot will release the locked files."
                 )
                 return
 
@@ -1340,7 +1344,8 @@ class GpuPackInstallThread(QThread):
             if "Errno 13" in msg or "Permission denied" in msg or "Access is denied" in msg:
                 msg = (
                     "Installation failed: Windows denied access to a file.\n\n"
-                    "Click 'Clear GPU Support Files' in Settings, then try installing again.\n\n"
+                    "Reboot your computer, then reopen Star Trail CleanR and click "
+                    "Install GPU Support again. The reboot will release the locked files.\n\n"
                     f"Details: {e}"
                 )
             elif "urlopen error" in msg or "ConnectionReset" in msg or "timed out" in msg:
@@ -2660,8 +2665,11 @@ class MainWindow(QMainWindow):
         layout.addWidget(step4)
 
         self._frame_limit = QComboBox()
-        self._frame_limit.addItems(["20", "50", "100", "250", "All Frames"])
-        self._frame_limit.setFixedWidth(140)
+        self._frame_limit.setEditable(True)
+        self._frame_limit.addItems(["20", "50", "100", "250", "500", "1000", "All Frames"])
+        self._frame_limit.lineEdit().setPlaceholderText("All Frames")
+        self._frame_limit.lineEdit().setValidator(QIntValidator(1, 999999))
+        self._frame_limit.setFixedWidth(160)
         layout.addWidget(self._frame_limit)
         layout.addSpacing(4)
 
@@ -2772,6 +2780,8 @@ class MainWindow(QMainWindow):
         fli = self._frame_limit.findText(last_frame_limit)
         if fli >= 0:
             self._frame_limit.setCurrentIndex(fli)
+        else:
+            self._frame_limit.setCurrentText(last_frame_limit)
 
         # Persist on change
         self._format_combo.currentTextChanged.connect(
@@ -3328,9 +3338,12 @@ class MainWindow(QMainWindow):
                 f for e in _exts for f in glob.glob(os.path.join(folder, e))
             ))
             if _frames:
-                _lim_text = self._frame_limit.currentText()
-                _total_frames = (len(_frames) if _lim_text == "All Frames"
-                                 else min(int(_lim_text), len(_frames)))
+                _lim_text = self._frame_limit.currentText().strip()
+                try:
+                    _total_frames = (len(_frames) if _lim_text in ("All Frames", "")
+                                     else min(int(_lim_text), len(_frames)))
+                except ValueError:
+                    _total_frames = len(_frames)
 
                 if _total_frames < 3:
                     from PySide6.QtWidgets import QMessageBox as _QMB

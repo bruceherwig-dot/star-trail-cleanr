@@ -5,6 +5,7 @@ import os
 from typing import Optional
 
 from .io_safe import robust_imread
+from .trail_grouper import filter_masks, filter_masks_with_props, group_detections, fit_polygon
 
 
 def best_device() -> str:
@@ -78,46 +79,101 @@ def _build_combined_mask(predictions, h, w):
     return out
 
 
-def detect_frame(model, image, tile_size: int = 640,
-                 overlap: float = 0.2, dilate: int = 1) -> Optional[np.ndarray]:
-    """Run SAHI tiled inference on one frame.
-
-    `image` may be a numpy array (preferred) or a file path. Whatever arrives
-    is normalized to 8-bit 3-channel BGR before handing to SAHI.
-
-    Returns binary uint8 mask (255=trail, 0=sky) at original resolution,
-    or None if the image cannot be read.
-    """
+def _load_as_rgb(image):
+    """Load image from path or array and return (rgb_uint8, h, w), or None on failure."""
     if isinstance(image, np.ndarray):
         img = image
     else:
         img = robust_imread(image, cv2.IMREAD_UNCHANGED)
         if img is None:
             return None
-
     if img.dtype == np.uint16:
         img = (img >> 8).astype(np.uint8)
     elif img.dtype != np.uint8:
         img = np.clip(img, 0, 255).astype(np.uint8)
-
     if img.ndim == 2:
-        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
     elif img.ndim == 3:
         if img.shape[2] == 1:
-            img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+            img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
         elif img.shape[2] == 4:
-            img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
-
+            img = cv2.cvtColor(img, cv2.COLOR_BGRA2RGB)
+        else:
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     h, w = img.shape[:2]
+    return img, h, w
 
+
+def _sahi_predict(model, img, tile_size, overlap):
+    """Run SAHI tiled inference and return raw prediction list."""
     from sahi.predict import get_sliced_prediction
     result = get_sliced_prediction(
         image=img, detection_model=model,
         slice_height=tile_size, slice_width=tile_size,
         overlap_height_ratio=overlap, overlap_width_ratio=overlap,
-        postprocess_type="NMS", verbose=0,
+        perform_standard_pred=False,
+        postprocess_type="NMS",
+        postprocess_match_metric="IOS",
+        postprocess_match_threshold=1.0,
+        postprocess_class_agnostic=True,
+        verbose=0,
     )
-    mask = _build_combined_mask(result.object_prediction_list, h, w)
+    return result.object_prediction_list
+
+
+def detect_frame(model, image, tile_size: int = 640,
+                 overlap: float = 0.2, dilate: int = 1) -> Optional[np.ndarray]:
+    """Run SAHI tiled inference on one frame.
+
+    Returns binary uint8 mask (255=trail, 0=sky) at original resolution,
+    or None if the image cannot be read.
+    """
+    loaded = _load_as_rgb(image)
+    if loaded is None:
+        return None
+    img, h, w = loaded
+
+    passing = filter_masks(_sahi_predict(model, img, tile_size, overlap), h, w)
+    mask = np.zeros((h, w), dtype=np.uint8)
+    for m in passing:
+        mask = np.maximum(mask, m)
+
+    if dilate > 0:
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (dilate * 2 + 1, dilate * 2 + 1))
+        mask = cv2.dilate(mask, kernel)
+
+    return mask
+
+
+def detect_frame_polygon(model, image, tile_size: int = 640,
+                         overlap: float = 0.2, dilate: int = 1) -> Optional[np.ndarray]:
+    """Like detect_frame, but returns a tight fitted-polygon mask.
+
+    Runs the same SAHI inference, then:
+      crossing splitter → elongation filter → group collinear tile detections
+      → fit one tight rectangle per trail group → fill as binary mask.
+
+    Same output format as detect_frame. Uses identical code to polymakr so
+    the repair mask and the CVAT annotation polygon are the same shape.
+    """
+    loaded = _load_as_rgb(image)
+    if loaded is None:
+        return None
+    img, h, w = loaded
+
+    _, det_list = filter_masks_with_props(
+        _sahi_predict(model, img, tile_size, overlap), h, w)
+
+    if not det_list:
+        return np.zeros((h, w), dtype=np.uint8)
+
+    groups = group_detections(det_list)
+    mask = np.zeros((h, w), dtype=np.uint8)
+    for grp in groups:
+        corners, _, _ = fit_polygon(grp, det_list)
+        pts = np.array(corners, dtype=np.int32).reshape(-1, 1, 2)
+        cv2.fillPoly(mask, [pts], 255)
 
     if dilate > 0:
         kernel = cv2.getStructuringElement(

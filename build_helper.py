@@ -120,6 +120,7 @@ cmd = [
     '--collect-all', 'sahi',
     '--collect-all', 'ultralytics',
     '--collect-all', 'skimage',
+    '--collect-all', 'scipy',
     '--collect-all', 'tifffile',
     '--collect-all', 'psutil',
     '--runtime-hook', 'rthooks/pyi_rthook_gpu_override.py',
