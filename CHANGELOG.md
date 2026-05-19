@@ -2,6 +2,13 @@
 
 ---
 
+## v2.24-beta
+- **New: A fitted polygon layer now sits on top of the YOLO detection.** After the AI finds a trail, Star Trail CleanR fits a tight rectangle to the detected trail pixels — closer-fitting ends, more accurate width, and fragments from the same trail joined into one shape. The repair now works from this fitted polygon instead of the raw AI mask blob, which reduces bleed into surrounding sky.
+- **Fix: Repair no longer imports trail from a neighboring frame.** When Star Trail CleanR fills a masked area using pixels from the frames before and after, it now checks whether those imported pixels are themselves trail-bright. Any that are get zeroed out instead of pasted in, leaving clean sky.
+- **Fix: GPU error message now says to reboot instead of "Clear GPU Support Files."**
+- **Fix: Frame limit field now accepts any number you type, not just preset values from the dropdown.**
+- **Smoke tests:** 133 passing.
+
 ## v2.23-beta
 - **Fix: App no longer crashes on image sets that include TIFF files with an embedded alpha channel.** Some software exports TIFFs with a transparency layer that Star Trail CleanR doesn't need. The app now strips the alpha automatically and notes it in the Star Log, so the run continues without interruption.
 - **Smoke tests:** 133 passing.
