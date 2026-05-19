@@ -2,6 +2,10 @@
 
 ---
 
+## v2.25-beta
+- **Fix: 16-bit TIFF files are now uncompressed.** Some stacking software (including Sequator) requires uncompressed TIFF and would reject the files Star Trail CleanR produced. The 16-bit TIFF option now writes uncompressed files, which are compatible with all stacking apps. Files will be somewhat larger on disk.
+- **Smoke tests:** 133 passing.
+
 ## v2.24-beta
 - **New: A fitted polygon layer now sits on top of the YOLO detection.** After the AI finds a trail, Star Trail CleanR fits a tight rectangle to the detected trail pixels — closer-fitting ends, more accurate width, and fragments from the same trail joined into one shape. The repair now works from this fitted polygon instead of the raw AI mask blob, which reduces bleed into surrounding sky.
 - **Fix: Repair no longer imports trail from a neighboring frame.** When Star Trail CleanR fills a masked area using pixels from the frames before and after, it now checks whether those imported pixels are themselves trail-bright. Any that are get zeroed out instead of pasted in, leaving clean sky.

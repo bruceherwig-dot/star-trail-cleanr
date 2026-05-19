@@ -32,6 +32,7 @@ if len(sys.argv) > 1 and sys.argv[1] == '--cleanr-worker':
 import glob
 import json
 import threading
+from pathlib import Path
 import time
 import subprocess
 import cv2
@@ -261,16 +262,35 @@ SCRIPT = os.path.join(_base, "astro_clean_v5.py")
 _bundled_model = os.path.join(_base, "best.pt")
 _DEV_FALLBACK_MODEL = os.path.join(
     os.path.expanduser("~"),
-    "Documents/yolo_runs/trail_detector_v11s_tiled/weights/best.pt")
+    "Documents/yolo_runs/trail_detector_v13s_tiled/weights/best.pt")
+
+_DEV_SWITCHER_ENABLED = Path.home().joinpath(
+    ".star_trail_cleanr", ".dev_model_switcher").is_file()
+_YOLO_RUNS_DIR = Path.home() / "Documents" / "yolo_runs"
+
+
+def _get_dev_model_choices():
+    """Return list of (folder_name, best.pt path) from ~/Documents/yolo_runs, newest first."""
+    choices = []
+    if _YOLO_RUNS_DIR.is_dir():
+        for folder in sorted(_YOLO_RUNS_DIR.iterdir(), reverse=True):
+            pt = folder / "weights" / "best.pt"
+            if pt.is_file():
+                choices.append((folder.name, str(pt)))
+    return choices
 
 
 def get_model_path():
     """Return the best available trail-detector model path for this session.
 
-    Priority: user-folder download > bundled model > dev fallback.
+    Priority: dev override (if switcher enabled) > user-folder download > bundled model > dev fallback.
     Re-evaluated on each call so a mid-session model install is picked up
     on the next processing run.
     """
+    if _DEV_SWITCHER_ENABLED:
+        override = SETTINGS.value("dev_model_override", "", type=str)
+        if override and os.path.isfile(override):
+            return override
     try:
         from modules.user_folder import (
             get_installed_model_path, get_installed_model_version,
@@ -2712,6 +2732,31 @@ class MainWindow(QMainWindow):
 
         layout.addLayout(hp_row)
         layout.addSpacing(6)
+
+        if _DEV_SWITCHER_ENABLED:
+            dev_row = QHBoxLayout()
+            dev_label = QLabel("Model (dev):")
+            dev_label.setFont(step_font)
+            dev_row.addWidget(dev_label)
+            self._dev_model_combo = QComboBox()
+            self._dev_model_combo.setFixedWidth(300)
+            _choices = _get_dev_model_choices()
+            _saved = SETTINGS.value("dev_model_override", "", type=str)
+            _saved_idx = 0
+            for i, (name, pt_path) in enumerate(_choices):
+                self._dev_model_combo.addItem(name, pt_path)
+                if pt_path == _saved:
+                    _saved_idx = i
+            if _choices:
+                self._dev_model_combo.setCurrentIndex(_saved_idx)
+                SETTINGS.setValue("dev_model_override", _choices[_saved_idx][1])
+            self._dev_model_combo.currentIndexChanged.connect(
+                lambda idx: SETTINGS.setValue(
+                    "dev_model_override", self._dev_model_combo.itemData(idx)))
+            dev_row.addWidget(self._dev_model_combo)
+            dev_row.addStretch(1)
+            layout.addLayout(dev_row)
+            layout.addSpacing(6)
 
         # ── Step 6: Run ──────────────────────────────────────────────────────
         step6 = QLabel(

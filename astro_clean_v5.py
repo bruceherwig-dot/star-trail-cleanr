@@ -348,7 +348,6 @@ def main():
                 extratags.append((34675, 'B', len(icc_profile), icc_profile, False))
             tiff_kwargs = {
                 "photometric": "rgb",
-                "compression": "deflate",
                 "extratags": extratags,
             }
             if dpi:
