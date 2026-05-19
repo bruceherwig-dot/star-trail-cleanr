@@ -317,7 +317,7 @@ def main():
             out = img if img.dtype == np.uint8 else (img >> 8).astype(np.uint8)
             rgb = cv2.cvtColor(out, cv2.COLOR_BGR2RGB)
             pil = Image.fromarray(rgb, mode="RGB")
-            save_kwargs = {"compression": "tiff_deflate"}
+            save_kwargs = {}
             if icc_profile:
                 save_kwargs["icc_profile"] = icc_profile
             _tiff_exif = _fit_exif_for_tiff(exif_bytes)

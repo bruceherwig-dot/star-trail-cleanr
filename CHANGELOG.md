@@ -2,6 +2,10 @@
 
 ---
 
+## v2.26-beta
+- **Fix: 8-bit TIFF files are now uncompressed.** Same fix as v2.25-beta for 16-bit — all TIFF output is now uncompressed and compatible with Sequator and other stacking apps that require uncompressed TIFF.
+- **Smoke tests:** 133 passing.
+
 ## v2.25-beta
 - **Fix: 16-bit TIFF files are now uncompressed.** Some stacking software (including Sequator) requires uncompressed TIFF and would reject the files Star Trail CleanR produced. The 16-bit TIFF option now writes uncompressed files, which are compatible with all stacking apps. Files will be somewhat larger on disk.
 - **Smoke tests:** 133 passing.
