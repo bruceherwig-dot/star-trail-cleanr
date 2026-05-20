@@ -42,7 +42,7 @@ from skimage.measure import label as sklabel, regionprops as skregionprops
 CONF_THRESH         = 0.30
 MAX_ANGLE_DEG       = 7.0
 MIN_AREA            = 300
-MIN_ASPECT          = 3.5
+MIN_ASPECT          = 2.0
 
 SPLIT_AREA_MIN      = 5000
 HOUGH_THRESHOLD     = 20
@@ -114,7 +114,7 @@ def _is_red_trail(mask, img):
     mean_r = float(pixels[:, 0].mean())
     mean_g = float(pixels[:, 1].mean())
     mean_b = float(pixels[:, 2].mean())
-    return mean_r > 80 and mean_r > mean_g * 1.5 and mean_r > mean_b * 1.5
+    return mean_r > 80 and mean_r > mean_g * 1.4 and mean_r > mean_b * 1.4
 
 
 def _line_intersect(L1, L2):
@@ -503,7 +503,7 @@ def fit_polygon(group_indices, det_list):
     u_avg = u_sum / np.linalg.norm(u_sum)
 
     t_centroid = centroid @ u_avg
-    tip_pad = max(d["minor"] for d in dets) / 2
+    tip_pad = max(d["minor"] for d in dets) / 4
     t_min = min(float((d["coords"] @ u_avg).min()) for d in dets) - tip_pad
     t_max = max(float((d["coords"] @ u_avg).max()) for d in dets) + tip_pad
     p_min = centroid + (t_min - t_centroid) * u_avg
@@ -513,7 +513,7 @@ def fit_polygon(group_indices, det_list):
     width = (float(np.median([
         min(d["minor"], d["area"] / max(d["major"], 1))
         for d in dets
-    ])) * 2.0) + min(trail_length / 200.0, 40.0)
+    ])) * 1.5) + min(trail_length / 200.0, 40.0)
 
     u_perp   = np.array([-u_avg[1], u_avg[0]])
     half_w   = width / 2.0

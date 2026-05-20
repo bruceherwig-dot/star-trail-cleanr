@@ -239,7 +239,7 @@ def filter_small_components(mask: np.ndarray, img: np.ndarray,
         mean_b = float(pixels[:, 0].mean())
         mean_g = float(pixels[:, 1].mean())
         mean_r = float(pixels[:, 2].mean())
-        is_red = mean_r > 80 and mean_r > mean_g * 1.5 and mean_r > mean_b * 1.5
+        is_red = mean_r > 80 and mean_r > mean_g * 1.4 and mean_r > mean_b * 1.4
         if not is_red:
             out[component_mask] = 0
     return out
