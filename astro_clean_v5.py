@@ -278,6 +278,10 @@ def main():
                         help="Run detection a second time on each frame rotated 180°, merging any new trails found")
     args = parser.parse_args()
 
+    # Dev flag: auto-enable mask saving when ~/.star_trail_cleanr/.dev_save_masks exists
+    if not args.save_masks and (Path.home() / ".star_trail_cleanr" / ".dev_save_masks").exists():
+        args.save_masks = True
+
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
 
@@ -682,12 +686,20 @@ def main():
     model = load_model(str(args.model), args.confidence, args.device)
 
     masks_all = []
+    raw_masks_all = []
     running_trail_total = 0
     for i, fp in enumerate(frame_files_all):
-        mask = detect_frame_polygon(model, frames_8bit_all[i], args.tile_size,
-                                    args.overlap, args.dilate)
+        result = detect_frame_polygon(model, frames_8bit_all[i], args.tile_size,
+                                      args.overlap, args.dilate,
+                                      return_raw=(masks_dir is not None))
+        if masks_dir is not None:
+            mask, raw_labeled = result
+        else:
+            mask = result
+            raw_labeled = None
         if mask is None:
             masks_all.append(np.zeros((h, w), dtype=np.uint8))
+            raw_masks_all.append(np.zeros((h, w), dtype=np.uint8))
             continue
 
         if sky_mask is not None:
@@ -697,6 +709,8 @@ def main():
             mask = filter_small_components(mask, frames_8bit_all[i], min_area_scaled)
 
         masks_all.append(mask)
+        raw_masks_all.append(raw_labeled if raw_labeled is not None
+                             else np.zeros((h, w), dtype=np.uint8))
         if mask.max() > 0:
             n_cc, _ = cv2.connectedComponents((mask > 0).astype(np.uint8))
             trail_count = max(0, n_cc - 1)
@@ -759,8 +773,11 @@ def main():
     print(f"  Step 1 complete - {trail_frames}/{n} frames have trails", flush=True)
 
     if masks_dir:
-        for fp, mask in zip(frame_files, masks_per_frame):
+        raw_masks_per_frame = raw_masks_all[core_start:core_end]
+        for fp, mask, raw_mask in zip(frame_files, masks_per_frame, raw_masks_per_frame):
             robust_imwrite(masks_dir / (fp.stem + ".png"), mask)
+            if raw_mask.max() > 0:
+                robust_imwrite(masks_dir / (fp.stem + "_raw.png"), raw_mask)
 
     # ── Step 2: Repair ────────────────────────────────────────────────────
     sb = args.skip_boundary
@@ -781,7 +798,6 @@ def main():
 
         if not skip:
             if trail_px > 0:
-                # Use i + core_start as index into the full (with-neighbors) arrays
                 cleaned = repair_frame(img, mask, i + core_start,
                                        frames_all)
                 _write_output(fp.stem, cleaned, icc_profile=icc_profile, exif_bytes=exif_bytes, dpi=dpi)

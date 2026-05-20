@@ -114,7 +114,7 @@ def _sahi_predict(model, img, tile_size, overlap):
         perform_standard_pred=False,
         postprocess_type="NMS",
         postprocess_match_metric="IOS",
-        postprocess_match_threshold=1.0,
+        postprocess_match_threshold=1.1,
         postprocess_class_agnostic=True,
         verbose=0,
     )
@@ -146,8 +146,27 @@ def detect_frame(model, image, tile_size: int = 640,
     return mask
 
 
+def _build_raw_labeled_mask(predictions, h, w):
+    """Label each SAHI prediction by index (1..N) before any filtering."""
+    out = np.zeros((h, w), dtype=np.uint8)
+    for idx, pred in enumerate(predictions, start=1):
+        if pred.mask is None or pred.mask.bool_mask is None:
+            continue
+        seg = pred.mask.bool_mask
+        if seg.shape == (h, w):
+            mask_bool = seg.astype(bool)
+        else:
+            m = cv2.resize(seg.astype(np.uint8) * 255, (w, h),
+                           interpolation=cv2.INTER_NEAREST)
+            mask_bool = m > 0
+        if mask_bool.any() and idx <= 255:
+            out[mask_bool] = idx
+    return out
+
+
 def detect_frame_polygon(model, image, tile_size: int = 640,
-                         overlap: float = 0.2, dilate: int = 1) -> Optional[np.ndarray]:
+                         overlap: float = 0.2, dilate: int = 1,
+                         return_raw: bool = False):
     """Like detect_frame, but returns a tight fitted-polygon mask.
 
     Runs the same SAHI inference, then:
@@ -156,31 +175,40 @@ def detect_frame_polygon(model, image, tile_size: int = 640,
 
     Same output format as detect_frame. Uses identical code to polymakr so
     the repair mask and the CVAT annotation polygon are the same shape.
+
+    If return_raw=True, returns (final_mask, raw_labeled_mask) where
+    raw_labeled_mask has pixel value = SAHI prediction index (1..N), 0=background.
     """
     loaded = _load_as_rgb(image)
     if loaded is None:
+        if return_raw:
+            return None, None
         return None
     img, h, w = loaded
 
-    _, det_list = filter_masks_with_props(
-        _sahi_predict(model, img, tile_size, overlap), h, w)
+    predictions = _sahi_predict(model, img, tile_size, overlap)
+    raw_labeled = _build_raw_labeled_mask(predictions, h, w) if return_raw else None
+
+    _, det_list = filter_masks_with_props(predictions, h, w)
 
     if not det_list:
-        return np.zeros((h, w), dtype=np.uint8)
-
-    groups = group_detections(det_list)
-    mask = np.zeros((h, w), dtype=np.uint8)
-    for grp in groups:
-        corners, _, _ = fit_polygon(grp, det_list)
-        pts = np.array(corners, dtype=np.int32).reshape(-1, 1, 2)
-        cv2.fillPoly(mask, [pts], 255)
+        final = np.zeros((h, w), dtype=np.uint8)
+    else:
+        groups = group_detections(det_list)
+        final = np.zeros((h, w), dtype=np.uint8)
+        for grp in groups:
+            corners, _, _ = fit_polygon(grp, det_list)
+            pts = np.array(corners, dtype=np.int32).reshape(-1, 1, 2)
+            cv2.fillPoly(final, [pts], 255)
 
     if dilate > 0:
         kernel = cv2.getStructuringElement(
             cv2.MORPH_ELLIPSE, (dilate * 2 + 1, dilate * 2 + 1))
-        mask = cv2.dilate(mask, kernel)
+        final = cv2.dilate(final, kernel)
 
-    return mask
+    if return_raw:
+        return final, raw_labeled
+    return final
 
 
 def apply_sky_mask(mask: np.ndarray, sky_mask: np.ndarray) -> np.ndarray:
