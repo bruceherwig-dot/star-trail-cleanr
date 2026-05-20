@@ -83,6 +83,13 @@ def _line_angle_deg(L):
     return float(np.degrees(np.arctan2(y2 - y1, x2 - x1)) % 180)
 
 
+def _circular_mean_angle(angle_list):
+    """Circular mean for undirected angles in [0, 180) degrees."""
+    rads = np.radians([2.0 * a for a in angle_list])
+    mean_rad = np.arctan2(np.mean(np.sin(rads)), np.mean(np.cos(rads)))
+    return float(np.degrees(mean_rad / 2.0) % 180.0)
+
+
 def _angle_dist(a, b):
     d = abs(a - b)
     return min(d, 180.0 - d)
@@ -159,20 +166,34 @@ def try_split(mask):
     labels, _ = _dbscan_angles(angles, eps=DBSCAN_EPS, min_samples=DBSCAN_MIN_SAMPLES)
     unique = [l for l in set(labels) if l >= 0]
 
-    if len(unique) != 2:
+    if len(unique) < 2:
         return [mask]
 
-    ang1 = float(np.mean([angles[i] for i, l in enumerate(labels) if l == unique[0]]))
-    ang2 = float(np.mean([angles[i] for i, l in enumerate(labels) if l == unique[1]]))
-    if _angle_dist(ang1, ang2) < MIN_SPLIT_ANGLE_DEG:
+    # Circular mean per cluster; pick the pair with maximum angular separation.
+    # Using circular mean (not linear) handles horizontal-trail lines that straddle
+    # the 0°/180° boundary. Accepting >2 clusters handles crossing junctions that
+    # generate Hough lines at many angles, chaining what should be 2 clusters into 3+.
+    cluster_means = {cid: _circular_mean_angle(
+        [angles[i] for i, l in enumerate(labels) if l == cid]
+    ) for cid in unique}
+
+    best_c1, best_c2, best_dist = unique[0], unique[1], 0.0
+    for ci in range(len(unique)):
+        for cj in range(ci + 1, len(unique)):
+            d = _angle_dist(cluster_means[unique[ci]], cluster_means[unique[cj]])
+            if d > best_dist:
+                best_dist = d
+                best_c1, best_c2 = unique[ci], unique[cj]
+
+    if best_dist < MIN_SPLIT_ANGLE_DEG:
         return [mask]
 
     def _longest(cid):
         clines = [lines[i][0] for i, l in enumerate(labels) if l == cid]
         return max(clines, key=lambda L: (L[2] - L[0]) ** 2 + (L[3] - L[1]) ** 2)
 
-    rep1 = _longest(unique[0])
-    rep2 = _longest(unique[1])
+    rep1 = _longest(best_c1)
+    rep2 = _longest(best_c2)
 
     ys, xs = np.where(mask > 0)
     mask_a = np.zeros_like(mask)
