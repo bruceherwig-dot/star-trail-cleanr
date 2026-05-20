@@ -354,7 +354,7 @@ def group_detections(det_list):
             diff = dj["centroid"] - di["centroid"]
             along = float(np.dot(diff, u_ref))
             perp = float(np.sqrt(max(float(np.dot(diff, diff)) - along ** 2, 0.0)))
-            if perp > 2.0 * max(di["minor"], dj["minor"]):
+            if perp > 1.2 * max(di["minor"], dj["minor"]):
                 continue
 
             tree_i = KDTree(di["coords"])
