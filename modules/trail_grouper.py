@@ -1,10 +1,10 @@
 """
-Trail grouper: crossing splitter + elongation filter + union-find grouper + polygon fitting.
+Trail grouper: crossing splitter + union-find grouper + polygon fitting.
 
 Public API
 ----------
 filter_masks(preds, h, w)
-    Run crossing splitter + elongation filter on raw SAHI predictions.
+    Run crossing splitter + area filter on raw SAHI predictions.
     Returns a list of uint8 masks (255=trail) that passed all filters.
     Used by detect_trails.detect_frame to build the combined mask.
 
@@ -13,7 +13,7 @@ filter_masks_with_props(preds, h, w, sky_mask=None)
     masks[i] and det_list[i] correspond to the same detection.
     Used by polymakr.py for full-chain detection → polygon fitting.
 
-thicken_mask(mask, h, w, min_aspect=2.0)
+thicken_mask(mask, h, w)
     Convert a combined binary pixel mask into fit_polygon rectangles.
     Returns (polygon_list, thick_mask). Used by STC repair to replace the
     tight pixel mask with wider rectangles consistent with CVAT annotations.
@@ -26,8 +26,8 @@ fit_polygon(group_indices, det_list)
     Fit one 4-corner rectangle to a group of detections.
     Returns (corners_xy, width, u_avg).
 
-detection_props(mask, min_aspect=None)
-    Return region properties for one mask, or None if elongation filter fails.
+detection_props(mask)
+    Return region properties for one mask, or None if area filter fails.
 
 try_split(mask)
     Crossing splitter: returns [mask] unchanged or [mask_a, mask_b].
@@ -41,7 +41,6 @@ from skimage.measure import label as sklabel, regionprops as skregionprops
 
 CONF_THRESH         = 0.30
 MAX_ANGLE_DEG       = 7.0
-MIN_ASPECT          = 3.5
 MIN_AREA            = 300
 
 SPLIT_AREA_MIN      = 5000
@@ -50,7 +49,7 @@ HOUGH_MIN_LINE      = 25
 HOUGH_MAX_GAP       = 15
 DBSCAN_EPS          = 5.0
 DBSCAN_MIN_SAMPLES  = 2
-MIN_SPLIT_ANGLE_DEG = 15.0
+MIN_SPLIT_ANGLE_DEG = 10.0
 SEAM_MARGIN         = 3.0
 
 
@@ -103,6 +102,16 @@ def _perp_dist(px, py, L):
     return abs(dy * px - dx * py + x2 * y1 - y2 * x1) / np.sqrt(dx * dx + dy * dy)
 
 
+def _line_intersect(L1, L2):
+    x1, y1, x2, y2 = L1
+    x3, y3, x4, y4 = L2
+    denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+    if abs(denom) < 1e-6:
+        return None
+    t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denom
+    return x1 + t * (x2 - x1), y1 + t * (y2 - y1)
+
+
 def _dbscan_angles(angles, eps, min_samples):
     n = len(angles)
     labels  = [-1] * n
@@ -139,7 +148,8 @@ def _dbscan_angles(angles, eps, min_samples):
 
 def try_split(mask):
     """
-    Check mask for an X-shaped crossing blob and split it if found.
+    Check mask for a crossing blob and split it if two distinct trail
+    directions are found.
 
     Returns [mask] unchanged if no crossing is detected, or [mask_a, mask_b]
     if exactly two distinct trail directions are found.
@@ -223,15 +233,8 @@ def try_split(mask):
 
 # ── Elongation filter ─────────────────────────────────────────────────────────
 
-def detection_props(mask, min_aspect=None):
-    """
-    Return region properties for one mask, or None if the elongation filter fails.
-
-    min_aspect overrides MIN_ASPECT when provided (e.g. lower threshold for
-    split arms that are known to be part of a crossing blob).
-    """
-    if min_aspect is None:
-        min_aspect = MIN_ASPECT
+def detection_props(mask):
+    """Return region properties for one mask, or None if the area filter fails."""
     lbl = sklabel(mask)
     props = skregionprops(lbl)
     if not props:
@@ -239,8 +242,6 @@ def detection_props(mask, min_aspect=None):
     p = max(props, key=lambda x: x.area)
     minor = p.axis_minor_length
     if minor < 1 or p.area < MIN_AREA:
-        return None
-    if p.axis_major_length / minor < min_aspect:
         return None
     pixel_density = p.area / max(p.axis_major_length, 1)
     if minor > 50 and minor > 2 * pixel_density:
@@ -272,9 +273,8 @@ def filter_masks(preds, h, w):
         if m is None:
             continue
         candidates = try_split(m)
-        is_split = len(candidates) == 2
         for cm in candidates:
-            if detection_props(cm, min_aspect=2.5 if is_split else None) is not None:
+            if detection_props(cm) is not None:
                 passing.append(cm)
     return passing
 
@@ -299,9 +299,8 @@ def filter_masks_with_props(preds, h, w, sky_mask=None):
             if m.max() == 0:
                 continue
         candidates = try_split(m)
-        is_split = len(candidates) == 2
         for cm in candidates:
-            props = detection_props(cm, min_aspect=2.5 if is_split else None)
+            props = detection_props(cm)
             if props is not None:
                 masks.append(cm)
                 det_list.append(props)
@@ -388,7 +387,7 @@ def group_detections(det_list):
 
 # ── Polygon fitting ───────────────────────────────────────────────────────────
 
-def thicken_mask(mask, h, w, min_aspect=2.0):
+def thicken_mask(mask, h, w):
     """
     Convert a combined binary pixel mask into fit_polygon rectangles.
 
@@ -410,7 +409,7 @@ def thicken_mask(mask, h, w, min_aspect=2.0):
 
     for comp_id in range(1, n_labels + 1):
         comp  = (lbl == comp_id).astype(np.uint8) * 255
-        props = detection_props(comp, min_aspect=min_aspect)
+        props = detection_props(comp)
         if props is None:
             fallback = np.maximum(fallback, comp)
         else:
