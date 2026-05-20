@@ -2,6 +2,16 @@
 
 ---
 
+## v2.27-beta
+- **New: Trail DetectoR v4 is now built in.** The AI model has been retrained on a larger, more diverse dataset. It finds more trails, especially faint ones and those near the edges of the frame. Detection accuracy (mAP50) improved from 0.805 to 0.859.
+- **Fix: Trails at tile boundaries are no longer missed.** Star Trail CleanR divides each frame into tiles for processing. A suppression bug was causing detections near tile seams to cancel each other out, leaving gaps in the mask. This is now fixed.
+- **Fix: Crossing trails are now detected separately more reliably.** When two airplane trails cross at a shallow angle, they can appear as one connected blob. The splitter that handles this case now works correctly for crossing angles and complex intersections that previously caused one trail to be missed entirely.
+- **Fix: Closely spaced parallel trails are no longer merged into one polygon.** Two trails flying close together now each get their own mask instead of being combined.
+- **Fix: Small red airplane nav-light blobs are no longer filtered out.** Short red trail segments — typical of a flashing port nav light — were being blocked by a size gate. They now pass through regardless of length as long as the underlying pixels are red.
+- **Fix: Run screen now shows the dataset folder and its parent.** When your images are in a folder with a generic name like "TIFF," the run screen now shows "Dataset Name/TIFF" so you can see at a glance which set is being cleaned.
+- **Fix: Mask painter always opens in Paint mode.** Previously, if you switched to Erase mode and closed the foreground mask editor, it would reopen in Erase mode next time. It now resets to Paint mode on every open.
+- **Smoke tests:** 133 passing.
+
 ## v2.26-beta
 - **Fix: 8-bit TIFF files are now uncompressed.** Same fix as v2.25-beta for 16-bit — all TIFF output is now uncompressed and compatible with Sequator and other stacking apps that require uncompressed TIFF.
 - **Smoke tests:** 133 passing.
