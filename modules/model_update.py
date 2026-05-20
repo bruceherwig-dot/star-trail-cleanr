@@ -15,7 +15,7 @@ from typing import Optional
 from modules.user_folder import get_installed_model_version
 
 REPO = "bruceherwig-dot/star-trail-cleanr"
-RELEASES_URL = f"https://api.github.com/repos/{REPO}/releases?per_page=30"
+RELEASES_URL = f"https://api.github.com/repos/{REPO}/releases?per_page=100"
 TIMEOUT_S = 5
 
 # Version label of the model shipped inside the app bundle. Bumped only when
