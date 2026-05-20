@@ -230,7 +230,9 @@ jobs:
             - **Intel (older Macs)**: StarTrailCleanR-Mac-Intel.dmg, same steps. Slower than Apple Silicon (no built-in GPU acceleration) but functional.
 
             **Windows**
-            - **Standard**: StarTrailCleanRSetup.zip. Right-click the downloaded zip and choose "Extract All...", then double-click StarTrailCleanRSetup.exe inside the extracted folder. If Windows shows a blue "Windows protected your PC" warning, click "More info" then "Run anyway".
+            - **Standard**: StarTrailCleanRSetup.zip. Right-click the downloaded zip and choose "Extract All...", then double-click StarTrailCleanRSetup.exe inside the extracted folder.
+            - **If Windows shows a blue "Windows protected your PC" screen:** click "More info" then "Run anyway". One-time step.
+            - **If you see "Error 4551: An application control policy has blocked this file":** right-click the installer and choose "Run as administrator". If that still fails, your machine has IT-managed security settings that block unsigned apps — contact your IT department or try on a personal machine.
 
             **Linux** (x86_64, Ubuntu 22.04+ / Debian 12+ / Fedora 36+ or newer)
             - StarTrailCleanR-Linux-x86_64.tar.gz. Extract anywhere (`tar -xzf StarTrailCleanR-Linux-x86_64.tar.gz`), then run `./StarTrailCleanR/StarTrailCleanR` from the extracted folder. First Linux release; please report any issues.

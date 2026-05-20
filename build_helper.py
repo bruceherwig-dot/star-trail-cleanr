@@ -46,7 +46,6 @@ SKIP_PACKAGES = {
     # (lxml, imgviz, labelme). Verified via grep across modules/ + top-level
     # *.py — zero direct imports.
     'pandas',                       # ultralytics training output, not runtime
-    'matplotlib',                   # ultralytics plots, not runtime
     'lxml',                         # labelme XML, not used at runtime
     'openai',                       # sahi optional VLM detector, not used
     'anthropic',                    # sahi optional VLM detector, not used
@@ -58,7 +57,7 @@ SKIP_PACKAGES = {
     #   fontTools: required only by borb + matplotlib (both already excluded)
     'pip',                          # package installer, not needed at runtime
     'astropy_iers_data',            # orphan from astropy exclusion
-    'fontTools',                    # orphan from matplotlib + borb exclusions
+    'fontTools',                    # orphan from borb exclusion
 }
 
 site_dirs = []
@@ -119,6 +118,7 @@ cmd = [
     '--collect-all', 'PySide6',
     '--collect-all', 'sahi',
     '--collect-all', 'ultralytics',
+    '--collect-all', 'matplotlib',
     '--collect-all', 'skimage',
     '--collect-all', 'scipy',
     '--collect-all', 'tifffile',
