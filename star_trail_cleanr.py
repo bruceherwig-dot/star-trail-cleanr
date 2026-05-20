@@ -2862,8 +2862,15 @@ class MainWindow(QMainWindow):
         self._trail_counter_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self._trail_counter_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
 
+        self._run_source_label = QLabel("")
+        self._run_source_label.setStyleSheet(f"font-size: 19px; color: {MUTED_TEXT};")
+        self._run_source_label.setAlignment(Qt.AlignCenter | Qt.AlignVCenter)
+        self._run_source_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+
         title_row = QHBoxLayout()
         title_row.addWidget(title)
+        title_row.addStretch()
+        title_row.addWidget(self._run_source_label)
         title_row.addStretch()
         title_row.addWidget(self._trail_counter_label)
         layout.addLayout(title_row)
@@ -3317,6 +3324,7 @@ class MainWindow(QMainWindow):
         if os.path.exists(mask_path):
             self._mask_window.load_existing_mask(mask_path)
 
+        self._mask_window._painter._set_mode(False)
         self._mask_window.show()
         self._mask_window.raise_()
         self._mask_window.activateWindow()
@@ -3508,6 +3516,7 @@ class MainWindow(QMainWindow):
 
         # Go to process page — reset all widgets
         self._process_title.setText("Cleaning in Progress")
+        self._run_source_label.setText(os.path.basename(folder))
         self._trail_counter_label.setText("")
         self._progress_bar.setValue(0)
         self._progress_bar.setFormat("%p%")
