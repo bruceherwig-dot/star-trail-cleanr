@@ -133,7 +133,7 @@ def detect_frame(model, image, tile_size: int = 640,
         return None
     img, h, w = loaded
 
-    passing = filter_masks(_sahi_predict(model, img, tile_size, overlap), h, w)
+    passing = filter_masks(_sahi_predict(model, img, tile_size, overlap), h, w, img)
     mask = np.zeros((h, w), dtype=np.uint8)
     for m in passing:
         mask = np.maximum(mask, m)
@@ -189,7 +189,7 @@ def detect_frame_polygon(model, image, tile_size: int = 640,
     predictions = _sahi_predict(model, img, tile_size, overlap)
     raw_labeled = _build_raw_labeled_mask(predictions, h, w) if return_raw else None
 
-    _, det_list = filter_masks_with_props(predictions, h, w)
+    _, det_list = filter_masks_with_props(predictions, h, w, img=img)
 
     if not det_list:
         final = np.zeros((h, w), dtype=np.uint8)

@@ -42,6 +42,7 @@ from skimage.measure import label as sklabel, regionprops as skregionprops
 CONF_THRESH         = 0.30
 MAX_ANGLE_DEG       = 7.0
 MIN_AREA            = 300
+MIN_ASPECT          = 3.5
 
 SPLIT_AREA_MIN      = 5000
 HOUGH_THRESHOLD     = 20
@@ -100,6 +101,20 @@ def _perp_dist(px, py, L):
     if dx == 0 and dy == 0:
         return float("inf")
     return abs(dy * px - dx * py + x2 * y1 - y2 * x1) / np.sqrt(dx * dx + dy * dy)
+
+
+def _is_red_trail(mask, img):
+    """Return True if pixels under mask are predominantly red (airplane nav light).
+
+    img must be RGB (channel 0 = R).  Thresholds match filter_small_components.
+    """
+    pixels = img[mask > 0]
+    if len(pixels) == 0:
+        return False
+    mean_r = float(pixels[:, 0].mean())
+    mean_g = float(pixels[:, 1].mean())
+    mean_b = float(pixels[:, 2].mean())
+    return mean_r > 80 and mean_r > mean_g * 1.5 and mean_r > mean_b * 1.5
 
 
 def _line_intersect(L1, L2):
@@ -233,8 +248,13 @@ def try_split(mask):
 
 # ── Elongation filter ─────────────────────────────────────────────────────────
 
-def detection_props(mask):
-    """Return region properties for one mask, or None if the area filter fails."""
+def detection_props(mask, min_aspect=None):
+    """Return region properties for one mask, or None if area/elongation filter fails.
+
+    min_aspect overrides MIN_ASPECT (pass 0.0 to skip the AR gate entirely).
+    """
+    if min_aspect is None:
+        min_aspect = MIN_ASPECT
     lbl = sklabel(mask)
     props = skregionprops(lbl)
     if not props:
@@ -242,6 +262,8 @@ def detection_props(mask):
     p = max(props, key=lambda x: x.area)
     minor = p.axis_minor_length
     if minor < 1 or p.area < MIN_AREA:
+        return None
+    if p.axis_major_length / minor < min_aspect:
         return None
     pixel_density = p.area / max(p.axis_major_length, 1)
     if minor > 50 and minor > 2 * pixel_density:
@@ -260,12 +282,15 @@ def detection_props(mask):
 
 # ── Public: filter masks ──────────────────────────────────────────────────────
 
-def filter_masks(preds, h, w):
+def filter_masks(preds, h, w, img=None):
     """
     Run crossing splitter + elongation filter on raw SAHI predictions.
 
     Returns a list of uint8 masks (255=trail) that passed all filters.
     Caller unions them into one combined mask.
+
+    img (RGB, optional): when provided, components that fail the elongation
+    filter are kept anyway if their pixels are predominantly red (nav light).
     """
     passing = []
     for pred in preds:
@@ -276,15 +301,20 @@ def filter_masks(preds, h, w):
         for cm in candidates:
             if detection_props(cm) is not None:
                 passing.append(cm)
+            elif img is not None and _is_red_trail(cm, img):
+                passing.append(cm)
     return passing
 
 
-def filter_masks_with_props(preds, h, w, sky_mask=None):
+def filter_masks_with_props(preds, h, w, sky_mask=None, img=None):
     """
     Like filter_masks, but returns (masks, det_list) in one pass.
 
     sky_mask (white=sky, black=foreground), if provided, is AND-ed with each
     prediction mask before the crossing splitter and elongation filter.
+
+    img (RGB, optional): when provided, components that fail the elongation
+    filter are kept anyway if their pixels are predominantly red (nav light).
     """
     masks    = []
     det_list = []
@@ -301,6 +331,8 @@ def filter_masks_with_props(preds, h, w, sky_mask=None):
         candidates = try_split(m)
         for cm in candidates:
             props = detection_props(cm)
+            if props is None and img is not None and _is_red_trail(cm, img):
+                props = detection_props(cm, min_aspect=0.0)
             if props is not None:
                 masks.append(cm)
                 det_list.append(props)

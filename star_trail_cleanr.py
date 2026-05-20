@@ -3516,7 +3516,9 @@ class MainWindow(QMainWindow):
 
         # Go to process page — reset all widgets
         self._process_title.setText("Cleaning in Progress")
-        self._run_source_label.setText(os.path.basename(folder))
+        _p = Path(folder)
+        _display = f"{_p.parent.name}/{_p.name}" if _p.parent.name else _p.name
+        self._run_source_label.setText(_display)
         self._trail_counter_label.setText("")
         self._progress_bar.setValue(0)
         self._progress_bar.setFormat("%p%")
