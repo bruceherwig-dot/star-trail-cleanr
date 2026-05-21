@@ -783,6 +783,15 @@ def main():
     sb = args.skip_boundary
     print(f"\nStep 2 - repairing frames (skipping first/last {sb})", flush=True)
 
+    # Build neighbor_masks aligned with frames_all so repair_frame can check
+    # whether each neighbor frame has a trail at the component being repaired.
+    # Boundary frames (before/after core) have no mask — leave as None.
+    neighbor_masks = [None] * len(frames_all)
+    for _j, _m in enumerate(masks_all):
+        _abs = _j + core_start
+        if 0 <= _abs < len(frames_all):
+            neighbor_masks[_abs] = _m
+
     n_repaired = 0
     total_trail = 0
     for i, (fp, img, mask) in enumerate(zip(frame_files, frames, masks_per_frame)):
@@ -799,7 +808,8 @@ def main():
         if not skip:
             if trail_px > 0:
                 cleaned = repair_frame(img, mask, i + core_start,
-                                       frames_all)
+                                       frames_all,
+                                       neighbor_masks=neighbor_masks)
                 _write_output(fp.stem, cleaned, icc_profile=icc_profile, exif_bytes=exif_bytes, dpi=dpi)
                 n_repaired += 1
             else:

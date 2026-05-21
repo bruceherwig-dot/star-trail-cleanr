@@ -2909,6 +2909,7 @@ class MainWindow(QMainWindow):
         time_row.addWidget(self._time_label)
         time_row.addStretch()
         self._elapsed_label = QLabel("")
+        self._elapsed_label.setStyleSheet(f"font-size: 14px; color: {MUTED_TEXT};")
         self._elapsed_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         time_row.addWidget(self._elapsed_label)
         layout.addLayout(time_row)
@@ -2988,12 +2989,12 @@ class MainWindow(QMainWindow):
         log_col.setSpacing(8)
         log_col.setContentsMargins(0, 0, 0, 0)
 
-        star_log_title = QLabel("Star Log")
-        star_log_title.setAlignment(Qt.AlignCenter)
-        star_log_title.setStyleSheet(
+        self._star_log_title = QLabel("Star Log")
+        self._star_log_title.setAlignment(Qt.AlignCenter)
+        self._star_log_title.setStyleSheet(
             f"font-size: 18px; font-weight: bold; color: {CARD_TEXT};"
         )
-        log_col.addWidget(star_log_title)
+        log_col.addWidget(self._star_log_title)
 
         self._status_out = QTextEdit()
         self._status_out.setReadOnly(True)
@@ -3646,6 +3647,8 @@ class MainWindow(QMainWindow):
             self._spinner_timer.stop()
         if hasattr(self, '_warmup_timer') and self._warmup_timer.isActive():
             self._warmup_timer.stop()
+        if hasattr(self, '_star_log_title'):
+            self._star_log_title.setText("Star Log")
 
     def _go_to_setup(self):
         self._stop_elapsed_timer()
@@ -3658,6 +3661,8 @@ class MainWindow(QMainWindow):
         elapsed = (time.time() - start.timestamp()) if start is not None else 0
         m, s = divmod(int(elapsed), 60)
         self._elapsed_label.setText(f"{ch}  Elapsed: {m}m {s:02d}s")
+        if hasattr(self, '_star_log_title'):
+            self._star_log_title.setText(f"Star Log  {ch}")
 
 
         # Pulse "Estimating..." before real estimate arrives
@@ -3796,7 +3801,7 @@ class MainWindow(QMainWindow):
                 f"stacker (StarStaX, Sequator, Photoshop, etc.) for the final composite."
             )
             return
-        SECONDS_PER_MANUAL_TRAIL = 20
+        SECONDS_PER_MANUAL_TRAIL = 30
         saved_sec = total_trails * SECONDS_PER_MANUAL_TRAIL
         if saved_sec >= 60:
             rounded_min = int(round(saved_sec / 900.0) * 15)
@@ -3815,7 +3820,7 @@ class MainWindow(QMainWindow):
         self._stats_trail_line = (
             f"Swept <b>{total_trails:,}</b> airplane and satellite trails from your stars<br>"
             f"across <b>{total_frames:,}</b> twinkling frames.<br>"
-            f"<i>Based on manual cleanup at 20 seconds per trail.</i><br><br>"
+            f"<i>Based on manual cleanup at 30 seconds per trail.</i><br><br>"
             f"<span style='font-size:20px; font-weight:bold;'>TIME SAVED: {time_saved}</span>"
             f"<br><br><b>Time to stack!</b><br>"
             f"Open the Cleaned Folder, then load the frames into your favorite "
@@ -3827,10 +3832,12 @@ class MainWindow(QMainWindow):
         self._run_initial_est_sec = initial_est_sec
         self._run_actual_sec = actual_sec
         tail = "You're welcome." if actual_sec <= initial_est_sec else "My apologies."
+        frames = getattr(self, '_run_total_frames', 0)
+        pf = f"  ({actual_sec / frames:.1f}s/frame)" if frames > 0 else ""
         self._stats_timing_line = (
             f"<br><br><span style='font-size:14px; color:{MUTED_TEXT};'>"
             f"Thought it'd take <b>{fmt_hms(initial_est_sec)}</b>. "
-            f"Took <b>{fmt_hms(actual_sec)}</b>. {tail}"
+            f"Took <b>{fmt_hms(actual_sec)}</b>{pf}. {tail}"
             f"</span>"
         )
         # Modal dialog will read this on _on_done.
@@ -4149,7 +4156,7 @@ class MainWindow(QMainWindow):
         actual_sec = getattr(self, '_run_actual_sec', 0)
 
         # Mirror the on-screen "TIME SAVED" formatting.
-        SECONDS_PER_MANUAL_TRAIL = 20
+        SECONDS_PER_MANUAL_TRAIL = 30
         saved_sec = trails * SECONDS_PER_MANUAL_TRAIL
         if saved_sec >= 60:
             rounded_min = int(round(saved_sec / 900.0) * 15)
@@ -4334,7 +4341,7 @@ class MainWindow(QMainWindow):
             f"Thought it'd take {fmt_hms(est_sec)}. "
             f"Took {fmt_hms(actual_sec)}. {tail}",
             "",
-            f"Time saved vs cleaning manually (at ~20 sec per trail):  {time_saved}",
+            f"Time saved vs cleaning manually (at ~30 sec per trail):  {time_saved}",
             "",
             "================================================",
             "",
@@ -4709,7 +4716,7 @@ if __name__ == '__main__':
     # first launch, the slow imports keep the splash up longer than the
     # minimum and this delay is effectively zero.
     _elapsed_ms = int((_time.monotonic() - _splash_shown_at) * 1000)
-    _remaining_ms = max(0, 5000 - _elapsed_ms)
+    _remaining_ms = max(0, 3000 - _elapsed_ms)
     QTimer.singleShot(_remaining_ms, _splash.close)
 
     # Live OS appearance switching: when the user toggles macOS Light/Dark

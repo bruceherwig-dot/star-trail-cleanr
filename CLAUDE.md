@@ -32,6 +32,8 @@
 6. Push commits and tag (`git push && git push origin vX.XX-beta`)
 7. Watch the GitHub Actions build with `bash scripts/watch_ci.sh` — when it reports "Build succeeded", post the download links to the user. (This is the standard watcher; never invent a new one each release.)
 
+**Model-only releases (`model-v*` tags):** Always publish as prerelease (`gh release create --prerelease` or `gh release edit --prerelease`). Model releases contain only `best.pt` — no app installers. If published as a full release, GitHub's `/releases/latest` resolves to the model tag instead of the most recent app release, breaking the permanent download link on startrailcleanr.com. The model updater is not affected — it queries all releases via `/releases?per_page=100` and sees prereleases too.
+
 ## Smoke test suite (`tests/`)
 Regression safety net for Claude's edits — Bruce does not run these himself.
 - Run with: `python3 tests/run_all.py` (takes <1 second, no external deps)

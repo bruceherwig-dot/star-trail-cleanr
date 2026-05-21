@@ -111,10 +111,12 @@ def _is_red_trail(mask, img):
     pixels = img[mask > 0]
     if len(pixels) == 0:
         return False
-    mean_r = float(pixels[:, 0].mean())
-    mean_g = float(pixels[:, 1].mean())
-    mean_b = float(pixels[:, 2].mean())
-    return mean_r > 80 and mean_r > mean_g * 1.4 and mean_r > mean_b * 1.4
+    r_vals = pixels[:, 0].astype(float)
+    top_mask = r_vals >= np.percentile(r_vals, 90)
+    top_r = float(r_vals[top_mask].mean())
+    top_g = float(pixels[top_mask, 1].mean())
+    top_b = float(pixels[top_mask, 2].mean())
+    return top_r > 80 and top_r > top_g * 1.4 and top_r > top_b * 1.4
 
 
 def _line_intersect(L1, L2):
@@ -241,6 +243,12 @@ def try_split(mask):
         return max(p.axis_minor_length for p in rp) if rp else 0
 
     if _arm_minor(mask_a) > 50 or _arm_minor(mask_b) > 50:
+        return [mask]
+
+    # If either half would be dropped by the elongation filter, the split created
+    # a fat non-trail blob from the overlap zone of two nearby parallel trails.
+    # Revert to the original — a genuine crossing always produces two elongated halves.
+    if detection_props(mask_a) is None or detection_props(mask_b) is None:
         return [mask]
 
     return [mask_a, mask_b]

@@ -2,6 +2,15 @@
 
 ---
 
+## v2.28-beta
+- **Fix: Trail repair no longer blacks out entire components on multi-frame trails.** When a trail spans adjacent frames, the repair now uses sky pixels from all neighbor frames and blacks out only the pixels where a neighbor's own trail mask overlaps. Previously, any mask overlap above a threshold caused the entire component to be skipped and filled with black.
+- **Fix: Red nav-light trails with diluted color are now detected correctly.** The red channel check now uses the brightest pixels in the detection mask instead of the average. Masks that include surrounding dark sky were dragging the mean down and causing real nav-light trails to be filtered out.
+- **Fix: Splitting a combined trail blob no longer discards a valid single-trail detection.** When two parallel trails overlap in a tile seam zone, the splitter now checks whether both halves are trail-shaped before committing to the split. If one half is a fat blob, it reverts to the original detection.
+- **Fix: Polygon tips are now tighter and polygon width is closer to the actual trail.** End-cap padding and perpendicular width were both trimmed to reduce overshoot into surrounding sky.
+- **Fix: Short diagonal trails are no longer dropped.** The minimum aspect ratio gate was lowered so trails at wider angles pass through.
+- **New: TileFixR Cleaned mode.** A new radio button in TileFixR lets you switch to a view-only mode showing the cleaned tiles with mask contours overlaid. No editing is possible in this mode.
+- **Smoke tests:** 133 passing.
+
 ## v2.27-beta
 - **New: Trail DetectoR v4 is now built in.** The AI model has been retrained on a larger, more diverse dataset. It finds more trails, especially faint ones and those near the edges of the frame. Detection accuracy (mAP50) improved from 0.805 to 0.859.
 - **Fix: Trails at tile boundaries are no longer missed.** Star Trail CleanR divides each frame into tiles for processing. A suppression bug was causing detections near tile seams to cancel each other out, leaving gaps in the mask. This is now fixed.

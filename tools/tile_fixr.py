@@ -267,6 +267,103 @@ def _tile_origins(extent: int, tile: int, stride: int) -> list:
     return sorted(set(o))
 
 
+def build_tile_entries_from_masks(masks_dir, frame_names, progress_cb=None):
+    """Like build_tile_entries but loads mask PNGs instead of CVAT polygons.
+
+    Reads IMG_DIR for tile images (should already point to cleaned folder).
+    For each tile, finds contours in the mask crop and stores them as
+    read-only polygon entries with server_id=-1.
+    """
+    img_files = sorted(IMG_DIR.glob("*.jpg")) or sorted(IMG_DIR.glob("*.JPG"))
+    if not img_files:
+        sub = IMG_DIR / "JPGs"
+        img_files = sorted(sub.glob("*.jpg")) or sorted(sub.glob("*.JPG"))
+    if not img_files:
+        raise SystemExit(f"No cleaned frames in {IMG_DIR}")
+
+    img_by_name = {p.name: p for p in img_files}
+    stride = int(TILE_SIZE * (1 - OVERLAP))
+    entries = []
+    frame_list = SUSPECT_FRAMES if SUSPECT_FRAMES else list(range(FRAME_START, FRAME_END))
+
+    for pos, frame_idx in enumerate(frame_list):
+        if frame_idx >= len(frame_names):
+            continue
+        img_path = img_by_name.get(frame_names[frame_idx])
+        if img_path is None:
+            continue
+        stem = img_path.stem
+
+        sys.stdout.write(f"\r  Frame {pos + 1}/{len(frame_list)}  {img_path.name}   ")
+        sys.stdout.flush()
+        if progress_cb and (pos % 5 == 0):
+            if progress_cb(
+                    f"Building tiles: frame {pos + 1} of {len(frame_list)}...",
+                    pos + 1, len(frame_list)):
+                return [], []
+
+        img = cv2.imread(str(img_path))
+        if img is None:
+            continue
+        H, W = img.shape[:2]
+
+        mask_path = masks_dir / (stem + ".png")
+        frame_mask = None
+        if mask_path.exists():
+            frame_mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+
+        xs_o = _tile_origins(W, TILE_SIZE, stride)
+        ys_o = _tile_origins(H, TILE_SIZE, stride)
+        n_cols = len(xs_o)
+        n_rows = len(ys_o)
+
+        for row_idx, ty in enumerate(ys_o):
+            for col_idx, tx in enumerate(xs_o):
+                tx2 = min(tx + TILE_SIZE, W)
+                ty2 = min(ty + TILE_SIZE, H)
+                crop = img[ty:ty2, tx:tx2].copy()
+                if crop.shape[:2] != (TILE_SIZE, TILE_SIZE):
+                    pad = np.zeros((TILE_SIZE, TILE_SIZE, 3), dtype=np.uint8)
+                    pad[:crop.shape[0], :crop.shape[1]] = crop
+                    crop = pad
+
+                tile_polys = []
+                if frame_mask is not None:
+                    tile_mask = frame_mask[ty:ty2, tx:tx2]
+                    if tile_mask.max() > 0:
+                        contours, _ = cv2.findContours(
+                            tile_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                        for contour in contours:
+                            if contour.shape[0] < 3:
+                                continue
+                            pts = contour.reshape(-1, 2).astype(np.int32)
+                            tile_polys.append({
+                                "server_id": -1,
+                                "color_index": 0,
+                                "tile_local_pts": pts,
+                                "frame_idx": frame_idx,
+                            })
+
+                tile_id = f"{stem}_t{tx:04d}_{ty:04d}"
+                entries.append({
+                    "frame": stem,
+                    "frame_idx": frame_idx,
+                    "img_filename": img_path.name,
+                    "tile_x": tx,
+                    "tile_y": ty,
+                    "tile_col": col_idx,
+                    "tile_row": row_idx,
+                    "n_cols": n_cols,
+                    "n_rows": n_rows,
+                    "label": f"{stem} tile ({tx},{ty})",
+                    "crop_raw": crop,
+                    "polys": tile_polys,
+                    "tile_id": tile_id,
+                })
+    print()
+    return entries, []
+
+
 def build_tile_entries(by_frame, frame_names, progress_cb=None):
     """Walk every 640x640 tile in each frame in [FRAME_START, FRAME_END).
     For each tile, list the polygons that intersect it (with tile-local
@@ -618,19 +715,21 @@ def load_last_pick():
     return {"task_id": 16, "first_frame": 0, "last_frame": 19}
 
 
-def save_last_pick(task_id, first_frame, last_frame):
+def save_last_pick(task_id, first_frame, last_frame, source_mode="cvat"):
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     LAST_PICK_PATH.write_text(json.dumps({
         "task_id": task_id,
         "first_frame": int(first_frame),
         "last_frame": int(last_frame),
+        "source_mode": source_mode,
     }, indent=2))
 
 
 class TaskPickerDialog(QDialog):
     """Modal dialog shown at launch — pick a CVAT task + how many frames to load."""
 
-    def __init__(self, tasks, last_task_id, last_first, last_last, auth=None):
+    def __init__(self, tasks, last_task_id, last_first, last_last,
+                 auth=None, last_source_mode="cvat"):
         super().__init__()
         self.tasks        = tasks
         self.auth         = auth
@@ -693,6 +792,23 @@ class TaskPickerDialog(QDialog):
         self.folder_label.setWordWrap(True)
         layout.addWidget(self.folder_label)
 
+        # Source mode radio buttons
+        from PySide6.QtWidgets import QButtonGroup, QRadioButton
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("Image source:"))
+        self._rb_cvat    = QRadioButton("Source + CVAT polygons")
+        self._rb_cleaned = QRadioButton("Cleaned + STC masks  (view only)")
+        self._rb_cvat.setChecked(True)
+        mode_group = QButtonGroup(self)
+        mode_group.addButton(self._rb_cvat)
+        mode_group.addButton(self._rb_cleaned)
+        mode_row.addWidget(self._rb_cvat)
+        mode_row.addWidget(self._rb_cleaned)
+        mode_row.addStretch()
+        layout.addLayout(mode_row)
+        if last_source_mode == "cleaned":
+            self._rb_cleaned.setChecked(True)
+
         # Buttons
         self.btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         self.btns.button(QDialogButtonBox.Ok).setText("Load")
@@ -746,8 +862,17 @@ class TaskPickerDialog(QDialog):
             self.folder_label.setStyleSheet(
                 "color: #c0392b; font-size: 11px; font-family: monospace;")
             self.btns.button(QDialogButtonBox.Ok).setEnabled(False)
+            self._rb_cleaned.setEnabled(False)
         else:
-            self.folder_label.setText(f"image folder: {img_dir}")
+            masks_dir = img_dir / "cleaned" / "masks"
+            has_masks = masks_dir.is_dir()
+            self._rb_cleaned.setEnabled(has_masks)
+            if not has_masks and self._rb_cleaned.isChecked():
+                self._rb_cvat.setChecked(True)
+            self.folder_label.setText(
+                f"image folder: {img_dir}"
+                + (f"\ncleaned/masks: {masks_dir}" if has_masks
+                   else "\ncleaned/masks: not found"))
             self.folder_label.setStyleSheet(
                 "color: #2a7a2a; font-size: 11px; font-family: monospace;")
             self.btns.button(QDialogButtonBox.Ok).setEnabled(True)
@@ -757,6 +882,9 @@ class TaskPickerDialog(QDialog):
         if 0 <= idx < len(self.tasks):
             return self.tasks[idx]
         return None
+
+    def selected_mode(self):
+        return "cleaned" if self._rb_cleaned.isChecked() else "cvat"
 
     def selected_first_frame(self):
         return int(self.first_spin.value())
@@ -899,8 +1027,9 @@ def _play_end_sound():
 # ── Main window ─────────────────────────────────────────────────────────────
 
 class TileFixR(QMainWindow):
-    def __init__(self, entries, all_polys, frame_names, job_id):
+    def __init__(self, entries, all_polys, frame_names, job_id, view_only=False):
         super().__init__()
+        self.view_only = view_only
         self.entries = entries
         self.all_polys = all_polys
         # Central polygon registry (full-frame coords). Source of truth for edits.
@@ -1043,6 +1172,12 @@ class TileFixR(QMainWindow):
         root.addWidget(self._build_action_bar())
         root.addWidget(self._build_nav_bar())
         root.addWidget(self._build_debug_bar())
+
+        if self.view_only:
+            self.add_btn.setEnabled(False)
+            self.send_btn.setEnabled(False)
+            self.pull_btn.setEnabled(False)
+            self.setWindowTitle("TileFixR  —  View Only")
 
         def _guarded(fn):
             def wrapper():
@@ -2393,6 +2528,8 @@ class TileFixR(QMainWindow):
         return (sid, vi, best_dist2 ** 0.5)
 
     def _on_image_pressed(self, ix, iy):
+        if self.view_only:
+            return
         if self.add_mode:
             self.image_view.setDragMode(QGraphicsView.NoDrag)
             self.debug_press_label.setText(
@@ -2668,6 +2805,8 @@ class TileFixR(QMainWindow):
     # ── Add mode ────────────────────────────────────────────────────────────
 
     def _toggle_add_mode(self):
+        if self.view_only:
+            return
         self.add_mode = not self.add_mode
         self.image_view.draw_mode = self.add_mode
         self.add_btn.blockSignals(True)
@@ -2811,6 +2950,8 @@ class TileFixR(QMainWindow):
         self.debug_label.setText(f"undo: {kind} (stack now {len(self.undo_stack)})")
 
     def _toggle_selected_mark(self):
+        if self.view_only:
+            return
         if self.selected_id is None:
             return
         sid = self.selected_id
@@ -3351,6 +3492,7 @@ def main():
         last.get("first_frame", 1),
         last.get("last_frame", 9999),
         auth=auth,
+        last_source_mode=last.get("source_mode", "cvat"),
     )
     if picker.exec() != QDialog.Accepted:
         print("Cancelled.")
@@ -3358,6 +3500,7 @@ def main():
     chosen = picker.selected_task()
     first_f = picker.selected_first_frame()
     last_f = picker.selected_last_frame()
+    mode = picker.selected_mode()
     if chosen is None:
         return
 
@@ -3372,9 +3515,9 @@ def main():
     TASK_NAME = chosen["name"]
     FRAME_START = first_f - 1
     FRAME_END = last_f
-    IMG_DIR = img_dir
+    IMG_DIR = img_dir / "cleaned" if mode == "cleaned" else img_dir
     _refresh_paths()
-    save_last_pick(CVAT_TASK_ID, first_f, last_f)
+    save_last_pick(CVAT_TASK_ID, first_f, last_f, source_mode=mode)
     print(f"  selected task {CVAT_TASK_ID}: {chosen['name']}", flush=True)
     if SUSPECT_FRAMES:
         print(f"  suspect mode: {len(SUSPECT_FRAMES)} specific frames from {IMG_DIR}", flush=True)
@@ -3387,7 +3530,15 @@ def main():
     splash.update_progress("Connecting to CVAT...")
 
     by_frame, frame_names, job_id = load_cvat_polygons(progress_cb=splash.update_progress)
-    entries, all_polys = build_tile_entries(by_frame, frame_names, progress_cb=splash.update_progress)
+    if mode == "cleaned":
+        entries, all_polys = build_tile_entries_from_masks(
+            img_dir / "cleaned" / "masks", frame_names,
+            progress_cb=splash.update_progress)
+        view_only = True
+    else:
+        entries, all_polys = build_tile_entries(by_frame, frame_names,
+            progress_cb=splash.update_progress)
+        view_only = False
 
     if splash.cancelled:
         splash.close()
@@ -3404,7 +3555,7 @@ def main():
         return
 
     splash.update_progress("Building the editor window...")
-    window = TileFixR(entries, all_polys, frame_names, job_id)
+    window = TileFixR(entries, all_polys, frame_names, job_id, view_only=view_only)
     splash.close()
     window.show()
     window.activateWindow()
