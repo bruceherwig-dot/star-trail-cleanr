@@ -2,6 +2,13 @@
 
 ---
 
+## v2.30-beta
+- **Fix: App no longer hangs on first launch on Windows.** A crash-reporting consent question was appearing hidden behind the startup screen, leaving the app waiting for an answer no one could see. The app now loads fully first, then asks the question after the main window is open.
+- **Fix: Version history link in About now shows the complete history.** The link was pointing to a branch that only had history up to v1.995.
+- **Fix: Trail repair no longer causes solid black rectangles on multi-frame trails.** An offset bug was applying neighbor masks at the wrong positions, causing large areas of sky to be blacked out instead of repaired.
+- **Fix: Polygon centering on trails that cross tile boundaries.** When a trail crossed a tile seam, the detection polygon was landing between two detection bands instead of on the actual trail pixels. Polygons now center on the real trail pixels regardless of how the trail was split across tiles.
+- **Fix: Polygon length no longer clips when one detection is near the size threshold.** A detection just barely pruned by the width filter was excluding its pixels from the polygon extent calculation, chopping the end off the polygon. All detections now contribute to the polygon length.
+
 ## v2.29-beta
 - **Fix: Download button in the update banner now links to the correct file.** The Mac download URL was pointing to a .zip that does not exist on the release. It now correctly links to the .dmg installer.
 

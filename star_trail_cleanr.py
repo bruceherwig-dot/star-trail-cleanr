@@ -1497,6 +1497,32 @@ class MainWindow(QMainWindow):
         if not self._min_height_locked:
             QTimer.singleShot(0, self._lock_min_height)
             self._min_height_locked = True
+        QTimer.singleShot(500, self._maybe_ask_crash_reporting)
+
+    def _maybe_ask_crash_reporting(self):
+        """First-run crash-reporting opt-in. Fires once after the main window
+        is visible so it never blocks startup. Only shown in CI builds where
+        the Sentry DSN is present."""
+        if not _SENTRY_DSN:
+            return
+        if SETTINGS.contains("crash_reporting_choice_made"):
+            return
+        prompt = QMessageBox(self)
+        prompt.setWindowTitle("Star Trail CleanR")
+        prompt.setIcon(QMessageBox.Question)
+        prompt.setText("Help improve Star Trail CleanR by sending anonymous crash reports?")
+        prompt.setInformativeText(
+            "If the app ever crashes, an automatic error report is sent so the bug "
+            "can be fixed.\n\nThe report contains a stack trace, your operating "
+            "system, and the app version. No images, no folder paths, no personal "
+            "information."
+        )
+        prompt.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        prompt.setDefaultButton(QMessageBox.Yes)
+        choice = prompt.exec()
+        SETTINGS.setValue("crash_reporting_enabled", choice == QMessageBox.Yes)
+        SETTINGS.setValue("crash_reporting_choice_made", True)
+        _maybe_init_sentry()
 
     def _lock_min_height(self):
         """Set the window's minimum vertical size to the Setup tab's
@@ -1898,7 +1924,7 @@ class MainWindow(QMainWindow):
         full list of contributors &rarr;</a></p>
 
         <h3 style='color:{BRAND_HEADING_BLUE}; margin:12px 0 2px 0;'>Version History</h3>
-        <p style='margin-top:2px;'>See the full <a href='https://github.com/bruceherwig-dot/star-trail-cleanr/blob/main/CHANGELOG.md'>version history on GitHub</a>.</p>
+        <p style='margin-top:2px;'>See the full <a href='https://github.com/bruceherwig-dot/star-trail-cleanr/blob/v2-auto-update/CHANGELOG.md'>version history on GitHub</a>.</p>
 
         <h3 style='color:{BRAND_HEADING_BLUE}; margin:12px 0 2px 0;'>Share Your Work&hellip; Have a Suggestion?</h3>
         <p style='margin-top:2px;'>Got a before-and-after you'd like to share? I would love to see it!<br>
@@ -4670,6 +4696,8 @@ if __name__ == '__main__':
     if _screen:
         _g = _screen.availableGeometry()
         _splash.move(_g.x() + (_g.width() - 600) // 2, _g.y() + (_g.height() - 338) // 2)
+    _maybe_init_sentry()
+
     import time as _time
     _cleanr_relaunch = '--cleanr-relaunch' in sys.argv
     if _cleanr_relaunch:
@@ -4678,29 +4706,6 @@ if __name__ == '__main__':
         _splash.show()
         app.processEvents()
         _splash_shown_at = _time.monotonic()
-
-    # First-run crash-reporting opt-in. Asked once; choice persists in
-    # QSettings. Only shown when a DSN is actually present (CI builds), so
-    # dev runs don't see the prompt at all.
-    if _SENTRY_DSN and not SETTINGS.contains("crash_reporting_choice_made"):
-        from PySide6.QtWidgets import QMessageBox
-        prompt = QMessageBox()
-        prompt.setWindowTitle("Star Trail CleanR")
-        prompt.setIcon(QMessageBox.Question)
-        prompt.setText("Help improve Star Trail CleanR by sending anonymous crash reports?")
-        prompt.setInformativeText(
-            "If the app ever crashes, an automatic error report is sent so the bug "
-            "can be fixed.\n\nThe report contains a stack trace, your operating "
-            "system, and the app version. No images, no folder paths, no personal "
-            "information."
-        )
-        prompt.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
-        prompt.setDefaultButton(QMessageBox.Yes)
-        choice = prompt.exec()
-        SETTINGS.setValue("crash_reporting_enabled", choice == QMessageBox.Yes)
-        SETTINGS.setValue("crash_reporting_choice_made", True)
-
-    _maybe_init_sentry()
 
     # Pre-window launch recovery (added v1.99-beta after v1.97-beta shipped a
     # NameError that crashed MainWindow.__init__ before the in-app update
