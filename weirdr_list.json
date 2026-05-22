@@ -1,0 +1,83 @@
+[
+  {
+    "tag": "cheryl_129",
+    "filename": "129.jpg",
+    "dataset": "Cheryl Hanscom Wilcox - Alabama Hills",
+    "reason": "",
+    "run": "run_20260515_234909",
+    "added": "2026-05-16"
+  },
+  {
+    "source": "mask_viewr",
+    "tag": "IMG_6027",
+    "filename": "IMG_6027.jpg",
+    "dataset": "cleaned_v4",
+    "reason": "",
+    "added": "2026-05-19"
+  },
+  {
+    "source": "mask_viewr",
+    "tag": "IMG_6007",
+    "filename": "IMG_6007.jpg",
+    "dataset": "cleaned",
+    "reason": "",
+    "added": "2026-05-19"
+  },
+  {
+    "source": "mask_viewr",
+    "tag": "IMG_6008",
+    "filename": "IMG_6008.jpg",
+    "dataset": "cleaned",
+    "reason": "",
+    "added": "2026-05-19"
+  },
+  {
+    "source": "mask_viewr",
+    "tag": "IMG_6037",
+    "filename": "IMG_6037.jpg",
+    "dataset": "cleaned",
+    "reason": "",
+    "added": "2026-05-20"
+  },
+  {
+    "source": "mask_viewr",
+    "tag": "071A7615",
+    "filename": "071A7615.jpg",
+    "dataset": "cleaned",
+    "reason": "",
+    "added": "2026-05-20"
+  },
+  {
+    "source": "mask_viewr",
+    "tag": "071A7706",
+    "filename": "071A7706.jpg",
+    "dataset": "Sean Parker - Arizona Star Trails",
+    "reason": "",
+    "added": "2026-05-20"
+  },
+  {
+    "source": "mask_viewr",
+    "tag": "071A7653",
+    "filename": "071A7653.jpg",
+    "dataset": "Sean Parker - Arizona Star Trails",
+    "reason": "",
+    "added": "2026-05-20"
+  },
+  {
+    "source": "mask_viewr",
+    "tag": "071A7544",
+    "filename": "071A7544.jpg",
+    "dataset": "Sean Parker - Arizona Star Trails",
+    "reason": "",
+    "added": "2026-05-20"
+  },
+  {
+    "source": "stc_output",
+    "tag": "071A7667",
+    "filename": "071A7667.jpg",
+    "dataset": "Sean Parker - Arizona Star Trails",
+    "folder": "/Volumes/T7 Shield/AI Projects/Star Trail CleanR/star trail images/Sean Parker - Arizona Star Trails/cleaned/",
+    "reason": "missed detection: short dashed red nav-light trail, upper center-left, not masked or cleaned",
+    "added": "2026-05-21"
+  }
+]

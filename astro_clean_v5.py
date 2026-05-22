@@ -788,7 +788,7 @@ def main():
     # Boundary frames (before/after core) have no mask — leave as None.
     neighbor_masks = [None] * len(frames_all)
     for _j, _m in enumerate(masks_all):
-        _abs = _j + core_start
+        _abs = _j
         if 0 <= _abs < len(frames_all):
             neighbor_masks[_abs] = _m
 

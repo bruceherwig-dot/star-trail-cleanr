@@ -50,6 +50,7 @@ HOUGH_MIN_LINE      = 25
 HOUGH_MAX_GAP       = 15
 DBSCAN_EPS          = 5.0
 DBSCAN_MIN_SAMPLES  = 2
+TIP_PAD_PX          = 0   # pixels added to each tip of the fitted polygon; negative trims
 MIN_SPLIT_ANGLE_DEG = 10.0
 SEAM_MARGIN         = 3.0
 
@@ -492,15 +493,14 @@ def fit_polygon(group_indices, det_list):
     Returns (corners_xy, width, u_avg) where corners_xy is a list of
     (x, y) integer tuples suitable for cv2.polylines / cv2.fillPoly.
     """
-    dets = [det_list[i] for i in group_indices]
+    all_dets = [det_list[i] for i in group_indices]
 
-    median_minor = float(np.median([d["minor"] for d in dets]))
-    pruned = [d for d in dets if d["minor"] <= 2.0 * median_minor]
-    if pruned:
-        dets = pruned
+    median_minor = float(np.median([d["minor"] for d in all_dets]))
+    pruned = [d for d in all_dets if d["minor"] <= 2.0 * median_minor]
+    dets = pruned if pruned else all_dets
 
-    total_area = sum(d["area"] for d in dets)
-    centroid   = sum(d["centroid"] * d["area"] for d in dets) / total_area
+    all_coords_combined = np.vstack([d["coords"] for d in all_dets])
+    centroid = all_coords_combined.mean(axis=0)
 
     u_sum = np.zeros(2)
     for d in dets:
@@ -511,9 +511,9 @@ def fit_polygon(group_indices, det_list):
     u_avg = u_sum / np.linalg.norm(u_sum)
 
     t_centroid = centroid @ u_avg
-    tip_pad = max(d["minor"] for d in dets) / 4
-    t_min = min(float((d["coords"] @ u_avg).min()) for d in dets) - tip_pad
-    t_max = max(float((d["coords"] @ u_avg).max()) for d in dets) + tip_pad
+    tip_pad = TIP_PAD_PX
+    t_min = min(float((d["coords"] @ u_avg).min()) for d in all_dets) - tip_pad
+    t_max = max(float((d["coords"] @ u_avg).max()) for d in all_dets) + tip_pad
     p_min = centroid + (t_min - t_centroid) * u_avg
     p_max = centroid + (t_max - t_centroid) * u_avg
 

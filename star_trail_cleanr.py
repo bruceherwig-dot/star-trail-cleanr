@@ -511,11 +511,13 @@ class CleanerWorker(QThread):
     BAD_FILE_SKIP_CAP = 1
 
     def __init__(self, folder, output_folder, frame_limit, mask_path=None,
-                 output_format="jpg", jpeg_quality=85):
+                 output_format="jpg", jpeg_quality=85, frame_start=0, frame_end=0):
         super().__init__()
         self.folder = folder
         self.output_folder = output_folder
         self.frame_limit = frame_limit
+        self.frame_start = frame_start
+        self.frame_end = frame_end
         self.mask_path = mask_path
         self.output_format = output_format
         self.jpeg_quality = jpeg_quality
@@ -583,6 +585,10 @@ class CleanerWorker(QThread):
                 self.error.emit(f"No image files found in: {folder}")
                 return
 
+            if self.frame_end > 0:
+                frames = frames[self.frame_start : self.frame_end + 1]
+            elif self.frame_start > 0:
+                frames = frames[self.frame_start:]
             total = len(frames)
             if self.frame_limit not in ("All Frames", ""):
                 try:
@@ -879,14 +885,15 @@ class CleanerWorker(QThread):
 
                 this_batch = min(batch_size, total - start)
                 _log_est("batch_start", i, 0, this_batch, None, None, force=True)
+                abs_start = start + self.frame_start
                 if getattr(sys, 'frozen', False):
                     cmd = [sys.executable, '--cleanr-worker', SCRIPT, folder,
                            "-o", output_folder, "--model", get_model_path(),
-                           "--start", str(start), "--batch", str(this_batch)]
+                           "--start", str(abs_start), "--batch", str(this_batch)]
                 else:
                     cmd = [sys.executable, "-u", SCRIPT, folder,
                            "-o", output_folder, "--model", get_model_path(),
-                           "--start", str(start), "--batch", str(this_batch)]
+                           "--start", str(abs_start), "--batch", str(this_batch)]
 
                 if self.mask_path:
                     cmd.extend(["--foreground-mask", self.mask_path])
@@ -2691,6 +2698,31 @@ class MainWindow(QMainWindow):
         self._frame_limit.lineEdit().setValidator(QIntValidator(1, 999999))
         self._frame_limit.setFixedWidth(160)
         layout.addWidget(self._frame_limit)
+
+        if not getattr(sys, 'frozen', False):
+            dev_row = QHBoxLayout()
+            dev_label = QLabel("Dev: Start:")
+            dev_label.setFont(step_font)
+            dev_row.addWidget(dev_label)
+            self._dev_start_frame = QSpinBox()
+            self._dev_start_frame.setRange(0, 99999)
+            self._dev_start_frame.setValue(0)
+            self._dev_start_frame.setFixedWidth(90)
+            dev_row.addWidget(self._dev_start_frame)
+            dev_end_label = QLabel("End (0 = last):")
+            dev_end_label.setFont(step_font)
+            dev_row.addWidget(dev_end_label)
+            self._dev_end_frame = QSpinBox()
+            self._dev_end_frame.setRange(0, 99999)
+            self._dev_end_frame.setValue(0)
+            self._dev_end_frame.setFixedWidth(90)
+            dev_row.addWidget(self._dev_end_frame)
+            dev_row.addStretch()
+            layout.addLayout(dev_row)
+        else:
+            self._dev_start_frame = None
+            self._dev_end_frame = None
+
         layout.addSpacing(4)
 
         # ── Step 5: Output Options ───────────────────────────────────────────
@@ -3591,10 +3623,14 @@ class MainWindow(QMainWindow):
         fmt_map = {"JPG": "jpg", "TIFF 8-bit": "tif8", "TIFF 16-bit": "tif16"}
         out_fmt = fmt_map.get(self._format_combo.currentText(), "jpg")
         self._run_cancelled = False
+        frame_start = self._dev_start_frame.value() if self._dev_start_frame is not None else 0
+        frame_end = self._dev_end_frame.value() if self._dev_end_frame is not None else 0
         self.worker = CleanerWorker(
             folder, output, self._frame_limit.currentText(), self._mask_path,
             output_format=out_fmt,
-            jpeg_quality=self._jpeg_quality.value())
+            jpeg_quality=self._jpeg_quality.value(),
+            frame_start=frame_start,
+            frame_end=frame_end)
         self.worker.progress.connect(self._on_progress)
         self.worker.status.connect(self._on_status)
         self.worker.batch_info.connect(self._on_batch_info)
