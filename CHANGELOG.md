@@ -2,6 +2,9 @@
 
 ---
 
+## v2.29-beta
+- **Fix: Download button in the update banner now links to the correct file.** The Mac download URL was pointing to a .zip that does not exist on the release. It now correctly links to the .dmg installer.
+
 ## v2.28-beta
 - **Fix: Trail repair no longer blacks out entire components on multi-frame trails.** When a trail spans adjacent frames, the repair now uses sky pixels from all neighbor frames and blacks out only the pixels where a neighbor's own trail mask overlaps. Previously, any mask overlap above a threshold caused the entire component to be skipped and filled with black.
 - **Fix: Red nav-light trails with diluted color are now detected correctly.** The red channel check now uses the brightest pixels in the detection mask instead of the average. Masks that include surrounding dark sky were dragging the mean down and causing real nav-light trails to be filtered out.
