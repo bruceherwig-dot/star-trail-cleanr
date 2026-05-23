@@ -240,6 +240,76 @@ def load_with_neighbors(frame_dir: Path, start: int, batch: int,
     return sliced, core_start, core_end
 
 
+def _suppress_static_fps(masks_all, core_start, core_end,
+                         overlap_threshold=0.75, min_matches=2):
+    """Remove detection components that are static false positives.
+
+    PURPOSE: The AI sometimes detects fixed foreground objects (building edges,
+    rooflines, fence posts) as airplane trails because they are long, thin, and
+    high-contrast against the sky. These false positives appear at the SAME pixel
+    position in every frame. Real airplane trails appear in at most 1-2 frames
+    and move significantly between frames.
+
+    HOW IT WORKS: For each detected component in a core frame, we check how much
+    of it overlaps with detections in the 4 surrounding frames (N-2, N-1, N+1,
+    N+2). Overlap is measured as the fraction of the component's own pixels that
+    are also masked in the neighboring frame. If 75% or more of the component
+    overlaps in 2 or more neighboring frames, the component is suppressed entirely.
+
+    WHY 75%: Measured against the Sompting Church roofline false positive -- the
+    worst-case frame-to-frame size variation of a static foreground detection was
+    11% (height), leaving ~89% overlap. 75% sits safely in the gap between static
+    FPs (~89% overlap) and real trails (~0% overlap, since they are absent or in a
+    completely different position in neighboring frames).
+
+    WHY 2 OF 4 NEIGHBORS: Allows the filter to work at batch edges where N+1/N+2
+    may not exist (last frame of last batch), and handles the rare case where a
+    real trail happens to fire in the same region in one neighboring frame.
+
+    KNOWN LIMITATION: If a real trail happens to fire in the same spot as a static
+    FP in 2+ neighboring frames (extremely unlikely given trail motion), the real
+    trail would be suppressed along with the FP. The 75% threshold makes this very
+    unlikely in practice.
+    """
+    suppressed_count = 0
+    for i in range(core_start, core_end):
+        mask = masks_all[i]
+        if mask.max() == 0:
+            continue
+
+        n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+            (mask > 0).astype(np.uint8))
+
+        to_suppress = np.zeros(mask.shape, dtype=bool)
+
+        for comp_id in range(1, n_labels):
+            comp_pixels = (labels == comp_id)
+            comp_area = int(comp_pixels.sum())
+            if comp_area == 0:
+                continue
+
+            match_count = 0
+            for ni in [i - 2, i - 1, i + 1, i + 2]:
+                if ni < 0 or ni >= len(masks_all):
+                    continue
+                nb = masks_all[ni]
+                if nb is None or nb.max() == 0:
+                    continue
+                intersection = int((comp_pixels & (nb > 0)).sum())
+                if intersection / comp_area >= overlap_threshold:
+                    match_count += 1
+
+            if match_count >= min_matches:
+                to_suppress |= comp_pixels
+
+        if to_suppress.any():
+            masks_all[i][to_suppress] = 0
+            n_cc, _ = cv2.connectedComponents(to_suppress.astype(np.uint8))
+            suppressed_count += max(0, n_cc - 1)
+
+    return suppressed_count
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="astro_clean_v5 — YOLO-based airplane trail removal")
@@ -760,6 +830,14 @@ def main():
             if updated_total > running_trail_total:
                 running_trail_total = updated_total
                 print(f"FRAME_TRAIL_COUNT: {running_trail_total}", flush=True)
+
+    print("\nStep 1c - removing static false positives...", flush=True)
+    n_static = _suppress_static_fps(masks_all, core_start, core_end)
+    if n_static:
+        print(f"  Suppressed {n_static} static detection(s) present in 2+ neighboring frames",
+              flush=True)
+    else:
+        print("  No static false positives found", flush=True)
 
     masks_per_frame = masks_all[core_start:core_end]
     trail_frames = sum(1 for m in masks_per_frame if m.max() > 0)

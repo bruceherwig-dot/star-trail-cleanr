@@ -1792,6 +1792,10 @@ class MainWindow(QMainWindow):
         _d.setStyleSheet(f"color: {BROWSER_TEXT}; font-size: 13px;")
         _d.setWordWrap(True)
         layout.addWidget(_d)
+        _d2 = QLabel("Most helpful with earlier detection models. Less necessary now that the AI trains on rotated trail images at multiple angles.")
+        _d2.setStyleSheet(f"color: {BROWSER_TEXT}; font-size: 13px;")
+        _d2.setWordWrap(True)
+        layout.addWidget(_d2)
 
         scrub_chk = QCheckBox("Enable Second ScrubbeR")
         scrub_chk.setStyleSheet(f"QCheckBox {{ font-size: 13px; color: {BROWSER_TEXT}; margin-left: 16px; }}")
