@@ -14,7 +14,15 @@ import cv2
 import numpy as np
 
 
-# --- Tuning constants -------------------------------------------------------
+# ── Tuning constants ──────────────────────────────────────────────────────────
+# PAD: pixels of context around each trail bounding box used for star tracking.
+# MIN_AREA: components smaller than this (px) are skipped -- likely noise.
+# MAX_SEG_LENGTH: long components are split into segments of this max length.
+# MIN_DISP/MAX_DISP: plausible star displacement range N-1 to N+1 in pixels.
+# MIN_STARS: minimum tracked stars needed to trust the shift estimate.
+# TRAIL_WARM_MARGIN/TRAIL_BRIGHT_THRESH: warm-pixel cleanup gate after warp.
+# Log fields: seg.method reflects which of these paths fired per segment.
+
 PAD            = 120   # pixels around each trail bbox for feature search
 MIN_AREA       = 500   # skip tiny mask components (noise)
 MAX_SEG_LENGTH = 500   # components longer than this are split for tighter repair
@@ -31,6 +39,11 @@ _LK_PARAMS = dict(
 )
 
 
+# ── Image helpers ─────────────────────────────────────────────────────────────
+# _to_8bit: converts 16-bit frames to 8-bit for Lucas-Kanade (LK requires uint8).
+# _shift_image: applies a fractional-pixel translation via warpAffine with reflect
+#   border padding so stars near the trail edge are not blacked out by the warp.
+
 def _to_8bit(img: np.ndarray) -> np.ndarray:
     if img.dtype == np.uint16:
         return (img / 257).astype(np.uint8)
@@ -44,8 +57,16 @@ def _shift_image(img: np.ndarray, dx: float, dy: float) -> np.ndarray:
                           borderMode=cv2.BORDER_REFLECT)
 
 
+# ── Star feature tracking (Lucas-Kanade sparse optical flow) ──────────────────
+# Finds bright corners in the prev patch (masking trail pixels), tracks them to
+# the next patch with LK pyramidal optical flow, and returns the median shift.
+# Returns (dx, dy, success, n_stars_tracked). n_stars_tracked is the count of
+# valid tracked points that passed the displacement plausibility gate.
+# Failure reasons: too few feature points found, too few tracked, or all
+# displacements outside [MIN_DISP, MAX_DISP]. Log field: seg.n_stars.
+
 def _track_stars(prev: np.ndarray, nxt: np.ndarray, trail_mask=None):
-    """Track stars from prev to nxt. Returns (dx, dy, success).
+    """Track stars from prev to nxt. Returns (dx, dy, success, n_stars_tracked).
 
     trail_mask: boolean array same shape as patch. When provided, those pixels
     are zeroed in the search image so the tracker ignores trail features and
@@ -65,21 +86,30 @@ def _track_stars(prev: np.ndarray, nxt: np.ndarray, trail_mask=None):
         minDistance=5, blockSize=7
     )
     if pts is None or len(pts) < MIN_STARS:
-        return 0.0, 0.0, False
+        return 0.0, 0.0, False, 0
 
     pts1, status, _ = cv2.calcOpticalFlowPyrLK(g_prev, g_next, pts, None, **_LK_PARAMS)
     good = (status.ravel() == 1)
     if good.sum() < MIN_STARS:
-        return 0.0, 0.0, False
+        return 0.0, 0.0, False, int(good.sum())
 
     disp = (pts1[good] - pts[good]).reshape(-1, 2)
     mag  = np.linalg.norm(disp, axis=1)
     valid = (mag >= MIN_DISP) & (mag <= MAX_DISP)
     if valid.sum() < MIN_STARS:
-        return 0.0, 0.0, False
+        return 0.0, 0.0, False, int(valid.sum())
 
-    return float(np.median(disp[valid, 0])), float(np.median(disp[valid, 1])), True
+    return (float(np.median(disp[valid, 0])),
+            float(np.median(disp[valid, 1])),
+            True,
+            int(valid.sum()))
 
+
+# ── Component splitting (long trails into sub-segments) ───────────────────────
+# Very long trails (> MAX_SEG_LENGTH px) are split into equal-length segments
+# along the major axis so star tracking has a smaller, more homogeneous patch.
+# Each segment gets its own tracking + warp pass.
+# Log field: comp.split_into = number of segments returned.
 
 def _split_component(comp_full: np.ndarray) -> list:
     """Split a full-frame boolean component mask into sub-masks along the major axis.
@@ -128,7 +158,8 @@ def _split_component(comp_full: np.ndarray) -> list:
 def repair_frame(frame: np.ndarray, mask: np.ndarray,
                  frame_idx: int,
                  neighbor_frames: list,
-                 neighbor_masks: list = None) -> np.ndarray:
+                 neighbor_masks: list = None,
+                 debug_out=None) -> np.ndarray:
     """Replace masked trail pixels using Star Bridge sparse-track morph repair.
 
     Args:
@@ -140,6 +171,10 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
             (None entries = no mask / assume clean). When provided, a neighbor
             is skipped for any component where its mask overlaps that component,
             since its pixels there are trail, not sky.
+        debug_out (dict, optional): filled with a "components" list. Each entry
+            has id, area, bbox, split_into, and a "segments" list. Each segment
+            has tracking_ok, dx, dy, n_stars, method, still_trail_px,
+            union_zeroed_px.
     Returns:
         Repaired copy of frame.
     """
@@ -147,6 +182,9 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
     trail = mask > 0
     if not trail.any():
         return result
+
+    if debug_out is not None:
+        debug_out["components"] = []
 
     H, W = mask.shape[:2]
     N = len(neighbor_frames)
@@ -166,10 +204,29 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
         if stats[i, cv2.CC_STAT_AREA] < MIN_AREA:
             continue
 
+        # ── Per-component setup ───────────────────────────────────────────────
+        comp_area = int(stats[i, cv2.CC_STAT_AREA])
+        bx = int(stats[i, cv2.CC_STAT_LEFT])
+        by = int(stats[i, cv2.CC_STAT_TOP])
+        bw = int(stats[i, cv2.CC_STAT_WIDTH])
+        bh = int(stats[i, cv2.CC_STAT_HEIGHT])
+
         comp_full = (labels == i)
         sub_masks = _split_component(comp_full)
 
-        for sub_mask in sub_masks:
+        comp_dbg = None
+        if debug_out is not None:
+            comp_dbg = {
+                "id": i,
+                "area": comp_area,
+                "bbox": [bx, by, bx + bw, by + bh],
+                "split_into": len(sub_masks),
+                "segments": [],
+            }
+
+        for seg_idx, sub_mask in enumerate(sub_masks):
+            seg_info = {"seg": seg_idx} if comp_dbg is not None else None
+
             sub_ys, sub_xs = np.where(sub_mask)
             x0 = max(0, int(sub_xs.min()) - PAD)
             y0 = max(0, int(sub_ys.min()) - PAD)
@@ -178,7 +235,7 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
 
             comp_mask = sub_mask[y0:y1, x0:x1] > 0
 
-                # Always repair from all available neighbors.
+            # Always repair from all available neighbors.
             # The union mask below blacks out any pixel where a neighbor has trail,
             # so overlap areas are handled pixel-by-pixel after repair.
             use_prev = has_prev
@@ -186,13 +243,30 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
 
             if not use_prev and not use_next:
                 result[y0:y1, x0:x1][comp_mask] = 0
+                if seg_info is not None:
+                    seg_info.update({"method": "black_fill_no_neighbors",
+                                     "tracking_ok": False, "dx": 0.0, "dy": 0.0,
+                                     "n_stars": 0, "still_trail_px": 0,
+                                     "union_zeroed_px": 0})
+                    comp_dbg["segments"].append(seg_info)
                 continue
 
+            _method = "unknown"
+            _dx = 0.0
+            _dy = 0.0
+            _ok = False
+            _n_stars = 0
+
             if use_prev and use_next:
+                # ── Star feature tracking (Lucas-Kanade sparse optical flow) ──
                 patch_prev = neighbor_frames[prev_idx][y0:y1, x0:x1]
                 patch_next = neighbor_frames[next_idx][y0:y1, x0:x1]
-                dx, dy, ok = _track_stars(patch_prev, patch_next, trail_mask=comp_mask)
+                dx, dy, ok, n_stars = _track_stars(patch_prev, patch_next,
+                                                   trail_mask=comp_mask)
+                _dx, _dy, _ok, _n_stars = dx, dy, ok, n_stars
+
                 if ok:
+                    # ── Warp synthesis ────────────────────────────────────────
                     warped_prev = _shift_image(patch_prev,  dx / 2.0,  dy / 2.0)
                     warped_next = _shift_image(patch_next, -dx / 2.0, -dy / 2.0)
                     if neighbor_masks is None:
@@ -209,10 +283,13 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                         if cp <= _CONTAM_THRESH and cn <= _CONTAM_THRESH:
                             synth = ((warped_prev.astype(np.float32) +
                                       warped_next.astype(np.float32)) / 2.0).astype(frame.dtype)
+                            _method = "blend"
                         elif cp <= cn:
                             synth = warped_prev.copy()
+                            _method = "prev_only"
                         else:
                             synth = warped_next.copy()
+                            _method = "next_only"
                     else:
                         # Per-pixel: use only the clean neighbor where one side has trail.
                         prev_c = (neighbor_masks[prev_idx][y0:y1, x0:x1] > 0
@@ -229,17 +306,22 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                         use_prev_only = comp_mask & next_c & ~prev_c
                         if use_prev_only.any():
                             synth[use_prev_only] = warped_prev[use_prev_only]
+                        _method = "blend"
                 else:
                     synth = np.zeros_like(frame[y0:y1, x0:x1])
+                    _method = "black_fill"
 
             elif use_prev:
                 synth = neighbor_frames[prev_idx][y0:y1, x0:x1].copy()
+                _method = "prev_only"
 
             else:
                 synth = neighbor_frames[next_idx][y0:y1, x0:x1].copy()
+                _method = "next_only"
 
             result[y0:y1, x0:x1][comp_mask] = synth[comp_mask]
 
+            # ── Warm-pixel cleanup (still-trail remnants after warp) ──────────
             bg_pixels = frame[y0:y1, x0:x1][~comp_mask].astype(np.int32)
             if len(bg_pixels) >= 10:
                 bg_rb = float(np.median(bg_pixels[:, 2] - bg_pixels[:, 0]))
@@ -252,10 +334,12 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                            (filled[..., 2] - filled[..., 0] > warm_thresh) &
                            (filled[..., 2] > TRAIL_BRIGHT_THRESH))
             result[y0:y1, x0:x1][still_trail] = 0
+            _still_trail_px = int(still_trail.sum())
 
-            # AND union mask: zero only pixels contaminated in BOTH neighbors.
-            # Pixels in only one neighbor's trail are repaired above from the clean side.
+            # ── AND union mask: zero pixels contaminated in BOTH neighbors ────
+            # Pixels in only one neighbor's trail are already repaired above.
             # Black is transparent in lighten-max stacks so the cost is zero.
+            _union_zeroed_px = 0
             if neighbor_masks is not None:
                 prev_c = (neighbor_masks[prev_idx][y0:y1, x0:x1] > 0
                           if has_prev and neighbor_masks[prev_idx] is not None
@@ -263,6 +347,23 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                 next_c = (neighbor_masks[next_idx][y0:y1, x0:x1] > 0
                           if has_next and neighbor_masks[next_idx] is not None
                           else np.zeros(comp_mask.shape, dtype=bool))
-                result[y0:y1, x0:x1][comp_mask & prev_c & next_c] = 0
+                union_both = comp_mask & prev_c & next_c
+                result[y0:y1, x0:x1][union_both] = 0
+                _union_zeroed_px = int(union_both.sum())
+
+            if seg_info is not None:
+                seg_info.update({
+                    "tracking_ok":     _ok,
+                    "dx":              round(_dx, 2),
+                    "dy":              round(_dy, 2),
+                    "n_stars":         _n_stars,
+                    "method":          _method,
+                    "still_trail_px":  _still_trail_px,
+                    "union_zeroed_px": _union_zeroed_px,
+                })
+                comp_dbg["segments"].append(seg_info)
+
+        if debug_out is not None and comp_dbg is not None:
+            debug_out["components"].append(comp_dbg)
 
     return result

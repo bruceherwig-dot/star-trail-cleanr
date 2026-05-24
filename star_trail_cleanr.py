@@ -3677,7 +3677,7 @@ class MainWindow(QMainWindow):
         self.worker.too_many_bad_files.connect(self._on_too_many_bad_files)
         self.worker.frames_filter_prompt.connect(self._on_frames_filter_prompt)
         self.worker.trail_count_update.connect(self._on_trail_count_update)
-        self._trail_counter_label.setText("0 Trails Detected")
+        self._trail_counter_label.setText("0 Trails Cleaned")
         self._trail_counter_label.setStyleSheet(
             "font-size: 22px; font-weight: bold; color: #5b9bd5;"
         )
@@ -3848,7 +3848,7 @@ class MainWindow(QMainWindow):
         self._jpeg_quality_label.setEnabled(is_jpg)
 
     def _on_trail_count_update(self, count):
-        self._trail_counter_label.setText(f"{count:,} Trails Detected")
+        self._trail_counter_label.setText(f"{count:,} Trails Cleaned")
 
     def _on_stats_ready(self, total_trails, total_frames):
         # Capture for the run-summary file and the run-complete dialog.

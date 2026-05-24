@@ -38,6 +38,8 @@ import numpy as np
 from skimage.measure import label as sklabel, regionprops as skregionprops
 
 # ── Constants ─────────────────────────────────────────────────────────────────
+# Thresholds used across filter, splitter, grouper, and polygon fitter.
+# Changing any of these affects detection coverage — check the run log before tuning.
 
 CONF_THRESH         = 0.30
 MAX_ANGLE_DEG       = 7.0
@@ -56,6 +58,8 @@ SEAM_MARGIN         = 3.0
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
+# Geometry, angle math, and per-pixel helpers used by the public functions.
+# None of these write to the log — they are pure computation.
 
 def _pred_to_mask(pred, h, w):
     if pred.mask is None:
@@ -163,6 +167,10 @@ def _dbscan_angles(angles, eps, min_samples):
 
 
 # ── Crossing splitter ─────────────────────────────────────────────────────────
+# Detects blobs where two trails cross and splits them into two separate masks.
+# Uses Hough line detection + DBSCAN angle clustering to find two distinct directions.
+# Input: one SAHI prediction mask. Output: [mask] unchanged, or [mask_a, mask_b].
+# Log field: grouper.try_split_fired counts how many predictions were split.
 
 def try_split(mask):
     """
@@ -256,6 +264,10 @@ def try_split(mask):
 
 
 # ── Elongation filter ─────────────────────────────────────────────────────────
+# Rejects masks that are too round or too fat to be a trail. Gates: area >= MIN_AREA,
+# aspect ratio (major/minor) >= MIN_ASPECT, and minor axis not wider than pixel density.
+# Returns a props dict on pass, None on reject. Red nav lights bypass this gate.
+# Log field: grouper.failed_elongation counts predictions rejected here.
 
 def detection_props(mask, min_aspect=None):
     """Return region properties for one mask, or None if area/elongation filter fails.
@@ -290,6 +302,10 @@ def detection_props(mask, min_aspect=None):
 
 
 # ── Public: filter masks ──────────────────────────────────────────────────────
+# Entry points for the full filter pipeline: crossing splitter → elongation filter.
+# filter_masks: used by detect_frame (simple combined mask, no polygon fitting).
+# filter_masks_with_props: used by detect_frame_polygon (returns props for grouping).
+# Both support debug_out to capture per-stage rejection counts for the run log.
 
 def filter_masks(preds, h, w, img=None):
     """
@@ -315,40 +331,96 @@ def filter_masks(preds, h, w, img=None):
     return passing
 
 
-def filter_masks_with_props(preds, h, w, sky_mask=None, img=None):
+def filter_masks_with_props(preds, h, w, sky_mask=None, img=None, debug_out=None):
     """
-    Like filter_masks, but returns (masks, det_list) in one pass.
+    Like filter_masks, but returns (masks, det_list, edge_candidates) in one pass.
 
     sky_mask (white=sky, black=foreground), if provided, is AND-ed with each
     prediction mask before the crossing splitter and elongation filter.
 
     img (RGB, optional): when provided, components that fail the elongation
     filter are kept anyway if their pixels are predominantly red (nav light).
+
+    debug_out (dict, optional): populated with per-stage rejection counts when
+    provided. Keys: raw_pred_count, no_mask, sky_zeroed, try_split_fired,
+    failed_elongation, kept_as_nav_light, passed, edge_candidate_count.
+
+    edge_candidates: list of dicts {"mask", "u", "bbox"} for components that
+    failed elongation but whose bounding box touches any image edge (within 5px).
+    These are rescued by the pipeline if 2+ neighboring frames contain a mask
+    component with matching slope.
     """
-    masks    = []
-    det_list = []
+    masks           = []
+    det_list        = []
+    edge_candidates = []
+    if debug_out is not None:
+        debug_out.update({
+            "raw_pred_count":      len(preds),
+            "no_mask":             0,
+            "sky_zeroed":          0,
+            "try_split_fired":     0,
+            "failed_elongation":   0,
+            "kept_as_nav_light":   0,
+            "passed":              0,
+            "edge_candidate_count": 0,
+        })
     for pred in preds:
         m = _pred_to_mask(pred, h, w)
         if m is None:
+            if debug_out is not None:
+                debug_out["no_mask"] += 1
             continue
         if sky_mask is not None:
             sm = (sky_mask if sky_mask.shape == (h, w)
                   else cv2.resize(sky_mask, (w, h), interpolation=cv2.INTER_NEAREST))
             m = cv2.bitwise_and(m, sm)
             if m.max() == 0:
+                if debug_out is not None:
+                    debug_out["sky_zeroed"] += 1
                 continue
         candidates = try_split(m)
+        if len(candidates) > 1 and debug_out is not None:
+            debug_out["try_split_fired"] += 1
         for cm in candidates:
             props = detection_props(cm)
             if props is None and img is not None and _is_red_trail(cm, img):
                 props = detection_props(cm, min_aspect=0.0)
+                if props is not None and debug_out is not None:
+                    debug_out["kept_as_nav_light"] += 1
             if props is not None:
                 masks.append(cm)
                 det_list.append(props)
-    return masks, det_list
+                if debug_out is not None:
+                    debug_out["passed"] += 1
+            else:
+                if debug_out is not None:
+                    debug_out["failed_elongation"] += 1
+                # If the bbox touches any image edge, save as a rescue candidate.
+                # Trails clipped at the frame boundary look stubby (low AR) but
+                # are real -- the rescue pass in astro_clean_v5 reinstates them
+                # if 2+ neighboring frames have a mask component with matching slope.
+                px = np.where(cm > 0)
+                if len(px[0]) > 0:
+                    by1, by2 = int(px[0].min()), int(px[0].max())
+                    bx1, bx2 = int(px[1].min()), int(px[1].max())
+                    if by1 <= 4 or by2 >= h - 5 or bx1 <= 4 or bx2 >= w - 5:
+                        edge_props = detection_props(cm, min_aspect=0.0)
+                        if edge_props is not None:
+                            edge_candidates.append({
+                                "mask": cm,
+                                "u":    edge_props["u"],
+                                "bbox": (bx1, by1, bx2, by2),
+                            })
+                            if debug_out is not None:
+                                debug_out["edge_candidate_count"] += 1
+    return masks, det_list, edge_candidates
 
 
 # ── Union-find grouper ────────────────────────────────────────────────────────
+# Connects detections that belong to the same physical trail using union-find.
+# Four gates must ALL pass to merge a pair: angle, width-ratio, perp distance,
+# and tip-to-tip gap. Returns list-of-lists of detection indices (one per trail).
+# Log field: detect record group_count = number of groups returned here.
 
 def group_detections(det_list):
     """
@@ -427,6 +499,10 @@ def group_detections(det_list):
 
 
 # ── Polygon fitting ───────────────────────────────────────────────────────────
+# Fits one tight 4-corner rectangle to each detection group.
+# Width is derived from the median minor axis of the group members plus a
+# length-scaled bonus. TIP_PAD_PX trims or extends each tip.
+# Log field: detect record polygon_count = number of polygons filled onto the mask.
 
 def thicken_mask(mask, h, w):
     """
