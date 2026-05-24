@@ -12,10 +12,17 @@ Override dir: %LOCALAPPDATA%\StarTrailCleanR\gpu_override\
 import os
 import sys
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 CUDA_SUFFIX = "cu128"
 PYTHON_TAG = "cp311"
+
+# Mirrors tried in order when pytorch.org returns 403.
+# Aliyun carries a complete copy of the pytorch wheel index including cu128 Windows wheels.
+_MIRROR_BASES = [
+    f"https://download.pytorch.org/whl/{CUDA_SUFFIX}",
+    f"https://mirrors.aliyun.com/pytorch-wheels/{CUDA_SUFFIX}",
+]
 
 _APP_DIR = "StarTrailCleanR"
 _OVERRIDE_DIR = "gpu_override"
@@ -66,25 +73,34 @@ def get_expected_torchvision_version() -> Optional[str]:
 
 
 def get_download_urls() -> Optional[Tuple[str, str, str, str]]:
+    """Return (torch_url, torchvision_url, torch_ver, tv_ver) from the primary mirror."""
+    sets = get_all_download_url_sets()
+    return sets[0] if sets else None
+
+
+def get_all_download_url_sets() -> List[Tuple[str, str, str, str]]:
     """
-    Return (torch_url, torchvision_url, torch_ver, tv_ver) for the CUDA wheels
-    that match this app build, or None if versions cannot be determined.
+    Return one (torch_url, torchvision_url, torch_ver, tv_ver) tuple per mirror,
+    in priority order. The downloader tries each in sequence and stops on first success.
+    Returns an empty list if the expected wheel versions cannot be determined.
     """
     torch_ver = get_expected_torch_version()
     tv_ver = get_expected_torchvision_version()
     if not torch_ver or not tv_ver:
-        return None
+        return []
 
-    base = f"https://download.pytorch.org/whl/{CUDA_SUFFIX}"
-    torch_url = (
-        f"{base}/torch-{torch_ver}%2B{CUDA_SUFFIX}"
-        f"-{PYTHON_TAG}-{PYTHON_TAG}-win_amd64.whl"
-    )
-    tv_url = (
-        f"{base}/torchvision-{tv_ver}%2B{CUDA_SUFFIX}"
-        f"-{PYTHON_TAG}-{PYTHON_TAG}-win_amd64.whl"
-    )
-    return torch_url, tv_url, torch_ver, tv_ver
+    result = []
+    for base in _MIRROR_BASES:
+        torch_url = (
+            f"{base}/torch-{torch_ver}%2B{CUDA_SUFFIX}"
+            f"-{PYTHON_TAG}-{PYTHON_TAG}-win_amd64.whl"
+        )
+        tv_url = (
+            f"{base}/torchvision-{tv_ver}%2B{CUDA_SUFFIX}"
+            f"-{PYTHON_TAG}-{PYTHON_TAG}-win_amd64.whl"
+        )
+        result.append((torch_url, tv_url, torch_ver, tv_ver))
+    return result
 
 
 def write_version_tag(torch_ver: str) -> bool:

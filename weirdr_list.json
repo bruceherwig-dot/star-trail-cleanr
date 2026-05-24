@@ -79,5 +79,13 @@
     "folder": "/Volumes/T7 Shield/AI Projects/Star Trail CleanR/star trail images/Sean Parker - Arizona Star Trails/cleaned/",
     "reason": "missed detection: short dashed red nav-light trail, upper center-left, not masked or cleaned",
     "added": "2026-05-21"
+  },
+  {
+    "source": "mask_viewr",
+    "tag": "071A7594",
+    "filename": "071A7594.jpg",
+    "dataset": "Sean Parker - Arizona Star Trails",
+    "reason": "",
+    "added": "2026-05-23"
   }
 ]

@@ -1275,41 +1275,57 @@ class GpuPackInstallThread(QThread):
     finished_ok = Signal()
     failed = Signal(str)
 
-    def _download(self, label, url, dest_path):
+    def _download(self, label, urls, dest_path):
+        """Try each URL in order. On HTTP 403 move to the next mirror silently.
+        Raises RuntimeError with a __blocked__ sentinel if every mirror returns 403."""
         import urllib.request
-        req = urllib.request.Request(url, headers={"User-Agent": "StarTrailCleanR-GpuPack"})
-        try:
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                total = float(resp.headers.get("Content-Length") or 0)
-                done = 0.0
-                with open(str(dest_path), "wb") as f:
-                    while True:
-                        chunk = resp.read(131072)
-                        if not chunk:
-                            break
-                        f.write(chunk)
-                        done += len(chunk)
-                        self.progress.emit(label, done, total)
-        except Exception as e:
-            raise RuntimeError(f"{label} failed: {e}") from e
+        import urllib.error
+        last_403 = None
+        for idx, url in enumerate(urls):
+            if idx > 0:
+                self.progress.emit(f"{label} — trying backup server...", 0, 0)
+            req = urllib.request.Request(url, headers={"User-Agent": "StarTrailCleanR-GpuPack"})
+            try:
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    total = float(resp.headers.get("Content-Length") or 0)
+                    done = 0.0
+                    with open(str(dest_path), "wb") as f:
+                        while True:
+                            chunk = resp.read(131072)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                            done += len(chunk)
+                            self.progress.emit(label, done, total)
+                return
+            except urllib.error.HTTPError as e:
+                if e.code == 403:
+                    last_403 = e
+                    continue
+                raise RuntimeError(f"{label} failed: {e}") from e
+            except Exception as e:
+                raise RuntimeError(f"{label} failed: {e}") from e
+        raise RuntimeError(
+            f"{label} blocked: all servers returned 403 Forbidden\n__blocked__"
+        ) from last_403
 
     def run(self):
         import zipfile
-        from modules.gpu_pack import get_download_urls, get_override_dir, write_version_tag
-
-        from modules.gpu_pack import (get_download_urls, get_override_dir,
+        from modules.gpu_pack import (get_all_download_url_sets, get_override_dir,
                                        write_version_tag, clear_gpu_files,
                                        chmod_extracted_files)
 
-        urls = get_download_urls()
-        if not urls:
+        url_sets = get_all_download_url_sets()
+        if not url_sets:
             self.failed.emit(
                 "Cannot determine download URLs for this build.\n"
                 "Try updating Star Trail CleanR first, then install GPU support again."
             )
             return
 
-        torch_url, tv_url, torch_ver, _ = urls
+        torch_urls = [s[0] for s in url_sets]
+        tv_urls    = [s[1] for s in url_sets]
+        torch_ver  = url_sets[0][2]
         override_dir = get_override_dir()
 
         try:
@@ -1340,14 +1356,14 @@ class GpuPackInstallThread(QThread):
                 return
 
         try:
-            self._download("Downloading GPU support (1 of 2)", torch_url, torch_whl)
+            self._download("Downloading GPU support (1 of 2)", torch_urls, torch_whl)
             self.progress.emit("Installing GPU support (1 of 2)...", 0, 0)
             with zipfile.ZipFile(str(torch_whl), "r") as zf:
                 zf.extractall(str(override_dir))
             torch_whl.unlink(missing_ok=True)
             chmod_extracted_files(override_dir)
 
-            self._download("Downloading GPU support (2 of 2)", tv_url, tv_whl)
+            self._download("Downloading GPU support (2 of 2)", tv_urls, tv_whl)
             self.progress.emit("Installing GPU support (2 of 2)...", 0, 0)
             with zipfile.ZipFile(str(tv_whl), "r") as zf:
                 zf.extractall(str(override_dir))
@@ -1373,6 +1389,16 @@ class GpuPackInstallThread(QThread):
                     "Installation failed: Windows denied access to a file.\n\n"
                     "Reboot your computer, then reopen Star Trail CleanR and click "
                     "Install GPU Support again. The reboot will release the locked files.\n\n"
+                    f"Details: {e}"
+                )
+            elif "__blocked__" in msg or ("403" in msg and "Forbidden" in msg):
+                msg = (
+                    "Download blocked (HTTP 403).\n\n"
+                    "PyTorch's download servers are blocking requests from your network. "
+                    "We automatically tried an alternative server, but it was also blocked.\n\n"
+                    "The most reliable fix is to use a VPN — connect to any US or European "
+                    "server, then click Install GPU Support again.\n\n"
+                    "Click More Info for step-by-step instructions.\n\n"
                     f"Details: {e}"
                 )
             elif "urlopen error" in msg or "ConnectionReset" in msg or "timed out" in msg:
@@ -1742,6 +1768,23 @@ class MainWindow(QMainWindow):
         gpu_clear_row.addStretch()
         gpu_install_layout.addSpacing(2)
         gpu_install_layout.addLayout(gpu_clear_row)
+
+        gpu_help_btn = QPushButton("GPU installation troubleshooting guide")
+        gpu_help_btn.setFixedHeight(28)
+        gpu_help_btn.setCursor(Qt.PointingHandCursor)
+        gpu_help_btn.setStyleSheet(
+            f"QPushButton {{ background-color: transparent; color: {MUTED_TEXT}; "
+            f"font-size: 12px; border: none; text-decoration: underline; }}"
+            f"QPushButton:hover {{ color: {BROWSER_TEXT}; }}"
+        )
+        gpu_help_btn.clicked.connect(self._on_gpu_help_clicked)
+        self._gpu_help_btn = gpu_help_btn
+        gpu_help_row = QHBoxLayout()
+        gpu_help_row.setContentsMargins(16, 0, 0, 0)
+        gpu_help_row.addWidget(gpu_help_btn)
+        gpu_help_row.addStretch()
+        gpu_install_layout.addSpacing(0)
+        gpu_install_layout.addLayout(gpu_help_row)
 
         from PySide6.QtWidgets import QProgressBar
         gpu_progress = QProgressBar()
@@ -2466,13 +2509,26 @@ class MainWindow(QMainWindow):
         self._gpu_progress_label.setVisible(False)
         self._gpu_download_btn.setVisible(True)
         self._gpu_upgrade_browser.setVisible(True)
-        QMessageBox.critical(
-            self,
-            "GPU Installation Failed",
+        box = QMessageBox(self)
+        box.setWindowTitle("GPU Installation Failed")
+        box.setIcon(QMessageBox.Critical)
+        box.setText(
             f"GPU support could not be installed.\n\n{err}\n\n"
             "You can try again. If the problem continues, check your internet connection "
             "and make sure you have enough free disk space (4 GB needed)."
         )
+        box.addButton(QMessageBox.Ok)
+        info_btn = box.addButton("More Info", QMessageBox.HelpRole)
+        box.exec()
+        if box.clickedButton() is info_btn:
+            from PySide6.QtCore import QUrl
+            from PySide6.QtGui import QDesktopServices
+            QDesktopServices.openUrl(QUrl(_GPU_BUILD_URL))
+
+    def _on_gpu_help_clicked(self):
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        QDesktopServices.openUrl(QUrl(_GPU_BUILD_URL))
 
     def _on_gpu_clear_clicked(self):
         from PySide6.QtWidgets import QMessageBox
@@ -2549,6 +2605,8 @@ class MainWindow(QMainWindow):
         self._gpu_download_btn.setVisible(show_upgrade)
         if hasattr(self, '_gpu_clear_btn'):
             self._gpu_clear_btn.setVisible(show_upgrade)
+        if hasattr(self, '_gpu_help_btn'):
+            self._gpu_help_btn.setVisible(show_upgrade)
 
     def _relaunch(self):
         """Close and reopen the app."""
