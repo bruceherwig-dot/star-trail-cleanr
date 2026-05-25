@@ -690,6 +690,8 @@ class CleanerWorker(QThread):
             n_batches = (total + MAX_BATCH - 1) // MAX_BATCH
             batch_size = (total + n_batches - 1) // n_batches if n_batches else MAX_BATCH
             starts = list(range(0, total, batch_size))
+            if len(starts) > 1 and (total - starts[-1]) < 3:
+                starts.pop()
             n_batches = len(starts)
 
             ref_pixels = 5472 * 3648
@@ -1004,7 +1006,7 @@ class CleanerWorker(QThread):
                         self.step_progress.emit(1, 0, this_batch)
                         # Idempotent on the GUI side; harmless if already running.
                         self.warmup_active.emit(True)
-                    elif "Step 2" in proc_line and "repairing" in proc_line:
+                    elif "Step 2" in proc_line and "cleaning" in proc_line:
                         cur_step = 2
                         self.step_progress.emit(1, this_batch, this_batch)
                         self.step_progress.emit(2, 0, this_batch)
@@ -1036,7 +1038,7 @@ class CleanerWorker(QThread):
                                 _log_est("detect", i, frame_num, frame_total,
                                          overall_pct, remaining)
 
-                        elif cur_step == 2 and "repairing " in proc_line:
+                        elif cur_step == 2 and "cleaning " in proc_line:
                             repair_count = frame_num
                             now_t = time.time()
                             if est_processing_start_t is None:

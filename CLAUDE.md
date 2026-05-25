@@ -52,6 +52,9 @@ Regression safety net for Claude's edits — Bruce does not run these himself.
 - Build: `build_helper.py` (PyInstaller)
 - Tools: `tools/` folder (inference, training, LabelMe utilities)
 - Mask CheckR: `tools/mask_checkr.py` — picks a CVAT task + frame range, fetches reviewed polygons directly from CVAT API (NOT from local labelme_json files — those are stale pre-annotation starting points and never reflect Bruce's CVAT review work), black-fills each polygon, lighten-max stacks all frames; any visible trail = missed annotation. Outputs two JPEGs: plain stack and tile-grid overlay with A1/B2-style labels. Single-instance locked. Output folder: `mask_checkr_output/`
+- YOLO MaskViewR: `tools/mask_viewr.py` — frame-by-frame STC detection mask viewer. Shows colored numbered outlines for every detected trail region. Navigate with arrow keys; scroll/pinch to zoom; drag to pan. Tile grid overlay toggleable.
+- TileFixR: `tools/tile_fixr.py` — per-tile CVAT polygon editor. Walks 640x640 tile windows per frame, pulls polygons from CVAT, lets you click to mark polygons for deletion, then pushes deletions back to CVAT in one batch.
+- TrailFixR: `tools/trail_fixr.py` — visual polygon reviewer for YOLO trail detections. Pulls annotations from CVAT, crops each polygon with proportional padding, presents for review with brightness control and zoom/pan.
 
 ## Trained YOLO models
 All trained models live on the **local Mac** at `/Users/bruceherwig/Documents/yolo_runs/` — NOT on T7 Shield. Default ultralytics output path.

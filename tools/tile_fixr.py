@@ -864,15 +864,15 @@ class TaskPickerDialog(QDialog):
             self.btns.button(QDialogButtonBox.Ok).setEnabled(False)
             self._rb_cleaned.setEnabled(False)
         else:
-            masks_dir = img_dir / "cleaned" / "masks"
+            masks_dir = img_dir / "cleanr_workspace" / "masks"
             has_masks = masks_dir.is_dir()
             self._rb_cleaned.setEnabled(has_masks)
             if not has_masks and self._rb_cleaned.isChecked():
                 self._rb_cvat.setChecked(True)
             self.folder_label.setText(
                 f"image folder: {img_dir}"
-                + (f"\ncleaned/masks: {masks_dir}" if has_masks
-                   else "\ncleaned/masks: not found"))
+                + (f"\ncleanr_workspace/masks: {masks_dir}" if has_masks
+                   else "\ncleanr_workspace/masks: not found"))
             self.folder_label.setStyleSheet(
                 "color: #2a7a2a; font-size: 11px; font-family: monospace;")
             self.btns.button(QDialogButtonBox.Ok).setEnabled(True)
@@ -3532,7 +3532,7 @@ def main():
     by_frame, frame_names, job_id = load_cvat_polygons(progress_cb=splash.update_progress)
     if mode == "cleaned":
         entries, all_polys = build_tile_entries_from_masks(
-            img_dir / "cleaned" / "masks", frame_names,
+            img_dir / "cleanr_workspace" / "masks", frame_names,
             progress_cb=splash.update_progress)
         view_only = True
     else:

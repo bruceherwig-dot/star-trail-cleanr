@@ -242,9 +242,42 @@ def load_with_neighbors(frame_dir: Path, start: int, batch: int,
     return sliced, core_start, core_end
 
 
+_CENTROID_MOTION_PX = 20   # centroid offset above which a neighbor is a different object
+_BRIGHT_TRAIL_RATIO  = 2.5  # 90th-pct inside brightness / median surrounding; above = real trail
+
+
+def _is_bright_trail(comp_pixels, img_bgr):
+    """Return (is_bright, ratio): True if mask pixels stand out from surroundings.
+
+    Compares the 90th-percentile max-channel brightness of pixels inside the
+    component mask against the median brightness of a surrounding ring. Any color
+    (red, white, green) triggers the veto as long as the pixels are significantly
+    brighter than the local sky background.
+    """
+    if img_bgr is None:
+        return False, 0.0
+    ys, xs = np.where(comp_pixels)
+    if len(ys) == 0:
+        return False, 0.0
+    inside = img_bgr[ys, xs].astype(np.float32)
+    inside_bright = float(np.percentile(np.max(inside, axis=1), 90))
+    m = comp_pixels.astype(np.uint8) * 255
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (21, 21))
+    ring = (cv2.dilate(m, kernel) > 0) & ~comp_pixels
+    ry, rx = np.where(ring)
+    if len(ry) == 0:
+        return False, 0.0
+    surrounding = img_bgr[ry, rx].astype(np.float32)
+    surround_med = float(np.median(np.max(surrounding, axis=1)))
+    if surround_med < 1:
+        return False, 0.0
+    ratio = round(inside_bright / surround_med, 2)
+    return ratio >= _BRIGHT_TRAIL_RATIO, ratio
+
+
 def _suppress_static_fps(masks_all, core_start, core_end,
                          iou_threshold=0.70, min_matches=1,
-                         raw_masks_all=None, debug_out=None):
+                         raw_masks_all=None, frames_all=None, debug_out=None):
     """Remove detection components that are static false positives.
 
     PURPOSE: The AI sometimes detects fixed foreground objects (building edges,
@@ -281,14 +314,37 @@ def _suppress_static_fps(masks_all, core_start, core_end,
     and trigger mutual suppression, even when the frames between them are empty.
     Real trails cannot reach 70% IoU with a static foreground object because they
     are moving -- their pixel position changes every frame.
+
+    TWO VETOES prevent suppression of real trails even when IoU fires:
+
+    Veto 1 -- Bright/distinctive pixels: if the detection pixels are significantly
+    brighter than the local sky background (ratio >= _BRIGHT_TRAIL_RATIO), the
+    component is a real trail (nav light, strobe, or bright streak) and is kept.
+    This catches red, white, green, and any other bright airplane lights. Requires
+    frames_all to be passed; skipped otherwise.
+
+    Veto 3 -- Frame edge: if the component's bbox touches any image edge within
+    20px, suppression is skipped entirely. Trails go off the page; static
+    foreground objects (rooflines, fence posts, building edges) do not. This
+    is the same 20px threshold used by the edge rescue in filter_masks_with_props
+    and applies the same reasoning: proximity to the frame boundary is strong
+    evidence of a real trail, not a fixed object.
+
+    Veto 2 -- Centroid motion: when a neighbor matches at IoU >= iou_threshold,
+    the centroid of the neighbor's pixels inside the component bounding box is
+    compared to the component centroid. If the offset exceeds _CENTROID_MOTION_PX,
+    the neighbor is at a different position and is NOT counted as a static match.
+    This prevents two different airplanes on the same flight path from mutually
+    suppressing each other.
     """
     # Pass 1: identify every component to suppress using the ORIGINAL unmodified masks.
     # All overlap checks happen before any mask is zeroed, so later frames see the
     # same reference masks as earlier frames. The prior single-pass approach zeroed
     # masks in order, causing the last 2 frames in a batch to lose their reference
     # points (already-zeroed earlier frames), which prevented suppression there.
-    suppress_maps = {}   # frame_idx -> bool array of pixels to zero
-    debug_by_frame = {}  # frame_idx -> [rich suppression record, ...] for log
+    suppress_maps  = {}  # frame_idx -> bool array of pixels to zero
+    debug_by_frame = {}  # frame_idx -> [suppressed records] for log
+    kept_by_veto   = {}  # frame_idx -> [veto records] for log
 
     for i in range(core_start, core_end):
         mask = masks_all[i]
@@ -310,6 +366,24 @@ def _suppress_static_fps(masks_all, core_start, core_end,
             ys, xs = np.where(comp_pixels)
             cx = int(xs.mean()); cy = int(ys.mean())
             x1, y1, x2, y2 = int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())
+
+            # Frame-edge veto: trails go off the page -- static foreground
+            # objects do not. If the bbox touches any image edge within 20px,
+            # this is a trail entering or exiting the frame, not a static FP.
+            h_mask, w_mask = mask.shape
+            if y1 <= 19 or y2 >= h_mask - 20 or x1 <= 19 or x2 >= w_mask - 20:
+                kept_by_veto.setdefault(i, []).append({
+                    "area": comp_area,
+                    "cx": cx, "cy": cy,
+                    "bbox": [x1, y1, x2, y2],
+                    "veto": "frame_edge",
+                    "reason": (
+                        f"Suppression skipped: bbox touches frame edge within 20px "
+                        f"(x1={x1} y1={y1} x2={x2} y2={y2}, frame {w_mask}x{h_mask}). "
+                        f"Trails go off the page -- static foreground objects do not."
+                    ),
+                })
+                continue
 
             matched_neighbors = []
             for ni in [i - 4, i - 3, i - 2, i - 1, i + 1, i + 2, i + 3, i + 4]:
@@ -333,6 +407,19 @@ def _suppress_static_fps(masks_all, core_start, core_end,
                 union = comp_area + local_nb_area - intersection
                 iou = intersection / union if union > 0 else 0.0
                 if iou >= iou_threshold:
+                    # Centroid motion veto: if the neighbor detection in this
+                    # bounding box has its center far from the component center,
+                    # it is a different object at a different position -- not a
+                    # static repeat of the same object (e.g. a large trail from
+                    # a different airplane passing through the same area).
+                    nb_in_bbox = nb_hit[y1:y2 + 1, x1:x2 + 1]
+                    if nb_in_bbox.any():
+                        ny, nx = np.where(nb_in_bbox)
+                        nb_cx_f = float(nx.mean()) + x1
+                        nb_cy_f = float(ny.mean()) + y1
+                        centroid_dist = float(np.sqrt((cx - nb_cx_f) ** 2 + (cy - nb_cy_f) ** 2))
+                        if centroid_dist > _CENTROID_MOTION_PX:
+                            continue  # different object -- skip this neighbor
                     matched_neighbors.append({
                         "frame_idx": ni,
                         "source": source,
@@ -341,16 +428,45 @@ def _suppress_static_fps(masks_all, core_start, core_end,
                     })
 
             if len(matched_neighbors) >= min_matches:
+                # Bright-trail veto: if pixels inside the component are
+                # significantly brighter than the surrounding sky, it is a
+                # real trail (nav light, strobe, or bright streak) -- keep it
+                # regardless of the neighbor match count.
+                if frames_all is not None and i < len(frames_all):
+                    is_bright, bright_ratio = _is_bright_trail(comp_pixels, frames_all[i])
+                    if is_bright:
+                        match_desc = "; ".join(
+                            f"frame {m['frame_idx']} via {m['source']} (IoU {m['iou_pct']}%)"
+                            for m in matched_neighbors
+                        )
+                        kept_by_veto.setdefault(i, []).append({
+                            "area": comp_area,
+                            "cx": cx, "cy": cy,
+                            "bbox": [x1, y1, x2, y2],
+                            "match_count": len(matched_neighbors),
+                            "matched_neighbors": matched_neighbors,
+                            "veto": "bright_trail",
+                            "bright_ratio": bright_ratio,
+                            "reason": (
+                                f"Kept despite {len(matched_neighbors)} neighbor match(es) "
+                                f"({match_desc}): detection pixels are {bright_ratio}x "
+                                f"brighter than surroundings -- real trail "
+                                f"(nav light, strobe, or bright streak)."
+                            ),
+                        })
+                        continue  # do not suppress
+
                 to_suppress |= comp_pixels
                 match_desc = "; ".join(
                     f"frame {m['frame_idx']} via {m['source']} (IoU {m['iou_pct']}%)"
                     for m in matched_neighbors
                 )
                 reason = (
-                    f"Static foreground object at cx={cx} cy={cy} ({comp_area}px). "
-                    f"Matched {match_desc}. "
-                    f"Appears at same pixel position in {len(matched_neighbors)} of 8 "
-                    f"neighboring frames (±4 window) -- real trails move between frames."
+                    f"Matched {match_desc} at IoU >= {iou_threshold*100:.0f}%. "
+                    f"Same pixel position in {len(matched_neighbors)} neighboring "
+                    f"frame(s) within ±4 window -- consistent with static foreground "
+                    f"object (roofline, fence post, building edge). "
+                    f"cx={cx} cy={cy} area={comp_area}px."
                 )
                 debug_by_frame.setdefault(i, []).append({
                     "area": comp_area,
@@ -373,6 +489,7 @@ def _suppress_static_fps(masks_all, core_start, core_end,
 
     if debug_out is not None:
         debug_out["suppressed_by_frame"] = debug_by_frame
+        debug_out["kept_by_veto_by_frame"] = kept_by_veto
 
     return suppressed_count
 
@@ -401,7 +518,7 @@ def main():
     parser.add_argument("--hot-pixel-map", type=str, default=None,
                         help="Path to hot pixel map file (load if exists, save if not)")
     parser.add_argument("--save-masks", action="store_true",
-                        help="Save detection masks to output_dir/masks/")
+                        help="Save detection masks to cleanr_workspace/masks/")
     parser.add_argument("--output-format", choices=["jpg", "tif8", "tif16"],
                         default="jpg",
                         help="Output file format (default jpg)")
@@ -512,7 +629,7 @@ def main():
         _write_finder_comment(out_path)
     cleaned_dir = output_dir
     cleaned_dir.mkdir(parents=True, exist_ok=True)
-    masks_dir = output_dir / "masks" if args.save_masks else None
+    masks_dir = input_dir / "cleanr_workspace" / "masks" if args.save_masks else None
     if masks_dir:
         masks_dir.mkdir(parents=True, exist_ok=True)
 
@@ -925,6 +1042,7 @@ def main():
     static_fp_dbg = {} if logger is not None else None
     n_static = _suppress_static_fps(masks_all, core_start, core_end,
                                     raw_masks_all=raw_masks_all,
+                                    frames_all=frames_all,
                                     debug_out=static_fp_dbg)
     if n_static:
         print(f"  Suppressed {n_static} static detection(s) present in 2+ neighboring frames",
@@ -1003,7 +1121,8 @@ def main():
     # Write all detect records now that static FP suppression is complete.
     # final_trail_components is computed here (post-suppression) from masks_all.
     if logger is not None:
-        _sfp_by_frame = (static_fp_dbg or {}).get("suppressed_by_frame", {})
+        _sfp_by_frame  = (static_fp_dbg or {}).get("suppressed_by_frame", {})
+        _veto_by_frame = (static_fp_dbg or {}).get("kept_by_veto_by_frame", {})
         for _i, _dbg in enumerate(detect_infos):
             if _dbg is None:
                 continue
@@ -1013,7 +1132,8 @@ def main():
                 _dbg["final_trail_components"] = max(0, _ncc - 1)
             else:
                 _dbg["final_trail_components"] = 0
-            _dbg["static_fp_suppressed"] = _sfp_by_frame.get(_i, [])
+            _dbg["static_fp_suppressed"]    = _sfp_by_frame.get(_i, [])
+            _dbg["static_fp_kept_by_veto"]  = _veto_by_frame.get(_i, [])
             _dbg["type"] = "detect"
             logger.log(_dbg)
 
@@ -1038,7 +1158,7 @@ def main():
 
     # ── Step 2: Repair ────────────────────────────────────────────────────
     sb = args.skip_boundary
-    print(f"\nStep 2 - repairing frames (skipping first/last {sb})", flush=True)
+    print(f"\nStep 2 - cleaning frames (skipping first/last {sb})", flush=True)
 
     # Build neighbor_masks aligned with frames_all so repair_frame can check
     # whether each neighbor frame has a trail at the component being repaired.
@@ -1085,7 +1205,7 @@ def main():
                                 "frame_idx": i + core_start,
                                 "trail_px": 0, "components": []})
 
-        print(f"  repairing {i+1}/{n}: {fp.name} - {trail_label}", flush=True)
+        print(f"  cleaning {i+1}/{n}: {fp.name} - {trail_label}", flush=True)
         running_trail_total += trail_count
         print(f"FRAME_TRAIL_COUNT: {running_trail_total}", flush=True)
 
