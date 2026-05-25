@@ -43,7 +43,7 @@ from skimage.measure import label as sklabel, regionprops as skregionprops
 
 CONF_THRESH         = 0.30
 MAX_ANGLE_DEG       = 7.0
-MIN_AREA            = 300
+MIN_AREA            = 1000
 MIN_ASPECT          = 2.0
 
 SPLIT_AREA_MIN      = 5000
@@ -346,7 +346,7 @@ def filter_masks_with_props(preds, h, w, sky_mask=None, img=None, debug_out=None
     failed_elongation, kept_as_nav_light, passed, edge_candidate_count.
 
     edge_candidates: list of dicts {"mask", "u", "bbox"} for components that
-    failed elongation but whose bounding box touches any image edge (within 5px).
+    failed elongation but whose bounding box touches any image edge (within 20px).
     These are rescued by the pipeline if 2+ neighboring frames contain a mask
     component with matching slope.
     """
@@ -403,7 +403,7 @@ def filter_masks_with_props(preds, h, w, sky_mask=None, img=None, debug_out=None
                 if len(px[0]) > 0:
                     by1, by2 = int(px[0].min()), int(px[0].max())
                     bx1, bx2 = int(px[1].min()), int(px[1].max())
-                    if by1 <= 4 or by2 >= h - 5 or bx1 <= 4 or bx2 >= w - 5:
+                    if by1 <= 19 or by2 >= h - 20 or bx1 <= 19 or bx2 >= w - 20:
                         edge_props = detection_props(cm, min_aspect=0.0)
                         if edge_props is not None:
                             edge_candidates.append({
