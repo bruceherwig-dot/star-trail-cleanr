@@ -169,8 +169,66 @@ def _dbscan_angles(angles, eps, min_samples):
 # ── Crossing splitter ─────────────────────────────────────────────────────────
 # Detects blobs where two trails cross and splits them into two separate masks.
 # Uses Hough line detection + DBSCAN angle clustering to find two distinct directions.
+# For same-angle blobs (parallel trail fusions), falls back to bimodal perp split.
 # Input: one SAHI prediction mask. Output: [mask] unchanged, or [mask_a, mask_b].
 # Log field: grouper.try_split_fired counts how many predictions were split.
+
+def _try_bimodal_split(mask):
+    """
+    Split a blob that fuses two parallel trails by detecting a bimodal pixel
+    distribution perpendicular to the trail direction.
+
+    Projects all pixels onto the axis perpendicular to the blob's major axis,
+    runs k-means with k=2 on the 1D projection, and splits if the two cluster
+    means are well-separated relative to their spread (sep > 1.5x avg std and
+    > 20px absolute). Both pieces must pass the elongation filter.
+
+    Returns [mask] if no clean bimodal split is found, [mask_a, mask_b] if split.
+    """
+    ys, xs = np.where(mask > 0)
+    if len(xs) < 200:
+        return [mask]
+
+    coords = np.stack([ys, xs], axis=1).astype(float)
+    cov = np.cov(coords.T)
+    vals, vecs = np.linalg.eigh(cov)
+    u = vecs[:, np.argmax(vals)]
+    u_perp = np.array([-u[1], u[0]])
+    centroid = coords.mean(axis=0)
+    perp_proj = np.dot(coords - centroid, u_perp)
+
+    p_min, p_max = perp_proj.min(), perp_proj.max()
+    c1 = p_min + (p_max - p_min) / 3.0
+    c2 = p_min + 2.0 * (p_max - p_min) / 3.0
+    for _ in range(30):
+        labels = (np.abs(perp_proj - c2) < np.abs(perp_proj - c1)).astype(int)
+        c1_n = perp_proj[labels == 0].mean() if (labels == 0).any() else c1
+        c2_n = perp_proj[labels == 1].mean() if (labels == 1).any() else c2
+        if abs(c1_n - c1) < 0.1 and abs(c2_n - c2) < 0.1:
+            break
+        c1, c2 = c1_n, c2_n
+
+    sep = abs(c2 - c1)
+    std1 = perp_proj[labels == 0].std() if (labels == 0).sum() > 5 else 999.0
+    std2 = perp_proj[labels == 1].std() if (labels == 1).sum() > 5 else 999.0
+    avg_std = (std1 + std2) / 2.0
+
+    if sep < 1.5 * avg_std or sep < 20.0:
+        return [mask]
+
+    coords_int = coords.astype(int)
+    mask_a = np.zeros_like(mask)
+    mask_b = np.zeros_like(mask)
+    mask_a[coords_int[labels == 0, 0], coords_int[labels == 0, 1]] = 255
+    mask_b[coords_int[labels == 1, 0], coords_int[labels == 1, 1]] = 255
+
+    if mask_a.max() == 0 or mask_b.max() == 0:
+        return [mask]
+    if detection_props(mask_a) is None or detection_props(mask_b) is None:
+        return [mask]
+
+    return [mask_a, mask_b]
+
 
 def try_split(mask):
     """
@@ -203,7 +261,7 @@ def try_split(mask):
     unique = [l for l in set(labels) if l >= 0]
 
     if len(unique) < 2:
-        return [mask]
+        return _try_bimodal_split(mask)
 
     # Circular mean per cluster; pick the pair with maximum angular separation.
     # Using circular mean (not linear) handles horizontal-trail lines that straddle
@@ -222,7 +280,7 @@ def try_split(mask):
                 best_c1, best_c2 = unique[ci], unique[cj]
 
     if best_dist < MIN_SPLIT_ANGLE_DEG:
-        return [mask]
+        return _try_bimodal_split(mask)
 
     def _longest(cid):
         clines = [lines[i][0] for i, l in enumerate(labels) if l == cid]
@@ -269,20 +327,23 @@ def try_split(mask):
 # Returns a props dict on pass, None on reject. Red nav lights bypass this gate.
 # Log field: grouper.failed_elongation counts predictions rejected here.
 
-def detection_props(mask, min_aspect=None):
+def detection_props(mask, min_aspect=None, min_area=None):
     """Return region properties for one mask, or None if area/elongation filter fails.
 
     min_aspect overrides MIN_ASPECT (pass 0.0 to skip the AR gate entirely).
+    min_area overrides MIN_AREA (pass 0 to skip the area gate entirely).
     """
     if min_aspect is None:
         min_aspect = MIN_ASPECT
+    if min_area is None:
+        min_area = MIN_AREA
     lbl = sklabel(mask)
     props = skregionprops(lbl)
     if not props:
         return None
     p = max(props, key=lambda x: x.area)
     minor = p.axis_minor_length
-    if minor < 1 or p.area < MIN_AREA:
+    if minor < 1 or p.area < min_area:
         return None
     if p.axis_major_length / minor < min_aspect:
         return None
@@ -395,43 +456,43 @@ def filter_masks_with_props(preds, h, w, sky_mask=None, img=None, debug_out=None
             else:
                 if debug_out is not None:
                     debug_out["failed_elongation"] += 1
-                # If the bbox touches any image edge, save as a rescue candidate.
-                # Trails clipped at the frame boundary look stubby (low AR) but
-                # are real -- the rescue pass in astro_clean_v5 reinstates them
-                # if 2+ neighboring frames have a mask component with matching slope.
+                # Detections clipped by the image boundary look stubby (low AR or
+                # small area) but are real trails -- false positives at frame edges
+                # are vanishingly rare.  Keep them unconditionally so the grouper
+                # and repair pass treat them like any other detection.
                 px = np.where(cm > 0)
                 if len(px[0]) > 0:
                     by1, by2 = int(px[0].min()), int(px[0].max())
                     bx1, bx2 = int(px[1].min()), int(px[1].max())
                     if by1 <= 19 or by2 >= h - 20 or bx1 <= 19 or bx2 >= w - 20:
-                        edge_props = detection_props(cm, min_aspect=0.0)
+                        edge_props = detection_props(cm, min_aspect=0.0, min_area=0)
                         if edge_props is not None:
-                            edge_candidates.append({
-                                "mask": cm,
-                                "u":    edge_props["u"],
-                                "bbox": (bx1, by1, bx2, by2),
-                            })
+                            masks.append(cm)
+                            det_list.append(edge_props)
                             if debug_out is not None:
-                                debug_out["edge_candidate_count"] += 1
+                                debug_out["passed"] += 1
     return masks, det_list, edge_candidates
 
 
 # ── Union-find grouper ────────────────────────────────────────────────────────
 # Connects detections that belong to the same physical trail using union-find.
-# Four gates must ALL pass to merge a pair: angle, width-ratio, perp distance,
-# and tip-to-tip gap. Returns list-of-lists of detection indices (one per trail).
-# Log field: detect record group_count = number of groups returned here.
+# Five gates must ALL pass to merge a pair: angle, width-ratio, perp distance,
+# tip-to-tip gap, and tip alignment. Returns list-of-lists of detection indices
+# (one per trail). Log field: detect record group_count = number of groups.
 
 def group_detections(det_list):
     """
     Group detections belonging to the same trail using union-find.
 
-    All four gates must pass to connect a pair:
+    All five gates must pass to connect a pair:
       1. Angle between major axes < MAX_ANGLE_DEG
       2. Width ratio < 3x (prevents grouping thin with fat)
-      3. Perpendicular centroid distance < 2x max minor
+      3. Perpendicular centroid distance < 0.9x max minor
       4. Two-stage gap: if masks overlap → always merge;
          otherwise tip-to-tip distance < 2.5x min minor
+      5. Tip alignment: the tip-to-tip vector must be mostly along-trail
+         (perpendicular component < 0.5x max minor); prevents staggered
+         parallel trails from merging via nearby tips.
 
     Returns list-of-lists of detection indices (one list per trail group).
     """
@@ -466,27 +527,14 @@ def group_detections(det_list):
             diff = dj["centroid"] - di["centroid"]
             along = float(np.dot(diff, u_ref))
             perp = float(np.sqrt(max(float(np.dot(diff, diff)) - along ** 2, 0.0)))
-            if perp > 1.2 * max(di["minor"], dj["minor"]):
+            if perp > 0.9 * max(di["minor"], dj["minor"]):
                 continue
 
             tree_i = KDTree(di["coords"])
             dists, _ = tree_i.query(dj["coords"], k=1)
             nearest_gap = float(np.min(dists))
             if nearest_gap > 0:
-                def _pixel_tips(d):
-                    t = d["coords"] @ d["u"]
-                    return (d["coords"][np.argmax(t)].astype(float),
-                            d["coords"][np.argmin(t)].astype(float))
-                ti = _pixel_tips(di)
-                tj = _pixel_tips(dj)
-                tip_gap = min(
-                    np.linalg.norm(ti[0] - tj[0]),
-                    np.linalg.norm(ti[0] - tj[1]),
-                    np.linalg.norm(ti[1] - tj[0]),
-                    np.linalg.norm(ti[1] - tj[1]),
-                )
-                if tip_gap > 2.5 * min(di["minor"], dj["minor"]):
-                    continue
+                continue
 
             union(i, j)
 
