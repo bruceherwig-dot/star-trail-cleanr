@@ -963,15 +963,12 @@ def main():
         edge_cands = []
         result = detect_frame_polygon(model, frames_8bit_all[i], args.tile_size,
                                       args.overlap, args.dilate,
-                                      return_raw=(masks_dir is not None),
+                                      return_raw=True,
                                       debug_out=dbg,
-                                      edge_candidates_out=edge_cands)
+                                      edge_candidates_out=edge_cands,
+                                      sky_mask=sky_mask)
         edge_candidates_all.append(edge_cands)
-        if masks_dir is not None:
-            mask, raw_labeled = result
-        else:
-            mask = result
-            raw_labeled = None
+        mask, raw_labeled = result
         if mask is None:
             masks_all.append(np.zeros((h, w), dtype=np.uint8))
             raw_masks_all.append(np.zeros((h, w), dtype=np.uint8))
@@ -1017,7 +1014,8 @@ def main():
         try:
             for i, fp in enumerate(frame_files_all):
                 rotated = np.rot90(frames_8bit_all[i], 2)
-                mask2 = detect_frame_polygon(model, rotated, args.tile_size, args.overlap, args.dilate)
+                mask2 = detect_frame_polygon(model, rotated, args.tile_size, args.overlap, args.dilate,
+                                         sky_mask=np.rot90(sky_mask, 2) if sky_mask is not None else None)
                 if mask2 is None:
                     continue
                 mask2 = np.rot90(mask2, 2)
@@ -1067,9 +1065,11 @@ def main():
     # Running AFTER the static FP suppressor means rescued candidates are checked
     # against already-cleaned neighbor masks -- static objects that got suppressed
     # in neighbor frames won't accidentally rescue a matching edge stub.
-    _EDGE_WINDOW     = 4    # check up to 4 frames before and after
-    _EDGE_SLOPE_TOL  = 15.0 # degrees -- how closely slopes must match
-    _EDGE_MIN_MATCHES = 2   # neighbor frames required to rescue
+    _EDGE_WINDOW      = 4    # check up to 4 frames before and after
+    _EDGE_SLOPE_TOL   = 15.0 # degrees -- how closely slopes must match
+    _EDGE_MIN_MATCHES = 1    # 1 neighbor suffices: static FPs were already removed
+                             # by the suppressor above; raw fallback handles the
+                             # case where every frame has a stub that failed elongation
     n_rescued = 0
     if any(len(ec) > 0 for ec in edge_candidates_all):
         print("\nStep 1d - rescuing edge-clipped detections...", flush=True)
@@ -1087,7 +1087,15 @@ def main():
                             continue
                         nb_mask = masks_all[j]
                         if nb_mask.max() == 0:
-                            continue
+                            # Fitted mask is empty in this neighbor -- fall back to
+                            # raw SAHI hits. If the trail stub also failed elongation
+                            # in every neighboring frame (circular dependency), the
+                            # raw hits still confirm the trail's slope and location.
+                            raw_nb = raw_masks_all[j] if j < len(raw_masks_all) else None
+                            if raw_nb is not None and raw_nb.max() > 0:
+                                nb_mask = (raw_nb > 0).astype(np.uint8) * 255
+                            else:
+                                continue
                         # Split the neighbor mask into individual components and
                         # check each one for a slope match with the edge candidate.
                         n_labels, labeled = cv2.connectedComponents(
