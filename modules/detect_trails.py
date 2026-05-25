@@ -494,9 +494,13 @@ def detect_frame_polygon(model, image, tile_size: int = 640,
                     if len(lc) == 0:
                         continue
                     lr, lc2 = lc[:,0]-ty, lc[:,1]-tx
-                    ov = max(int(np.count_nonzero(gi_local[lr, lc2])),
-                             int(np.count_nonzero(gj_local[lr, lc2])))
-                    if ov / len(lc) < 0.30:
+                    ov_i = int(np.count_nonzero(gi_local[lr, lc2]))
+                    ov_j = int(np.count_nonzero(gj_local[lr, lc2]))
+                    ov_max = max(ov_i, ov_j)
+                    # Genuine if: little overlap (current check), OR the detection
+                    # overlaps BOTH groups -- it physically spans the gap.
+                    bilateral = (ov_i / len(lc) > 0.05) and (ov_j / len(lc) > 0.05)
+                    if ov_max / len(lc) < 0.30 or bilateral:
                         genuine = True
                         break
                 if genuine:
