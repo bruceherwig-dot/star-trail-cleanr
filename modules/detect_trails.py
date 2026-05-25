@@ -5,7 +5,8 @@ import os
 from typing import Optional
 
 from .io_safe import robust_imread
-from .trail_grouper import filter_masks, filter_masks_with_props, group_detections, fit_polygon
+from .trail_grouper import (filter_masks, filter_masks_with_props, group_detections,
+                            fit_polygon, try_split, detection_props)
 
 
 # ── Device selection ──────────────────────────────────────────────────────────
@@ -189,10 +190,163 @@ def _build_raw_labeled_mask(predictions, h, w):
     return out
 
 
+# ── Targeted gap-bridge pass ──────────────────────────────────────────────────
+# After the initial grouper, scan every pair of groups. If two groups look like
+# the same trail (similar angle, similar width, co-linear) but their nearest
+# tips are farther apart than the grouper's tip-to-tip gate allows, run one
+# extra inference tile centered in the gap between them.
+#
+# This targets the specific failure mode at tile seam corners where the model's
+# confidence drops between two otherwise-connected detections, without firing on
+# every trail tip (which the tile-edge-margin approach did, causing 17+ extra
+# tiles per frame and unacceptable slowdown).
+#
+# Uses direct YOLO forward pass (not SAHI get_prediction) to keep per-tile
+# overhead at ~5ms instead of ~300ms.
+
+_BRIDGE_MAX_GAP   = 400   # px: max tip-to-tip distance to attempt a bridge
+_BRIDGE_MAX_ANGLE = 7.0   # degrees: same as grouper gate 1
+_BRIDGE_MAX_WIDTH = 3.0   # ratio: same as grouper gate 2
+
+
+def _group_tips(grp, det_list):
+    """Return (tip_min_rc, tip_max_rc) for a group as row-col arrays."""
+    all_dets = [det_list[i] for i in grp]
+    all_coords = np.vstack([d["coords"] for d in all_dets])
+    u_sum = np.zeros(2)
+    for d in all_dets:
+        u = d["u"] if u_sum.dot(d["u"]) >= 0 else -d["u"]
+        u_sum += u * d["area"]
+    u_avg = u_sum / np.linalg.norm(u_sum)
+    centroid = all_coords.mean(axis=0)
+    t_c = float(centroid @ u_avg)
+    t = all_coords @ u_avg
+    tip_min = centroid + (float(t.min()) - t_c) * u_avg
+    tip_max = centroid + (float(t.max()) - t_c) * u_avg
+    return tip_min, tip_max, u_avg
+
+
+def _find_gap_bridge_tiles(groups, det_list, h, w, tile_size):
+    """Return list of (gi, gj, tile_x, tile_y) for groups that need gap validation.
+
+    Checks every pair of groups for the seam-gap signature: similar angle,
+    similar width, co-linear centroids, tips within _BRIDGE_MAX_GAP px.
+    For qualifying pairs, one tile is placed at the midpoint of the nearest tips.
+    Each group pair appears at most once (deduped by (gi, gj)).
+    """
+    extra = []
+    seen = set()
+    n = len(groups)
+
+    for gi in range(n):
+        for gj in range(gi + 1, n):
+            di_list = [det_list[k] for k in groups[gi]]
+            dj_list = [det_list[k] for k in groups[gj]]
+
+            # Gate 1: angle
+            u_i = di_list[0]["u"]
+            u_j = dj_list[0]["u"]
+            cos_sim = min(abs(float(np.dot(u_i, u_j))), 1.0)
+            adiff = min(np.degrees(np.arccos(cos_sim)),
+                        180.0 - np.degrees(np.arccos(cos_sim)))
+            if adiff > _BRIDGE_MAX_ANGLE:
+                continue
+
+            # Gate 2: width ratio
+            minor_i = float(np.median([d["minor"] for d in di_list]))
+            minor_j = float(np.median([d["minor"] for d in dj_list]))
+            if max(minor_i, minor_j) / max(min(minor_i, minor_j), 1) > _BRIDGE_MAX_WIDTH:
+                continue
+
+            # Gate 3: perpendicular distance between group centroids
+            all_i = np.vstack([det_list[k]["coords"] for k in groups[gi]])
+            all_j = np.vstack([det_list[k]["coords"] for k in groups[gj]])
+            ci = all_i.mean(axis=0)
+            cj = all_j.mean(axis=0)
+            diff = cj - ci
+            along = float(np.dot(diff, u_i))
+            perp = float(np.sqrt(max(float(np.dot(diff, diff)) - along ** 2, 0.0)))
+            if perp > 0.9 * max(minor_i, minor_j):
+                continue
+
+            # Get tips for both groups
+            tip_i_min, tip_i_max, u_avg_i = _group_tips(groups[gi], det_list)
+            tip_j_min, tip_j_max, u_avg_j = _group_tips(groups[gj], det_list)
+
+            # Find the two nearest tips (one from each group)
+            combos = [
+                (tip_i_min, tip_j_min), (tip_i_min, tip_j_max),
+                (tip_i_max, tip_j_min), (tip_i_max, tip_j_max),
+            ]
+            best_dist, best_a, best_b = float("inf"), None, None
+            for ta, tb in combos:
+                d = float(np.linalg.norm(ta - tb))
+                if d < best_dist:
+                    best_dist, best_a, best_b = d, ta, tb
+
+            if best_dist > _BRIDGE_MAX_GAP:
+                continue
+
+            # Midpoint of the two nearest tips → center of the bridge tile
+            mid_rc = (best_a + best_b) / 2.0
+            mid_y = int(round(float(mid_rc[0])))
+            mid_x = int(round(float(mid_rc[1])))
+            new_tx = max(0, min(w - tile_size, mid_x - tile_size // 2))
+            new_ty = max(0, min(h - tile_size, mid_y - tile_size // 2))
+            pair_key = (gi, gj)
+            if pair_key not in seen:
+                seen.add(pair_key)
+                extra.append((gi, gj, new_tx, new_ty))
+
+    return extra
+
+
+def _run_targeted_tile(model, img_rgb, tile_x, tile_y, tile_size, h, w):
+    """Run single-tile YOLO inference; return detection props in global coords.
+
+    Uses the underlying YOLO model directly (bypassing SAHI get_prediction
+    overhead) so each extra tile costs ~5ms instead of ~300ms.
+    Converts masks back to global image coordinates and filters through
+    try_split + detection_props.
+    """
+    import torch
+    ty1, tx1 = tile_y, tile_x
+    ty2, tx2 = min(h, tile_y + tile_size), min(w, tile_x + tile_size)
+    crop_h, crop_w = ty2 - ty1, tx2 - tx1
+    crop = img_rgb[ty1:ty2, tx1:tx2].copy()
+    if crop_h < tile_size or crop_w < tile_size:
+        padded = np.zeros((tile_size, tile_size, 3), dtype=np.uint8)
+        padded[:crop_h, :crop_w] = crop
+        crop = padded
+
+    # model.model is the SAHI wrapper; model.model.model is the ultralytics YOLO
+    yolo = model.model
+    conf = getattr(model, "confidence_threshold", 0.30)
+    results = yolo.predict(source=crop, conf=conf, verbose=False, imgsz=tile_size)
+
+    new_dets = []
+    for r in results:
+        if r.masks is None:
+            continue
+        for seg_xy in r.masks.xy:
+            if len(seg_xy) < 3:
+                continue
+            local_mask = np.zeros((tile_size, tile_size), dtype=np.uint8)
+            pts = np.array(seg_xy, dtype=np.int32)
+            cv2.fillPoly(local_mask, [pts], 255)
+            global_mask = np.zeros((h, w), dtype=np.uint8)
+            global_mask[ty1:ty2, tx1:tx2] = local_mask[:crop_h, :crop_w]
+            for cm in try_split(global_mask):
+                props = detection_props(cm)
+                if props is not None:
+                    new_dets.append(props)
+    return new_dets
+
+
 # ── Public: detect_frame_polygon (fitted polygon mask) ────────────────────────
 # Active detection entry point for STC v5. Pipeline:
 #   SAHI tiled inference → crossing splitter → elongation filter
-#   → union-find grouper → polygon fitting → dilation.
+#   → union-find grouper → targeted tip-clip pass → polygon fitting → dilation.
 # sky_mask and small-component filter are applied by the caller (astro_clean_v5.py)
 # after this returns, so final_trail_components in the log reflects those too.
 # Log fields populated via debug_out: sahi_raw_count, grouper (per-stage counts),
@@ -201,7 +355,7 @@ def _build_raw_labeled_mask(predictions, h, w):
 def detect_frame_polygon(model, image, tile_size: int = 640,
                          overlap: float = 0.2, dilate: int = 1,
                          return_raw: bool = False, debug_out=None,
-                         edge_candidates_out=None):
+                         edge_candidates_out=None, sky_mask=None):
     """Like detect_frame, but returns a tight fitted-polygon mask.
 
     Runs the same SAHI inference, then:
@@ -211,8 +365,13 @@ def detect_frame_polygon(model, image, tile_size: int = 640,
     Same output format as detect_frame. Uses identical code to polymakr so
     the repair mask and the CVAT annotation polygon are the same shape.
 
+    sky_mask (np.ndarray, optional): 255=sky (keep), 0=foreground (zero out).
+    Applied to raw SAHI predictions before any other processing so the
+    elongation filter, grouper, and gap-bridge never see foreground pixels.
+
     If return_raw=True, returns (final_mask, raw_labeled_mask) where
     raw_labeled_mask has pixel value = SAHI prediction index (1..N), 0=background.
+    raw_labeled reflects post-sky-mask predictions.
 
     edge_candidates_out (list, optional): if provided, any detections that
     failed the elongation filter but whose bbox touches a frame edge (within
@@ -231,6 +390,22 @@ def detect_frame_polygon(model, image, tile_size: int = 640,
 
     # ── SAHI tiled inference ──────────────────────────────────────────────────
     predictions = _sahi_predict(model, img, tile_size, overlap)
+
+    # Zero foreground pixels from every SAHI prediction before any other step.
+    # Grouper, gap-bridge, and polygon fitter never see foreground pixels.
+    if sky_mask is not None:
+        _sm_bool = sky_mask > 0
+        for _pred in predictions:
+            if _pred.mask is None or _pred.mask.bool_mask is None:
+                continue
+            _bm = _pred.mask.bool_mask
+            if _bm.shape == (h, w):
+                _bm[~_sm_bool] = False
+            else:
+                _sm_r = cv2.resize(sky_mask, (_bm.shape[1], _bm.shape[0]),
+                                   interpolation=cv2.INTER_NEAREST) > 0
+                _bm[~_sm_r] = False
+
     raw_labeled = _build_raw_labeled_mask(predictions, h, w) if return_raw else None
 
     # ── Crossing splitter + elongation filter ─────────────────────────────────
@@ -246,13 +421,97 @@ def detect_frame_polygon(model, image, tile_size: int = 640,
         debug_out["sahi_raw_count"] = len(predictions)
         debug_out["grouper"] = grouper_dbg
 
-    # ── Union-find grouper + polygon fitting ──────────────────────────────────
+    # ── Union-find grouper + targeted tip-clip pass + polygon fitting ─────────
     if not det_list:
         final = np.zeros((h, w), dtype=np.uint8)
         if debug_out is not None:
-            debug_out.update({"group_count": 0, "polygon_count": 0})
+            debug_out.update({"group_count": 0, "polygon_count": 0,
+                              "gap_bridge_tiles": 0, "gap_bridge_new_dets": 0})
     else:
         groups = group_detections(det_list)
+
+        # Check every pair of groups for the seam-gap signature. If two groups
+        # look like the same trail but their tips are farther apart than the
+        # grouper's gate allows, run one extra tile in the gap between them.
+        gap_pairs = _find_gap_bridge_tiles(groups, det_list, h, w, tile_size)
+        bridge_tiles = len(gap_pairs)
+        bridge_new_dets = 0
+        if gap_pairs:
+            gp = list(range(len(groups)))
+
+            def _gf(x):
+                while gp[x] != x:
+                    gp[x] = gp[gp[x]]
+                    x = gp[x]
+                return x
+
+            for gi, gj, tx, ty in gap_pairs:
+                new = _run_targeted_tile(model, img, tx, ty, tile_size, h, w)
+                if not new:
+                    continue
+                # Reject if every new detection overlaps heavily with an existing
+                # group — that means the tile re-detected a trail end that was
+                # already captured, not genuine gap content.
+                eff_h = min(h - ty, tile_size)
+                eff_w = min(w - tx, tile_size)
+                gi_local = np.zeros((eff_h, eff_w), dtype=bool)
+                gj_local = np.zeros((eff_h, eff_w), dtype=bool)
+                for k in groups[gi]:
+                    c = det_list[k]["coords"]
+                    m = (c[:,0]>=ty)&(c[:,0]<ty+eff_h)&(c[:,1]>=tx)&(c[:,1]<tx+eff_w)
+                    lc = c[m]
+                    if len(lc):
+                        gi_local[lc[:,0]-ty, lc[:,1]-tx] = True
+                for k in groups[gj]:
+                    c = det_list[k]["coords"]
+                    m = (c[:,0]>=ty)&(c[:,0]<ty+eff_h)&(c[:,1]>=tx)&(c[:,1]<tx+eff_w)
+                    lc = c[m]
+                    if len(lc):
+                        gj_local[lc[:,0]-ty, lc[:,1]-tx] = True
+                u_bridge = det_list[groups[gi][0]]["u"]
+                # Lateral band: new detections must be at roughly the same
+                # y-level as the two trail groups. A separate unrelated trail
+                # in the same tile but a different part of the frame must not
+                # trigger the bridge.
+                all_ci = np.vstack([det_list[k]["coords"] for k in groups[gi]])
+                all_cj = np.vstack([det_list[k]["coords"] for k in groups[gj]])
+                ci_row = float(all_ci[:,0].mean())
+                cj_row = float(all_cj[:,0].mean())
+                minor_gi = float(np.median([det_list[k]["minor"] for k in groups[gi]]))
+                minor_gj = float(np.median([det_list[k]["minor"] for k in groups[gj]]))
+                lat_tol = 2.0 * max(minor_gi, minor_gj)
+                row_lo = min(ci_row, cj_row) - lat_tol
+                row_hi = max(ci_row, cj_row) + lat_tol
+                genuine = False
+                for nd in new:
+                    # Must be in the lateral band between the two trail groups.
+                    nd_row = float(nd["coords"][:,0].mean())
+                    if nd_row < row_lo or nd_row > row_hi:
+                        continue
+                    c = nd["coords"]
+                    m = (c[:,0]>=ty)&(c[:,0]<ty+eff_h)&(c[:,1]>=tx)&(c[:,1]<tx+eff_w)
+                    lc = c[m]
+                    if len(lc) == 0:
+                        continue
+                    lr, lc2 = lc[:,0]-ty, lc[:,1]-tx
+                    ov = max(int(np.count_nonzero(gi_local[lr, lc2])),
+                             int(np.count_nonzero(gj_local[lr, lc2])))
+                    if ov / len(lc) < 0.30:
+                        genuine = True
+                        break
+                if genuine:
+                    gp[_gf(gi)] = _gf(gj)
+                    bridge_new_dets += len(new)
+
+            merged = {}
+            for gi, grp in enumerate(groups):
+                merged.setdefault(_gf(gi), []).extend(grp)
+            groups = list(merged.values())
+
+        if debug_out is not None:
+            debug_out["gap_bridge_tiles"] = bridge_tiles
+            debug_out["gap_bridge_new_dets"] = bridge_new_dets
+
         final = np.zeros((h, w), dtype=np.uint8)
         for grp in groups:
             corners, _, _ = fit_polygon(grp, det_list)
