@@ -2,6 +2,17 @@
 
 ---
 
+## v2.31-beta
+- **Fix: GPU installation no longer fails with a misleading error on networks that block pytorch.org.** When pytorch.org returns a 403 Forbidden error, Star Trail CleanR now automatically retries the download from a backup server. If both servers are blocked, the error message now explains the situation clearly and suggests connecting to a VPN, with a More Info button linking to step-by-step instructions.
+- **Fix: GPU installation error dialog no longer gives wrong advice.** The previous dialog told users to check their internet connection and free disk space regardless of what actually went wrong. The message now shows only the specific reason for the failure.
+- **Fix: Batch processing no longer drops the last frame of each batch.** A frame-counting bug was causing the final frame in every batch to be skipped during the trail cleaning pass.
+- **Fix: Mask output folder moved.** Detection masks now save to the `cleanr_workspace` folder inside your image folder instead of the `cleaned` folder, keeping all intermediate files in one place.
+- **New: Static false-positive suppressor.** Detections that appear in the same location across multiple frames are now automatically suppressed. Stationary bright objects — hot pixels, fixed reflections — that the AI occasionally mistakes for trails are filtered out before repair, so they are no longer blacked out.
+- **Improvement: Suppressor now also vetoes detections with bright, non-moving pixels.** A detection where the brightest pixels are fixed across frames, or where the centroid does not move between frames, is treated as a static artifact and skipped.
+- **Improvement: Edge rescue is more aggressive.** Trails that pass within 20 pixels of the image edge (up from 5) are now pulled in from the edge and included in the detection.
+- **Improvement: Trail grouper minimum area raised.** Small stray detections below 1000 pixels are no longer grouped with larger trails, reducing polygon noise on faint detections.
+- **Smoke tests:** 133 passing.
+
 ## v2.30-beta
 - **Fix: App no longer hangs on first launch on Windows.** A crash-reporting consent question was appearing hidden behind the startup screen, leaving the app waiting for an answer no one could see. The app now loads fully first, then asks the question after the main window is open.
 - **Fix: Version history link in About now shows the complete history.** The link was pointing to a branch that only had history up to v1.995.

@@ -2514,11 +2514,7 @@ class MainWindow(QMainWindow):
         box = QMessageBox(self)
         box.setWindowTitle("GPU Installation Failed")
         box.setIcon(QMessageBox.Critical)
-        box.setText(
-            f"GPU support could not be installed.\n\n{err}\n\n"
-            "You can try again. If the problem continues, check your internet connection "
-            "and make sure you have enough free disk space (4 GB needed)."
-        )
+        box.setText(f"GPU support could not be installed.\n\n{err}")
         box.addButton(QMessageBox.Ok)
         info_btn = box.addButton("More Info", QMessageBox.HelpRole)
         box.exec()
