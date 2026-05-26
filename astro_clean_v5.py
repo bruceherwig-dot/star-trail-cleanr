@@ -277,7 +277,8 @@ def _is_bright_trail(comp_pixels, img_bgr):
 
 def _suppress_static_fps(masks_all, core_start, core_end,
                          iou_threshold=0.70, min_matches=1,
-                         raw_masks_all=None, frames_all=None, debug_out=None):
+                         raw_masks_all=None, frames_all=None, debug_out=None,
+                         timing_out=None):
     """Remove detection components that are static false positives.
 
     PURPOSE: The AI sometimes detects fixed foreground objects (building edges,
@@ -293,6 +294,15 @@ def _suppress_static_fps(masks_all, core_start, core_end,
     matches any 1 neighbor at iou_threshold IoU, the total is 2 and it is
     suppressed. The intermediate frames between the two matching frames do not
     need to fire.
+
+    SPATIAL OPTIMIZATION: Neighbor comparisons use only the component's bounding
+    box region instead of the full frame.  All pixels of a component lie within
+    their own bbox, so (comp_pixels & nb_hit) is equivalent to
+    (comp_pixels[bbox] & nb_hit[bbox]).  For a 6000x4000 frame with a 400x12
+    trail bbox, this reduces each comparison from 24 million pixel ops to ~4 800 --
+    roughly a 5 000x reduction per check.  Neighbor boolean masks are also
+    precomputed once before the outer loop so the (mask > 0) conversion is not
+    repeated for every component.
 
     Each neighbor is checked against BOTH the fitted polygon mask AND the raw SAHI
     hit map (raw_masks_all). A static FP that passes elongation filters in some
@@ -337,6 +347,27 @@ def _suppress_static_fps(masks_all, core_start, core_end,
     This prevents two different airplanes on the same flight path from mutually
     suppressing each other.
     """
+    # Precompute boolean "hit" mask for every frame (polygon mask OR raw SAHI,
+    # whichever is available) so the (mask > 0) conversion is not repeated for
+    # every component comparison.  Building this once covers all 8 neighbor
+    # lookups per component without re-allocating arrays.
+    _t0_pre = time.perf_counter()
+    _nb_hits    = {}   # frame_idx -> np.ndarray bool, or None
+    _nb_sources = {}   # frame_idx -> "polygon" | "raw_sahi"
+    for _fi in range(len(masks_all)):
+        _m   = masks_all[_fi]
+        _hit = (_m > 0) if (_m is not None and _m.max() > 0) else None
+        _src = "polygon"
+        if _hit is None and raw_masks_all is not None:
+            _r = raw_masks_all[_fi] if _fi < len(raw_masks_all) else None
+            if _r is not None and _r.max() > 0:
+                _hit = (_r > 0)
+                _src = "raw_sahi"
+        _nb_hits[_fi]    = _hit
+        _nb_sources[_fi] = _src
+    if timing_out is not None:
+        timing_out["sfp_precompute_s"] = time.perf_counter() - _t0_pre
+
     # Pass 1: identify every component to suppress using the ORIGINAL unmodified masks.
     # All overlap checks happen before any mask is zeroed, so later frames see the
     # same reference masks as earlier frames. The prior single-pass approach zeroed
@@ -346,6 +377,7 @@ def _suppress_static_fps(masks_all, core_start, core_end,
     debug_by_frame = {}  # frame_idx -> [suppressed records] for log
     kept_by_veto   = {}  # frame_idx -> [veto records] for log
 
+    _t0_cmp = time.perf_counter()
     for i in range(core_start, core_end):
         mask = masks_all[i]
         if mask.max() == 0:
@@ -389,21 +421,26 @@ def _suppress_static_fps(masks_all, core_start, core_end,
             for ni in [i - 4, i - 3, i - 2, i - 1, i + 1, i + 2, i + 3, i + 4]:
                 if ni < 0 or ni >= len(masks_all):
                     continue
-                # Check fitted polygon mask first; fall back to raw SAHI hit map.
-                nb = masks_all[ni]
-                nb_hit = (nb > 0) if (nb is not None and nb.max() > 0) else None
-                source = "polygon"
-                if nb_hit is None and raw_masks_all is not None:
-                    raw = raw_masks_all[ni] if ni < len(raw_masks_all) else None
-                    if raw is not None and raw.max() > 0:
-                        nb_hit = (raw > 0)
-                        source = "raw_sahi"
+                # Use precomputed boolean mask for this neighbor frame.
+                # Falls back automatically to raw SAHI via _nb_sources if no
+                # polygon mask was available (already resolved at precompute time).
+                nb_hit = _nb_hits.get(ni)
                 if nb_hit is None:
                     continue
-                intersection = int((comp_pixels & nb_hit).sum())
+                source = _nb_sources[ni]
+                # Spatial fast-path: slice to the component's bounding box before
+                # any pixel operation.  All component pixels lie within [y1:y2+1,
+                # x1:x2+1] by definition, so the bbox AND gives the same result as
+                # a full-frame AND while touching ~5 000x fewer pixels on a typical
+                # 6000x4000 frame with a 400x12 trail component.
+                bbox_nb = nb_hit[y1:y2 + 1, x1:x2 + 1]
+                if not bbox_nb.any():
+                    continue  # no neighbor pixels in this region -- skip instantly
+                bbox_comp = comp_pixels[y1:y2 + 1, x1:x2 + 1]
+                intersection = int((bbox_comp & bbox_nb).sum())
                 if intersection == 0:
                     continue
-                local_nb_area = int(nb_hit[y1:y2 + 1, x1:x2 + 1].sum())
+                local_nb_area = int(bbox_nb.sum())
                 union = comp_area + local_nb_area - intersection
                 iou = intersection / union if union > 0 else 0.0
                 if iou >= iou_threshold:
@@ -412,7 +449,7 @@ def _suppress_static_fps(masks_all, core_start, core_end,
                     # it is a different object at a different position -- not a
                     # static repeat of the same object (e.g. a large trail from
                     # a different airplane passing through the same area).
-                    nb_in_bbox = nb_hit[y1:y2 + 1, x1:x2 + 1]
+                    nb_in_bbox = bbox_nb  # reuse already-sliced region
                     if nb_in_bbox.any():
                         ny, nx = np.where(nb_in_bbox)
                         nb_cx_f = float(nx.mean()) + x1
@@ -480,12 +517,18 @@ def _suppress_static_fps(masks_all, core_start, core_end,
         if to_suppress.any():
             suppress_maps[i] = to_suppress
 
+    if timing_out is not None:
+        timing_out["sfp_compare_s"] = time.perf_counter() - _t0_cmp
+
     # Pass 2: apply all suppressions now that overlap checks are complete.
+    _t0_apply = time.perf_counter()
     suppressed_count = 0
     for i, to_suppress in suppress_maps.items():
         masks_all[i][to_suppress] = 0
         n_cc, _ = cv2.connectedComponents(to_suppress.astype(np.uint8))
         suppressed_count += max(0, n_cc - 1)
+    if timing_out is not None:
+        timing_out["sfp_apply_s"] = time.perf_counter() - _t0_apply
 
     if debug_out is not None:
         debug_out["suppressed_by_frame"] = debug_by_frame
@@ -956,17 +999,31 @@ def main():
     edge_candidates_all = []  # per-frame lists of edge-touching detections that failed elongation
     detect_infos = []  # buffered per-frame detect data; written after static FP pass
     running_trail_total = 0
+
+    _timing = {}
+
+    def _tacc(key, elapsed):
+        if key in _timing:
+            _timing[key][0] += 1
+            _timing[key][1] += elapsed
+        else:
+            _timing[key] = [1, elapsed]
+
     for i, fp in enumerate(frame_files_all):
         is_neighbor = i < core_start or i >= core_end
         dbg = {} if logger is not None else None
 
         edge_cands = []
+        _ft = {}
         result = detect_frame_polygon(model, frames_8bit_all[i], args.tile_size,
                                       args.overlap, args.dilate,
                                       return_raw=True,
                                       debug_out=dbg,
                                       edge_candidates_out=edge_cands,
-                                      sky_mask=sky_mask)
+                                      sky_mask=sky_mask,
+                                      timing_out=_ft)
+        for _k, _v in _ft.items():
+            _tacc(_k, _v)
         edge_candidates_all.append(edge_cands)
         mask, raw_labeled = result
         if mask is None:
@@ -982,13 +1039,17 @@ def main():
         sky_px_removed = 0
         if sky_mask is not None:
             before_px = int((mask > 0).sum())
+            _t0 = time.perf_counter()
             mask = apply_sky_mask(mask, sky_mask)
+            _tacc("apply_sky_mask_s", time.perf_counter() - _t0)
             sky_px_removed = before_px - int((mask > 0).sum())
 
         small_dbg = {} if dbg is not None else None
         if min_area_scaled > 0 and mask.max() > 0:
+            _t0 = time.perf_counter()
             mask = filter_small_components(mask, frames_8bit_all[i], min_area_scaled,
                                            debug_out=small_dbg)
+            _tacc("filter_small_s", time.perf_counter() - _t0)
 
         masks_all.append(mask)
         raw_masks_all.append(raw_labeled if raw_labeled is not None
@@ -1014,8 +1075,10 @@ def main():
         try:
             for i, fp in enumerate(frame_files_all):
                 rotated = np.rot90(frames_8bit_all[i], 2)
+                _t0 = time.perf_counter()
                 mask2 = detect_frame_polygon(model, rotated, args.tile_size, args.overlap, args.dilate,
                                          sky_mask=np.rot90(sky_mask, 2) if sky_mask is not None else None)
+                _tacc("second_scrub_s", time.perf_counter() - _t0)
                 if mask2 is None:
                     continue
                 mask2 = np.rot90(mask2, 2)
@@ -1038,10 +1101,16 @@ def main():
 
     print("\nStep 1c - removing static false positives...", flush=True)
     static_fp_dbg = {} if logger is not None else None
+    _sfp_timing = {}
+    _t0 = time.perf_counter()
     n_static = _suppress_static_fps(masks_all, core_start, core_end,
                                     raw_masks_all=raw_masks_all,
                                     frames_all=frames_all,
-                                    debug_out=static_fp_dbg)
+                                    debug_out=static_fp_dbg,
+                                    timing_out=_sfp_timing)
+    _tacc("static_fp_s", time.perf_counter() - _t0)
+    for _k, _v in _sfp_timing.items():
+        _tacc(_k, _v)
     if n_static:
         print(f"  Suppressed {n_static} static detection(s) present in 2+ neighboring frames",
               flush=True)
@@ -1070,6 +1139,7 @@ def main():
     _EDGE_MIN_MATCHES = 1    # 1 neighbor suffices: static FPs were already removed
                              # by the suppressor above; raw fallback handles the
                              # case where every frame has a stub that failed elongation
+    _t0 = time.perf_counter()
     n_rescued = 0
     if any(len(ec) > 0 for ec in edge_candidates_all):
         print("\nStep 1d - rescuing edge-clipped detections...", flush=True)
@@ -1125,6 +1195,8 @@ def main():
                   f"{_EDGE_MIN_MATCHES}+ neighboring frames", flush=True)
         else:
             print("  No edge-clipped detections qualified for rescue", flush=True)
+
+    _tacc("edge_rescue_s", time.perf_counter() - _t0)
 
     # Write all detect records now that static FP suppression is complete.
     # final_trail_components is computed here (post-suppression) from masks_all.
@@ -1194,10 +1266,12 @@ def main():
         if not skip:
             if trail_px > 0:
                 repair_dbg = {} if logger is not None else None
+                _t0 = time.perf_counter()
                 cleaned = repair_frame(img, mask, i + core_start,
                                        frames_all,
                                        neighbor_masks=neighbor_masks,
                                        debug_out=repair_dbg)
+                _tacc("repair_s", time.perf_counter() - _t0)
                 _write_output(fp.stem, cleaned, icc_profile=icc_profile, exif_bytes=exif_bytes, dpi=dpi)
                 n_repaired += 1
                 if logger is not None:
@@ -1216,6 +1290,47 @@ def main():
         print(f"  cleaning {i+1}/{n}: {fp.name} - {trail_label}", flush=True)
         running_trail_total += trail_count
         print(f"FRAME_TRAIL_COUNT: {running_trail_total}", flush=True)
+
+    def _fmt_s(s):
+        m, sec = divmod(int(s), 60)
+        if m:
+            return f"{m}m {sec:02d}s"
+        if s >= 1.0:
+            return f"{s:.1f}s"
+        return f"{s * 1000:.0f}ms"
+
+    if _timing:
+        _STEP_ORDER = [
+            ("sahi_s",            "sahi_inference"),
+            ("sky_mask_s",        "sky_mask_zero"),
+            ("raw_labeled_s",     "raw_labeled_mask"),
+            ("try_split_s",       "try_split"),
+            ("elongation_s",      "elongation_filter"),
+            ("edge_cand_s",       "edge_candidates"),
+            ("group_s",           "group_detections"),
+            ("bridge_s",          "gap_bridge"),
+            ("bridge_rot90_s",     "gap_bridge_rot90"),
+            ("poly_fit_s",        "poly_fit"),
+            ("dilate_s",          "dilation"),
+            ("apply_sky_mask_s",  "apply_sky_mask"),
+            ("filter_small_s",    "filter_small_comps"),
+            ("second_scrub_s",    "second_scrub"),
+            ("static_fp_s",          "static_fp_suppressor"),
+            ("sfp_precompute_s",     "  sfp_precompute"),
+            ("sfp_compare_s",        "  sfp_compare"),
+            ("sfp_apply_s",          "  sfp_apply"),
+            ("edge_rescue_s",        "edge_rescue"),
+            ("repair_s",          "repair_frame"),
+        ]
+        print("\nTiming summary:")
+        print(f"  {'Step':<26} {'Calls':>6}  {'Total':>8}  {'Avg':>8}")
+        for _key, _label in _STEP_ORDER:
+            if _key not in _timing:
+                print(f"  {_label:<26} {'0':>6}  {'--':>8}  {'--':>8}")
+                continue
+            _cnt, _tot = _timing[_key]
+            _avg = _tot / _cnt if _cnt else 0.0
+            print(f"  {_label:<26} {_cnt:>6}  {_fmt_s(_tot):>8}  {_fmt_s(_avg):>8}")
 
     elapsed = time.time() - t_total
     mins, secs = divmod(int(elapsed), 60)

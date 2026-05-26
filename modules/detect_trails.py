@@ -2,6 +2,7 @@
 import cv2
 import numpy as np
 import os
+import time
 from typing import Optional
 
 from .io_safe import robust_imread
@@ -345,6 +346,51 @@ def _run_targeted_tile(model, img_rgb, tile_x, tile_y, tile_size, h, w):
     return new_dets
 
 
+def _run_targeted_tile_rot90(model, img_rgb, tile_x, tile_y, tile_size, h, w):
+    """Same as _run_targeted_tile but rotates the crop 90 degrees before inference.
+
+    Catches trails that fall dead-center in a tile and are missed by the normal
+    pass because the model is sensitive to orientation.  Results are rotated back
+    before returning so coords are in global image space.
+    """
+    import torch
+    ty1, tx1 = tile_y, tile_x
+    ty2, tx2 = min(h, tile_y + tile_size), min(w, tile_x + tile_size)
+    crop_h, crop_w = ty2 - ty1, tx2 - tx1
+    crop = img_rgb[ty1:ty2, tx1:tx2].copy()
+    # rot90(k=1) turns (crop_h, crop_w) → (crop_w, crop_h)
+    crop_rot = np.ascontiguousarray(np.rot90(crop, 1))
+    if crop_w < tile_size or crop_h < tile_size:
+        padded = np.zeros((tile_size, tile_size, 3), dtype=np.uint8)
+        padded[:crop_w, :crop_h] = crop_rot
+        crop_rot = padded
+
+    yolo = model.model
+    conf = getattr(model, "confidence_threshold", 0.30)
+    results = yolo.predict(source=crop_rot, conf=conf, verbose=False, imgsz=tile_size)
+
+    new_dets = []
+    for r in results:
+        if r.masks is None:
+            continue
+        for seg_xy in r.masks.xy:
+            if len(seg_xy) < 3:
+                continue
+            local_mask_rot = np.zeros((tile_size, tile_size), dtype=np.uint8)
+            pts = np.array(seg_xy, dtype=np.int32)
+            cv2.fillPoly(local_mask_rot, [pts], 255)
+            # Trim padding rows/cols, then rotate back: (crop_w, crop_h) → (crop_h, crop_w)
+            trimmed = local_mask_rot[:crop_w, :crop_h]
+            restored = np.ascontiguousarray(np.rot90(trimmed, 3))
+            global_mask = np.zeros((h, w), dtype=np.uint8)
+            global_mask[ty1:ty2, tx1:tx2] = restored
+            for cm in try_split(global_mask):
+                props = detection_props(cm)
+                if props is not None:
+                    new_dets.append(props)
+    return new_dets
+
+
 # ── Public: detect_frame_polygon (fitted polygon mask) ────────────────────────
 # Active detection entry point for STC v5. Pipeline:
 #   SAHI tiled inference → crossing splitter → elongation filter
@@ -357,7 +403,8 @@ def _run_targeted_tile(model, img_rgb, tile_x, tile_y, tile_size, h, w):
 def detect_frame_polygon(model, image, tile_size: int = 640,
                          overlap: float = 0.2, dilate: int = 1,
                          return_raw: bool = False, debug_out=None,
-                         edge_candidates_out=None, sky_mask=None):
+                         edge_candidates_out=None, sky_mask=None,
+                         timing_out=None):
     """Like detect_frame, but returns a tight fitted-polygon mask.
 
     Runs the same SAHI inference, then:
@@ -390,11 +437,22 @@ def detect_frame_polygon(model, image, tile_size: int = 640,
         return None
     img, h, w = loaded
 
+    if timing_out is not None:
+        timing_out.update({"sahi_s": 0.0, "sky_mask_s": 0.0, "raw_labeled_s": 0.0,
+                           "try_split_s": 0.0, "elongation_s": 0.0, "edge_cand_s": 0.0,
+                           "group_s": 0.0, "bridge_s": 0.0, "bridge_rot90_s": 0.0,
+                           "poly_fit_s": 0.0, "dilate_s": 0.0, "gap_pairs_count": 0,
+                           "gap_bridge_merges": 0})
+
     # ── SAHI tiled inference ──────────────────────────────────────────────────
+    _t0 = time.perf_counter()
     predictions = _sahi_predict(model, img, tile_size, overlap)
+    if timing_out is not None:
+        timing_out["sahi_s"] = time.perf_counter() - _t0
 
     # Zero foreground pixels from every SAHI prediction before any other step.
     # Grouper, gap-bridge, and polygon fitter never see foreground pixels.
+    _t0 = time.perf_counter()
     if sky_mask is not None:
         _sm_bool = sky_mask > 0
         for _pred in predictions:
@@ -407,15 +465,21 @@ def detect_frame_polygon(model, image, tile_size: int = 640,
                 _sm_r = cv2.resize(sky_mask, (_bm.shape[1], _bm.shape[0]),
                                    interpolation=cv2.INTER_NEAREST) > 0
                 _bm[~_sm_r] = False
+    if timing_out is not None:
+        timing_out["sky_mask_s"] = time.perf_counter() - _t0
 
+    _t0 = time.perf_counter()
     raw_labeled = _build_raw_labeled_mask(predictions, h, w) if return_raw else None
+    if timing_out is not None:
+        timing_out["raw_labeled_s"] = time.perf_counter() - _t0
 
     # ── Crossing splitter + elongation filter ─────────────────────────────────
     # Returns normal passing masks, their props for the grouper, and any
     # edge-touching components that failed elongation (rescue candidates).
     grouper_dbg = {} if debug_out is not None else None
     _, det_list, edge_cands = filter_masks_with_props(predictions, h, w, img=img,
-                                                      debug_out=grouper_dbg)
+                                                      debug_out=grouper_dbg,
+                                                      timing_out=timing_out)
     if edge_candidates_out is not None:
         edge_candidates_out.extend(edge_cands)
 
@@ -430,14 +494,21 @@ def detect_frame_polygon(model, image, tile_size: int = 640,
             debug_out.update({"group_count": 0, "polygon_count": 0,
                               "gap_bridge_tiles": 0, "gap_bridge_new_dets": 0})
     else:
+        _t0 = time.perf_counter()
         groups = group_detections(det_list)
+        if timing_out is not None:
+            timing_out["group_s"] = time.perf_counter() - _t0
 
         # Check every pair of groups for the seam-gap signature. If two groups
         # look like the same trail but their tips are farther apart than the
         # grouper's gate allows, run one extra tile in the gap between them.
+        _t0 = time.perf_counter()
         gap_pairs = _find_gap_bridge_tiles(groups, det_list, h, w, tile_size)
         bridge_tiles = len(gap_pairs)
+        if timing_out is not None:
+            timing_out["gap_pairs_count"] = bridge_tiles
         bridge_new_dets = 0
+        bridge_merges = 0
         if gap_pairs:
             gp = list(range(len(groups)))
 
@@ -508,16 +579,79 @@ def detect_frame_polygon(model, image, tile_size: int = 640,
                 if genuine:
                     gp[_gf(gi)] = _gf(gj)
                     bridge_new_dets += len(new)
+                    bridge_merges += 1
+
+            # Second pass: 90-degree tile rotation for pairs not merged by first pass
+            _t0_rot90 = time.perf_counter()
+            for gi, gj, tx, ty in gap_pairs:
+                if _gf(gi) == _gf(gj):
+                    continue
+                new90 = _run_targeted_tile_rot90(model, img, tx, ty, tile_size, h, w)
+                if not new90:
+                    continue
+                eff_h = min(h - ty, tile_size)
+                eff_w = min(w - tx, tile_size)
+                gi_local90 = np.zeros((eff_h, eff_w), dtype=bool)
+                gj_local90 = np.zeros((eff_h, eff_w), dtype=bool)
+                for k in groups[gi]:
+                    c = det_list[k]["coords"]
+                    m = (c[:,0]>=ty)&(c[:,0]<ty+eff_h)&(c[:,1]>=tx)&(c[:,1]<tx+eff_w)
+                    lc = c[m]
+                    if len(lc):
+                        gi_local90[lc[:,0]-ty, lc[:,1]-tx] = True
+                for k in groups[gj]:
+                    c = det_list[k]["coords"]
+                    m = (c[:,0]>=ty)&(c[:,0]<ty+eff_h)&(c[:,1]>=tx)&(c[:,1]<tx+eff_w)
+                    lc = c[m]
+                    if len(lc):
+                        gj_local90[lc[:,0]-ty, lc[:,1]-tx] = True
+                all_ci90 = np.vstack([det_list[k]["coords"] for k in groups[gi]])
+                all_cj90 = np.vstack([det_list[k]["coords"] for k in groups[gj]])
+                ci_row90 = float(all_ci90[:,0].mean())
+                cj_row90 = float(all_cj90[:,0].mean())
+                minor_gi90 = float(np.median([det_list[k]["minor"] for k in groups[gi]]))
+                minor_gj90 = float(np.median([det_list[k]["minor"] for k in groups[gj]]))
+                lat_tol90 = 2.0 * max(minor_gi90, minor_gj90)
+                row_lo90 = min(ci_row90, cj_row90) - lat_tol90
+                row_hi90 = max(ci_row90, cj_row90) + lat_tol90
+                genuine90 = False
+                for nd in new90:
+                    nd_row = float(nd["coords"][:,0].mean())
+                    if nd_row < row_lo90 or nd_row > row_hi90:
+                        continue
+                    c = nd["coords"]
+                    m = (c[:,0]>=ty)&(c[:,0]<ty+eff_h)&(c[:,1]>=tx)&(c[:,1]<tx+eff_w)
+                    lc = c[m]
+                    if len(lc) == 0:
+                        continue
+                    lr, lc2 = lc[:,0]-ty, lc[:,1]-tx
+                    ov_i = int(np.count_nonzero(gi_local90[lr, lc2]))
+                    ov_j = int(np.count_nonzero(gj_local90[lr, lc2]))
+                    ov_max = max(ov_i, ov_j)
+                    bilateral = (ov_i / len(lc) > 0.05) and (ov_j / len(lc) > 0.05)
+                    if ov_max / len(lc) < 0.30 or bilateral:
+                        genuine90 = True
+                        break
+                if genuine90:
+                    gp[_gf(gi)] = _gf(gj)
+                    bridge_new_dets += len(new90)
+                    bridge_merges += 1
+            if timing_out is not None:
+                timing_out["bridge_rot90_s"] = time.perf_counter() - _t0_rot90
 
             merged = {}
             for gi, grp in enumerate(groups):
                 merged.setdefault(_gf(gi), []).extend(grp)
             groups = list(merged.values())
 
+        if timing_out is not None:
+            timing_out["bridge_s"] = time.perf_counter() - _t0
+            timing_out["gap_bridge_merges"] = bridge_merges
         if debug_out is not None:
             debug_out["gap_bridge_tiles"] = bridge_tiles
             debug_out["gap_bridge_new_dets"] = bridge_new_dets
 
+        _t0 = time.perf_counter()
         final = np.zeros((h, w), dtype=np.uint8)
         poly_count = 0
         for grp in groups:
@@ -533,15 +667,20 @@ def detect_frame_polygon(model, image, tile_size: int = 640,
                 pts = np.array(corners, dtype=np.int32).reshape(-1, 1, 2)
                 cv2.fillPoly(final, [pts], 255)
             poly_count += len(corner_sets)
+        if timing_out is not None:
+            timing_out["poly_fit_s"] = time.perf_counter() - _t0
         if debug_out is not None:
             debug_out.update({"group_count": len(groups),
                               "polygon_count": poly_count})
 
     # ── Dilation ──────────────────────────────────────────────────────────────
+    _t0 = time.perf_counter()
     if dilate > 0:
         kernel = cv2.getStructuringElement(
             cv2.MORPH_ELLIPSE, (dilate * 2 + 1, dilate * 2 + 1))
         final = cv2.dilate(final, kernel)
+    if timing_out is not None:
+        timing_out["dilate_s"] = time.perf_counter() - _t0
 
     if debug_out is not None:
         debug_out["dilate_px"] = dilate

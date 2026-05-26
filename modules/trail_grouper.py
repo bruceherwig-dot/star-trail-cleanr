@@ -35,6 +35,7 @@ try_split(mask)
 
 import cv2
 import numpy as np
+import time
 from skimage.measure import label as sklabel, regionprops as skregionprops
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -398,7 +399,8 @@ def filter_masks(preds, h, w, img=None):
     return passing
 
 
-def filter_masks_with_props(preds, h, w, sky_mask=None, img=None, debug_out=None):
+def filter_masks_with_props(preds, h, w, sky_mask=None, img=None, debug_out=None,
+                            timing_out=None):
     """
     Like filter_masks, but returns (masks, det_list, edge_candidates) in one pass.
 
@@ -420,6 +422,7 @@ def filter_masks_with_props(preds, h, w, sky_mask=None, img=None, debug_out=None
     masks           = []
     det_list        = []
     edge_candidates = []
+    _ts = _te = _tec = 0.0
     if debug_out is not None:
         debug_out.update({
             "raw_pred_count":      len(preds),
@@ -445,15 +448,19 @@ def filter_masks_with_props(preds, h, w, sky_mask=None, img=None, debug_out=None
                 if debug_out is not None:
                     debug_out["sky_zeroed"] += 1
                 continue
+        _t0 = time.perf_counter()
         candidates = try_split(m)
+        _ts += time.perf_counter() - _t0
         if len(candidates) > 1 and debug_out is not None:
             debug_out["try_split_fired"] += 1
         for cm in candidates:
+            _t0 = time.perf_counter()
             props = detection_props(cm)
             if props is None and img is not None and _is_red_trail(cm, img):
                 props = detection_props(cm, min_aspect=0.0)
                 if props is not None and debug_out is not None:
                     debug_out["kept_as_nav_light"] += 1
+            _te += time.perf_counter() - _t0
             if props is not None:
                 masks.append(cm)
                 det_list.append(props)
@@ -466,6 +473,7 @@ def filter_masks_with_props(preds, h, w, sky_mask=None, img=None, debug_out=None
                 # small area) but are real trails -- false positives at frame edges
                 # are vanishingly rare.  Keep them unconditionally so the grouper
                 # and repair pass treat them like any other detection.
+                _t0 = time.perf_counter()
                 px = np.where(cm > 0)
                 if len(px[0]) > 0:
                     by1, by2 = int(px[0].min()), int(px[0].max())
@@ -477,6 +485,11 @@ def filter_masks_with_props(preds, h, w, sky_mask=None, img=None, debug_out=None
                             det_list.append(edge_props)
                             if debug_out is not None:
                                 debug_out["passed"] += 1
+                _tec += time.perf_counter() - _t0
+    if timing_out is not None:
+        timing_out["try_split_s"] = _ts
+        timing_out["elongation_s"] = _te
+        timing_out["edge_cand_s"]  = _tec
     return masks, det_list, edge_candidates
 
 
