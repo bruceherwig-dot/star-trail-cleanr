@@ -2,6 +2,11 @@
 
 ---
 
+## v2.32-beta
+- **Fix: Two parallel airplane trails in the same frame are no longer merged into one fat polygon.** When two trails run close together (roughly 40 pixels apart), the grouper was treating them as one trail because their detection masks touched. The merging threshold has been tightened so each trail gets its own polygon.
+- **Fix: Curved trails are now traced with multiple fitted segments instead of one straight rectangle.** When a trail curves significantly across the frame (spanning more than 1,500 pixels with at least 5 degrees of angle change), Star Trail CleanR now divides it into overlapping strip segments and fits each one separately. This prevents the single-rectangle fit from cutting across stars on either side of the curve.
+- **Smoke tests:** 133 passing.
+
 ## v2.31-beta
 - **Fix: GPU installation no longer fails with a misleading error on networks that block pytorch.org.** When pytorch.org returns a 403 Forbidden error, Star Trail CleanR now automatically retries the download from a backup server. If both servers are blocked, the error message now explains the situation clearly and suggests connecting to a VPN, with a More Info button linking to step-by-step instructions.
 - **Fix: GPU installation error dialog no longer gives wrong advice.** The previous dialog told users to check their internet connection and free disk space regardless of what actually went wrong. The message now shows only the specific reason for the failure.
