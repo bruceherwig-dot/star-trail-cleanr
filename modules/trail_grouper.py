@@ -440,6 +440,7 @@ def filter_masks_with_props(preds, h, w, sky_mask=None, img=None, debug_out=None
             if debug_out is not None:
                 debug_out["no_mask"] += 1
             continue
+        _pred_conf = float(getattr(getattr(pred, "score", None), "value", 0.0))
         if sky_mask is not None:
             sm = (sky_mask if sky_mask.shape == (h, w)
                   else cv2.resize(sky_mask, (w, h), interpolation=cv2.INTER_NEAREST))
@@ -462,6 +463,7 @@ def filter_masks_with_props(preds, h, w, sky_mask=None, img=None, debug_out=None
                     debug_out["kept_as_nav_light"] += 1
             _te += time.perf_counter() - _t0
             if props is not None:
+                props["conf"] = _pred_conf
                 masks.append(cm)
                 det_list.append(props)
                 if debug_out is not None:
@@ -481,6 +483,7 @@ def filter_masks_with_props(preds, h, w, sky_mask=None, img=None, debug_out=None
                     if by1 <= 19 or by2 >= h - 20 or bx1 <= 19 or bx2 >= w - 20:
                         edge_props = detection_props(cm, min_aspect=0.0, min_area=0)
                         if edge_props is not None:
+                            edge_props["conf"] = _pred_conf
                             masks.append(cm)
                             det_list.append(edge_props)
                             if debug_out is not None:

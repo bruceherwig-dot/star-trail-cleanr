@@ -2164,8 +2164,9 @@ class MainWindow(QMainWindow):
 
     def _on_update_download(self):
         if self._update_download_url:
-            import webbrowser
-            webbrowser.open(self._update_download_url)
+            from PySide6.QtCore import QUrl
+            from PySide6.QtGui import QDesktopServices
+            QDesktopServices.openUrl(QUrl(self._update_download_url))
 
     # ── Model update card (shows when GitHub has a newer trail detector) ─────
 

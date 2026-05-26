@@ -331,9 +331,11 @@ def _run_targeted_tile(model, img_rgb, tile_x, tile_y, tile_size, h, w):
     for r in results:
         if r.masks is None:
             continue
-        for seg_xy in r.masks.xy:
+        confs = r.boxes.conf.tolist() if r.boxes is not None else []
+        for seg_idx, seg_xy in enumerate(r.masks.xy):
             if len(seg_xy) < 3:
                 continue
+            seg_conf = float(confs[seg_idx]) if seg_idx < len(confs) else 0.0
             local_mask = np.zeros((tile_size, tile_size), dtype=np.uint8)
             pts = np.array(seg_xy, dtype=np.int32)
             cv2.fillPoly(local_mask, [pts], 255)
@@ -342,6 +344,7 @@ def _run_targeted_tile(model, img_rgb, tile_x, tile_y, tile_size, h, w):
             for cm in try_split(global_mask):
                 props = detection_props(cm)
                 if props is not None:
+                    props["conf"] = seg_conf
                     new_dets.append(props)
     return new_dets
 
@@ -373,9 +376,11 @@ def _run_targeted_tile_rot90(model, img_rgb, tile_x, tile_y, tile_size, h, w):
     for r in results:
         if r.masks is None:
             continue
-        for seg_xy in r.masks.xy:
+        confs = r.boxes.conf.tolist() if r.boxes is not None else []
+        for seg_idx, seg_xy in enumerate(r.masks.xy):
             if len(seg_xy) < 3:
                 continue
+            seg_conf = float(confs[seg_idx]) if seg_idx < len(confs) else 0.0
             local_mask_rot = np.zeros((tile_size, tile_size), dtype=np.uint8)
             pts = np.array(seg_xy, dtype=np.int32)
             cv2.fillPoly(local_mask_rot, [pts], 255)
@@ -387,6 +392,7 @@ def _run_targeted_tile_rot90(model, img_rgb, tile_x, tile_y, tile_size, h, w):
             for cm in try_split(global_mask):
                 props = detection_props(cm)
                 if props is not None:
+                    props["conf"] = seg_conf
                     new_dets.append(props)
     return new_dets
 
@@ -670,8 +676,11 @@ def detect_frame_polygon(model, image, tile_size: int = 640,
         if timing_out is not None:
             timing_out["poly_fit_s"] = time.perf_counter() - _t0
         if debug_out is not None:
+            poly_confs = [round(max((det_list[i].get("conf", 0.0) for i in grp), default=0.0), 3)
+                          for grp in groups]
             debug_out.update({"group_count": len(groups),
-                              "polygon_count": poly_count})
+                              "polygon_count": poly_count,
+                              "polygon_confidences": poly_confs})
 
     # ── Dilation ──────────────────────────────────────────────────────────────
     _t0 = time.perf_counter()
