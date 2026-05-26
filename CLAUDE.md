@@ -20,6 +20,11 @@
 - Star motion between frames is NOT a simple rotation — only true with pole-centered framing + no lens distortion. Off-axis framing and wide-angle lenses create non-uniform motion fields.
 - Hot pixels are multi-pixel clusters (~5px wide after demosaic), not single-pixel defects. Detected via color imbalance filter (single-channel Bayer CFA defect → ratio 5-100x).
 - GUI (`star_trail_cleanr.py`) chunks frames into 20-frame batches and runs `astro_clean_v5.py` as a subprocess per batch.
+- All users shoot on fixed tripods. No tracking mounts. Foreground is perfectly static across every frame — same pixel, every shot.
+- Airplane and satellite trails can each span 2 to 20 consecutive frames. Do not assume short duration for either.
+- Sequences are typically night sky, but twilight-to-darkness sequences are common (timelapse converted to star trail). Users run STC on the dark portion where trails are visible -- pure twilight frames are too bright for trails to show in a lighten-max stack so they're irrelevant. Twilight frames are out-of-distribution for the model (gradient sky, warm tones) and may produce more FPs or misses.
+- Framing: most sequences include a horizon with foreground (landscape, buildings, trees). Full-sky framing with no horizon is possible but uncommon.
+- Source files: predominantly full-resolution TIFFs, not JPEGs. Bruce expected mostly JPEGs but real-world usage is mostly TIFFs. Design and performance decisions should treat TIFF as the primary case.
 
 ## Release checklist (ALWAYS do all steps before tagging)
 0. **Run the smoke tests — must be all-green: `python3 tests/run_all.py`**
