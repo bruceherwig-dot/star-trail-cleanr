@@ -6,7 +6,9 @@ from typing import Optional
 
 from .io_safe import robust_imread
 from .trail_grouper import (filter_masks, filter_masks_with_props, group_detections,
-                            fit_polygon, try_split, detection_props)
+                            fit_polygon, fit_curved_group, _group_angle_spread,
+                            _CURVED_MIN_XSPAN, _CURVED_MIN_ANGLE_SPREAD,
+                            try_split, detection_props)
 
 
 # ── Device selection ──────────────────────────────────────────────────────────
@@ -517,13 +519,23 @@ def detect_frame_polygon(model, image, tile_size: int = 640,
             debug_out["gap_bridge_new_dets"] = bridge_new_dets
 
         final = np.zeros((h, w), dtype=np.uint8)
+        poly_count = 0
         for grp in groups:
-            corners, _, _ = fit_polygon(grp, det_list)
-            pts = np.array(corners, dtype=np.int32).reshape(-1, 1, 2)
-            cv2.fillPoly(final, [pts], 255)
+            all_coords = np.vstack([det_list[i]["coords"] for i in grp])
+            x_span = int(all_coords[:,1].max() - all_coords[:,1].min())
+            if (x_span >= _CURVED_MIN_XSPAN
+                    and _group_angle_spread(grp, det_list) >= _CURVED_MIN_ANGLE_SPREAD):
+                corner_sets = fit_curved_group(grp, det_list)
+            else:
+                corners, _, _ = fit_polygon(grp, det_list)
+                corner_sets = [corners]
+            for corners in corner_sets:
+                pts = np.array(corners, dtype=np.int32).reshape(-1, 1, 2)
+                cv2.fillPoly(final, [pts], 255)
+            poly_count += len(corner_sets)
         if debug_out is not None:
             debug_out.update({"group_count": len(groups),
-                              "polygon_count": len(groups)})
+                              "polygon_count": poly_count})
 
     # ── Dilation ──────────────────────────────────────────────────────────────
     if dilate > 0:

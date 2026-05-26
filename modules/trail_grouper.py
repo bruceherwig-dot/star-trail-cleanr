@@ -56,6 +56,12 @@ TIP_PAD_PX          = 0   # pixels added to each tip of the fitted polygon; nega
 MIN_SPLIT_ANGLE_DEG = 10.0
 SEAM_MARGIN         = 3.0
 
+_CURVED_MIN_XSPAN         = 1500   # px -- group must span this wide to be curved
+_CURVED_MIN_ANGLE_SPREAD  = 5.0    # degrees -- min angle variation to call it curved
+_CURVED_STRIP_PX          = 600    # target strip width in px
+_CURVED_STRIP_OVERLAP     = 0.15   # fraction of strip width shared with neighbors
+_CURVED_TIP_PAD           = 120    # px added beyond pixel extent on outer trail tips
+
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
 # Geometry, angle math, and per-pixel helpers used by the public functions.
@@ -657,3 +663,89 @@ def fit_polygon(group_indices, det_list):
     ]
     corners_xy = [(int(c[1]), int(c[0])) for c in corners_rc]
     return corners_xy, width, u_avg
+
+
+def _group_angle_spread(group_indices, det_list):
+    """Return angle spread (degrees) across detections in a group.
+    Handles the 0/180 wrap: angles are unwrapped relative to the median."""
+    angles = []
+    for i in group_indices:
+        d = det_list[i]
+        a = float(np.degrees(np.arctan2(d["u"][0], d["u"][1]))) % 180
+        angles.append(a)
+    med = float(np.median(angles))
+    unwrapped = []
+    for a in angles:
+        diff = a - med
+        if diff > 90:
+            diff -= 180
+        elif diff < -90:
+            diff += 180
+        unwrapped.append(diff)
+    return max(unwrapped) - min(unwrapped)
+
+
+def _fit_poly_from_pixels(coords_rc):
+    """PCA rectangle fit for a (N,2) (row,col) pixel array.
+    Returns list of (x,y) corner tuples, or None if too few pixels."""
+    if len(coords_rc) < 10:
+        return None
+    cov = np.cov(coords_rc.T)
+    evals, evecs = np.linalg.eigh(cov)
+    u = evecs[:, np.argmax(evals)]
+    u_perp = np.array([-u[1], u[0]])
+    centroid = coords_rc.mean(axis=0)
+    t = coords_rc @ u
+    t_centroid = float(centroid @ u)
+    t_min, t_max = float(t.min()), float(t.max())
+    col_lo = float(coords_rc[:,1].min())
+    col_hi = float(coords_rc[:,1].max())
+    step = max((col_hi - col_lo) / 15, 1.0)
+    widths = []
+    c = col_lo
+    while c < col_hi:
+        rows = coords_rc[(coords_rc[:,1] >= c) & (coords_rc[:,1] < c + step), 0]
+        if len(rows) > 2:
+            widths.append(float(rows.max() - rows.min()))
+        c += step
+    half_w = (float(np.median(widths)) if widths else 20.0) * 0.75
+    p_min = centroid + (t_min - t_centroid) * u
+    p_max = centroid + (t_max - t_centroid) * u
+    corners_rc = [
+        p_min + half_w * u_perp,
+        p_min - half_w * u_perp,
+        p_max - half_w * u_perp,
+        p_max + half_w * u_perp,
+    ]
+    return [(int(c[1]), int(c[0])) for c in corners_rc]
+
+
+def fit_curved_group(group_indices, det_list):
+    """Strip-based polygon fit for curved trails.
+
+    Divides all group pixels into N x-column strips with overlap and fits one
+    PCA rectangle per strip. Returns a list of corner lists (one per strip),
+    each suitable for cv2.fillPoly.
+
+    Called when a group's x-span exceeds _CURVED_MIN_XSPAN AND its angle
+    spread exceeds _CURVED_MIN_ANGLE_SPREAD degrees.
+    """
+    all_coords = np.vstack([det_list[i]["coords"] for i in group_indices])
+    x_min = int(all_coords[:,1].min())
+    x_max = int(all_coords[:,1].max())
+    x_span = x_max - x_min
+    n_strips = max(2, round(x_span / _CURVED_STRIP_PX))
+    x_lo = x_min - _CURVED_TIP_PAD
+    x_hi = x_max + _CURVED_TIP_PAD
+    total = x_hi - x_lo
+    strip_w = total / n_strips
+    overlap = strip_w * _CURVED_STRIP_OVERLAP
+    result = []
+    for s in range(n_strips):
+        sx1 = x_lo + s * strip_w - (overlap if s > 0 else 0)
+        sx2 = x_lo + (s + 1) * strip_w + (overlap if s < n_strips - 1 else 0)
+        strip = all_coords[(all_coords[:,1] >= sx1) & (all_coords[:,1] < sx2)]
+        corners = _fit_poly_from_pixels(strip)
+        if corners is not None:
+            result.append(corners)
+    return result
