@@ -2,6 +2,10 @@
 
 ---
 
+## v2.33-beta
+- **Fix: Download button in the update banner now opens the browser on Windows.** The button was silently doing nothing on Windows due to a platform compatibility issue. It now uses the same method as the pre-launch update prompt, which works correctly on all platforms.
+- **Smoke tests:** 133 passing.
+
 ## v2.32-beta
 - **Fix: Two parallel airplane trails in the same frame are no longer merged into one fat polygon.** When two trails run close together (roughly 40 pixels apart), the grouper was treating them as one trail because their detection masks touched. The merging threshold has been tightened so each trail gets its own polygon.
 - **Fix: Curved trails are now traced with multiple fitted segments instead of one straight rectangle.** When a trail curves significantly across the frame (spanning more than 1,500 pixels with at least 5 degrees of angle change), Star Trail CleanR now divides it into overlapping strip segments and fits each one separately. This prevents the single-rectangle fit from cutting across stars on either side of the curve.
