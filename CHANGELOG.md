@@ -2,6 +2,10 @@
 
 ---
 
+## v2.34-beta
+- **Improvement: Static false-positive suppressor is significantly faster.** The suppressor now pre-computes per-component bounding boxes for every frame before comparing, then works entirely within each component's bounding box instead of scanning the full image. On a 40-frame batch of 6000x4000 images, the suppressor step dropped from 36 seconds to under 6 seconds.
+- **Smoke tests:** 133 passing.
+
 ## v2.33-beta
 - **Fix: Download button in the update banner now opens the browser on Windows.** The button was silently doing nothing on Windows due to a platform compatibility issue. It now uses the same method as the pre-launch update prompt, which works correctly on all platforms.
 - **Smoke tests:** 133 passing.

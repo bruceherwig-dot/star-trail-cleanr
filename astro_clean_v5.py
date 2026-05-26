@@ -347,24 +347,40 @@ def _suppress_static_fps(masks_all, core_start, core_end,
     This prevents two different airplanes on the same flight path from mutually
     suppressing each other.
     """
-    # Precompute boolean "hit" mask for every frame (polygon mask OR raw SAHI,
-    # whichever is available) so the (mask > 0) conversion is not repeated for
-    # every component comparison.  Building this once covers all 8 neighbor
-    # lookups per component without re-allocating arrays.
+    # Precompute per-component records for every frame so the inner compare loop
+    # can do a fast bbox-overlap check before touching any pixels.  Each record
+    # stores the component's bbox, area, cropped boolean pixels, and source tag.
+    # This replaces the prior full-frame OR mask: instead of slicing a 6000x4000
+    # array for every (query component, neighbor frame) pair, we iterate a small
+    # list (~5-15 items) and skip with four integer comparisons when bboxes don't
+    # overlap -- zero numpy work for the common case of a real trail with no
+    # neighbor at the same location.
     _t0_pre = time.perf_counter()
-    _nb_hits    = {}   # frame_idx -> np.ndarray bool, or None
-    _nb_sources = {}   # frame_idx -> "polygon" | "raw_sahi"
+    _nb_comps = {}  # frame_idx -> list of {x1,y1,x2,y2,area,crop,source}
     for _fi in range(len(masks_all)):
-        _m   = masks_all[_fi]
-        _hit = (_m > 0) if (_m is not None and _m.max() > 0) else None
+        _m = masks_all[_fi]
         _src = "polygon"
-        if _hit is None and raw_masks_all is not None:
+        _use = (_m > 0).astype(np.uint8) if (_m is not None and _m.max() > 0) else None
+        if _use is None and raw_masks_all is not None:
             _r = raw_masks_all[_fi] if _fi < len(raw_masks_all) else None
             if _r is not None and _r.max() > 0:
-                _hit = (_r > 0)
+                _use = (_r > 0).astype(np.uint8)
                 _src = "raw_sahi"
-        _nb_hits[_fi]    = _hit
-        _nb_sources[_fi] = _src
+        if _use is None:
+            _nb_comps[_fi] = []
+            continue
+        _nc, _lbl, _stats, _ = cv2.connectedComponentsWithStats(_use)
+        _comps = []
+        for _ci in range(1, _nc):
+            _cx1 = int(_stats[_ci, cv2.CC_STAT_LEFT])
+            _cy1 = int(_stats[_ci, cv2.CC_STAT_TOP])
+            _cw  = int(_stats[_ci, cv2.CC_STAT_WIDTH])
+            _ch  = int(_stats[_ci, cv2.CC_STAT_HEIGHT])
+            _cx2, _cy2 = _cx1 + _cw - 1, _cy1 + _ch - 1
+            _ca  = int(_stats[_ci, cv2.CC_STAT_AREA])
+            _crop = (_lbl[_cy1:_cy2 + 1, _cx1:_cx2 + 1] == _ci)
+            _comps.append((_cx1, _cy1, _cx2, _cy2, _ca, _crop, _src))
+        _nb_comps[_fi] = _comps
     if timing_out is not None:
         timing_out["sfp_precompute_s"] = time.perf_counter() - _t0_pre
 
@@ -383,26 +399,21 @@ def _suppress_static_fps(masks_all, core_start, core_end,
         if mask.max() == 0:
             continue
 
-        n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
-            (mask > 0).astype(np.uint8))
-
+        h_mask, w_mask = mask.shape
         to_suppress = np.zeros(mask.shape, dtype=bool)
 
-        for comp_id in range(1, n_labels):
-            comp_pixels = (labels == comp_id)
-            comp_area = int(comp_pixels.sum())
+        for (x1, y1, x2, y2, comp_area, comp_crop, _) in _nb_comps.get(i, []):
             if comp_area == 0:
                 continue
 
-            # Centroid and bounding box for log readability.
-            ys, xs = np.where(comp_pixels)
-            cx = int(xs.mean()); cy = int(ys.mean())
-            x1, y1, x2, y2 = int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())
+            # Centroid from bbox-local crop -- no full-frame array needed.
+            _ys_loc, _xs_loc = np.where(comp_crop)
+            cx = int(_xs_loc.mean()) + x1
+            cy = int(_ys_loc.mean()) + y1
 
             # Frame-edge veto: trails go off the page -- static foreground
             # objects do not. If the bbox touches any image edge within 20px,
             # this is a trail entering or exiting the frame, not a static FP.
-            h_mask, w_mask = mask.shape
             if y1 <= 19 or y2 >= h_mask - 20 or x1 <= 19 or x2 >= w_mask - 20:
                 kept_by_veto.setdefault(i, []).append({
                     "area": comp_area,
@@ -421,48 +432,51 @@ def _suppress_static_fps(masks_all, core_start, core_end,
             for ni in [i - 4, i - 3, i - 2, i - 1, i + 1, i + 2, i + 3, i + 4]:
                 if ni < 0 or ni >= len(masks_all):
                     continue
-                # Use precomputed boolean mask for this neighbor frame.
-                # Falls back automatically to raw SAHI via _nb_sources if no
-                # polygon mask was available (already resolved at precompute time).
-                nb_hit = _nb_hits.get(ni)
-                if nb_hit is None:
+                # Accumulate the union of all overlapping neighbor components
+                # into a query-bbox-sized boolean array.  A static FP detected
+                # as multiple fragments in a neighbor frame still triggers
+                # suppression because the fragments are OR'd together before
+                # IoU is computed -- same result as the original full-frame OR.
+                _union_in_bbox = np.zeros((y2 - y1 + 1, x2 - x1 + 1), dtype=bool)
+                _first_src = None
+                for (_nx1, _ny1, _nx2, _ny2, _na, _ncrop, _nsrc) in _nb_comps.get(ni, []):
+                    # Fast bbox overlap test -- O(1), no numpy.
+                    if _nx2 < x1 or _nx1 > x2 or _ny2 < y1 or _ny1 > y2:
+                        continue
+                    # Overlap region in global coordinates.
+                    _ox1, _oy1 = max(x1, _nx1), max(y1, _ny1)
+                    _ox2, _oy2 = min(x2, _nx2), min(y2, _ny2)
+                    _nb_slice = _ncrop[_oy1 - _ny1:_oy2 - _ny1 + 1,
+                                       _ox1 - _nx1:_ox2 - _nx1 + 1]
+                    _union_in_bbox[_oy1 - y1:_oy2 - y1 + 1,
+                                   _ox1 - x1:_ox2 - x1 + 1] |= _nb_slice
+                    if _first_src is None:
+                        _first_src = _nsrc
+                _union_area = int(_union_in_bbox.sum())
+                if _union_area == 0:
                     continue
-                source = _nb_sources[ni]
-                # Spatial fast-path: slice to the component's bounding box before
-                # any pixel operation.  All component pixels lie within [y1:y2+1,
-                # x1:x2+1] by definition, so the bbox AND gives the same result as
-                # a full-frame AND while touching ~5 000x fewer pixels on a typical
-                # 6000x4000 frame with a 400x12 trail component.
-                bbox_nb = nb_hit[y1:y2 + 1, x1:x2 + 1]
-                if not bbox_nb.any():
-                    continue  # no neighbor pixels in this region -- skip instantly
-                bbox_comp = comp_pixels[y1:y2 + 1, x1:x2 + 1]
-                intersection = int((bbox_comp & bbox_nb).sum())
-                if intersection == 0:
+                _intersection = int((comp_crop & _union_in_bbox).sum())
+                if _intersection == 0:
                     continue
-                local_nb_area = int(bbox_nb.sum())
-                union = comp_area + local_nb_area - intersection
-                iou = intersection / union if union > 0 else 0.0
-                if iou >= iou_threshold:
-                    # Centroid motion veto: if the neighbor detection in this
-                    # bounding box has its center far from the component center,
-                    # it is a different object at a different position -- not a
-                    # static repeat of the same object (e.g. a large trail from
-                    # a different airplane passing through the same area).
-                    nb_in_bbox = bbox_nb  # reuse already-sliced region
-                    if nb_in_bbox.any():
-                        ny, nx = np.where(nb_in_bbox)
-                        nb_cx_f = float(nx.mean()) + x1
-                        nb_cy_f = float(ny.mean()) + y1
-                        centroid_dist = float(np.sqrt((cx - nb_cx_f) ** 2 + (cy - nb_cy_f) ** 2))
-                        if centroid_dist > _CENTROID_MOTION_PX:
-                            continue  # different object -- skip this neighbor
-                    matched_neighbors.append({
-                        "frame_idx": ni,
-                        "source": source,
-                        "iou_pct": round(iou * 100, 1),
-                        "local_nb_area": local_nb_area,
-                    })
+                _iou = _intersection / (comp_area + _union_area - _intersection)
+                if _iou < iou_threshold:
+                    continue
+                # Centroid motion veto: union centroid in the query bbox must
+                # be close to the query component centroid.
+                _ncy_arr, _ncx_arr = np.where(_union_in_bbox)
+                if len(_ncy_arr) > 0:
+                    _nb_cx_f = float(_ncx_arr.mean()) + x1
+                    _nb_cy_f = float(_ncy_arr.mean()) + y1
+                    _centroid_dist = float(np.sqrt((cx - _nb_cx_f) ** 2
+                                                   + (cy - _nb_cy_f) ** 2))
+                    if _centroid_dist > _CENTROID_MOTION_PX:
+                        continue
+                matched_neighbors.append({
+                    "frame_idx": ni,
+                    "source": _first_src or "polygon",
+                    "iou_pct": round(_iou * 100, 1),
+                    "local_nb_area": _union_area,
+                })
 
             if len(matched_neighbors) >= min_matches:
                 # Bright-trail veto: if pixels inside the component are
@@ -470,7 +484,9 @@ def _suppress_static_fps(masks_all, core_start, core_end,
                 # real trail (nav light, strobe, or bright streak) -- keep it
                 # regardless of the neighbor match count.
                 if frames_all is not None and i < len(frames_all):
-                    is_bright, bright_ratio = _is_bright_trail(comp_pixels, frames_all[i])
+                    _comp_pixels_full = np.zeros(mask.shape, dtype=bool)
+                    _comp_pixels_full[y1:y2 + 1, x1:x2 + 1] = comp_crop
+                    is_bright, bright_ratio = _is_bright_trail(_comp_pixels_full, frames_all[i])
                     if is_bright:
                         match_desc = "; ".join(
                             f"frame {m['frame_idx']} via {m['source']} (IoU {m['iou_pct']}%)"
@@ -493,7 +509,7 @@ def _suppress_static_fps(masks_all, core_start, core_end,
                         })
                         continue  # do not suppress
 
-                to_suppress |= comp_pixels
+                to_suppress[y1:y2 + 1, x1:x2 + 1] |= comp_crop
                 match_desc = "; ".join(
                     f"frame {m['frame_idx']} via {m['source']} (IoU {m['iou_pct']}%)"
                     for m in matched_neighbors
