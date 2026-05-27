@@ -1,13 +1,60 @@
-"""Trail repair — Star Bridge: per-trail sparse feature tracking morph from N-1/N+1.
+"""
+Trail repair — Star Bridge: per-trail sparse optical flow morph from N-1/N+1.
 
-For each trail component, bright star features are tracked from N-1 to N+1
-using Lucas-Kanade sparse optical flow. The median displacement gives the
-local star motion at that trail's location. N-1 is shifted forward by half
-and N+1 backward by half, averaged to synthesize frame N without the trail.
-Paste the synthetic pixels into frame N at masked locations only.
+THE CORE PROBLEM
+----------------
+We need to fill in the pixels that a trail was covering in frame N. We can't just
+copy pixels from a static background because the sky is not static — stars move in
+arcs across the frame over the course of a multi-hour session. A star that is at
+position (x, y) in frame N-1 will be at a slightly different position in frame N+1.
+Copying neighbor pixels directly without accounting for that motion would smear every
+star in the repaired region.
 
-Single-neighbor fallback (first/last frame): copy that neighbor directly.
-Tracking failure fallback: black fill (transparent in lighten-max stacks).
+HOW STAR BRIDGE WORKS
+----------------------
+For each detected trail, Star Bridge measures the local star motion at that specific
+region of the frame using sparse Lucas-Kanade optical flow:
+
+1. Find bright corner features (stars) in the prev frame (N-1) within a padded
+   bounding box around the trail. Mask out the trail pixels so the tracker only
+   latches onto real stars, not the trail itself.
+
+2. Track those star points forward to the next frame (N+1). Discard any tracked
+   points with implausible displacements (too small = not moving stars, too large =
+   tracking noise). The median displacement of the surviving points is the local
+   star motion vector (dx, dy) from N-1 to N+1.
+
+3. Shift the prev frame (N-1) FORWARD by half that motion (dx/2, dy/2), and shift
+   the next frame (N+1) BACKWARD by half that motion (-dx/2, -dy/2). Both neighbors
+   now have their stars aligned to where they would be in frame N.
+
+4. Average the two shifted neighbors. Paste the averaged pixels into frame N at the
+   trail mask locations only. The rest of frame N is untouched.
+
+WHY BLACK FILL IS SAFE
+-----------------------
+When star tracking fails (too few stars, implausible displacements, first/last frame
+with only one neighbor), the trail pixels are filled with pure black — zero in all
+channels. This is safe because the final output is a lighten-max composite: each
+pixel in the stack takes the brightest value across all frames. A zero pixel loses
+to any real star pixel in any other frame. The hole becomes invisible in the final
+image, even if the repair was imperfect.
+
+LONG TRAIL SEGMENTATION
+------------------------
+Trails longer than MAX_SEG_LENGTH pixels are split into overlapping segments before
+repair. This matters because star motion is not perfectly uniform across a wide-angle
+frame — there is some field distortion and the motion vector at the left edge of a
+3000px trail may differ from the vector at the right edge. Shorter segments each get
+their own local motion estimate, producing more accurate repair than a single global
+estimate for the whole trail.
+
+FALLBACKS IN ORDER
+------------------
+1. Star Bridge (two neighbors, LK tracking succeeds)      -> best quality
+2. Single-neighbor copy (first or last frame of batch)    -> good quality
+3. Single-neighbor LK (tracking fails, one neighbor)      -> shifted neighbor, no average
+4. Black fill (tracking fails, no usable neighbors)       -> invisible in lighten-max
 """
 import math
 import cv2

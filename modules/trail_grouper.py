@@ -1,5 +1,51 @@
 """
-Trail grouper: crossing splitter + union-find grouper + polygon fitting.
+Trail grouper — fragment splitter, union-find grouper, and polygon fitter.
+
+THE PROBLEM THIS MODULE SOLVES
+-------------------------------
+SAHI tiled inference runs the YOLO model on each 640x640 tile independently. A
+single physical trail that crosses three tiles comes back as three separate mask
+blobs — one per tile. Left ungrouped, the pipeline would try to repair the same
+trail three times using three overlapping masks, producing a patchy result and
+inflating the trail count shown to the user.
+
+This module fuses those fragments back into one coherent detection before repair.
+
+STEP 1 — CROSSING SPLITTER (try_split)
+---------------------------------------
+Sometimes a tile contains two trails that cross at an angle, and the model returns
+them as one merged blob. try_split() uses Hough line detection to find the two
+dominant directions in the blob, then splits along the crossing point using DBSCAN
+clustering of the inlier pixels. A blob that is actually one straight trail is
+returned unchanged; an X-shaped blob is returned as two separate masks.
+
+STEP 2 — FILTER (filter_masks / filter_masks_with_props)
+---------------------------------------------------------
+Each candidate mask is tested against area and aspect ratio thresholds. Tiny blobs
+(likely noise) and blobs that are too square (not trail-shaped) are discarded here.
+The sky mask, if provided, zeroes out detections in the foreground zone.
+
+STEP 3 — GROUPER (group_detections)
+-------------------------------------
+Union-find algorithm with a 4-gate check. Two detections are merged into the same
+trail if they pass all four tests:
+  - Angle gate: their principal axes point in the same direction (within MAX_ANGLE_DEG).
+  - Width-ratio gate: their widths are within a factor of 2x (same physical object).
+  - Perpendicular gate: they are close in the direction perpendicular to the trail
+    axis (not two parallel but separate trails).
+  - Tip-to-tip gate: the tip of one detection is close to the tip of the other
+    (they are spatially adjacent, not just parallel at a distance).
+
+STEP 4 — POLYGON FITTING (fit_polygon / fit_curved_group)
+----------------------------------------------------------
+Once a group of fragments is confirmed as one trail, fit_polygon() wraps the combined
+pixel footprint in a minimal 4-corner rectangle aligned to the trail's principal axis.
+For long trails that visibly curve across the frame (common with wide-angle lenses),
+fit_curved_group() splits the trail into 600px-wide strips and fits a separate polygon
+to each strip, producing a chain of rectangles that follows the arc.
+
+These polygons are the unit used for CVAT annotation review and for the repair mask
+passed to modules/repair.py.
 
 Public API
 ----------

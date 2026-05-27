@@ -29,6 +29,69 @@ if len(sys.argv) > 1 and sys.argv[1] == '--cleanr-worker':
     runpy.run_path(script, run_name='__main__')
     sys.exit(0)
 
+"""
+star_trail_cleanr.py — Star Trail CleanR desktop application (GUI)
+
+WHAT THIS APP DOES
+------------------
+Star Trail CleanR removes airplane and satellite trails from astrophotography
+image sequences. Astrophotographers capture hundreds of frames of the night sky
+over hours, then stack them into a single "star trail" composite. Any aircraft or
+satellite that crosses the field of view during those hours leaves a bright streak
+in the final image. This app finds those streaks and removes them — frame by frame,
+automatically — before the user stacks.
+
+WHO USES IT
+-----------
+Amateur and semi-professional astrophotographers shooting star trail sequences on
+fixed tripods. The foreground (landscape, buildings, trees) is perfectly static
+across every frame. The stars move in arcs. Anything else moving through the frame
+is a trail to be removed.
+
+THE TWO-STEP PIPELINE
+---------------------
+1. Detect: YOLO AI model (Trail DetectoR) finds trail pixels in each frame via
+   tiled inference (SAHI). The sky/foreground mask limits false positives.
+   Static false positives (objects at the same location in every frame) are
+   suppressed by comparing detections across neighboring frames.
+
+2. Repair: Star Bridge fills removed pixels by tracking star motion from the
+   frame before and after, then blending those two neighbor frames together to
+   synthesize what the frame would look like without the trail. Any trail pixel
+   that can't be repaired via star tracking gets filled with pure black — which
+   is invisible in a lighten-max stack because real star pixels in other frames
+   always win.
+
+HOW THIS FILE WORKS
+-------------------
+This file is both the GUI and the algorithm launcher. The PySide6 desktop app
+lives entirely in this file. When the user clicks Run, the app spawns itself as
+a subprocess with the --cleanr-worker flag, which causes the re-invoked process
+to immediately load and execute astro_clean_v5.py (the algorithm) instead of
+showing a window. This worker-subprocess model keeps the GUI responsive during
+long batch jobs and isolates model loading from the GUI process.
+
+The worker re-launch block at the top of this file handles that early re-dispatch.
+Everything below that block (imports, classes, main()) is GUI-only code that never
+runs in the worker.
+
+BATCH SIZE AND STAR ROTATION
+-----------------------------
+Frames are processed in batches of up to 20 at a time. This limit exists because
+star motion between frames accumulates over time — a batch that spans too many
+minutes of real time will have stars that have moved far enough to confuse the
+repair step. The GUI loads one extra frame before and after each batch boundary
+so the repair can stitch across batch edges.
+
+KEY FILES
+---------
+- astro_clean_v5.py: worker subprocess — detection + repair algorithm
+- modules/detect_trails.py: YOLO/SAHI inference, sky mask, per-frame detection
+- modules/trail_grouper.py: fragments → groups → polygons
+- modules/repair.py: Star Bridge morph repair per trail
+- assets/best.pt: shipped YOLO segmentation weights (Trail DetectoR)
+"""
+
 import glob
 import json
 import threading
@@ -466,6 +529,15 @@ def fmt_hms(seconds):
     if h > 0:
         return f"{h}h {m:02d}m {s:02d}s"
     return f"{m}m {s:02d}s"
+
+
+def fmt_estimate(seconds):
+    total_minutes = max(1, round(seconds / 60))
+    h = total_minutes // 60
+    m = total_minutes % 60
+    if h > 0:
+        return f"{h} hr {m} min"
+    return f"{total_minutes} min"
 
 
 def _windows_release_label():
@@ -1031,7 +1103,7 @@ class CleanerWorker(QThread):
                                 batch_pct = (detect_count / frame_total) * 0.67
                                 overall_pct = int(((i + batch_pct) / n_batches) * 100)
                                 overall_pct = max(0, min(99, overall_pct))
-                                self.progress.emit(overall_pct, 100, fmt_hms(remaining))
+                                self.progress.emit(overall_pct, 100, fmt_estimate(remaining))
                                 if est_initial_shown is None:
                                     est_initial_shown = remaining + (now_t - t0)
                                     self.initial_estimate.emit(float(est_initial_shown))
@@ -1053,7 +1125,7 @@ class CleanerWorker(QThread):
                                 batch_pct = 0.67 + (repair_count / frame_total) * 0.33
                                 overall_pct = int(((i + batch_pct) / n_batches) * 100)
                                 overall_pct = max(0, min(99, overall_pct))
-                                self.progress.emit(overall_pct, 100, fmt_hms(remaining))
+                                self.progress.emit(overall_pct, 100, fmt_estimate(remaining))
                                 if est_initial_shown is None:
                                     est_initial_shown = remaining + (now_t - t0)
                                     self.initial_estimate.emit(float(est_initial_shown))
@@ -3352,8 +3424,20 @@ class MainWindow(QMainWindow):
             if count == 0:
                 self._frame_count_label.setText("No images found")
             else:
+                dim_str = ""
+                try:
+                    first = next(
+                        os.path.join(folder, n) for n in sorted(os.listdir(folder))
+                        if os.path.splitext(n)[1].lower() in exts
+                    )
+                    from PIL import Image as _PILImage
+                    with _PILImage.open(first) as _im:
+                        _w, _h = _im.size
+                    dim_str = f"  ({_w:,}px x {_h:,}px)"
+                except Exception:
+                    pass
                 self._frame_count_label.setText(
-                    f"<b>{count:,}</b> frame{'s' if count != 1 else ''} found")
+                    f"<b>{count:,}</b> frame{'s' if count != 1 else ''} found{dim_str}")
 
         model = self._frame_limit.model()
         for i in range(self._frame_limit.count()):
@@ -3782,8 +3866,7 @@ class MainWindow(QMainWindow):
         ch = self._spinner_chars[self._spinner_idx % len(self._spinner_chars)]
         start = getattr(self, '_run_start_time', None)
         elapsed = (time.time() - start.timestamp()) if start is not None else 0
-        m, s = divmod(int(elapsed), 60)
-        self._elapsed_label.setText(f"{ch}  Elapsed: {m}m {s:02d}s")
+        self._elapsed_label.setText(f"{ch}  Elapsed: {fmt_estimate(elapsed)}")
         if hasattr(self, '_star_log_title'):
             self._star_log_title.setText(f"Star Log  {ch}")
 

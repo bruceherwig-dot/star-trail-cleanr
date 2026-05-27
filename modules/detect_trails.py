@@ -1,4 +1,56 @@
-"""YOLO/SAHI trail detection."""
+"""
+Trail detection — YOLO segmentation model with SAHI tiled inference.
+
+WHY TILED INFERENCE
+-------------------
+The YOLO model processes images at 640x640 pixels. Astrophotography frames are
+typically 6000x4000 or larger. If we simply downscaled the full frame to 640x640,
+a trail that spans 3000 pixels in the original would become a 2-pixel smear — too
+thin for the model to detect reliably. Instead, SAHI (Slicing Aided Hyper Inference)
+divides each frame into overlapping 640x640 tiles, runs the model on every tile, then
+stitches all the per-tile detections back to full-frame pixel coordinates. Overlapping
+tiles (rather than non-overlapping) ensure that a trail near a tile edge is seen in
+full by at least one tile and not missed at the seam.
+
+WHAT COMES BACK FROM THE MODEL
+-------------------------------
+Each tile inference produces a set of predictions. Each prediction contains:
+- A segmentation mask: a boolean array (640x640) marking which pixels the model
+  thinks are part of a trail.
+- A confidence score: how certain the model is (0.0 to 1.0). We threshold at 0.25.
+- A bounding box for the detection.
+
+The tile mask is scaled back to its position in the full frame and combined with
+all other tile results to produce one full-frame binary mask per detection.
+
+GROUPING AND POLYGON FITTING (modules/trail_grouper.py)
+-------------------------------------------------------
+A single physical trail often crosses several tile boundaries. SAHI produces one
+detection fragment per tile, so a trail spanning three tiles comes back as three
+separate mask blobs. The grouper (trail_grouper.py) fuses fragments that belong to
+the same trail using geometric tests: angle alignment, width consistency, perpendicular
+offset, and tip-to-tip distance. Once grouped, fit_polygon() wraps the fused pixel
+mask in a clean 4-corner rectangle, which is the format written to the CVAT annotation
+tool and used for repair masking.
+
+SKY MASK
+--------
+apply_sky_mask() takes the combined detection mask and zeroes out any pixel that falls
+in the "foreground" zone — the part of the frame that is landscape, buildings, or other
+static terrestrial objects. The foreground mask is computed once per batch by finding
+pixels that are bright across many frames (foreground is always lit; sky varies).
+Removing foreground pixels from detections prevents bright edges, illuminated structures,
+and other static bright objects from passing through to the repair step.
+
+PUBLIC ENTRY POINT
+------------------
+detect_frame_polygon(frame, model, sky_mask, ...) — call this once per frame.
+Returns a list of per-trail dicts, each with:
+  - 'mask': full-frame binary uint8 array (255 = trail pixel)
+  - 'polygon': 4-corner rectangle in pixel coordinates
+  - 'conf': YOLO confidence score for this detection
+  - timing sub-fields for the JSONL run log
+"""
 import cv2
 import numpy as np
 import os

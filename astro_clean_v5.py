@@ -14,16 +14,66 @@ try:
 except Exception:
     pass
 """
-astro_clean_v5.py — YOLO-based astrophotography airplane trail removal
+astro_clean_v5.py — trail detection and repair worker
 
-ALGORITHM: Per-frame YOLO segmentation + temporal median repair
+ROLE IN THE APP
+---------------
+This script runs as a subprocess, not directly. Star Trail CleanR (the GUI in
+star_trail_cleanr.py) spawns this file via --cleanr-worker for each 20-frame batch.
+It reads raw frames from disk, finds every airplane and satellite trail in each frame,
+removes them, writes cleaned replacements, and logs per-frame results to a JSONL file.
+The GUI monitors stdout for progress updates while this worker runs.
 
-Pipeline:
-  1. Detect trails per frame using YOLO/SAHI tiled inference.
-     - Apply foreground/sky mask to suppress false positives.
-     - Filter small components (preserve red nav lights).
-  2. Repair: Star Bridge morph from neighbors, black fill fallback
-     (black is transparent in lighten-max stacks).
+THE TWO STEPS
+-------------
+Step 1 — DETECT (modules/detect_trails.py + modules/trail_grouper.py)
+  The YOLO model (Trail DetectoR) was trained to recognize the pixel shape of a trail
+  in a single astrophotography frame. Because our frames are large (often 6000x4000+)
+  and the model works on 640x640 tiles, we use SAHI (Slicing Aided Hyper Inference)
+  to divide each frame into overlapping tiles, run the model on each tile, then stitch
+  all results back to full-frame coordinates. The grouper fuses tile-boundary fragments
+  that belong to the same physical trail into one clean detection polygon.
+
+  The foreground/sky mask is computed once per batch: any pixel that is bright across
+  the majority of frames is foreground (landscape, buildings) rather than sky. The
+  mask is applied to each detection mask so that foreground false positives are
+  discarded before they reach the repair step.
+
+  The static FP suppressor runs after detection. It looks at each detected region and
+  checks whether the same pixel region is detected in neighboring frames too. If a
+  "trail" shows up in the same location across many frames, it's a static object (a
+  bright edge, a roofline, an illuminated antenna) — not a moving trail. Those
+  detections are removed before repair.
+
+Step 2 — REPAIR (modules/repair.py)
+  For each detected trail, Star Bridge synthesizes what the frame would look like
+  without it. It tracks bright star features from the frame before (N-1) to the frame
+  after (N+1) using Lucas-Kanade sparse optical flow, measures how far the stars moved
+  between those two neighbors, then shifts each neighbor by half that motion and
+  averages them. The result is a synthetic version of frame N with the stars in the
+  right position and the trail gone. Only the masked trail pixels are replaced — the
+  rest of the frame is untouched.
+
+  First/last frame fallback: only one neighbor is available, so that neighbor is
+  used directly (no blending).
+
+  Tracking failure fallback: if too few stars are found or their displacements are
+  implausible, the trail is filled with pure black (zero in all channels). Black is
+  invisible in a lighten-max composite because the real star pixel in any other frame
+  always wins.
+
+KEY ASSUMPTIONS
+---------------
+- Fixed tripod: all users shoot on non-tracking mounts. The foreground is
+  pixel-perfect static in every frame. Stars move; everything else stays still.
+- Trails span 2-20 consecutive frames for both airplanes and satellites.
+- Source files are predominantly full-resolution TIFFs (not JPEGs). Performance
+  decisions should treat TIFF as the primary case.
+- Batch size is capped at 20 frames. Beyond that, accumulated star rotation
+  between the first and last frame of a batch becomes large enough to degrade
+  the Star Bridge repair quality.
+- The GUI passes one extra frame before and after each batch (overlap frames)
+  so repair can stitch trails that cross batch boundaries.
 """
 
 import argparse

@@ -2,6 +2,12 @@
 
 ---
 
+## v2.35-beta
+- **Improvement: Running time estimate and elapsed time are now shown in minutes and hours only.** The "Time remaining" and "Time elapsed" displays in the Run screen no longer show seconds. Short jobs show "5 min"; longer jobs show "1 hr 46 min".
+- **Improvement: Folder selection now shows image dimensions.** After you select a folder, the frame count label now includes the width and height of your images, for example "206 frames found (6,720px x 4,480px)".
+- **Improvement: In-depth plain-English documentation added to all pipeline modules.** Each major source file now has a full description of what it does, why, and how the key steps work. Intended for anyone reading the code for the first time.
+- **Smoke tests:** 133 passing.
+
 ## v2.34-beta
 - **Improvement: Static false-positive suppressor is significantly faster.** The suppressor now pre-computes per-component bounding boxes for every frame before comparing, then works entirely within each component's bounding box instead of scanning the full image. On a 40-frame batch of 6000x4000 images, the suppressor step dropped from 36 seconds to under 6 seconds.
 - **Smoke tests:** 133 passing.
