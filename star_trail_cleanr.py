@@ -532,12 +532,13 @@ def fmt_hms(seconds):
 
 
 def fmt_estimate(seconds):
-    total_minutes = max(1, round(seconds / 60))
-    h = total_minutes // 60
-    m = total_minutes % 60
+    seconds = max(0, int(seconds))
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    s = seconds % 60
     if h > 0:
-        return f"{h} hr {m} min"
-    return f"{total_minutes} min"
+        return f"{h}h {m}m {s}s"
+    return f"{m}m {s}s"
 
 
 def _windows_release_label():

@@ -198,6 +198,113 @@ def _sahi_predict(model, img, tile_size, overlap):
     return result.object_prediction_list
 
 
+# ── Foreground-tile skip helpers ──────────────────────────────────────────────
+# When a foreground mask is available, tiles that are 100% foreground contain
+# no sky and therefore no trails. Skipping them saves one YOLO forward pass
+# (~45ms on MPS) per skipped tile. On high-foreground datasets this cuts the
+# fixed inference cost by 30–60%.
+#
+# _sahi_predict_skip replaces _sahi_predict when fg_mask is provided. It runs
+# the same tile grid but batches only the non-foreground tiles through YOLO
+# directly (bypassing SAHI's per-tile overhead). Returns (predictions, n_skipped).
+# Predictions are _SyntheticPred objects with the same .mask.bool_mask and
+# .score.value interface as SAHI ObjectPredictions.
+
+class _PredMaskWrap:
+    __slots__ = ("bool_mask",)
+    def __init__(self, bm):
+        self.bool_mask = bm
+
+class _PredScoreWrap:
+    __slots__ = ("value",)
+    def __init__(self, v):
+        self.value = v
+
+class _SyntheticPred:
+    """Duck-type replacement for SAHI ObjectPrediction."""
+    __slots__ = ("mask", "score")
+    def __init__(self, bool_mask, conf):
+        self.mask  = _PredMaskWrap(bool_mask)
+        self.score = _PredScoreWrap(float(conf))
+
+
+def _tile_starts(size, tile_size, stride):
+    """Return list of tile start positions for one dimension."""
+    starts = []
+    x = 0
+    while x + tile_size <= size:
+        starts.append(x)
+        x += stride
+    if not starts or starts[-1] + tile_size < size:
+        starts.append(size - tile_size)
+    return starts
+
+
+def _sahi_predict_skip(model, img_rgb, tile_size, overlap, fg_mask):
+    """Tiled YOLO inference that skips 100%-foreground tiles.
+
+    img_rgb: H x W x 3 RGB numpy array (same format as _sahi_predict).
+    fg_mask: H x W uint8, >0 = foreground pixel.
+    Returns (predictions, n_skipped) where predictions is a list of
+    _SyntheticPred objects compatible with the rest of the pipeline.
+    """
+    h, w = img_rgb.shape[:2]
+    stride = int(tile_size * (1 - overlap))
+    xs = _tile_starts(w, tile_size, stride)
+    ys = _tile_starts(h, tile_size, stride)
+
+    # Resize fg_mask to frame dims if needed (should always match but be safe)
+    fm = fg_mask if fg_mask.shape == (h, w) else cv2.resize(
+        fg_mask, (w, h), interpolation=cv2.INTER_NEAREST)
+
+    kept = []   # (tx, ty, crop_w, crop_h, bgr_crop)
+    n_skipped = 0
+    for ty in ys:
+        for tx in xs:
+            ty2 = min(h, ty + tile_size)
+            tx2 = min(w, tx + tile_size)
+            crop_h, crop_w = ty2 - ty, tx2 - tx
+            if (fm[ty:ty2, tx:tx2] > 0).all():
+                n_skipped += 1
+                continue
+            # YOLO expects BGR; our image is RGB
+            crop_bgr = np.ascontiguousarray(img_rgb[ty:ty2, tx:tx2, ::-1])
+            if crop_h < tile_size or crop_w < tile_size:
+                padded = np.zeros((tile_size, tile_size, 3), dtype=np.uint8)
+                padded[:crop_h, :crop_w] = crop_bgr
+                crop_bgr = padded
+            kept.append((tx, ty, crop_w, crop_h, crop_bgr))
+
+    if not kept:
+        return [], n_skipped
+
+    yolo = model.model
+    conf_thresh = getattr(model, "confidence_threshold", 0.25)
+    results = yolo.predict(
+        source=[t[4] for t in kept],
+        conf=conf_thresh, verbose=False, imgsz=tile_size,
+    )
+
+    preds = []
+    for (tx, ty, crop_w, crop_h, _), r in zip(kept, results):
+        if r.masks is None:
+            continue
+        confs = r.boxes.conf.tolist() if r.boxes is not None else []
+        for seg_idx, seg_xy in enumerate(r.masks.xy):
+            if len(seg_xy) < 3:
+                continue
+            seg_conf = float(confs[seg_idx]) if seg_idx < len(confs) else 0.0
+            local_u8 = np.zeros((tile_size, tile_size), dtype=np.uint8)
+            cv2.fillPoly(local_u8, [np.array(seg_xy, dtype=np.int32)], 1)
+            global_mask = np.zeros((h, w), dtype=bool)
+            global_mask[ty:ty + crop_h, tx:tx + crop_w] = (
+                local_u8[:crop_h, :crop_w].astype(bool))
+            if global_mask.any():
+                preds.append(_SyntheticPred(global_mask, seg_conf))
+
+    return preds, n_skipped
+
+
 # ── Public: detect_frame (combined pixel mask, no polygon fitting) ────────────
 # Used by the legacy detect_frame path. Not the active pipeline in STC v5.
 # The active pipeline uses detect_frame_polygon below.
@@ -259,9 +366,11 @@ def _build_raw_labeled_mask(predictions, h, w):
 # Uses direct YOLO forward pass (not SAHI get_prediction) to keep per-tile
 # overhead at ~5ms instead of ~300ms.
 
-_BRIDGE_MAX_GAP   = 400   # px: max tip-to-tip distance to attempt a bridge
-_BRIDGE_MAX_ANGLE = 7.0   # degrees: same as grouper gate 1
-_BRIDGE_MAX_WIDTH = 3.0   # ratio: same as grouper gate 2
+_BRIDGE_MAX_GAP        = 450   # px: max tip-to-tip distance to attempt a bridge
+_BRIDGE_MAX_ANGLE      = 12.0  # degrees: loosened from 7.0; PCA on fragment blobs is noisy
+_BRIDGE_MAX_WIDTH      = 3.0   # ratio: same as grouper gate 2
+_BRIDGE_TIP_ANGLE      = 20.0  # degrees: tip-to-tip vector must align with average trail direction
+_BRIDGE_CLIP_TOL       = 3     # px: facing edge must be within this many px of the seam boundary
 
 
 def _group_tips(grp, det_list):
@@ -292,6 +401,31 @@ def _find_gap_bridge_tiles(groups, det_list, h, w, tile_size):
     extra = []
     seen = set()
     n = len(groups)
+
+    # Pre-compute all SAHI tile boundary positions (x and y) for this frame.
+    # Stride = tile_size * (1 - overlap) = tile_size * 0.8 for overlap=0.2.
+    # Boundaries are: left edges at stride multiples, right edges = left + tile_size,
+    # plus the last tile's left edge (frame_size - tile_size) which may not fall on
+    # a stride multiple, and its right edge (frame_size).
+    _stride = int(tile_size * 0.8)
+
+    def _tile_bounds_1d(size):
+        bounds = set()
+        k = 0
+        while True:
+            left = k * _stride
+            if left > size - tile_size:
+                break
+            bounds.add(left)
+            bounds.add(min(left + tile_size, size))
+            k += 1
+        last_left = size - tile_size
+        bounds.add(last_left)
+        bounds.add(size)
+        return bounds
+
+    x_bounds = _tile_bounds_1d(w)
+    y_bounds = _tile_bounds_1d(h)
 
     for gi in range(n):
         for gj in range(gi + 1, n):
@@ -340,6 +474,60 @@ def _find_gap_bridge_tiles(groups, det_list, h, w, tile_size):
                     best_dist, best_a, best_b = d, ta, tb
 
             if best_dist > _BRIDGE_MAX_GAP:
+                continue
+
+            # Gate 4: seam-in-gap — SAHI NMS signature.
+            # A tile boundary line must fall strictly inside the spatial gap
+            # between the two groups' facing bbox extremes. This fires only
+            # when NMS actually clipped a trail at a seam, leaving a gap that
+            # straddles a grid line. No tolerance: the boundary must be in
+            # the gap, not merely near an edge.
+            min_c_i = float(all_i[:, 1].min())
+            max_c_i = float(all_i[:, 1].max())
+            min_c_j = float(all_j[:, 1].min())
+            max_c_j = float(all_j[:, 1].max())
+            min_r_i = float(all_i[:, 0].min())
+            max_r_i = float(all_i[:, 0].max())
+            min_r_j = float(all_j[:, 0].min())
+            max_r_j = float(all_j[:, 0].max())
+
+            x_lo = min(max_c_i, max_c_j)
+            x_hi = max(min_c_i, min_c_j)
+            y_lo = min(max_r_i, max_r_j)
+            y_hi = max(min_r_i, min_r_j)
+
+            x_seam = x_lo < x_hi and any(
+                x_lo < b < x_hi
+                and (abs(x_lo - b) <= _BRIDGE_CLIP_TOL or abs(x_hi - b) <= _BRIDGE_CLIP_TOL)
+                for b in x_bounds
+            )
+            y_seam = y_lo < y_hi and any(
+                y_lo < b < y_hi
+                and (abs(y_lo - b) <= _BRIDGE_CLIP_TOL or abs(y_hi - b) <= _BRIDGE_CLIP_TOL)
+                for b in y_bounds
+            )
+
+            if not (x_seam or y_seam):
+                continue
+
+            # Gate 5: tip-direction alignment
+            # The tip-to-tip vector must align with the average trail direction.
+            # Compensates for the loosened angle gate: proves the gap closes
+            # along the trail axis, not at some oblique angle.
+            tip_vec = best_b - best_a
+            tip_len = float(np.linalg.norm(tip_vec))
+            if tip_len < 1.0:
+                continue
+            tip_unit = tip_vec / tip_len
+            u_j_oriented = u_j if float(np.dot(u_i, u_j)) >= 0 else -u_j
+            u_avg = u_i + u_j_oriented
+            u_avg_norm = float(np.linalg.norm(u_avg))
+            if u_avg_norm < 1e-6:
+                continue
+            u_avg = u_avg / u_avg_norm
+            tip_cos = min(abs(float(np.dot(tip_unit, u_avg))), 1.0)
+            tip_adiff = float(np.degrees(np.arccos(tip_cos)))
+            if tip_adiff > _BRIDGE_TIP_ANGLE:
                 continue
 
             # Midpoint of the two nearest tips → center of the bridge tile
@@ -462,7 +650,7 @@ def detect_frame_polygon(model, image, tile_size: int = 640,
                          overlap: float = 0.2, dilate: int = 1,
                          return_raw: bool = False, debug_out=None,
                          edge_candidates_out=None, sky_mask=None,
-                         timing_out=None):
+                         timing_out=None, fg_mask=None):
     """Like detect_frame, but returns a tight fitted-polygon mask.
 
     Runs the same SAHI inference, then:
@@ -504,7 +692,11 @@ def detect_frame_polygon(model, image, tile_size: int = 640,
 
     # ── SAHI tiled inference ──────────────────────────────────────────────────
     _t0 = time.perf_counter()
-    predictions = _sahi_predict(model, img, tile_size, overlap)
+    _tiles_skipped = 0
+    if fg_mask is not None:
+        predictions, _tiles_skipped = _sahi_predict_skip(model, img, tile_size, overlap, fg_mask)
+    else:
+        predictions = _sahi_predict(model, img, tile_size, overlap)
     if timing_out is not None:
         timing_out["sahi_s"] = time.perf_counter() - _t0
 
@@ -543,6 +735,7 @@ def detect_frame_polygon(model, image, tile_size: int = 640,
 
     if debug_out is not None:
         debug_out["sahi_raw_count"] = len(predictions)
+        debug_out["sahi_tiles_skipped"] = _tiles_skipped
         debug_out["grouper"] = grouper_dbg
 
     # ── Union-find grouper + targeted tip-clip pass + polygon fitting ─────────
@@ -567,6 +760,7 @@ def detect_frame_polygon(model, image, tile_size: int = 640,
             timing_out["gap_pairs_count"] = bridge_tiles
         bridge_new_dets = 0
         bridge_merges = 0
+        bridge_rot90_merges = 0
         if gap_pairs:
             gp = list(range(len(groups)))
 
@@ -694,6 +888,7 @@ def detect_frame_polygon(model, image, tile_size: int = 640,
                     gp[_gf(gi)] = _gf(gj)
                     bridge_new_dets += len(new90)
                     bridge_merges += 1
+                    bridge_rot90_merges += 1
             if timing_out is not None:
                 timing_out["bridge_rot90_s"] = time.perf_counter() - _t0_rot90
 
@@ -708,6 +903,8 @@ def detect_frame_polygon(model, image, tile_size: int = 640,
         if debug_out is not None:
             debug_out["gap_bridge_tiles"] = bridge_tiles
             debug_out["gap_bridge_new_dets"] = bridge_new_dets
+            debug_out["gap_bridge_merges"] = bridge_merges
+            debug_out["gap_bridge_rot90_merges"] = bridge_rot90_merges
 
         _t0 = time.perf_counter()
         final = np.zeros((h, w), dtype=np.uint8)

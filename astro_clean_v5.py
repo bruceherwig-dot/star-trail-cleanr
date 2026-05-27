@@ -1087,7 +1087,8 @@ def main():
                                       debug_out=dbg,
                                       edge_candidates_out=edge_cands,
                                       sky_mask=sky_mask,
-                                      timing_out=_ft)
+                                      timing_out=_ft,
+                                      fg_mask=fg_mask)
         for _k, _v in _ft.items():
             _tacc(_k, _v)
         edge_candidates_all.append(edge_cands)
@@ -1143,7 +1144,8 @@ def main():
                 rotated = np.rot90(frames_8bit_all[i], 2)
                 _t0 = time.perf_counter()
                 mask2 = detect_frame_polygon(model, rotated, args.tile_size, args.overlap, args.dilate,
-                                         sky_mask=np.rot90(sky_mask, 2) if sky_mask is not None else None)
+                                         sky_mask=np.rot90(sky_mask, 2) if sky_mask is not None else None,
+                                         fg_mask=np.rot90(fg_mask, 2) if fg_mask is not None else None)
                 _tacc("second_scrub_s", time.perf_counter() - _t0)
                 if mask2 is None:
                     continue

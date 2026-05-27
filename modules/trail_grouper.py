@@ -11,13 +11,14 @@ inflating the trail count shown to the user.
 
 This module fuses those fragments back into one coherent detection before repair.
 
-STEP 1 — CROSSING SPLITTER (try_split)
----------------------------------------
+STEP 1 — CROSSING SPLITTER (split_crossing)
+--------------------------------------------
 Sometimes a tile contains two trails that cross at an angle, and the model returns
-them as one merged blob. try_split() uses Hough line detection to find the two
-dominant directions in the blob, then splits along the crossing point using DBSCAN
-clustering of the inlier pixels. A blob that is actually one straight trail is
-returned unchanged; an X-shaped blob is returned as two separate masks.
+them as one merged blob. split_crossing() in modules/crossing_splitter.py finds the
+junction point where the two trails meet, excludes a disc of pixels around it to
+isolate clean arms, then dilates the arms back to fill the gap. Handles X crossings,
+T intersections, and V shapes. The old try_split() function is kept below but is
+no longer called -- swap the import to revert.
 
 STEP 2 — FILTER (filter_masks / filter_masks_with_props)
 ---------------------------------------------------------
@@ -83,6 +84,7 @@ import cv2
 import numpy as np
 import time
 from skimage.measure import label as sklabel, regionprops as skregionprops
+from modules.crossing_splitter import split_crossing
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 # Thresholds used across filter, splitter, grouper, and polygon fitter.
@@ -390,7 +392,17 @@ def detection_props(mask, min_aspect=None, min_area=None):
         min_aspect = MIN_ASPECT
     if min_area is None:
         min_area = MIN_AREA
-    lbl = sklabel(mask)
+    # Crop to bounding box before running skimage regionprops.
+    # sklabel/skregionprops scan the entire image array, so running on the
+    # full 6000x4000 frame mask is ~100x slower than needed when the trail
+    # blob occupies a small fraction of that space.
+    ys, xs = np.where(mask > 0)
+    if len(ys) == 0:
+        return None
+    row_lo, row_hi = int(ys.min()), int(ys.max())
+    col_lo, col_hi = int(xs.min()), int(xs.max())
+    crop = mask[row_lo:row_hi + 1, col_lo:col_hi + 1]
+    lbl = sklabel(crop)
     props = skregionprops(lbl)
     if not props:
         return None
@@ -406,12 +418,12 @@ def detection_props(mask, min_aspect=None, min_area=None):
     _, vecs = np.linalg.eigh(p.inertia_tensor)
     u = vecs[:, 0]
     return {
-        "centroid": np.array(p.centroid),
+        "centroid": np.array([p.centroid[0] + row_lo, p.centroid[1] + col_lo]),
         "u":        u,
         "minor":    minor,
         "major":    p.axis_major_length,
         "area":     p.area,
-        "coords":   np.column_stack(np.where(mask > 0)),
+        "coords":   np.column_stack((ys, xs)),
     }
 
 
@@ -436,7 +448,7 @@ def filter_masks(preds, h, w, img=None):
         m = _pred_to_mask(pred, h, w)
         if m is None:
             continue
-        candidates = try_split(m)
+        candidates = split_crossing(m)
         for cm in candidates:
             if detection_props(cm) is not None:
                 passing.append(cm)
@@ -496,7 +508,7 @@ def filter_masks_with_props(preds, h, w, sky_mask=None, img=None, debug_out=None
                     debug_out["sky_zeroed"] += 1
                 continue
         _t0 = time.perf_counter()
-        candidates = try_split(m)
+        candidates = split_crossing(m)
         _ts += time.perf_counter() - _t0
         if len(candidates) > 1 and debug_out is not None:
             debug_out["try_split_fired"] += 1
