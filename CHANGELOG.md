@@ -2,6 +2,14 @@
 
 ---
 
+## v2.36-beta
+- **Improvement: Detection is significantly faster on images with a visible horizon or foreground.** Star Trail CleanR now skips AI inference on tiles that are entirely in the foreground — trees, buildings, ground — where trails can never appear. On sequences with a clear horizon in the lower third of the frame, this cuts the detection time per frame by 30 to 60 percent. Sequences that are mostly sky (very low horizon) are unaffected.
+- **Improvement: Trail-crossing detection is faster.** The step that separates two crossing trails from a single merged detection now runs 4x faster. It uses a cropped region instead of scanning the full frame, and processes pixels as a batch instead of one at a time.
+- **Improvement: Elongation filtering is faster.** The step that rejects blob-shaped detections that are too round to be a trail now runs 2x faster using the same cropping approach.
+- **Fix: Gap between trail fragments at tile boundaries is now reliably bridged.** The angle tolerance was tightened and two new geometric checks were added — one confirming the gap closes in the direction the trail is traveling, and one confirming the gap actually straddles a tile boundary. Fixes cases where a trail split at a corner would not be re-joined.
+- **Improvement: Time estimate now shows hours, minutes, and seconds** instead of rounded minutes only.
+- **Smoke tests:** 133 passing.
+
 ## v2.35-beta
 - **Improvement: Running time estimate and elapsed time are now shown in minutes and hours only.** The "Time remaining" and "Time elapsed" displays in the Run screen no longer show seconds. Short jobs show "5 min"; longer jobs show "1 hr 46 min".
 - **Improvement: Folder selection now shows image dimensions.** After you select a folder, the frame count label now includes the width and height of your images, for example "206 frames found (6,720px x 4,480px)".
