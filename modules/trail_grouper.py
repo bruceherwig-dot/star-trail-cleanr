@@ -20,6 +20,15 @@ isolate clean arms, then dilates the arms back to fill the gap. Handles X crossi
 T intersections, and V shapes. The old try_split() function is kept below but is
 no longer called -- swap the import to revert.
 
+STEP 1b — PARALLEL TRAIL SPLITTER (_try_split_parallel)
+---------------------------------------------------------
+Some tiles capture two parallel trails running side by side. The model merges them
+into one fat blob (minor axis > ~65px). _try_split_parallel() samples perpendicular
+cross-sections in the central 40% of the blob. If 2+ slices show two filled spans
+separated by a gap >= 3px, the blob is split along the median gap position into two
+independent detections. This fires only on fat blobs that the crossing splitter did
+not split (single angle cluster). Applied in both filter paths after split_crossing.
+
 STEP 2 — FILTER (filter_masks / filter_masks_with_props)
 ---------------------------------------------------------
 Each candidate mask is tested against area and aspect ratio thresholds. Tiny blobs
@@ -82,6 +91,7 @@ try_split(mask)
 
 import cv2
 import numpy as np
+import math
 import time
 from skimage.measure import label as sklabel, regionprops as skregionprops
 from modules.crossing_splitter import split_crossing
@@ -104,6 +114,8 @@ DBSCAN_MIN_SAMPLES  = 2
 TIP_PAD_PX          = 0   # pixels added to each tip of the fitted polygon; negative trims
 MIN_SPLIT_ANGLE_DEG = 10.0
 SEAM_MARGIN         = 3.0
+
+_REF_FRAME_PX = 6000 * 4000   # reference resolution for normalizing area thresholds
 
 _CURVED_MIN_XSPAN         = 1500   # px -- group must span this wide to be curved
 _CURVED_MIN_ANGLE_SPREAD  = 5.0    # degrees -- min angle variation to call it curved
@@ -298,7 +310,8 @@ def try_split(mask):
     generate enough Hough votes at threshold=20 to fire the split.
     """
     area = int((mask > 0).sum())
-    if area < SPLIT_AREA_MIN:
+    area_scale = (mask.shape[0] * mask.shape[1]) / _REF_FRAME_PX
+    if area < SPLIT_AREA_MIN * area_scale:
         return [mask]
 
     local_threshold = 10 if area < 20000 else HOUGH_THRESHOLD
@@ -390,8 +403,9 @@ def detection_props(mask, min_aspect=None, min_area=None):
     """
     if min_aspect is None:
         min_aspect = MIN_ASPECT
+    area_scale = (mask.shape[0] * mask.shape[1]) / _REF_FRAME_PX
     if min_area is None:
-        min_area = MIN_AREA
+        min_area = MIN_AREA * area_scale
     # Crop to bounding box before running skimage regionprops.
     # sklabel/skregionprops scan the entire image array, so running on the
     # full 6000x4000 frame mask is ~100x slower than needed when the trail
@@ -413,7 +427,7 @@ def detection_props(mask, min_aspect=None, min_area=None):
     if p.axis_major_length / minor < min_aspect:
         return None
     pixel_density = p.area / max(p.axis_major_length, 1)
-    if minor > 50 and minor > 2 * pixel_density:
+    if minor > 50 * math.sqrt(area_scale) and minor > 1.6 * pixel_density:
         return None
     _, vecs = np.linalg.eigh(p.inertia_tensor)
     u = vecs[:, 0]
@@ -425,6 +439,97 @@ def detection_props(mask, min_aspect=None, min_area=None):
         "area":     p.area,
         "coords":   np.column_stack((ys, xs)),
     }
+
+
+def _try_split_parallel(mask):
+    """Split a fat SAHI mask into two parallel trail masks when a perpendicular gap exists.
+
+    Some SAHI predictions merge two close parallel trails into one fat blob. Samples
+    10 perpendicular cross-sections in the central 40% of the blob. If >= 2 slices
+    show two filled spans separated by a gap >= 3px (each span >= 10px), splits all
+    blob pixels at the median gap position.
+
+    Returns [mask] unchanged if the blob is not fat enough (minor < 65px at 24MP)
+    or no consistent gap is found. Returns [mask_a, mask_b] on a successful split.
+    """
+    area_scale = (mask.shape[0] * mask.shape[1]) / _REF_FRAME_PX
+    fat_threshold = 65.0 * math.sqrt(area_scale)
+
+    ys, xs = np.where(mask > 0)
+    if len(ys) == 0:
+        return [mask]
+
+    row_lo, row_hi = int(ys.min()), int(ys.max())
+    col_lo, col_hi = int(xs.min()), int(xs.max())
+    crop = (mask[row_lo:row_hi + 1, col_lo:col_hi + 1] > 0).astype(np.uint8) * 255
+    lbl = sklabel(crop)
+    props = skregionprops(lbl)
+    if not props:
+        return [mask]
+    p = max(props, key=lambda x: x.area)
+    minor = p.axis_minor_length
+    major = p.axis_major_length
+    if minor < fat_threshold or major < minor * 2.0:
+        return [mask]
+
+    _, vecs = np.linalg.eigh(p.inertia_tensor)
+    u = vecs[:, 0]   # unit direction in (row, col) space: u[0]=row, u[1]=col
+    cy_full = float(p.centroid[0]) + row_lo
+    cx_full = float(p.centroid[1]) + col_lo
+
+    half_span = int(minor) + 8
+    sample_ts = np.linspace(-major * 0.20, major * 0.20, 10)
+
+    gap_positions = []
+    for t in sample_ts:
+        row_c = cy_full + u[0] * t
+        col_c = cx_full + u[1] * t
+        profile = []
+        for s in range(-half_span, half_span + 1):
+            r = int(round(row_c - u[1] * s)) - row_lo
+            c = int(round(col_c + u[0] * s)) - col_lo
+            if 0 <= r < crop.shape[0] and 0 <= c < crop.shape[1]:
+                profile.append(int(crop[r, c] > 0))
+            else:
+                profile.append(0)
+        spans = []
+        in_s = False
+        for j, v in enumerate(profile):
+            sc = j - half_span
+            if v and not in_s:
+                s_start = sc
+                in_s = True
+            elif not v and in_s:
+                spans.append((s_start, sc - 1))
+                in_s = False
+        if in_s:
+            spans.append((s_start, half_span))
+        if len(spans) == 2:
+            s0_w = spans[0][1] - spans[0][0] + 1
+            s1_w = spans[1][1] - spans[1][0] + 1
+            g_w = spans[1][0] - spans[0][1] - 1
+            if g_w >= 3 and s0_w >= 10 and s1_w >= 10:
+                gap_positions.append((spans[0][1] + spans[1][0]) / 2.0)
+
+    if len(gap_positions) < 2:
+        return [mask]
+
+    split_off = float(np.median(gap_positions))
+    drow = ys.astype(float) - cy_full
+    dcol = xs.astype(float) - cx_full
+    perp_off = drow * (-u[1]) + dcol * u[0]
+
+    side_a = perp_off < split_off
+    side_b = ~side_a
+    min_px = int(MIN_AREA * area_scale)
+    if int(side_a.sum()) < min_px or int(side_b.sum()) < min_px:
+        return [mask]
+
+    mask_a = np.zeros_like(mask)
+    mask_b = np.zeros_like(mask)
+    mask_a[ys[side_a], xs[side_a]] = 255
+    mask_b[ys[side_b], xs[side_b]] = 255
+    return [mask_a, mask_b]
 
 
 # ── Public: filter masks ──────────────────────────────────────────────────────
@@ -449,7 +554,10 @@ def filter_masks(preds, h, w, img=None):
         if m is None:
             continue
         candidates = split_crossing(m)
+        expanded = []
         for cm in candidates:
+            expanded.extend(_try_split_parallel(cm))
+        for cm in expanded:
             if detection_props(cm) is not None:
                 passing.append(cm)
             elif img is not None and _is_red_trail(cm, img):
@@ -487,6 +595,7 @@ def filter_masks_with_props(preds, h, w, sky_mask=None, img=None, debug_out=None
             "no_mask":             0,
             "sky_zeroed":          0,
             "try_split_fired":     0,
+            "crossing_arm_count":  0,
             "failed_elongation":   0,
             "kept_as_nav_light":   0,
             "passed":              0,
@@ -510,8 +619,14 @@ def filter_masks_with_props(preds, h, w, sky_mask=None, img=None, debug_out=None
         _t0 = time.perf_counter()
         candidates = split_crossing(m)
         _ts += time.perf_counter() - _t0
-        if len(candidates) > 1 and debug_out is not None:
-            debug_out["try_split_fired"] += 1
+        if len(candidates) > 1:
+            if debug_out is not None:
+                debug_out["try_split_fired"] += 1
+                debug_out["crossing_arm_count"] += len(candidates)
+        expanded = []
+        for cm in candidates:
+            expanded.extend(_try_split_parallel(cm))
+        candidates = expanded
         for cm in candidates:
             _t0 = time.perf_counter()
             props = detection_props(cm)

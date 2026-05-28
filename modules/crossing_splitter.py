@@ -1,48 +1,50 @@
 """
-Crossing splitter — junction-disc approach for X, T, and V shaped trail blobs.
+Crossing splitter — Voronoi arm approach for X, T, Y and V shaped trail blobs.
 
 Replaces try_split() in trail_grouper.py. The old function is kept there but
 no longer called. To revert: in trail_grouper.py swap the two split_crossing()
 calls back to try_split() and remove the crossing_splitter import.
 
-THE FIVE-PIECE MODEL
---------------------
+THE FOUR-ARM MODEL
+------------------
 When two trails cross (or meet), a single SAHI detection blob contains up to
-five distinct regions:
+four arms radiating from a junction point:
 
-  - Left arm   (trail A, left of junction)
-  - Right arm  (trail A, right of junction)
-  - Top arm    (trail B, above junction)
-  - Bottom arm (trail B, below junction)
-  - Junction   (the middle zone where both trails physically overlap)
+  - Arm A+  (trail A, positive direction from junction)
+  - Arm A-  (trail A, negative direction from junction)
+  - Arm B+  (trail B, positive direction from junction)
+  - Arm B-  (trail B, negative direction from junction)
 
-The junction zone is what caused the old try_split() to fail: assigning those
-pixels to either half inflated the minor axis of that half, and the quality
-check rejected the split.
+Each pixel is assigned to exactly one arm using Voronoi (perpendicular distance
+to each trail centerline) then split by sign of projection along the trail
+direction. Junction pixels are naturally assigned to whichever arm they are
+closest to -- no separate junction piece, no black fill, no overlap.
+
+For T, Y, V shapes one or two arms are absent (too few pixels) and are skipped,
+yielding 3 or 2 arms respectively.
 
 HOW THIS MODULE HANDLES IT
 ---------------------------
-1. Find two dominant Hough angle clusters -- same detection logic as old code.
-2. Find the junction point: intersection of the two cluster representative lines.
-3. Try increasing disc radii (0, 10, 20 ... 80 px) around the junction until
-   both split halves each contain at least one elongated trail arm.
-4. Once found, dilate each clean arm back by that radius and clip to the
-   original blob pixels. This fills the gap so each trail's mask is continuous
-   and both masks overlap in the crossing zone -- no unrepaired gap is left.
-
-This handles X, T, and V shapes with the same logic. For T and V the junction
-lands at the endpoint of one trail (or a shared vertex) rather than the middle,
-but the disc exclusion and dilation work identically.
+1. Find two dominant Hough angle clusters.
+2. Find the junction anchor: intersection of the two representative lines.
+3. Disc sweep (validation only): try increasing exclusion radii until both
+   Voronoi halves each contain an elongated arm. This confirms the split is
+   real before committing to the four-arm output.
+4. Output: assign ALL blob pixels (including junction zone) to their nearest
+   arm via Voronoi + projection sign. Return up to four non-overlapping masks.
+   Each arm is a continuous rectangular strip from its tip to the junction
+   center -- no gaps, no overlaps, ready for independent Star Bridge repair.
 
 Public API
 ----------
 split_crossing(mask) -> list[ndarray]
     Returns [mask] unchanged if no valid split is found.
-    Returns [mask_a, mask_b] if the blob cleanly separates into two trails.
-    Same return contract as the old try_split() in trail_grouper.py.
+    Returns [arm1, arm2, ...] (2-4 masks) if the blob splits into trail arms.
+    Each returned mask is a separate non-overlapping arm for independent repair.
 """
 
 import cv2
+import math
 import numpy as np
 from skimage.measure import label as sklabel, regionprops as skregionprops
 
@@ -56,11 +58,13 @@ _HOUGH_MIN_LINE     = 25     # px  -- minimum Hough line length
 _HOUGH_MAX_GAP      = 15     # px  -- maximum gap in a Hough line
 _DBSCAN_EPS         = 5.0    # deg -- angular neighbourhood for DBSCAN clustering
 _DBSCAN_MIN_SAMPLES = 2      # minimum lines per DBSCAN cluster
-_MIN_SPLIT_ANGLE    = 10.0   # deg -- minimum angular separation between clusters
+_MIN_SPLIT_ANGLE    = 25.0   # deg -- minimum angular separation between clusters
 _MIN_AREA           = 1000   # px  -- minimum area for a valid trail arm
 _MIN_ASPECT         = 2.0    # ratio -- minimum major/minor for a valid trail arm
 _DISC_STEP          = 10     # px  -- radius increment when scanning for clean split
 _DISC_MAX           = 80     # px  -- maximum exclusion radius to attempt
+_MIN_ARM_FRACTION   = 0.12   # ratio -- smaller arm must be >= 12% of combined kept pixels
+_REF_FRAME_PX       = 6000 * 4000   # reference resolution for normalizing area thresholds
 
 
 # ── Geometry helpers ───────────────────────────────────────────────────────────
@@ -135,7 +139,7 @@ def _dbscan_angles(angles, eps, min_samples):
 
 # ── Shape validator ────────────────────────────────────────────────────────────
 
-def _has_valid_arm(m):
+def _has_valid_arm(m, area_scale=1.0):
     """Return True if mask contains at least one component shaped like a trail arm.
 
     Checks every connected component individually -- unlike detection_props in
@@ -145,7 +149,7 @@ def _has_valid_arm(m):
     """
     n, lbl, st, _ = cv2.connectedComponentsWithStats(m, connectivity=8)
     for i in range(1, n):
-        if st[i, cv2.CC_STAT_AREA] < _MIN_AREA:
+        if st[i, cv2.CC_STAT_AREA] < _MIN_AREA * area_scale:
             continue
         comp = (lbl == i).astype(np.uint8) * 255
         rp = skregionprops(sklabel(comp))
@@ -196,7 +200,8 @@ def split_crossing(mask):
     Returns [mask_a, mask_b] if the blob splits cleanly.
     """
     area = int((mask > 0).sum())
-    if area < _SPLIT_AREA_MIN:
+    area_scale = (mask.shape[0] * mask.shape[1]) / _REF_FRAME_PX
+    if area < _SPLIT_AREA_MIN * area_scale:
         return [mask]
 
     blob_u8 = (mask > 0).astype(np.uint8) * 255
@@ -291,7 +296,12 @@ def split_crossing(mask):
     crop_rows = row_hi - row_lo + 1
     crop_cols = col_hi - col_lo + 1
 
-    found_a = found_b = None
+    # ── Disc sweep: validation only ───────────────────────────────────────────
+    # Exclude increasing disc radii around the anchor until both Voronoi halves
+    # each contain an elongated arm. This confirms the blob is a real crossing
+    # before committing to the four-arm output. The disc radius is NOT used in
+    # the output -- all pixels (including junction) are assigned via Voronoi.
+    valid_split = False
 
     for disc_r in range(0, _DISC_MAX + _DISC_STEP, _DISC_STEP):
         if disc_r > 0:
@@ -301,39 +311,55 @@ def split_crossing(mask):
 
         yk = ys[keep] - row_lo
         xk = xs[keep] - col_lo
-        side_a = d1_all[keep] <= d2_all[keep]
+        side_a_k = d1_all[keep] <= d2_all[keep]
 
         mask_a_c = np.zeros((crop_rows, crop_cols), dtype=np.uint8)
         mask_b_c = np.zeros((crop_rows, crop_cols), dtype=np.uint8)
-        mask_a_c[yk[side_a],  xk[side_a]]  = 255
-        mask_b_c[yk[~side_a], xk[~side_a]] = 255
+        mask_a_c[yk[side_a_k],  xk[side_a_k]]  = 255
+        mask_b_c[yk[~side_a_k], xk[~side_a_k]] = 255
 
         if mask_a_c.max() == 0 or mask_b_c.max() == 0:
             continue
 
-        if not _has_valid_arm(mask_a_c) or not _has_valid_arm(mask_b_c):
+        n_a = int((mask_a_c > 0).sum())
+        n_b = int((mask_b_c > 0).sum())
+        if min(n_a, n_b) / max(n_a + n_b, 1) < _MIN_ARM_FRACTION:
             continue
 
-        if disc_r > 0:
-            d = 2 * disc_r + 1
-            struct = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (d, d))
-            out_a_c = cv2.bitwise_and(cv2.dilate(mask_a_c, struct), blob_crop)
-            out_b_c = cv2.bitwise_and(cv2.dilate(mask_b_c, struct), blob_crop)
-        else:
-            out_a_c = mask_a_c
-            out_b_c = mask_b_c
-
-        if _passes_shape_filter(out_a_c) and _passes_shape_filter(out_b_c):
-            found_a = out_a_c
-            found_b = out_b_c
+        if _has_valid_arm(mask_a_c, area_scale) and _has_valid_arm(mask_b_c, area_scale):
+            valid_split = True
             break
 
-    if found_a is None:
+    if not valid_split:
         return [mask]
 
-    # Embed crop-local results back into full-frame masks.
-    out_a = np.zeros_like(mask)
-    out_b = np.zeros_like(mask)
-    out_a[row_lo:row_hi + 1, col_lo:col_hi + 1] = found_a
-    out_b[row_lo:row_hi + 1, col_lo:col_hi + 1] = found_b
-    return [out_a, out_b]
+    # ── Four-arm Voronoi output ───────────────────────────────────────────────
+    # Assign ALL blob pixels (including junction zone) to their nearest arm.
+    # Each pixel goes to the trail whose centerline it is closest to (d1 vs d2),
+    # then to the arm on its side of the junction (projection sign along trail).
+    # Result: up to four non-overlapping masks, each a continuous tip-to-center
+    # rectangular strip. Skips any arm with insufficient pixels (handles T/Y/V).
+    side_a = d1_all <= d2_all
+    udx1, udy1 = dx1 / len1, dy1 / len1
+    udx2, udy2 = dx2 / len2, dy2 / len2
+    proj_a = (xs_f - ax) * udx1 + (ys_f - ay) * udy1
+    proj_b = (xs_f - ax) * udx2 + (ys_f - ay) * udy2
+
+    arm_selections = [
+        side_a  & (proj_a >= 0),   # trail A, positive direction
+        side_a  & (proj_a <  0),   # trail A, negative direction
+        ~side_a & (proj_b >= 0),   # trail B, positive direction
+        ~side_a & (proj_b <  0),   # trail B, negative direction
+    ]
+
+    result = []
+    for arm_sel in arm_selections:
+        if int(arm_sel.sum()) < _MIN_AREA * area_scale:
+            continue
+        m_crop = np.zeros((crop_rows, crop_cols), dtype=np.uint8)
+        m_crop[ys[arm_sel] - row_lo, xs[arm_sel] - col_lo] = 255
+        m_full = np.zeros_like(mask)
+        m_full[row_lo:row_hi + 1, col_lo:col_hi + 1] = m_crop
+        result.append(m_full)
+
+    return result if len(result) >= 2 else [mask]

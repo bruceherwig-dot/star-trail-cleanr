@@ -366,7 +366,7 @@ def _build_raw_labeled_mask(predictions, h, w):
 # Uses direct YOLO forward pass (not SAHI get_prediction) to keep per-tile
 # overhead at ~5ms instead of ~300ms.
 
-_BRIDGE_MAX_GAP        = 450   # px: max tip-to-tip distance to attempt a bridge
+_BRIDGE_MAX_GAP        = 550   # px: max tip-to-tip distance to attempt a bridge
 _BRIDGE_MAX_ANGLE      = 12.0  # degrees: loosened from 7.0; PCA on fragment blobs is noisy
 _BRIDGE_MAX_WIDTH      = 3.0   # ratio: same as grouper gate 2
 _BRIDGE_TIP_ANGLE      = 20.0  # degrees: tip-to-tip vector must align with average trail direction
@@ -388,6 +388,49 @@ def _group_tips(grp, det_list):
     tip_min = centroid + (float(t.min()) - t_c) * u_avg
     tip_max = centroid + (float(t.max()) - t_c) * u_avg
     return tip_min, tip_max, u_avg
+
+
+def _split_disconnected_groups(groups, det_list):
+    """Split any group whose OR-mask has 2+ disconnected components.
+
+    Catches grouper false merges: two separate trail fragments that passed the
+    grouper's gates but are spatially disconnected. Each disconnected island
+    becomes its own group for independent polygon fitting.
+    A 1px dilation bridges hairline gaps between adjacent tile detections
+    without connecting genuinely separate clusters.
+    """
+    result = []
+    _kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    for grp in groups:
+        if len(grp) < 2:
+            result.append(grp)
+            continue
+        all_c = np.vstack([det_list[k]["coords"] for k in grp])
+        r0 = int(all_c[:, 0].min())
+        r1 = int(all_c[:, 0].max())
+        c0 = int(all_c[:, 1].min())
+        c1 = int(all_c[:, 1].max())
+        local = np.zeros((r1 - r0 + 1, c1 - c0 + 1), dtype=np.uint8)
+        for k in grp:
+            coords = det_list[k]["coords"]
+            local[coords[:, 0] - r0, coords[:, 1] - c0] = 1
+        n_labels, label_map = cv2.connectedComponents(cv2.dilate(local, _kernel))
+        if n_labels <= 2:
+            result.append(grp)
+            continue
+        sub = {}
+        for k in grp:
+            coords = det_list[k]["coords"]
+            r_c = max(0, min(r1 - r0, int(round(float(coords[:, 0].mean()))) - r0))
+            c_c = max(0, min(c1 - c0, int(round(float(coords[:, 1].mean()))) - c0))
+            lbl = int(label_map[r_c, c_c])
+            if lbl == 0:
+                flat = label_map[coords[:, 0] - r0, coords[:, 1] - c0].flatten()
+                counts = np.bincount(flat)
+                lbl = int(counts[1:].argmax()) + 1 if len(counts) > 1 else 1
+            sub.setdefault(lbl, []).append(k)
+        result.extend(sub.values())
+    return result
 
 
 def _find_gap_bridge_tiles(groups, det_list, h, w, tile_size):
@@ -650,7 +693,8 @@ def detect_frame_polygon(model, image, tile_size: int = 640,
                          overlap: float = 0.2, dilate: int = 1,
                          return_raw: bool = False, debug_out=None,
                          edge_candidates_out=None, sky_mask=None,
-                         timing_out=None, fg_mask=None):
+                         timing_out=None, fg_mask=None,
+                         polygon_segs_out=None, polygon_corners_out=None):
     """Like detect_frame, but returns a tight fitted-polygon mask.
 
     Runs the same SAHI inference, then:
@@ -749,6 +793,8 @@ def detect_frame_polygon(model, image, tile_size: int = 640,
         groups = group_detections(det_list)
         if timing_out is not None:
             timing_out["group_s"] = time.perf_counter() - _t0
+
+        groups = _split_disconnected_groups(groups, det_list)
 
         # Check every pair of groups for the seam-gap signature. If two groups
         # look like the same trail but their tips are farther apart than the
@@ -921,6 +967,12 @@ def detect_frame_polygon(model, image, tile_size: int = 640,
             for corners in corner_sets:
                 pts = np.array(corners, dtype=np.int32).reshape(-1, 1, 2)
                 cv2.fillPoly(final, [pts], 255)
+                if polygon_segs_out is not None:
+                    seg = np.zeros((h, w), dtype=np.uint8)
+                    cv2.fillPoly(seg, [pts], 255)
+                    polygon_segs_out.append(seg)
+                if polygon_corners_out is not None:
+                    polygon_corners_out.append([[int(c[0]), int(c[1])] for c in corners])
             poly_count += len(corner_sets)
         if timing_out is not None:
             timing_out["poly_fit_s"] = time.perf_counter() - _t0

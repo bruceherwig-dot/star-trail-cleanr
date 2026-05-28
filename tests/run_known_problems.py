@@ -19,7 +19,10 @@ Pass/fail logic per problem type:
       FAIL if any component centroid falls inside the problem bbox
 
   missed_trail / present:
-      FAIL if no component centroid is within 100px of (cx, cy) with area > min_area
+      PASS if component centroid within 100px of (cx, cy) with area > min_area/2
+      PASS (secondary) if target pixel (cx, cy) is directly inside a detected region
+      with area > min_area/2 (handles edge trails and multi-trail merges where
+      the polygon centroid is displaced from the annotated target point)
 
   needs_coordinates / bbox=null:
       SKIP
@@ -208,6 +211,19 @@ def run_entry(entry, model):
         if best_dist <= 100.0 and best_area >= min_area * 0.5:
             return "PASS", (f"Found: dist={best_dist:.0f}px area={best_area} "
                             f"({elapsed:.1f}s)")
+
+        # Secondary check: target pixel directly covered by a detected region.
+        # Centroid-based distance fails when the polygon is larger than the
+        # target trail (e.g. edge trails fitted to full extent, multi-trail merges).
+        lbl_at_target = labeled[cy_target, cx_target] if (
+            0 <= cy_target < mask.shape[0] and 0 <= cx_target < mask.shape[1]
+        ) else 0
+        if lbl_at_target > 0:
+            for r in regions:
+                if r.label == lbl_at_target and r.area >= min_area * 0.5:
+                    return "PASS", (f"Found: target pixel covered area={r.area:.0f} "
+                                    f"({elapsed:.1f}s)")
+
         return "FAIL", (f"Closest: dist={best_dist:.0f}px area={best_area} "
                         f"(need dist<=100 area>={min_area//2}) ({elapsed:.1f}s)")
 
