@@ -52,6 +52,7 @@ Returns a list of per-trail dicts, each with:
   - timing sub-fields for the JSONL run log
 """
 import cv2
+import math
 import numpy as np
 import os
 import time
@@ -61,7 +62,8 @@ from .io_safe import robust_imread
 from .trail_grouper import (filter_masks, filter_masks_with_props, group_detections,
                             fit_polygon, fit_curved_group, _group_angle_spread,
                             _CURVED_MIN_XSPAN, _CURVED_MIN_ANGLE_SPREAD,
-                            try_split, detection_props)
+                            try_split, detection_props,
+                            MIN_AREA, _REF_FRAME_PX)
 
 
 # ── Device selection ──────────────────────────────────────────────────────────
@@ -682,6 +684,53 @@ def _run_targeted_tile_rot90(model, img_rgb, tile_x, tile_y, tile_size, h, w):
 
 # ── Public: detect_frame_polygon (fitted polygon mask) ────────────────────────
 # Active detection entry point for STC v5. Pipeline:
+def _clip_overlapping_polygons(poly_fills, poly_lengths, min_fragment):
+    """Clip shorter polygon fills against longer ones at crossings.
+
+    For each overlapping pair the polygon with the longer major-axis span keeps
+    its fill intact; the shorter one has the longer one's area subtracted from
+    it. If the subtraction splits the shorter polygon into two stubs (top and
+    bottom at a crossing), both stubs are kept as separate repair patches
+    provided each is >= min_fragment pixels. This produces 3 non-overlapping
+    repair regions instead of one oversized merged blob.
+
+    Overlap gate: skip if overlap < 3% of the smaller polygon's area. This
+    catches genuine crossings while ignoring polygons that barely graze at tile
+    seams. The ratio is resolution-independent.
+
+    Gap creation: the winner fill is dilated 1px before subtraction, so each
+    surviving stub ends 2px away from the winner's actual boundary. Combined
+    with the 1px gap from the dilation, the stubs and winner form separate
+    connected components in the final mask.
+
+    poly_fills  : list of H×W uint8 masks, one per group
+    poly_lengths: list of float diagonal span values, one per group
+    min_fragment: keep a clipped stub only if its area >= this
+    """
+    _k = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    result = [f.copy() for f in poly_fills]
+    n = len(result)
+    for i in range(n):
+        for j in range(i + 1, n):
+            a_i = int(np.count_nonzero(result[i]))
+            a_j = int(np.count_nonzero(result[j]))
+            ov = int(np.count_nonzero((result[i] > 0) & (result[j] > 0)))
+            if ov < 0.03 * min(a_i, a_j):
+                continue
+            winner, loser = (i, j) if poly_lengths[i] >= poly_lengths[j] else (j, i)
+            # Dilate winner 1px so subtraction leaves a 2px gap between stubs
+            # and winner boundary -- enough for separate connected components.
+            winner_expanded = cv2.dilate((result[winner] > 0).astype(np.uint8), _k)
+            clipped = (result[loser] > 0) & ~winner_expanded.astype(bool)
+            nc, lbl = cv2.connectedComponents(clipped.astype(np.uint8))
+            rebuilt = np.zeros_like(result[loser])
+            for ci in range(1, nc):
+                if int((lbl == ci).sum()) >= min_fragment:
+                    rebuilt[lbl == ci] = 255
+            result[loser] = rebuilt
+    return result
+
+
 #   SAHI tiled inference → crossing splitter → elongation filter
 #   → union-find grouper → targeted tip-clip pass → polygon fitting → dilation.
 # sky_mask and small-component filter are applied by the caller (astro_clean_v5.py)
@@ -955,6 +1004,9 @@ def detect_frame_polygon(model, image, tile_size: int = 640,
         _t0 = time.perf_counter()
         final = np.zeros((h, w), dtype=np.uint8)
         poly_count = 0
+        poly_fills = []
+        poly_lengths = []
+        poly_corner_sets = []
         for grp in groups:
             all_coords = np.vstack([det_list[i]["coords"] for i in grp])
             x_span = int(all_coords[:,1].max() - all_coords[:,1].min())
@@ -964,16 +1016,29 @@ def detect_frame_polygon(model, image, tile_size: int = 640,
             else:
                 corners, _, _ = fit_polygon(grp, det_list)
                 corner_sets = [corners]
+            grp_fill = np.zeros((h, w), dtype=np.uint8)
             for corners in corner_sets:
                 pts = np.array(corners, dtype=np.int32).reshape(-1, 1, 2)
-                cv2.fillPoly(final, [pts], 255)
+                cv2.fillPoly(grp_fill, [pts], 255)
                 if polygon_segs_out is not None:
                     seg = np.zeros((h, w), dtype=np.uint8)
                     cv2.fillPoly(seg, [pts], 255)
                     polygon_segs_out.append(seg)
                 if polygon_corners_out is not None:
                     polygon_corners_out.append([[int(c[0]), int(c[1])] for c in corners])
+            row_span = float(all_coords[:, 0].max() - all_coords[:, 0].min())
+            col_span = float(all_coords[:, 1].max() - all_coords[:, 1].min())
+            poly_fills.append(grp_fill)
+            poly_lengths.append(math.sqrt(row_span ** 2 + col_span ** 2))
+            poly_corner_sets.append(corner_sets)
             poly_count += len(corner_sets)
+        area_scale = (h * w) / _REF_FRAME_PX
+        poly_fills = _clip_overlapping_polygons(
+            poly_fills, poly_lengths,
+            min_fragment=int((MIN_AREA // 2) * area_scale),
+        )
+        for grp_fill in poly_fills:
+            final |= grp_fill
         if timing_out is not None:
             timing_out["poly_fit_s"] = time.perf_counter() - _t0
         if debug_out is not None:

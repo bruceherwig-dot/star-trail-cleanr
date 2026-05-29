@@ -88,6 +88,48 @@ def _in_bbox(coords, px1, py1, px2, py2):
     ))
 
 
+def _check_static_fp_absent(model, image_path, neighbor_paths, px1, py1, px2, py2):
+    """For static_fp absent entries: run suppressor on a mini-batch and check the target frame.
+
+    Runs detect_frame_polygon on each neighbor frame, then the target frame.
+    Assembles them into a mini-batch with the target as the last frame, calls
+    _suppress_static_fps, and checks whether the FP in the target mask is gone.
+    PASS if no component centroid falls inside the problem bbox after suppression.
+    """
+    import sys as _sys
+    import os as _os
+    _sys.path.insert(0, _os.path.join(_os.path.dirname(__file__), ".."))
+    from modules.detect_trails import detect_frame_polygon
+    from astro_clean_v5 import _suppress_static_fps
+
+    t0 = time.time()
+    masks_all = []
+    for np_ in neighbor_paths:
+        m = detect_frame_polygon(model, np_, tile_size=640, overlap=0.2)
+        masks_all.append(m if m is not None else np.zeros((1, 1), dtype=np.uint8))
+
+    target_mask = detect_frame_polygon(model, image_path, tile_size=640, overlap=0.2)
+    if target_mask is None:
+        return "ERROR", "detect_frame_polygon returned None for target frame"
+    masks_all.append(target_mask)
+
+    core_start = len(masks_all) - 1
+    core_end = len(masks_all)
+    _suppress_static_fps(masks_all, core_start, core_end)
+    elapsed = time.time() - t0
+
+    post_mask = masks_all[core_start]
+    labeled = sklabel(post_mask)
+    regions = skregionprops(labeled)
+
+    for r in regions:
+        cy_c, cx_c = r.centroid
+        if px1 <= cx_c <= px2 and py1 <= cy_c <= py2:
+            return "FAIL", (f"FP centroid still present after suppression: "
+                            f"cx={cx_c:.0f} cy={cy_c:.0f} area={r.area} ({elapsed:.1f}s)")
+    return "PASS", f"FP suppressed (no centroid in bbox after suppressor) ({elapsed:.1f}s)"
+
+
 def _check_parallel_merge_absent(model, image_path, px1, py1, px2, py2):
     """For parallel_merge absent entries: check per-group polygon widths.
 
@@ -138,6 +180,11 @@ def run_entry(entry, model):
     # ── parallel_merge absent: per-group polygon width check ─────────────────
     if problem_type == "parallel_merge" and expected == "absent":
         return _check_parallel_merge_absent(model, image_path, px1, py1, px2, py2)
+
+    # ── static_fp absent: mini-batch suppressor check ────────────────────────
+    if problem_type == "static_fp" and expected == "absent":
+        neighbor_paths = entry.get("neighbor_frames", [])
+        return _check_static_fp_absent(model, image_path, neighbor_paths, px1, py1, px2, py2)
 
     t0 = time.time()
     mask = detect_frame_polygon(model, image_path, tile_size=640, overlap=0.2)
