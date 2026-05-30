@@ -1062,6 +1062,8 @@ def main():
 
     masks_all = []
     raw_masks_all = []
+    segs_all = []           # per-frame polygon segment lists for independent repair
+    corners_all = []        # per-frame polygon corner coordinate lists for JSON export
     edge_candidates_all = []  # per-frame lists of edge-touching detections that failed elongation
     detect_infos = []  # buffered per-frame detect data; written after static FP pass
     running_trail_total = 0
@@ -1080,6 +1082,8 @@ def main():
         dbg = {} if logger is not None else None
 
         edge_cands = []
+        frame_segs = []
+        frame_corners = []
         _ft = {}
         result = detect_frame_polygon(model, frames_8bit_all[i], args.tile_size,
                                       args.overlap, args.dilate,
@@ -1088,7 +1092,9 @@ def main():
                                       edge_candidates_out=edge_cands,
                                       sky_mask=sky_mask,
                                       timing_out=_ft,
-                                      fg_mask=fg_mask)
+                                      fg_mask=fg_mask,
+                                      polygon_segs_out=frame_segs,
+                                      polygon_corners_out=frame_corners)
         for _k, _v in _ft.items():
             _tacc(_k, _v)
         edge_candidates_all.append(edge_cands)
@@ -1096,6 +1102,8 @@ def main():
         if mask is None:
             masks_all.append(np.zeros((h, w), dtype=np.uint8))
             raw_masks_all.append(np.zeros((h, w), dtype=np.uint8))
+            segs_all.append([])
+            corners_all.append([])
             if dbg is not None:
                 dbg.update({"frame": fp.stem, "frame_idx": i,
                             "is_neighbor": is_neighbor,
@@ -1121,6 +1129,8 @@ def main():
         masks_all.append(mask)
         raw_masks_all.append(raw_labeled if raw_labeled is not None
                              else np.zeros((h, w), dtype=np.uint8))
+        segs_all.append(frame_segs)
+        corners_all.append(frame_corners)
         if is_neighbor:
             print(f"  detecting neighbor: {fp.name}", flush=True)
         else:
@@ -1298,11 +1308,25 @@ def main():
     print(f"  Step 1 complete - {trail_frames}/{n} frames have trails", flush=True)
 
     if masks_dir:
+        import json as _json
         raw_masks_per_frame = raw_masks_all[core_start:core_end]
-        for fp, mask, raw_mask in zip(frame_files, masks_per_frame, raw_masks_per_frame):
+        corners_per_frame = corners_all[core_start:core_end]
+        for fp, mask, raw_mask, frm_corners in zip(
+                frame_files, masks_per_frame, raw_masks_per_frame, corners_per_frame):
             robust_imwrite(masks_dir / (fp.stem + ".png"), mask)
             if raw_mask.max() > 0:
                 robust_imwrite(masks_dir / (fp.stem + "_raw.png"), raw_mask)
+            if frm_corners:
+                h_fr, w_fr = mask.shape
+                polys_data = {
+                    "frame": fp.stem,
+                    "width": w_fr,
+                    "height": h_fr,
+                    "polygons": [{"id": idx, "corners": c}
+                                 for idx, c in enumerate(frm_corners)],
+                }
+                (masks_dir / (fp.stem + "_polys.json")).write_text(
+                    _json.dumps(polys_data))
 
     # ── Step 2: Repair ────────────────────────────────────────────────────
     sb = args.skip_boundary
@@ -1338,6 +1362,7 @@ def main():
                 cleaned = repair_frame(img, mask, i + core_start,
                                        frames_all,
                                        neighbor_masks=neighbor_masks,
+                                       polygon_segs=segs_all[i + core_start],
                                        debug_out=repair_dbg)
                 _tacc("repair_s", time.perf_counter() - _t0)
                 _write_output(fp.stem, cleaned, icc_profile=icc_profile, exif_bytes=exif_bytes, dpi=dpi)

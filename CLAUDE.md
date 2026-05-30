@@ -22,6 +22,7 @@
 - GUI (`star_trail_cleanr.py`) chunks frames into 20-frame batches and runs `astro_clean_v5.py` as a subprocess per batch.
 - All users shoot on fixed tripods. No tracking mounts. Foreground is perfectly static across every frame — same pixel, every shot.
 - Airplane and satellite trails can each span 2 to 20 consecutive frames. Do not assume short duration for either.
+- Satellite constellation growth will roughly double the number of visible satellites in the next few years, increasing both the frequency of satellite trail events and the variety of crossing angles (including low-angle crossings). Robust crossing detection is increasingly critical.
 - Sequences are typically night sky, but twilight-to-darkness sequences are common (timelapse converted to star trail). Users run STC on the dark portion where trails are visible -- pure twilight frames are too bright for trails to show in a lighten-max stack so they're irrelevant. Twilight frames are out-of-distribution for the model (gradient sky, warm tones) and may produce more FPs or misses.
 - Framing: most sequences include a horizon with foreground (landscape, buildings, trees). Full-sky framing with no horizon is possible but uncommon.
 - Source files: predominantly full-resolution TIFFs, not JPEGs. Bruce expected mostly JPEGs but real-world usage is mostly TIFFs. Design and performance decisions should treat TIFF as the primary case.

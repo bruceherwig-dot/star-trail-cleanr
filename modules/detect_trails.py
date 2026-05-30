@@ -684,6 +684,18 @@ def _run_targeted_tile_rot90(model, img_rgb, tile_x, tile_y, tile_size, h, w):
 
 # ── Public: detect_frame_polygon (fitted polygon mask) ────────────────────────
 # Active detection entry point for STC v5. Pipeline:
+def _poly_angle(fill):
+    """Principal axis angle of a filled polygon mask, in degrees [0, 180)."""
+    ys, xs = np.where(fill > 0)
+    if len(xs) < 4:
+        return 0.0
+    dr = ys - ys.mean(); dc = xs - xs.mean()
+    Irr = float((dr * dr).mean()); Icc = float((dc * dc).mean()); Irc = float((dr * dc).mean())
+    _, evecs = np.linalg.eigh(np.array([[Irr, Irc], [Irc, Icc]]))
+    u = evecs[:, 1]
+    return float(np.degrees(np.arctan2(u[1], u[0])) % 180)
+
+
 def _clip_overlapping_polygons(poly_fills, poly_lengths, min_fragment):
     """Clip shorter polygon fills against longer ones at crossings.
 
@@ -698,6 +710,10 @@ def _clip_overlapping_polygons(poly_fills, poly_lengths, min_fragment):
     catches genuine crossings while ignoring polygons that barely graze at tile
     seams. The ratio is resolution-independent.
 
+    Angle gate: skip if the two polygons run at nearly the same angle (< 25
+    degree difference). Same-trail seam overlaps at tile boundaries have nearly
+    identical angles; genuine crossing trails differ by 25+ degrees.
+
     Gap creation: the winner fill is dilated 1px before subtraction, so each
     surviving stub ends 2px away from the winner's actual boundary. Combined
     with the 1px gap from the dilation, the stubs and winner form separate
@@ -710,25 +726,184 @@ def _clip_overlapping_polygons(poly_fills, poly_lengths, min_fragment):
     _k = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
     result = [f.copy() for f in poly_fills]
     n = len(result)
+
+    # Precompute per-fill bbox and area once rather than inside the O(N²) loop.
+    bboxes = []
+    areas = []
+    for f in result:
+        ys, xs = np.where(f > 0)
+        if len(ys) == 0:
+            bboxes.append(None)
+            areas.append(0)
+        else:
+            bboxes.append((int(ys.min()), int(ys.max()), int(xs.min()), int(xs.max())))
+            areas.append(int(len(ys)))
+
     for i in range(n):
+        if bboxes[i] is None:
+            continue
+        ri1, ri2, ci1, ci2 = bboxes[i]
         for j in range(i + 1, n):
-            a_i = int(np.count_nonzero(result[i]))
-            a_j = int(np.count_nonzero(result[j]))
-            ov = int(np.count_nonzero((result[i] > 0) & (result[j] > 0)))
-            if ov < 0.03 * min(a_i, a_j):
+            if bboxes[j] is None:
                 continue
+            rj1, rj2, cj1, cj2 = bboxes[j]
+
+            # Bbox intersection check -- skips the vast majority of pairs cheaply.
+            ir1 = max(ri1, rj1); ir2 = min(ri2, rj2)
+            ic1 = max(ci1, cj1); ic2 = min(ci2, cj2)
+            if ir1 > ir2 or ic1 > ic2:
+                continue
+
+            # All pixel work cropped to the intersection region.
+            fi_crop = result[i][ir1:ir2 + 1, ic1:ic2 + 1]
+            fj_crop = result[j][ir1:ir2 + 1, ic1:ic2 + 1]
+            ov = int(np.count_nonzero((fi_crop > 0) & (fj_crop > 0)))
+            if ov < 0.03 * min(areas[i], areas[j]):
+                continue
+
+            # Angle check on per-fill bbox crops (PCA angle is translation-invariant).
+            ang_i = _poly_angle(result[i][ri1:ri2 + 1, ci1:ci2 + 1])
+            ang_j = _poly_angle(result[j][rj1:rj2 + 1, cj1:cj2 + 1])
+            adiff = abs(ang_i - ang_j)
+            if adiff > 90:
+                adiff = 180 - adiff
+            if adiff < 25:
+                continue
+
             winner, loser = (i, j) if poly_lengths[i] >= poly_lengths[j] else (j, i)
-            # Dilate winner 1px so subtraction leaves a 2px gap between stubs
-            # and winner boundary -- enough for separate connected components.
-            winner_expanded = cv2.dilate((result[winner] > 0).astype(np.uint8), _k)
-            clipped = (result[loser] > 0) & ~winner_expanded.astype(bool)
+
+            # Clip within loser's bbox (+ 1px padding for dilation boundary).
+            rl1, rl2, cl1, cl2 = bboxes[loser]
+            h_f, w_f = result[loser].shape
+            rl1p = max(0, rl1 - 1); rl2p = min(h_f - 1, rl2 + 1)
+            cl1p = max(0, cl1 - 1); cl2p = min(w_f - 1, cl2 + 1)
+            loser_crop  = result[loser ][rl1p:rl2p + 1, cl1p:cl2p + 1]
+            winner_crop = result[winner][rl1p:rl2p + 1, cl1p:cl2p + 1]
+            winner_exp  = cv2.dilate((winner_crop > 0).astype(np.uint8), _k)
+            clipped = (loser_crop > 0) & ~winner_exp.astype(bool)
             nc, lbl = cv2.connectedComponents(clipped.astype(np.uint8))
-            rebuilt = np.zeros_like(result[loser])
+            rebuilt = np.zeros_like(loser_crop)
             for ci in range(1, nc):
                 if int((lbl == ci).sum()) >= min_fragment:
                     rebuilt[lbl == ci] = 255
-            result[loser] = rebuilt
+            result[loser][rl1p:rl2p + 1, cl1p:cl2p + 1] = rebuilt
+
+            # Refresh loser bbox/area after modification.
+            ys, xs = np.where(result[loser] > 0)
+            if len(ys) == 0:
+                bboxes[loser] = None
+                areas[loser]  = 0
+            else:
+                bboxes[loser] = (int(ys.min()), int(ys.max()), int(xs.min()), int(xs.max()))
+                areas[loser]  = int(len(ys))
+
     return result
+
+
+def _fill_tips(fill_mask):
+    """Return (tip_min_rc, tip_max_rc, u_rc, width_px) for a polygon fill, or None if too small."""
+    ys, xs = np.where(fill_mask > 0)
+    if len(xs) < 4:
+        return None
+    coords = np.stack([ys, xs], axis=1).astype(float)
+    centroid = coords.mean(axis=0)
+    dr = coords[:, 0] - centroid[0]
+    dc = coords[:, 1] - centroid[1]
+    Irr = float((dr * dr).mean())
+    Icc = float((dc * dc).mean())
+    Irc = float((dr * dc).mean())
+    _, evecs = np.linalg.eigh(np.array([[Irr, Irc], [Irc, Icc]]))
+    u = evecs[:, 1]  # major axis in (row, col) space
+    t = coords @ u
+    t_c = float(centroid @ u)
+    tip_min = centroid + (float(t.min()) - t_c) * u
+    tip_max = centroid + (float(t.max()) - t_c) * u
+    perp = np.array([-u[1], u[0]])
+    p = coords @ perp
+    width_px = float(p.max() - p.min())
+    return tip_min, tip_max, u, width_px
+
+
+def _link_polygon_gaps(final, poly_fills, polygon_segs_out, polygon_corners_out,
+                       h, w, tile_size):
+    """Fill gaps between collinear polygon pairs that the group-level bridge missed.
+
+    Operates on fitted polygon fills rather than raw detection groups, so the
+    geometry is deterministic regardless of MPS run-to-run variation. Scans
+    every pair of fills for: similar trail angle, a gap in the NMS-seam range,
+    and tip-to-tip vector aligned with the trail direction. When all three pass,
+    a connecting rectangle is filled between the two nearest tips, sized to the
+    narrower of the two polygons.
+
+    The minimum gap is a fraction of tile_size so it scales with the inference
+    grid rather than frame resolution. The maximum gap reuses _BRIDGE_MAX_GAP
+    because NMS seam gaps are bounded by tile geometry, not frame size.
+    """
+    min_gap = 0.05 * tile_size
+    n = len(poly_fills)
+    # Precompute tips once per fill (O(N)) rather than per pair (O(N²)).
+    all_tips = [_fill_tips(poly_fills[k]) for k in range(n)]
+    for i in range(n):
+        ti = all_tips[i]
+        if ti is None:
+            continue
+        tip_i_min, tip_i_max, u_i, w_i = ti
+        for j in range(i + 1, n):
+            tj = all_tips[j]
+            if tj is None:
+                continue
+            tip_j_min, tip_j_max, u_j, w_j = tj
+
+            # Gate 1: angle
+            cos_sim = min(abs(float(np.dot(u_i, u_j))), 1.0)
+            adiff = float(np.degrees(np.arccos(cos_sim)))
+            if adiff > _BRIDGE_MAX_ANGLE:
+                continue
+
+            # Nearest tips
+            best_dist, best_a, best_b = float("inf"), None, None
+            for ta, tb in [(tip_i_min, tip_j_min), (tip_i_min, tip_j_max),
+                           (tip_i_max, tip_j_min), (tip_i_max, tip_j_max)]:
+                d = float(np.linalg.norm(ta - tb))
+                if d < best_dist:
+                    best_dist, best_a, best_b = d, ta, tb
+
+            # Gate 2: gap range (bounded by tile geometry, not frame size)
+            if best_dist < min_gap or best_dist > _BRIDGE_MAX_GAP:
+                continue
+
+            # Gate 3: tip-direction alignment
+            tip_vec = best_b - best_a
+            tip_unit = tip_vec / float(np.linalg.norm(tip_vec))
+            u_j_oriented = u_j if float(np.dot(u_i, u_j)) >= 0 else -u_j
+            u_avg = u_i + u_j_oriented
+            u_avg_norm = float(np.linalg.norm(u_avg))
+            if u_avg_norm < 1e-6:
+                continue
+            u_avg /= u_avg_norm
+            tip_cos = min(abs(float(np.dot(tip_unit, u_avg))), 1.0)
+            if float(np.degrees(np.arccos(tip_cos))) > _BRIDGE_TIP_ANGLE:
+                continue
+
+            # Connecting rectangle between nearest tips, width = narrower polygon
+            gap_perp = np.array([-tip_unit[1], tip_unit[0]])
+            half_w = min(w_i, w_j) / 2.0
+            corners_rc = [
+                best_a + half_w * gap_perp,
+                best_a - half_w * gap_perp,
+                best_b - half_w * gap_perp,
+                best_b + half_w * gap_perp,
+            ]
+            # fillPoly and polygon_corners_out both use (x, y) = (col, row)
+            corners_xy = [[int(round(c[1])), int(round(c[0]))] for c in corners_rc]
+            pts = np.array(corners_xy, dtype=np.int32).reshape(-1, 1, 2)
+            cv2.fillPoly(final, [pts], 255)
+            if polygon_segs_out is not None:
+                seg = np.zeros((h, w), dtype=np.uint8)
+                cv2.fillPoly(seg, [pts], 255)
+                polygon_segs_out.append(seg)
+            if polygon_corners_out is not None:
+                polygon_corners_out.append(corners_xy)
 
 
 #   SAHI tiled inference → crossing splitter → elongation filter
@@ -866,126 +1041,10 @@ def detect_frame_polygon(model, image, tile_size: int = 640,
                 return x
 
             for gi, gj, tx, ty in gap_pairs:
-                new = _run_targeted_tile(model, img, tx, ty, tile_size, h, w)
-                if not new:
-                    continue
-                # Reject if every new detection overlaps heavily with an existing
-                # group — that means the tile re-detected a trail end that was
-                # already captured, not genuine gap content.
-                eff_h = min(h - ty, tile_size)
-                eff_w = min(w - tx, tile_size)
-                gi_local = np.zeros((eff_h, eff_w), dtype=bool)
-                gj_local = np.zeros((eff_h, eff_w), dtype=bool)
-                for k in groups[gi]:
-                    c = det_list[k]["coords"]
-                    m = (c[:,0]>=ty)&(c[:,0]<ty+eff_h)&(c[:,1]>=tx)&(c[:,1]<tx+eff_w)
-                    lc = c[m]
-                    if len(lc):
-                        gi_local[lc[:,0]-ty, lc[:,1]-tx] = True
-                for k in groups[gj]:
-                    c = det_list[k]["coords"]
-                    m = (c[:,0]>=ty)&(c[:,0]<ty+eff_h)&(c[:,1]>=tx)&(c[:,1]<tx+eff_w)
-                    lc = c[m]
-                    if len(lc):
-                        gj_local[lc[:,0]-ty, lc[:,1]-tx] = True
-                u_bridge = det_list[groups[gi][0]]["u"]
-                # Lateral band: new detections must be at roughly the same
-                # y-level as the two trail groups. A separate unrelated trail
-                # in the same tile but a different part of the frame must not
-                # trigger the bridge.
-                all_ci = np.vstack([det_list[k]["coords"] for k in groups[gi]])
-                all_cj = np.vstack([det_list[k]["coords"] for k in groups[gj]])
-                ci_row = float(all_ci[:,0].mean())
-                cj_row = float(all_cj[:,0].mean())
-                minor_gi = float(np.median([det_list[k]["minor"] for k in groups[gi]]))
-                minor_gj = float(np.median([det_list[k]["minor"] for k in groups[gj]]))
-                lat_tol = 2.0 * max(minor_gi, minor_gj)
-                row_lo = min(ci_row, cj_row) - lat_tol
-                row_hi = max(ci_row, cj_row) + lat_tol
-                genuine = False
-                for nd in new:
-                    # Must be in the lateral band between the two trail groups.
-                    nd_row = float(nd["coords"][:,0].mean())
-                    if nd_row < row_lo or nd_row > row_hi:
-                        continue
-                    c = nd["coords"]
-                    m = (c[:,0]>=ty)&(c[:,0]<ty+eff_h)&(c[:,1]>=tx)&(c[:,1]<tx+eff_w)
-                    lc = c[m]
-                    if len(lc) == 0:
-                        continue
-                    lr, lc2 = lc[:,0]-ty, lc[:,1]-tx
-                    ov_i = int(np.count_nonzero(gi_local[lr, lc2]))
-                    ov_j = int(np.count_nonzero(gj_local[lr, lc2]))
-                    ov_max = max(ov_i, ov_j)
-                    # Genuine if: little overlap (current check), OR the detection
-                    # overlaps BOTH groups -- it physically spans the gap.
-                    bilateral = (ov_i / len(lc) > 0.05) and (ov_j / len(lc) > 0.05)
-                    if ov_max / len(lc) < 0.30 or bilateral:
-                        genuine = True
-                        break
-                if genuine:
-                    gp[_gf(gi)] = _gf(gj)
-                    bridge_new_dets += len(new)
-                    bridge_merges += 1
-
-            # Second pass: 90-degree tile rotation for pairs not merged by first pass
-            _t0_rot90 = time.perf_counter()
-            for gi, gj, tx, ty in gap_pairs:
                 if _gf(gi) == _gf(gj):
                     continue
-                new90 = _run_targeted_tile_rot90(model, img, tx, ty, tile_size, h, w)
-                if not new90:
-                    continue
-                eff_h = min(h - ty, tile_size)
-                eff_w = min(w - tx, tile_size)
-                gi_local90 = np.zeros((eff_h, eff_w), dtype=bool)
-                gj_local90 = np.zeros((eff_h, eff_w), dtype=bool)
-                for k in groups[gi]:
-                    c = det_list[k]["coords"]
-                    m = (c[:,0]>=ty)&(c[:,0]<ty+eff_h)&(c[:,1]>=tx)&(c[:,1]<tx+eff_w)
-                    lc = c[m]
-                    if len(lc):
-                        gi_local90[lc[:,0]-ty, lc[:,1]-tx] = True
-                for k in groups[gj]:
-                    c = det_list[k]["coords"]
-                    m = (c[:,0]>=ty)&(c[:,0]<ty+eff_h)&(c[:,1]>=tx)&(c[:,1]<tx+eff_w)
-                    lc = c[m]
-                    if len(lc):
-                        gj_local90[lc[:,0]-ty, lc[:,1]-tx] = True
-                all_ci90 = np.vstack([det_list[k]["coords"] for k in groups[gi]])
-                all_cj90 = np.vstack([det_list[k]["coords"] for k in groups[gj]])
-                ci_row90 = float(all_ci90[:,0].mean())
-                cj_row90 = float(all_cj90[:,0].mean())
-                minor_gi90 = float(np.median([det_list[k]["minor"] for k in groups[gi]]))
-                minor_gj90 = float(np.median([det_list[k]["minor"] for k in groups[gj]]))
-                lat_tol90 = 2.0 * max(minor_gi90, minor_gj90)
-                row_lo90 = min(ci_row90, cj_row90) - lat_tol90
-                row_hi90 = max(ci_row90, cj_row90) + lat_tol90
-                genuine90 = False
-                for nd in new90:
-                    nd_row = float(nd["coords"][:,0].mean())
-                    if nd_row < row_lo90 or nd_row > row_hi90:
-                        continue
-                    c = nd["coords"]
-                    m = (c[:,0]>=ty)&(c[:,0]<ty+eff_h)&(c[:,1]>=tx)&(c[:,1]<tx+eff_w)
-                    lc = c[m]
-                    if len(lc) == 0:
-                        continue
-                    lr, lc2 = lc[:,0]-ty, lc[:,1]-tx
-                    ov_i = int(np.count_nonzero(gi_local90[lr, lc2]))
-                    ov_j = int(np.count_nonzero(gj_local90[lr, lc2]))
-                    ov_max = max(ov_i, ov_j)
-                    bilateral = (ov_i / len(lc) > 0.05) and (ov_j / len(lc) > 0.05)
-                    if ov_max / len(lc) < 0.30 or bilateral:
-                        genuine90 = True
-                        break
-                if genuine90:
-                    gp[_gf(gi)] = _gf(gj)
-                    bridge_new_dets += len(new90)
-                    bridge_merges += 1
-                    bridge_rot90_merges += 1
-            if timing_out is not None:
-                timing_out["bridge_rot90_s"] = time.perf_counter() - _t0_rot90
+                gp[_gf(gi)] = _gf(gj)
+                bridge_merges += 1
 
             merged = {}
             for gi, grp in enumerate(groups):
@@ -1039,6 +1098,27 @@ def detect_frame_polygon(model, image, tile_size: int = 640,
         )
         for grp_fill in poly_fills:
             final |= grp_fill
+
+        # Fallback: filtered detections where less than 70% of their pixel
+        # coords are covered by the polygon fills get their own single-detection
+        # rotated rectangle added to the mask.
+        for i, det in enumerate(det_list):
+            c = det["coords"]
+            covered = int(np.count_nonzero(final[c[:, 0], c[:, 1]]))
+            if covered / len(c) < 0.70:
+                corners, _, _ = fit_polygon([i], det_list)
+                pts = np.array(corners, dtype=np.int32).reshape(-1, 1, 2)
+                cv2.fillPoly(final, [pts], 255)
+                if polygon_segs_out is not None:
+                    seg = np.zeros((h, w), dtype=np.uint8)
+                    cv2.fillPoly(seg, [pts], 255)
+                    polygon_segs_out.append(seg)
+                if polygon_corners_out is not None:
+                    polygon_corners_out.append([[int(corner[0]), int(corner[1])] for corner in corners])
+
+        _link_polygon_gaps(final, poly_fills, polygon_segs_out, polygon_corners_out,
+                           h, w, tile_size)
+
         if timing_out is not None:
             timing_out["poly_fit_s"] = time.perf_counter() - _t0
         if debug_out is not None:

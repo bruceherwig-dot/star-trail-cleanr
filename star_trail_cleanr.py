@@ -562,7 +562,7 @@ class CleanerWorker(QThread):
     progress = Signal(int, int, str)   # pct, total, remaining_str
     status = Signal(str)               # log line
     batch_info = Signal(int, int)      # batch_num (1-based), n_batches
-    step_progress = Signal(int, int, int)  # step (1 or 2), current, total
+    step_progress = Signal(int, int, int, int, int)  # step, batch_current, batch_total, global_current, global_total
     step_detail = Signal(str)          # filename + detail text
     frame_count = Signal(int, int)     # frames_cleaned, total
     stats_ready = Signal(int, int)     # total_trails, total_frames_scanned
@@ -1076,13 +1076,13 @@ class CleanerWorker(QThread):
                         self.warmup_active.emit(True)
                     if "Step 1" in proc_line and "detecting" in proc_line:
                         cur_step = 1
-                        self.step_progress.emit(1, 0, this_batch)
+                        self.step_progress.emit(1, 0, this_batch, start, total)
                         # Idempotent on the GUI side; harmless if already running.
                         self.warmup_active.emit(True)
                     elif "Step 2" in proc_line and "cleaning" in proc_line:
                         cur_step = 2
-                        self.step_progress.emit(1, this_batch, this_batch)
-                        self.step_progress.emit(2, 0, this_batch)
+                        self.step_progress.emit(1, this_batch, this_batch, start + this_batch, total)
+                        self.step_progress.emit(2, 0, this_batch, start, total)
 
                     # Parse frame progress within steps
                     sub_m = _sub_re.search(proc_line)
@@ -1096,7 +1096,7 @@ class CleanerWorker(QThread):
                             if est_processing_start_t is None:
                                 est_processing_start_t = now_t
                             self.warmup_active.emit(False)
-                            self.step_progress.emit(1, frame_num, frame_total)
+                            self.step_progress.emit(1, frame_num, frame_total, start + frame_num, total)
                             self.step_detail.emit(proc_line)
 
                             remaining = _estimate_remaining(now_t, this_batch, "detect", frame_num, frame_total)
@@ -1116,7 +1116,7 @@ class CleanerWorker(QThread):
                             now_t = time.time()
                             if est_processing_start_t is None:
                                 est_processing_start_t = now_t
-                            self.step_progress.emit(2, frame_num, frame_total)
+                            self.step_progress.emit(2, frame_num, frame_total, start + frame_num, total)
                             frames_cleaned = start + frame_num
                             self.frame_count.emit(frames_cleaned, total)
                             self.step_detail.emit(proc_line)
@@ -1209,7 +1209,7 @@ class CleanerWorker(QThread):
                          force=True, note=f"cum_frames={est_batches_done_frames}")
 
                 # Mark both steps complete for this batch
-                self.step_progress.emit(2, this_batch, this_batch)
+                self.step_progress.emit(2, this_batch, this_batch, start + this_batch, total)
                 _add_log(f"Batch {i+1}/{n_batches} complete ({fmt_hms(time.time() - t0)} elapsed)")
 
             self.progress.emit(100, 100, "")
@@ -2683,6 +2683,13 @@ class MainWindow(QMainWindow):
     def _relaunch(self):
         """Close and reopen the app."""
         import subprocess
+        from PySide6.QtWidgets import QApplication as _QApp
+        _sock = getattr(_QApp.instance(), '_lock_socket', None)
+        if _sock is not None:
+            try:
+                _sock.close()
+            except Exception:
+                pass
         if getattr(sys, 'frozen', False):
             subprocess.Popen([sys.executable, '--cleanr-relaunch'])
         else:
@@ -3575,16 +3582,25 @@ class MainWindow(QMainWindow):
                 _f.write("probe")
             os.remove(_probe_path)
         except (PermissionError, OSError) as _err:
+            import errno as _errno
             from PySide6.QtWidgets import QMessageBox as _QMB
-            _QMB.warning(
-                self,
-                "Cannot write to output folder",
-                f"Star Trail CleanR cannot write to:\n\n{output}\n\n"
-                "Pick a different folder, or check that it isn't on a read-only "
-                "drive, a OneDrive synced location, or a folder where files are "
-                "open in another app.\n\n"
-                f"(Detail: {type(_err).__name__}: {_err})"
-            )
+            if getattr(_err, "errno", None) == _errno.ENOSPC:
+                _QMB.warning(
+                    self,
+                    "Drive is full",
+                    f"The output drive is full.\n\n{output}\n\n"
+                    "Free up space on that drive, or pick a different output folder."
+                )
+            else:
+                _QMB.warning(
+                    self,
+                    "Cannot write to output folder",
+                    f"Star Trail CleanR cannot write to:\n\n{output}\n\n"
+                    "Pick a different folder, or check that it isn't on a read-only "
+                    "drive, a OneDrive synced location, or a folder where files are "
+                    "open in another app.\n\n"
+                    f"(Detail: {type(_err).__name__}: {_err})"
+                )
             return None
 
         # Disk space + memory check: estimate resources needed before the run starts.
@@ -3633,19 +3649,22 @@ class MainWindow(QMainWindow):
                     return f"{b / 1_073_741_824:.1f} GB"
 
                 _free_bytes = _shutil.disk_usage(output).free
-                if _free_bytes < _estimated_bytes * 1.5:
+                if _free_bytes < _estimated_bytes:
                     from PySide6.QtWidgets import QMessageBox as _QMB
-                    resp = _QMB.warning(
-                        self,
-                        "Low disk space",
+                    _dlg = _QMB(self)
+                    _dlg.setIcon(_QMB.Warning)
+                    _dlg.setWindowTitle("Low disk space")
+                    _dlg.setText(
                         f"The output drive may not have enough space for this run.\n\n"
                         f"Estimated space needed:  {_fmt_gb(_estimated_bytes)}\n"
                         f"Free space available:      {_fmt_gb(_free_bytes)}\n\n"
-                        "You can continue anyway or cancel and pick a different output folder.",
-                        _QMB.Ok | _QMB.Cancel,
-                        _QMB.Cancel,
+                        "You can continue anyway or cancel and pick a different output folder."
                     )
-                    if resp == _QMB.Cancel:
+                    _cont_btn = _dlg.addButton("Continue", _QMB.AcceptRole)
+                    _dlg.addButton("Cancel", _QMB.RejectRole)
+                    _dlg.setDefaultButton(_cont_btn)
+                    _dlg.exec()
+                    if _dlg.clickedButton().text() == "Cancel":
                         return None
 
                 try:
@@ -3907,7 +3926,7 @@ class MainWindow(QMainWindow):
         self._step2_label.setText("Repairing\nwaiting")
         self._step2_bar.setStyleSheet(step1_style)
 
-    def _on_step_progress(self, step, current, total):
+    def _on_step_progress(self, step, current, total, global_current, global_total):
         if getattr(self, "_run_cancelled", False):
             return
         green_style = (
@@ -3925,7 +3944,7 @@ class MainWindow(QMainWindow):
                 self._step1_bar.setStyleSheet(green_style)
             else:
                 self._step1_bar.setFormat(f"{pct}%")
-                self._step1_label.setText(f"Detecting\nframe {current}/{total}")
+                self._step1_label.setText(f"Detecting\nframe {global_current}/{global_total}")
         elif step == 2:
             self._step2_bar.setValue(pct)
             if pct >= 100:
@@ -3934,7 +3953,7 @@ class MainWindow(QMainWindow):
                 self._step2_bar.setStyleSheet(green_style)
             else:
                 self._step2_bar.setFormat(f"{pct}%")
-                self._step2_label.setText(f"Repairing\nframe {current}/{total}")
+                self._step2_label.setText(f"Repairing\nframe {global_current}/{global_total}")
 
     def _on_warmup_active(self, active):
         if active:
@@ -4700,6 +4719,7 @@ if __name__ == '__main__':
         sys.exit(1)
 
     app = QApplication(sys.argv)
+    app._lock_socket = _lock_socket  # exposed so _relaunch can close it before spawning
 
     # Bundle our own font so widgets render at the same widths on every OS.
     # Without this, Mac uses San Francisco, Windows uses Segoe UI, Linux uses

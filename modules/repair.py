@@ -206,6 +206,7 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                  frame_idx: int,
                  neighbor_frames: list,
                  neighbor_masks: list = None,
+                 polygon_segs: list = None,
                  debug_out=None) -> np.ndarray:
     """Replace masked trail pixels using Star Bridge sparse-track morph repair.
 
@@ -218,6 +219,11 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
             (None entries = no mask / assume clean). When provided, a neighbor
             is skipped for any component where its mask overlaps that component,
             since its pixels there are trail, not sky.
+        polygon_segs: optional list of per-polygon binary masks (one per trail
+            arm or polygon). When provided, each segment is repaired independently
+            with its own Star Bridge pass instead of merging all polygons into one
+            connected-components analysis. Crossing-split arms are separate entries
+            so each narrow arm is repaired independently.
         debug_out (dict, optional): filled with a "components" list. Each entry
             has id, area, bbox, split_into, and a "segments" list. Each segment
             has tracking_ok, dx, dy, n_stars, method, still_trail_px,
@@ -228,6 +234,17 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
     result = frame.copy()
     trail = mask > 0
     if not trail.any():
+        return result
+
+    # When polygon segments are provided, repair each arm independently.
+    # Each recursive call processes one narrow polygon with its own Star Bridge
+    # pass. No connectedComponentsWithStats -- each polygon is already one unit.
+    if polygon_segs is not None and len(polygon_segs) > 0:
+        for seg_mask in polygon_segs:
+            if not (seg_mask > 0).any():
+                continue
+            result = repair_frame(result, seg_mask, frame_idx, neighbor_frames,
+                                  neighbor_masks=neighbor_masks)
         return result
 
     if debug_out is not None:
