@@ -182,12 +182,13 @@ def test_production_call_site_passes_array_not_path():
     AND the v1.91 crash source — the default cv2.imread does not reliably
     downcast 16-bit on every Windows + TIFF combination."""
     text = (REPO / "astro_clean_v5.py").read_text()
-    assert "detect_frame(model, frames_8bit_all[i]" in text, (
-        "astro_clean_v5.py no longer hands detect_frame the pre-loaded 8-bit "
-        "array. It must NOT regress to passing a file path — that re-loads "
-        "from disk and risks the v1.91 uint16-to-SAHI crash on Windows."
+    assert "image=frames_8bit_all[i]" in text, (
+        "astro_clean_v5.py no longer hands the detector (detect_pipeline."
+        "detect_frame) the pre-loaded 8-bit array via image=frames_8bit_all[i]. "
+        "It must NOT regress to passing a file path — that re-loads from disk and "
+        "risks the v1.91 uint16-to-SAHI crash on Windows."
     )
-    assert "detect_frame(model, str(fp)" not in text, (
-        "astro_clean_v5.py is passing a file path to detect_frame again — "
+    assert "image=str(" not in text and "image=fp" not in text, (
+        "astro_clean_v5.py is passing a file path to the detector again — "
         "that re-loads from disk and can leak uint16 to SAHI on Windows."
     )

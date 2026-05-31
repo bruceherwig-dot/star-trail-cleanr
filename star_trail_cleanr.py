@@ -29,9 +29,73 @@ if len(sys.argv) > 1 and sys.argv[1] == '--cleanr-worker':
     runpy.run_path(script, run_name='__main__')
     sys.exit(0)
 
+"""
+star_trail_cleanr.py — Star Trail CleanR desktop application (GUI)
+
+WHAT THIS APP DOES
+------------------
+Star Trail CleanR removes airplane and satellite trails from astrophotography
+image sequences. Astrophotographers capture hundreds of frames of the night sky
+over hours, then stack them into a single "star trail" composite. Any aircraft or
+satellite that crosses the field of view during those hours leaves a bright streak
+in the final image. This app finds those streaks and removes them — frame by frame,
+automatically — before the user stacks.
+
+WHO USES IT
+-----------
+Amateur and semi-professional astrophotographers shooting star trail sequences on
+fixed tripods. The foreground (landscape, buildings, trees) is perfectly static
+across every frame. The stars move in arcs. Anything else moving through the frame
+is a trail to be removed.
+
+THE TWO-STEP PIPELINE
+---------------------
+1. Detect: YOLO AI model (Trail DetectoR) finds trail pixels in each frame via
+   tiled inference (SAHI). The sky/foreground mask limits false positives.
+   Static false positives (objects at the same location in every frame) are
+   suppressed by comparing detections across neighboring frames.
+
+2. Repair: Star Bridge fills removed pixels by tracking star motion from the
+   frame before and after, then blending those two neighbor frames together to
+   synthesize what the frame would look like without the trail. Any trail pixel
+   that can't be repaired via star tracking gets filled with pure black — which
+   is invisible in a lighten-max stack because real star pixels in other frames
+   always win.
+
+HOW THIS FILE WORKS
+-------------------
+This file is both the GUI and the algorithm launcher. The PySide6 desktop app
+lives entirely in this file. When the user clicks Run, the app spawns itself as
+a subprocess with the --cleanr-worker flag, which causes the re-invoked process
+to immediately load and execute astro_clean_v5.py (the algorithm) instead of
+showing a window. This worker-subprocess model keeps the GUI responsive during
+long batch jobs and isolates model loading from the GUI process.
+
+The worker re-launch block at the top of this file handles that early re-dispatch.
+Everything below that block (imports, classes, main()) is GUI-only code that never
+runs in the worker.
+
+BATCH SIZE AND STAR ROTATION
+-----------------------------
+Frames are processed in batches of up to 20 at a time. This limit exists because
+star motion between frames accumulates over time — a batch that spans too many
+minutes of real time will have stars that have moved far enough to confuse the
+repair step. The GUI loads one extra frame before and after each batch boundary
+so the repair can stitch across batch edges.
+
+KEY FILES
+---------
+- astro_clean_v5.py: worker subprocess — detection + repair algorithm
+- modules/detect_trails.py: YOLO/SAHI inference, sky mask, per-frame detection
+- modules/trail_grouper.py: fragments → groups → polygons
+- modules/repair.py: Star Bridge morph repair per trail
+- assets/best.pt: shipped YOLO segmentation weights (Trail DetectoR)
+"""
+
 import glob
 import json
 import threading
+from pathlib import Path
 import time
 import subprocess
 import cv2
@@ -46,7 +110,7 @@ from PySide6.QtWidgets import (
     QSpinBox, QTabWidget, QTextBrowser, QScrollArea, QMessageBox,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QSettings, QTimer
-from PySide6.QtGui import QFont, QPixmap, QIcon, QPalette, QColor
+from PySide6.QtGui import QFont, QPixmap, QIcon, QPalette, QColor, QPainter, QIntValidator
 
 from mask_painter import MaskPainterWidget
 
@@ -93,6 +157,7 @@ BRAND_QUIT_RED        = "#d93025"
 BRAND_QUIT_RED_HOVER  = "#b8271b"
 BRAND_NOTICE_ORANGE   = "#e68a00"   # update banner, model card, NVIDIA banner
 BRAND_NOTICE_HOVER    = "#fdf6e3"
+_GPU_BUILD_URL = "https://github.com/bruceherwig-dot/star-trail-cleanr/blob/main/docs/nvidia_gpu_setup.md"
 BRAND_SUPPORT_BG      = "#d0e4f5"
 BRAND_SUPPORT_FG      = "#1a3a5c"
 BRAND_SUPPORT_BORDER  = "#a0c4e0"
@@ -247,20 +312,48 @@ def _apply_theme():
         app.setStyleSheet("")
 
 
+def _secondary_btn_css():
+    return (
+        f"QPushButton {{ background-color: {SECONDARY_BTN_BG}; color: white; "
+        f"font-size: 15px; border-radius: 6px; border: none; padding: 0 8px; }}"
+        f"QPushButton:hover {{ background-color: {DISABLED_BTN_HOVER}; }}"
+        f"QPushButton:disabled {{ background-color: {DISABLED_BTN_BG}; color: {MUTED_TEXT}; }}"
+    )
+
+
 SCRIPT = os.path.join(_base, "astro_clean_v5.py")
 _bundled_model = os.path.join(_base, "best.pt")
 _DEV_FALLBACK_MODEL = os.path.join(
     os.path.expanduser("~"),
-    "Documents/yolo_runs/trail_detector_v11s_tiled/weights/best.pt")
+    "Documents/yolo_runs/trail_detector_v13s_tiled/weights/best.pt")
+
+_DEV_SWITCHER_ENABLED = Path.home().joinpath(
+    ".star_trail_cleanr", ".dev_model_switcher").is_file()
+_YOLO_RUNS_DIR = Path.home() / "Documents" / "yolo_runs"
+
+
+def _get_dev_model_choices():
+    """Return list of (folder_name, best.pt path) from ~/Documents/yolo_runs, newest first."""
+    choices = []
+    if _YOLO_RUNS_DIR.is_dir():
+        for folder in sorted(_YOLO_RUNS_DIR.iterdir(), reverse=True):
+            pt = folder / "weights" / "best.pt"
+            if pt.is_file():
+                choices.append((folder.name, str(pt)))
+    return choices
 
 
 def get_model_path():
     """Return the best available trail-detector model path for this session.
 
-    Priority: user-folder download > bundled model > dev fallback.
+    Priority: dev override (if switcher enabled) > user-folder download > bundled model > dev fallback.
     Re-evaluated on each call so a mid-session model install is picked up
     on the next processing run.
     """
+    if _DEV_SWITCHER_ENABLED:
+        override = SETTINGS.value("dev_model_override", "", type=str)
+        if override and os.path.isfile(override):
+            return override
     try:
         from modules.user_folder import (
             get_installed_model_path, get_installed_model_version,
@@ -438,6 +531,16 @@ def fmt_hms(seconds):
     return f"{m}m {s:02d}s"
 
 
+def fmt_estimate(seconds):
+    seconds = max(0, int(seconds))
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    s = seconds % 60
+    if h > 0:
+        return f"{h}h {m}m {s}s"
+    return f"{m}m {s}s"
+
+
 def _windows_release_label():
     """Return '11' on Windows 11, '10' on Windows 10, etc.
 
@@ -459,10 +562,11 @@ class CleanerWorker(QThread):
     progress = Signal(int, int, str)   # pct, total, remaining_str
     status = Signal(str)               # log line
     batch_info = Signal(int, int)      # batch_num (1-based), n_batches
-    step_progress = Signal(int, int, int)  # step (1 or 2), current, total
+    step_progress = Signal(int, int, int, int, int)  # step, batch_current, batch_total, global_current, global_total
     step_detail = Signal(str)          # filename + detail text
     frame_count = Signal(int, int)     # frames_cleaned, total
     stats_ready = Signal(int, int)     # total_trails, total_frames_scanned
+    trail_count_update = Signal(int)   # running total trails after each batch
     timing_stats = Signal(float, float)  # initial_estimate_sec, actual_total_sec
     initial_estimate = Signal(float)   # initial estimate seconds (emitted once)
     warmup_active = Signal(bool)       # True = AI loading window, False = real per-frame progress kicked in
@@ -480,11 +584,13 @@ class CleanerWorker(QThread):
     BAD_FILE_SKIP_CAP = 1
 
     def __init__(self, folder, output_folder, frame_limit, mask_path=None,
-                 output_format="jpg", jpeg_quality=85):
+                 output_format="jpg", jpeg_quality=85, frame_start=0, frame_end=0):
         super().__init__()
         self.folder = folder
         self.output_folder = output_folder
         self.frame_limit = frame_limit
+        self.frame_start = frame_start
+        self.frame_end = frame_end
         self.mask_path = mask_path
         self.output_format = output_format
         self.jpeg_quality = jpeg_quality
@@ -552,9 +658,16 @@ class CleanerWorker(QThread):
                 self.error.emit(f"No image files found in: {folder}")
                 return
 
+            if self.frame_end > 0:
+                frames = frames[self.frame_start : self.frame_end + 1]
+            elif self.frame_start > 0:
+                frames = frames[self.frame_start:]
             total = len(frames)
-            if self.frame_limit != "All Frames":
-                total = min(total, int(self.frame_limit))
+            if self.frame_limit not in ("All Frames", ""):
+                try:
+                    total = min(total, int(self.frame_limit))
+                except ValueError:
+                    pass
                 frames = frames[:total]
 
             def _img_size(path):
@@ -627,7 +740,7 @@ class CleanerWorker(QThread):
                     "mismatched_sample": [os.path.basename(p) for p in mismatched[:5]],
                     "unreadable_sample": [os.path.basename(p) for p in unreadable_sorted[:5]],
                 })
-                self._frames_filter_event.wait()
+                self._frames_filter_event.wait(timeout=300)
                 if self._frames_filter_response != "CONTINUE" or self._cancelled:
                     self.error.emit(
                         "Run cancelled because some frames in this folder "
@@ -650,6 +763,8 @@ class CleanerWorker(QThread):
             n_batches = (total + MAX_BATCH - 1) // MAX_BATCH
             batch_size = (total + n_batches - 1) // n_batches if n_batches else MAX_BATCH
             starts = list(range(0, total, batch_size))
+            if len(starts) > 1 and (total - starts[-1]) < 3:
+                starts.pop()
             n_batches = len(starts)
 
             ref_pixels = 5472 * 3648
@@ -665,6 +780,30 @@ class CleanerWorker(QThread):
                       + (f" \u2014 skipped {skipped_total} file(s)" if skipped_total else ""))
             header += f"\n{n_batches} batch{'es' if n_batches > 1 else ''} to run"
             self.status.emit(header + "\nStarting\u2026")
+
+            # Run settings summary \u2014 always logged before the first subprocess
+            # launches so it survives silent worker crashes and lands in emails.
+            try:
+                from modules.detect_trails import best_device as _best_device
+                _dev = _best_device()
+                _device_str = {"mps": "GPU (Apple)", "cuda": "GPU (NVIDIA)"}.get(_dev, "CPU")
+            except Exception:
+                _device_str = "unknown device"
+            try:
+                from modules.user_folder import get_installed_model_version as _gmv
+                _mv = _gmv()
+                _mm = re.match(r"model-v(\d+(?:\.\d+)?)", _mv or "")
+                _model_str = f"Trail DetectoR v{_mm.group(1)}" if _mm else (_mv or "bundled model")
+            except Exception:
+                _model_str = "unknown model"
+            _scrub_str = ("Second ScrubbeR on"
+                          if SETTINGS.value("second_scrub_enabled", False, type=bool)
+                          else "Second ScrubbeR off")
+            self.status.emit(
+                f"{_model_str}  |  {_device_str}  |  {self.output_format.upper()} output"
+                f"  |  {_scrub_str}"
+            )
+
             self.progress.emit(0, 100, "")
             self.frame_count.emit(0, total)
 
@@ -821,14 +960,15 @@ class CleanerWorker(QThread):
 
                 this_batch = min(batch_size, total - start)
                 _log_est("batch_start", i, 0, this_batch, None, None, force=True)
+                abs_start = start + self.frame_start
                 if getattr(sys, 'frozen', False):
                     cmd = [sys.executable, '--cleanr-worker', SCRIPT, folder,
                            "-o", output_folder, "--model", get_model_path(),
-                           "--start", str(start), "--batch", str(this_batch)]
+                           "--start", str(abs_start), "--batch", str(this_batch)]
                 else:
                     cmd = [sys.executable, "-u", SCRIPT, folder,
                            "-o", output_folder, "--model", get_model_path(),
-                           "--start", str(start), "--batch", str(this_batch)]
+                           "--start", str(abs_start), "--batch", str(this_batch)]
 
                 if self.mask_path:
                     cmd.extend(["--foreground-mask", self.mask_path])
@@ -837,6 +977,8 @@ class CleanerWorker(QThread):
                             "--jpeg-quality", str(self.jpeg_quality)])
                 cmd.extend(["--expected-width", str(dominant[0]),
                             "--expected-height", str(dominant[1])])
+                if SETTINGS.value("second_scrub_enabled", False, type=bool):
+                    cmd.append("--second-scrub")
 
                 worker_env = os.environ.copy()
                 if (SETTINGS.value("crash_reporting_enabled", False, type=bool)
@@ -893,7 +1035,7 @@ class CleanerWorker(QThread):
                             self._bad_file_response = None
                             self._bad_file_event.clear()
                             self.bad_file_prompt.emit(path, diag)
-                            self._bad_file_event.wait()
+                            self._bad_file_event.wait(timeout=300)
                             decision = self._bad_file_response or "STOP"
                             if decision == "CONTINUE":
                                 self._run_skip_count += 1
@@ -908,6 +1050,12 @@ class CleanerWorker(QThread):
                         continue
 
                     # Parse stat lines emitted by astro_clean_v5
+                    if proc_line.startswith("FRAME_TRAIL_COUNT:"):
+                        try:
+                            self.trail_count_update.emit(total_trails_run + int(proc_line.split(":", 1)[1].strip()))
+                        except ValueError:
+                            pass
+                        continue
                     if proc_line.startswith("BATCH_TRAIL_COUNT:"):
                         try:
                             total_trails_run += int(proc_line.split(":", 1)[1].strip())
@@ -928,13 +1076,13 @@ class CleanerWorker(QThread):
                         self.warmup_active.emit(True)
                     if "Step 1" in proc_line and "detecting" in proc_line:
                         cur_step = 1
-                        self.step_progress.emit(1, 0, this_batch)
+                        self.step_progress.emit(1, 0, this_batch, start, total)
                         # Idempotent on the GUI side; harmless if already running.
                         self.warmup_active.emit(True)
-                    elif "Step 2" in proc_line and "repairing" in proc_line:
+                    elif "Step 2" in proc_line and "cleaning" in proc_line:
                         cur_step = 2
-                        self.step_progress.emit(1, this_batch, this_batch)
-                        self.step_progress.emit(2, 0, this_batch)
+                        self.step_progress.emit(1, this_batch, this_batch, start + this_batch, total)
+                        self.step_progress.emit(2, 0, this_batch, start, total)
 
                     # Parse frame progress within steps
                     sub_m = _sub_re.search(proc_line)
@@ -948,7 +1096,7 @@ class CleanerWorker(QThread):
                             if est_processing_start_t is None:
                                 est_processing_start_t = now_t
                             self.warmup_active.emit(False)
-                            self.step_progress.emit(1, frame_num, frame_total)
+                            self.step_progress.emit(1, frame_num, frame_total, start + frame_num, total)
                             self.step_detail.emit(proc_line)
 
                             remaining = _estimate_remaining(now_t, this_batch, "detect", frame_num, frame_total)
@@ -956,19 +1104,19 @@ class CleanerWorker(QThread):
                                 batch_pct = (detect_count / frame_total) * 0.67
                                 overall_pct = int(((i + batch_pct) / n_batches) * 100)
                                 overall_pct = max(0, min(99, overall_pct))
-                                self.progress.emit(overall_pct, 100, fmt_hms(remaining))
+                                self.progress.emit(overall_pct, 100, fmt_estimate(remaining))
                                 if est_initial_shown is None:
                                     est_initial_shown = remaining + (now_t - t0)
                                     self.initial_estimate.emit(float(est_initial_shown))
                                 _log_est("detect", i, frame_num, frame_total,
                                          overall_pct, remaining)
 
-                        elif cur_step == 2 and "repairing " in proc_line:
+                        elif cur_step == 2 and "cleaning " in proc_line:
                             repair_count = frame_num
                             now_t = time.time()
                             if est_processing_start_t is None:
                                 est_processing_start_t = now_t
-                            self.step_progress.emit(2, frame_num, frame_total)
+                            self.step_progress.emit(2, frame_num, frame_total, start + frame_num, total)
                             frames_cleaned = start + frame_num
                             self.frame_count.emit(frames_cleaned, total)
                             self.step_detail.emit(proc_line)
@@ -978,7 +1126,7 @@ class CleanerWorker(QThread):
                                 batch_pct = 0.67 + (repair_count / frame_total) * 0.33
                                 overall_pct = int(((i + batch_pct) / n_batches) * 100)
                                 overall_pct = max(0, min(99, overall_pct))
-                                self.progress.emit(overall_pct, 100, fmt_hms(remaining))
+                                self.progress.emit(overall_pct, 100, fmt_estimate(remaining))
                                 if est_initial_shown is None:
                                     est_initial_shown = remaining + (now_t - t0)
                                     self.initial_estimate.emit(float(est_initial_shown))
@@ -996,7 +1144,15 @@ class CleanerWorker(QThread):
                 if self._proc.returncode != 0:
                     stderr_text = self._proc.stderr.read().strip()
                     err_lines = [l for l in stderr_text.splitlines() if l.strip()]
-                    err_msg = err_lines[-1] if err_lines else "unknown error"
+                    if err_lines:
+                        err_msg = err_lines[-1]
+                    else:
+                        # Error was printed to stdout (e.g. mixed bit-depth check).
+                        # Find the last ERROR: line, or fall back to last stdout line.
+                        stdout_err = [l for l in proc_stdout_lines if l.startswith("ERROR:")]
+                        err_msg = stdout_err[-1] if stdout_err else (
+                            proc_stdout_lines[-1] if proc_stdout_lines else "unknown error"
+                        )
 
                     def _head_tail(lines, n=50):
                         """Return first n + last n lines joined, with a marker
@@ -1027,6 +1183,7 @@ class CleanerWorker(QThread):
                             os_tag = f"{sysname} {rel} ({_plat.machine()})"
                             with sentry_sdk.push_scope() as scope:
                                 scope.set_tag("component", "gui_worker_capture")
+                                scope.set_tag("app_version", VERSION)
                                 scope.set_tag("batch_index", str(i + 1))
                                 scope.set_tag("n_batches", str(n_batches))
                                 scope.set_tag("image_w", str(dominant[0]))
@@ -1052,7 +1209,7 @@ class CleanerWorker(QThread):
                          force=True, note=f"cum_frames={est_batches_done_frames}")
 
                 # Mark both steps complete for this batch
-                self.step_progress.emit(2, this_batch, this_batch)
+                self.step_progress.emit(2, this_batch, this_batch, start + this_batch, total)
                 _add_log(f"Batch {i+1}/{n_batches} complete ({fmt_hms(time.time() - t0)} elapsed)")
 
             self.progress.emit(100, 100, "")
@@ -1123,6 +1280,18 @@ class NvidiaDetectThread(QThread):
         self.result_ready.emit(outcome, detail)
 
 
+class BestDeviceThread(QThread):
+    """Background torch device detection. Emits 'cuda', 'mps', or 'cpu'."""
+    result_ready = Signal(str)
+
+    def run(self):
+        try:
+            from modules.detect_trails import best_device
+            self.result_ready.emit(best_device())
+        except Exception:
+            self.result_ready.emit("cpu")
+
+
 class ModelDownloadThread(QThread):
     """Streams a model file into the user folder. Atomic via temp-then-rename.
 
@@ -1169,6 +1338,150 @@ class ModelDownloadThread(QThread):
             except Exception:
                 pass
             self.failed.emit(str(e))
+
+
+class GpuPackInstallThread(QThread):
+    """Downloads the CUDA PyTorch wheels and extracts them into the GPU override folder.
+
+    Emits progress(label, bytes_done, total_bytes) during download.
+    label changes per step; total_bytes=0 signals an indeterminate phase.
+    """
+    progress = Signal(str, float, float)
+    finished_ok = Signal()
+    failed = Signal(str)
+
+    def _download(self, label, urls, dest_path):
+        """Try each URL in order. On HTTP 403 move to the next mirror silently.
+        Raises RuntimeError with a __blocked__ sentinel if every mirror returns 403."""
+        import urllib.request
+        import urllib.error
+        last_403 = None
+        for idx, url in enumerate(urls):
+            if idx > 0:
+                self.progress.emit(f"{label} — trying backup server...", 0, 0)
+            req = urllib.request.Request(url, headers={"User-Agent": "StarTrailCleanR-GpuPack"})
+            try:
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    total = float(resp.headers.get("Content-Length") or 0)
+                    done = 0.0
+                    with open(str(dest_path), "wb") as f:
+                        while True:
+                            chunk = resp.read(131072)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                            done += len(chunk)
+                            self.progress.emit(label, done, total)
+                return
+            except urllib.error.HTTPError as e:
+                if e.code == 403:
+                    last_403 = e
+                    continue
+                raise RuntimeError(f"{label} failed: {e}") from e
+            except Exception as e:
+                raise RuntimeError(f"{label} failed: {e}") from e
+        raise RuntimeError(
+            f"{label} blocked: all servers returned 403 Forbidden\n__blocked__"
+        ) from last_403
+
+    def run(self):
+        import zipfile
+        from modules.gpu_pack import (get_all_download_url_sets, get_override_dir,
+                                       write_version_tag, clear_gpu_files,
+                                       chmod_extracted_files)
+
+        url_sets = get_all_download_url_sets()
+        if not url_sets:
+            self.failed.emit(
+                "Cannot determine download URLs for this build.\n"
+                "Try updating Star Trail CleanR first, then install GPU support again."
+            )
+            return
+
+        torch_urls = [s[0] for s in url_sets]
+        tv_urls    = [s[1] for s in url_sets]
+        torch_ver  = url_sets[0][2]
+        override_dir = get_override_dir()
+
+        try:
+            override_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            self.failed.emit(
+                f"Cannot create the GPU support folder:\n{override_dir}\n\n{e}\n\n"
+                "Check that you have permission to write to your AppData folder."
+            )
+            return
+
+        torch_whl = override_dir / "torch_pack.whl"
+        tv_whl = override_dir / "torchvision_pack.whl"
+
+        # Robust cleanup: onerror handler + shell fallback + 3-retry loop.
+        # Handles read-only files from zip extraction and transient AV locks.
+        self.progress.emit("Preparing...", 0, 0)
+        _ok, _err = clear_gpu_files()
+        for _stale in (override_dir / "torch", override_dir / "torchvision"):
+            if _stale.is_dir():
+                detail = f"\n\nDetails: {_err}" if _err else ""
+                self.failed.emit(
+                    "Installation blocked: GPU support files from a previous install "
+                    f"could not be removed. Windows is holding them open.{detail}\n\n"
+                    "Reboot your computer, then reopen Star Trail CleanR and click "
+                    "Install GPU Support again. The reboot will release the locked files."
+                )
+                return
+
+        try:
+            self._download("Downloading GPU support (1 of 2)", torch_urls, torch_whl)
+            self.progress.emit("Installing GPU support (1 of 2)...", 0, 0)
+            with zipfile.ZipFile(str(torch_whl), "r") as zf:
+                zf.extractall(str(override_dir))
+            torch_whl.unlink(missing_ok=True)
+            chmod_extracted_files(override_dir)
+
+            self._download("Downloading GPU support (2 of 2)", tv_urls, tv_whl)
+            self.progress.emit("Installing GPU support (2 of 2)...", 0, 0)
+            with zipfile.ZipFile(str(tv_whl), "r") as zf:
+                zf.extractall(str(override_dir))
+            tv_whl.unlink(missing_ok=True)
+            chmod_extracted_files(override_dir)
+
+            if not write_version_tag(torch_ver):
+                raise RuntimeError(
+                    "Files downloaded successfully but could not write the version tag.\n"
+                    "GPU support may not activate on restart. Try installing again."
+                )
+            self.finished_ok.emit()
+
+        except Exception as e:
+            for whl in (torch_whl, tv_whl):
+                try:
+                    whl.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            msg = str(e)
+            if "Errno 13" in msg or "Permission denied" in msg or "Access is denied" in msg:
+                msg = (
+                    "Installation failed: Windows denied access to a file.\n\n"
+                    "Reboot your computer, then reopen Star Trail CleanR and click "
+                    "Install GPU Support again. The reboot will release the locked files.\n\n"
+                    f"Details: {e}"
+                )
+            elif "__blocked__" in msg or ("403" in msg and "Forbidden" in msg):
+                msg = (
+                    "Download blocked (HTTP 403).\n\n"
+                    "PyTorch's download servers are blocking requests from your network. "
+                    "We automatically tried an alternative server, but it was also blocked.\n\n"
+                    "The most reliable fix is to use a VPN — connect to any US or European "
+                    "server, then click Install GPU Support again.\n\n"
+                    "Click More Info for step-by-step instructions.\n\n"
+                    f"Details: {e}"
+                )
+            elif "urlopen error" in msg or "ConnectionReset" in msg or "timed out" in msg:
+                msg = (
+                    "Download failed. Check your internet connection and try again.\n\n"
+                    f"Details: {e}"
+                )
+            self.failed.emit(msg)
 
 
 class _XCloseButton(QPushButton):
@@ -1223,11 +1536,14 @@ class MainWindow(QMainWindow):
         self.worker = None
         self._mask_path = None
         self._mask_window = None
+        self._nvidia_outcome = None
+        self._compute_device = None
+        self._gpu_install_via_banner = False
 
         # Main stacked widget: page 0 = setup, page 1 = processing
         self._stack = QStackedWidget()
 
-        # Tabs: Main / FAQ / About
+        # Tabs: Main / FAQ / About / Settings
         self._tabs = QTabWidget()
         self._tabs.tabBar().setExpanding(True)
         self._tabs.tabBar().setDocumentMode(True)
@@ -1235,13 +1551,15 @@ class MainWindow(QMainWindow):
             f"QTabWidget::pane {{ border: none; background: palette(window); }}"
             "QTabBar { qproperty-drawBase: 0; }"
             f"QTabBar::tab {{ background: {BRAND_TAB_INACTIVE_BG}; color: {BRAND_TAB_INACTIVE_FG}; padding: 14px 20px; "
-            "font-size: 19px; font-weight: bold; border: none; min-width: 200px; }"
+            "font-size: 19px; font-weight: bold; border: none; min-width: 200px; }}"
             f"QTabBar::tab:selected {{ background: {BRAND_TAB_ACTIVE_BG}; color: {BRAND_TAB_ACTIVE_FG}; }}"
             f"QTabBar::tab:hover:!selected {{ background: {BRAND_TAB_HOVER_BG}; color: {BRAND_TAB_ACTIVE_FG}; }}"
         )
         self._tabs.addTab(self._stack, "Main")
         self._tabs.addTab(self._build_faq_tab(), "FAQ")
         self._tabs.addTab(self._build_about_tab(), "About")
+        self._tabs.addTab(self._build_settings_tab(), "Settings")
+        self._tabs.tabBar().setUsesScrollButtons(True)
 
         # Container: banner on top, tabs below
         container = QWidget()
@@ -1252,7 +1570,12 @@ class MainWindow(QMainWindow):
         container_layout.addWidget(self._build_update_banner())
         container_layout.addWidget(self._build_model_update_card())
         container_layout.addWidget(self._build_nvidia_banner())
-        container_layout.addWidget(self._tabs)
+        # Stretch factor 1 on tabs so extra vertical space (when the user
+        # resizes or maximizes the window) goes into the tab area and
+        # through to the Run-tab Star Log + Setup-tab scroll area, rather
+        # than empty space at top or bottom. Banners stay their fixed
+        # heights; chrome stays the same size; only content grows.
+        container_layout.addWidget(self._tabs, 1)
         self.setCentralWidget(container)
 
         self._build_setup_page()
@@ -1275,6 +1598,32 @@ class MainWindow(QMainWindow):
         if not self._min_height_locked:
             QTimer.singleShot(0, self._lock_min_height)
             self._min_height_locked = True
+        QTimer.singleShot(500, self._maybe_ask_crash_reporting)
+
+    def _maybe_ask_crash_reporting(self):
+        """First-run crash-reporting opt-in. Fires once after the main window
+        is visible so it never blocks startup. Only shown in CI builds where
+        the Sentry DSN is present."""
+        if not _SENTRY_DSN:
+            return
+        if SETTINGS.contains("crash_reporting_choice_made"):
+            return
+        prompt = QMessageBox(self)
+        prompt.setWindowTitle("Star Trail CleanR")
+        prompt.setIcon(QMessageBox.Question)
+        prompt.setText("Help improve Star Trail CleanR by sending anonymous crash reports?")
+        prompt.setInformativeText(
+            "If the app ever crashes, an automatic error report is sent so the bug "
+            "can be fixed.\n\nThe report contains a stack trace, your operating "
+            "system, and the app version. No images, no folder paths, no personal "
+            "information."
+        )
+        prompt.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        prompt.setDefaultButton(QMessageBox.Yes)
+        choice = prompt.exec()
+        SETTINGS.setValue("crash_reporting_enabled", choice == QMessageBox.Yes)
+        SETTINGS.setValue("crash_reporting_choice_made", True)
+        _maybe_init_sentry()
 
     def _lock_min_height(self):
         """Set the window's minimum vertical size to the Setup tab's
@@ -1303,13 +1652,13 @@ class MainWindow(QMainWindow):
     def _build_faq_tab(self):
         wrap = QWidget()
         wrap_layout = QVBoxLayout(wrap)
-        wrap_layout.setContentsMargins(24, 24, 24, 24)
+        wrap_layout.setContentsMargins(16, 16, 16, 16)
         wrap_layout.setSpacing(0)
         browser = QTextBrowser()
         browser.setOpenExternalLinks(True)
-        browser.document().setDocumentMargin(20)
+        browser.document().setDocumentMargin(16)
         browser.setStyleSheet(
-            f"QTextBrowser {{ background: {BROWSER_BG}; color: {BROWSER_TEXT}; border: none; font-size: 15px; }}"
+            f"QTextBrowser {{ background: {BROWSER_BG}; color: {BROWSER_TEXT}; border: none; font-size: 13px; }}"
         )
         browser.setHtml(f"""
         <html><body style='font-family: Inter, -apple-system, Segoe UI, sans-serif; line-height: 1.5; margin:0; padding:0; color:{BROWSER_TEXT}; background-color:{BROWSER_BG};'>
@@ -1317,7 +1666,7 @@ class MainWindow(QMainWindow):
         <h2 style='color:{BRAND_HEADING_BLUE}; margin-top:0; margin-bottom:2px;'>Why Star Trail CleanR?</h2>
         <p style='margin-top:2px;'>Star Trail CleanR removes airplane and satellite trails
         from astrophotography sequences while preserving the real stars. The result is a
-        clean set of frames you can stack into a perfect star trail composite.</p>
+        clean set of frames you can stack into a star trail composite. (That's the goal, anyway.)</p>
 
         <h2 style='color:{BRAND_HEADING_BLUE}; margin-bottom:2px;'>Trail Detection</h2>
         <p style='margin-top:2px;'>Each frame is run through a YOLO segmentation model
@@ -1374,6 +1723,273 @@ class MainWindow(QMainWindow):
         wrap_layout.addWidget(browser)
         return wrap
 
+    # ── Settings tab ─────────────────────────────────────────────────────────
+
+    def _build_settings_tab(self):
+        wrap = QWidget()
+        layout = QVBoxLayout(wrap)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(0)
+        layout.setAlignment(Qt.AlignTop)
+
+        _h = QLabel("Updates")
+        _h.setStyleSheet(f"color: {BRAND_HEADING_BLUE}; font-size: 18px; font-weight: bold;")
+        layout.addWidget(_h)
+        layout.addSpacing(4)
+        _d = QLabel("Star Trail CleanR checks for a new version every time you open it. Use this to check right now.")
+        _d.setStyleSheet(f"color: {BROWSER_TEXT}; font-size: 13px;")
+        _d.setWordWrap(True)
+        layout.addWidget(_d)
+
+        check_btn = QPushButton("Check for Updates")
+        check_btn.setFixedHeight(34)
+        check_btn.setFixedWidth(200)
+        check_btn.setCursor(Qt.PointingHandCursor)
+        check_btn.setStyleSheet(
+            f"QPushButton {{ background-color: {SECONDARY_BTN_BG}; color: white; "
+            f"font-size: 13px; font-weight: bold; border-radius: 6px; border: none; }}"
+            f"QPushButton:hover {{ background-color: {DISABLED_BTN_HOVER}; }}"
+            f"QPushButton:disabled {{ background-color: {DISABLED_BTN_BG}; color: {MUTED_TEXT}; }}"
+        )
+        check_btn.clicked.connect(self._on_check_for_updates)
+        self._check_updates_btn = check_btn
+
+        run_hint = QLabel("A run is in progress. Updates are paused until it finishes.")
+        run_hint.setStyleSheet(f"color: {MUTED_TEXT}; font-size: 12px;")
+        run_hint.setVisible(False)
+        self._check_updates_run_hint = run_hint
+
+        btn_row = QHBoxLayout()
+        btn_row.setContentsMargins(16, 0, 0, 0)
+        btn_row.addWidget(check_btn)
+        btn_row.addSpacing(12)
+        btn_row.addWidget(run_hint)
+        btn_row.addStretch()
+        layout.addSpacing(4)
+        layout.addLayout(btn_row)
+
+        layout.addSpacing(14)
+
+        _h = QLabel("GPU Acceleration")
+        _h.setStyleSheet(f"color: {BRAND_HEADING_BLUE}; font-size: 18px; font-weight: bold;")
+        layout.addWidget(_h)
+
+        compute_status = QLabel("Detecting...")
+        compute_status.setStyleSheet(f"color: {MUTED_TEXT}; font-size: 13px; margin-left: 16px;")
+        compute_status.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._compute_status_label = compute_status
+        layout.addSpacing(4)
+        layout.addWidget(compute_status)
+
+        # GPU install controls wrapped in a container so when hidden they
+        # leave no dead spacing in the layout.
+        gpu_install_widget = QWidget()
+        gpu_install_layout = QVBoxLayout(gpu_install_widget)
+        gpu_install_layout.setContentsMargins(0, 0, 0, 0)
+        gpu_install_layout.setSpacing(0)
+        gpu_install_widget.setVisible(False)
+        self._gpu_install_widget = gpu_install_widget
+
+        gpu_upgrade_browser = QTextBrowser()
+        gpu_upgrade_browser.setOpenExternalLinks(False)
+        gpu_upgrade_browser.document().setDocumentMargin(4)
+        gpu_upgrade_browser.setStyleSheet(
+            f"QTextBrowser {{ background: {BROWSER_BG}; color: {BROWSER_TEXT}; border: none; font-size: 13px; }}"
+        )
+        gpu_upgrade_browser.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        gpu_upgrade_browser.setHtml(f"""
+        <html><body style='font-family: Inter, -apple-system, Segoe UI, sans-serif; line-height: 1.5; margin:0; padding:0; color:{BROWSER_TEXT}; background-color:{BROWSER_BG};'>
+        <p style='margin-top:8px;'>An NVIDIA GPU is available. Installing GPU support downloads approximately 3-4 GB from pytorch.org. This is a one-time download that survives app updates automatically.</p>
+        </body></html>
+        """)
+        gpu_upgrade_browser.setFixedHeight(50)
+        self._gpu_upgrade_browser = gpu_upgrade_browser
+        gpu_install_layout.addSpacing(4)
+        gpu_install_layout.addWidget(gpu_upgrade_browser)
+
+        gpu_btn = QPushButton("Install GPU Support")
+        gpu_btn.setFixedHeight(34)
+        gpu_btn.setFixedWidth(200)
+        gpu_btn.setCursor(Qt.PointingHandCursor)
+        gpu_btn.setStyleSheet(
+            f"QPushButton {{ background-color: {SECONDARY_BTN_BG}; color: white; "
+            f"font-size: 13px; font-weight: bold; border-radius: 6px; border: none; }}"
+            f"QPushButton:hover {{ background-color: {DISABLED_BTN_HOVER}; }}"
+        )
+        gpu_btn.clicked.connect(self._on_nvidia_download_clicked)
+        self._gpu_download_btn = gpu_btn
+
+        gpu_btn_row = QHBoxLayout()
+        gpu_btn_row.setContentsMargins(16, 0, 0, 0)
+        gpu_btn_row.addWidget(gpu_btn)
+        gpu_btn_row.addStretch()
+        gpu_install_layout.addSpacing(4)
+        gpu_install_layout.addLayout(gpu_btn_row)
+
+        gpu_clear_btn = QPushButton("Clear GPU Support Files")
+        gpu_clear_btn.setFixedHeight(28)
+        gpu_clear_btn.setFixedWidth(200)
+        gpu_clear_btn.setCursor(Qt.PointingHandCursor)
+        gpu_clear_btn.setStyleSheet(
+            f"QPushButton {{ background-color: transparent; color: {MUTED_TEXT}; "
+            f"font-size: 12px; border: none; text-decoration: underline; }}"
+            f"QPushButton:hover {{ color: {BROWSER_TEXT}; }}"
+        )
+        gpu_clear_btn.clicked.connect(self._on_gpu_clear_clicked)
+        self._gpu_clear_btn = gpu_clear_btn
+        gpu_clear_row = QHBoxLayout()
+        gpu_clear_row.setContentsMargins(16, 0, 0, 0)
+        gpu_clear_row.addWidget(gpu_clear_btn)
+        gpu_clear_row.addStretch()
+        gpu_install_layout.addSpacing(2)
+        gpu_install_layout.addLayout(gpu_clear_row)
+
+        gpu_help_btn = QPushButton("GPU installation troubleshooting guide")
+        gpu_help_btn.setFixedHeight(28)
+        gpu_help_btn.setCursor(Qt.PointingHandCursor)
+        gpu_help_btn.setStyleSheet(
+            f"QPushButton {{ background-color: transparent; color: {MUTED_TEXT}; "
+            f"font-size: 12px; border: none; text-decoration: underline; }}"
+            f"QPushButton:hover {{ color: {BROWSER_TEXT}; }}"
+        )
+        gpu_help_btn.clicked.connect(self._on_gpu_help_clicked)
+        self._gpu_help_btn = gpu_help_btn
+        gpu_help_row = QHBoxLayout()
+        gpu_help_row.setContentsMargins(16, 0, 0, 0)
+        gpu_help_row.addWidget(gpu_help_btn)
+        gpu_help_row.addStretch()
+        gpu_install_layout.addSpacing(0)
+        gpu_install_layout.addLayout(gpu_help_row)
+
+        from PySide6.QtWidgets import QProgressBar
+        gpu_progress = QProgressBar()
+        gpu_progress.setRange(0, 100)
+        gpu_progress.setValue(0)
+        gpu_progress.setFixedHeight(20)
+        gpu_progress.setVisible(False)
+        self._gpu_progress = gpu_progress
+        gpu_install_layout.addSpacing(8)
+        gpu_install_layout.addWidget(gpu_progress)
+
+        gpu_progress_label = QLabel("")
+        gpu_progress_label.setStyleSheet(f"color: {MUTED_TEXT}; font-size: 12px; margin-left: 4px;")
+        gpu_progress_label.setVisible(False)
+        self._gpu_progress_label = gpu_progress_label
+        gpu_install_layout.addSpacing(2)
+        gpu_install_layout.addWidget(gpu_progress_label)
+
+        gpu_restart_btn = QPushButton("Restart Now to Activate GPU Support")
+        gpu_restart_btn.setFixedHeight(34)
+        gpu_restart_btn.setFixedWidth(290)
+        gpu_restart_btn.setCursor(Qt.PointingHandCursor)
+        gpu_restart_btn.setStyleSheet(
+            f"QPushButton {{ background-color: {SECONDARY_BTN_BG}; color: white; "
+            f"font-size: 13px; font-weight: bold; border-radius: 6px; border: none; }}"
+            f"QPushButton:hover {{ background-color: {DISABLED_BTN_HOVER}; }}"
+        )
+        gpu_restart_btn.clicked.connect(self._relaunch)
+        gpu_restart_btn.setVisible(False)
+        self._gpu_restart_btn = gpu_restart_btn
+        restart_row = QHBoxLayout()
+        restart_row.setContentsMargins(16, 0, 0, 0)
+        restart_row.addWidget(gpu_restart_btn)
+        restart_row.addStretch()
+        gpu_install_layout.addSpacing(8)
+        gpu_install_layout.addLayout(restart_row)
+
+        layout.addSpacing(4)
+        layout.addWidget(gpu_install_widget)
+
+        layout.addSpacing(14)
+
+        _h = QLabel("Second ScrubbeR")
+        _h.setStyleSheet(f"color: {BRAND_HEADING_BLUE}; font-size: 18px; font-weight: bold;")
+        layout.addWidget(_h)
+        layout.addSpacing(4)
+        _d = QLabel("Runs the trail detector a second time on each frame after rotating it 180°. Catches trails the first pass tends to miss. Detection takes roughly twice as long.")
+        _d.setStyleSheet(f"color: {BROWSER_TEXT}; font-size: 13px;")
+        _d.setWordWrap(True)
+        layout.addWidget(_d)
+        _d2 = QLabel("Most helpful with earlier detection models. Less necessary now that the AI trains on rotated trail images at multiple angles.")
+        _d2.setStyleSheet(f"color: {BROWSER_TEXT}; font-size: 13px;")
+        _d2.setWordWrap(True)
+        layout.addWidget(_d2)
+
+        scrub_chk = QCheckBox("Enable Second ScrubbeR")
+        scrub_chk.setStyleSheet(f"QCheckBox {{ font-size: 13px; color: {BROWSER_TEXT}; margin-left: 16px; }}")
+        scrub_chk.setChecked(SETTINGS.value("second_scrub_enabled", False, type=bool))
+        scrub_chk.toggled.connect(lambda v: SETTINGS.setValue("second_scrub_enabled", v))
+        self._scrub_chk = scrub_chk
+
+        scrub_run_hint = QLabel("A run is in progress. Setting locked until it finishes.")
+        scrub_run_hint.setStyleSheet(f"color: {MUTED_TEXT}; font-size: 12px;")
+        scrub_run_hint.setVisible(False)
+        self._scrub_run_hint = scrub_run_hint
+
+        scrub_row = QHBoxLayout()
+        scrub_row.setContentsMargins(16, 0, 0, 0)
+        scrub_row.addWidget(scrub_chk)
+        scrub_row.addSpacing(12)
+        scrub_row.addWidget(scrub_run_hint)
+        scrub_row.addStretch()
+        layout.addSpacing(4)
+        layout.addLayout(scrub_row)
+
+        layout.addSpacing(14)
+
+        _h = QLabel("Crash Reporting")
+        _h.setStyleSheet(f"color: {BRAND_HEADING_BLUE}; font-size: 18px; font-weight: bold;")
+        layout.addWidget(_h)
+        layout.addSpacing(4)
+        _d = QLabel("Sends anonymous crash reports to help find and fix bugs. Reports contain technical details like error messages and basic image dimensions.")
+        _d.setStyleSheet(f"color: {BROWSER_TEXT}; font-size: 13px;")
+        _d.setWordWrap(True)
+        layout.addWidget(_d)
+
+        crash_chk = QCheckBox("Send anonymous crash reports")
+        crash_chk.setStyleSheet(f"QCheckBox {{ font-size: 13px; color: {BROWSER_TEXT}; margin-left: 16px; }}")
+        crash_chk.setChecked(SETTINGS.value("crash_reporting_enabled", False, type=bool))
+
+        def _on_crash_chk_toggled(v):
+            SETTINGS.setValue("crash_reporting_enabled", v)
+            if v:
+                _maybe_init_sentry()
+
+        crash_chk.toggled.connect(_on_crash_chk_toggled)
+
+        crash_row = QHBoxLayout()
+        crash_row.setContentsMargins(16, 0, 0, 0)
+        crash_row.addWidget(crash_chk)
+        crash_row.addStretch()
+        layout.addSpacing(4)
+        layout.addLayout(crash_row)
+
+        layout.addStretch()
+        return wrap
+
+    def _set_updates_run_state(self, running):
+        if hasattr(self, '_check_updates_btn'):
+            self._check_updates_btn.setEnabled(not running)
+            self._check_updates_run_hint.setVisible(running)
+        if hasattr(self, '_scrub_chk'):
+            self._scrub_chk.setEnabled(not running)
+            self._scrub_run_hint.setVisible(running)
+
+    def _on_check_for_updates(self):
+        if getattr(sys, 'frozen', False):
+            if sys.platform == "darwin":
+                from modules.sparkle_updater import check_for_updates
+                check_for_updates()
+            elif sys.platform == "win32":
+                from modules.winsparkle_updater import check_for_updates
+                check_for_updates()
+            else:
+                import webbrowser
+                webbrowser.open("https://startrailcleanr.com")
+        else:
+            import webbrowser
+            webbrowser.open("https://startrailcleanr.com")
+
     # ── About tab ────────────────────────────────────────────────────────────
 
     def _build_about_tab(self):
@@ -1395,9 +2011,9 @@ class MainWindow(QMainWindow):
         bio = QTextBrowser()
         bio.setOpenExternalLinks(True)
         bio.setStyleSheet(
-            f"QTextBrowser {{ background: {BROWSER_BG}; color: {BROWSER_TEXT}; border: none; font-size: 15px; }}"
+            f"QTextBrowser {{ background: {BROWSER_BG}; color: {BROWSER_TEXT}; border: none; font-size: 13px; }}"
         )
-        bio.document().setDocumentMargin(20)
+        bio.document().setDocumentMargin(16)
         bio.setHtml(f"""
         <html><body style='font-family: Inter, -apple-system, Segoe UI, sans-serif; line-height: 1.5; margin:0; padding:0; color:{BROWSER_TEXT}; background-color:{BROWSER_BG};'>
         <p style='margin:0; padding:0; line-height:0; font-size:1px; height:0;'></p>
@@ -1430,7 +2046,7 @@ class MainWindow(QMainWindow):
         full list of contributors &rarr;</a></p>
 
         <h3 style='color:{BRAND_HEADING_BLUE}; margin:12px 0 2px 0;'>Version History</h3>
-        <p style='margin-top:2px;'>See the full <a href='https://github.com/bruceherwig-dot/star-trail-cleanr/blob/main/CHANGELOG.md'>version history on GitHub</a>.</p>
+        <p style='margin-top:2px;'>See the full <a href='https://github.com/bruceherwig-dot/star-trail-cleanr/blob/v2-auto-update/CHANGELOG.md'>version history on GitHub</a>.</p>
 
         <h3 style='color:{BRAND_HEADING_BLUE}; margin:12px 0 2px 0;'>Share Your Work&hellip; Have a Suggestion?</h3>
         <p style='margin-top:2px;'>Got a before-and-after you'd like to share? I would love to see it!<br>
@@ -1621,8 +2237,9 @@ class MainWindow(QMainWindow):
 
     def _on_update_download(self):
         if self._update_download_url:
-            import webbrowser
-            webbrowser.open(self._update_download_url)
+            from PySide6.QtCore import QUrl
+            from PySide6.QtGui import QDesktopServices
+            QDesktopServices.openUrl(QUrl(self._update_download_url))
 
     # ── Model update card (shows when GitHub has a newer trail detector) ─────
 
@@ -1710,7 +2327,7 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _model_display_name(tag):
-        """'model-v2' becomes 'Trail Detector v2'. Falls back to the raw tag on parse failure."""
+        """'model-v2' becomes 'Trail DetectoR v2'. Falls back to the raw tag on parse failure."""
         if not tag:
             return "New model"
         m = re.match(r"^model-v(\d+(?:\.\d+)?)", tag)
@@ -1719,10 +2336,10 @@ class MainWindow(QMainWindow):
         num = m.group(1)
         if "." in num:
             num = num.rstrip("0").rstrip(".")
-        return f"Trail Detector v{num}"
+        return f"Trail DetectoR v{num}"
 
     def _current_model_display_name(self):
-        """Return 'Trail Detector N' for the currently-active model. Empty string on failure."""
+        """Return 'Trail DetectoR N' for the currently-active model. Empty string on failure."""
         try:
             from modules.model_update import local_model_version
             return self._model_display_name(local_model_version())
@@ -1810,7 +2427,7 @@ class MainWindow(QMainWindow):
         layout.setSpacing(12)
 
         self._nvidia_label = QLabel(
-            "NVIDIA GPU detected. Full GPU support is coming in a future update."
+            "NVIDIA GPU detected. Install GPU support for faster processing."
         )
         self._nvidia_label.setStyleSheet(
             "color: white; font-size: 14px; font-weight: bold; background: transparent;"
@@ -1818,42 +2435,265 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._nvidia_label)
         layout.addStretch()
 
-        gotit_btn = QPushButton("Got it")
-        gotit_btn.setFixedHeight(28)
-        gotit_btn.setStyleSheet(
+        download_btn = QPushButton("Install")
+        download_btn.setFixedHeight(28)
+        download_btn.setStyleSheet(
             f"QPushButton {{ background-color: white; color: {BRAND_NOTICE_ORANGE}; font-size: 13px; "
             f"font-weight: bold; border-radius: 4px; padding: 0 16px; border: none; }}"
             f"QPushButton:hover {{ background-color: {BRAND_NOTICE_HOVER}; }}"
         )
-        gotit_btn.clicked.connect(self._on_nvidia_gotit_clicked)
-        layout.addWidget(gotit_btn)
+        download_btn.clicked.connect(self._on_nvidia_download_clicked)
+        layout.addWidget(download_btn)
+        self._nvidia_install_btn = download_btn
+
+        later_btn = QPushButton("Later")
+        later_btn.setFixedHeight(28)
+        later_btn.setStyleSheet(
+            f"QPushButton {{ background-color: transparent; color: white; font-size: 13px; "
+            f"border-radius: 4px; padding: 0 12px; border: 1px solid white; }}"
+            f"QPushButton:hover {{ background-color: rgba(255,255,255,0.15); }}"
+        )
+        later_btn.clicked.connect(self._on_nvidia_later_clicked)
+        layout.addWidget(later_btn)
+        self._nvidia_later_btn = later_btn
+
+        from PySide6.QtWidgets import QProgressBar
+        nvidia_progress = QProgressBar()
+        nvidia_progress.setFixedHeight(16)
+        nvidia_progress.setFixedWidth(220)
+        nvidia_progress.setRange(0, 100)
+        nvidia_progress.setValue(0)
+        nvidia_progress.setVisible(False)
+        nvidia_progress.setStyleSheet(
+            "QProgressBar { background: rgba(255,255,255,0.3); border-radius: 4px; border: none; }"
+            "QProgressBar::chunk { background: white; border-radius: 4px; }"
+        )
+        layout.addWidget(nvidia_progress)
+        self._nvidia_banner_progress = nvidia_progress
+
+        nvidia_progress_label = QLabel("")
+        nvidia_progress_label.setStyleSheet(
+            "color: white; font-size: 12px; background: transparent;"
+        )
+        nvidia_progress_label.setVisible(False)
+        layout.addWidget(nvidia_progress_label)
+        self._nvidia_banner_label = nvidia_progress_label
 
         self._nvidia_banner = banner
         return banner
 
     def _start_nvidia_detect(self):
-        if SETTINGS.value("nvidia_coming_soon_dismissed", False, type=bool):
-            return
         self._nvidia_thread = NvidiaDetectThread(self)
         self._nvidia_thread.result_ready.connect(self._on_nvidia_detect_result)
         self._nvidia_thread.start()
+        self._best_device_thread = BestDeviceThread(self)
+        self._best_device_thread.result_ready.connect(self._on_best_device_result)
+        self._best_device_thread.start()
 
     def _on_nvidia_detect_result(self, outcome, detail):
         print(f"[nvidia-detect] outcome={outcome} detail={detail}", flush=True)
-        if outcome == "yes":
+        self._nvidia_outcome = outcome
+        from modules.gpu_pack import is_installed as _gpu_installed
+        if (outcome == "yes"
+                and not _gpu_installed()
+                and not SETTINGS.value("nvidia_banner_dismissed", False, type=bool)):
             self._nvidia_banner.setVisible(True)
+        self._refresh_compute_section()
 
-    def _on_nvidia_gotit_clicked(self):
-        SETTINGS.setValue("nvidia_coming_soon_dismissed", True)
+    def _on_best_device_result(self, device):
+        self._compute_device = device
+        self._refresh_compute_section()
+
+    def _on_nvidia_download_clicked(self):
+        from PySide6.QtWidgets import QMessageBox
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Install GPU Support")
+        msg.setText(
+            "GPU support requires a one-time download of approximately 3-4 GB from pytorch.org.\n\n"
+            "Once installed, it survives Star Trail CleanR updates automatically.\n\n"
+            "Star Trail CleanR will need to restart after installation to activate GPU support."
+        )
+        msg.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
+        msg.button(QMessageBox.Ok).setText("Install")
+        msg.button(QMessageBox.Cancel).setText("Not Now")
+        if msg.exec() != QMessageBox.Ok:
+            return
+
+        self._gpu_install_via_banner = self._nvidia_banner.isVisible()
+        if self._gpu_install_via_banner:
+            self._nvidia_label.setVisible(False)
+            self._nvidia_install_btn.setVisible(False)
+            self._nvidia_later_btn.setVisible(False)
+            self._nvidia_banner_progress.setRange(0, 100)
+            self._nvidia_banner_progress.setValue(0)
+            self._nvidia_banner_progress.setVisible(True)
+            self._nvidia_banner_label.setText("Starting download...")
+            self._nvidia_banner_label.setVisible(True)
+        self._gpu_download_btn.setVisible(False)
+        self._gpu_upgrade_browser.setVisible(False)
+        self._gpu_progress.setRange(0, 100)
+        self._gpu_progress.setValue(0)
+        self._gpu_progress.setFormat("%p%")
+        self._gpu_progress.setVisible(True)
+        self._gpu_progress_label.setText("Starting download...")
+        self._gpu_progress_label.setVisible(True)
+
+        self._gpu_install_thread = GpuPackInstallThread(self)
+        self._gpu_install_thread.progress.connect(self._on_gpu_install_progress)
+        self._gpu_install_thread.finished_ok.connect(self._on_gpu_install_finished)
+        self._gpu_install_thread.failed.connect(self._on_gpu_install_failed)
+        self._gpu_install_thread.start()
+
+    def _on_gpu_install_progress(self, label, done, total):
+        if total > 0:
+            pct = int(done * 100 / total)
+            self._gpu_progress.setRange(0, 100)
+            self._gpu_progress.setValue(pct)
+            if self._gpu_install_via_banner:
+                self._nvidia_banner_progress.setRange(0, 100)
+                self._nvidia_banner_progress.setValue(pct)
+        else:
+            self._gpu_progress.setRange(0, 0)
+            if self._gpu_install_via_banner:
+                self._nvidia_banner_progress.setRange(0, 0)
+        self._gpu_progress_label.setText(label)
+        if self._gpu_install_via_banner:
+            self._nvidia_banner_label.setText(label)
+
+    def _on_gpu_install_finished(self):
+        if self._gpu_install_via_banner:
+            self._nvidia_banner.setVisible(False)
+            self._nvidia_label.setVisible(True)
+            self._nvidia_install_btn.setVisible(True)
+            self._nvidia_later_btn.setVisible(True)
+            self._nvidia_banner_progress.setVisible(False)
+            self._nvidia_banner_label.setVisible(False)
+        self._gpu_progress.setVisible(False)
+        self._gpu_progress_label.setVisible(False)
+        self._gpu_restart_btn.setVisible(True)
+        self._compute_status_label.setText("GPU support installed. Restart to activate.")
+
+    def _on_gpu_install_failed(self, err):
+        from PySide6.QtWidgets import QMessageBox
+        if self._gpu_install_via_banner:
+            self._nvidia_banner_progress.setVisible(False)
+            self._nvidia_banner_label.setVisible(False)
+            self._nvidia_label.setVisible(True)
+            self._nvidia_install_btn.setVisible(True)
+            self._nvidia_later_btn.setVisible(True)
+        self._gpu_progress.setVisible(False)
+        self._gpu_progress_label.setVisible(False)
+        self._gpu_download_btn.setVisible(True)
+        self._gpu_upgrade_browser.setVisible(True)
+        box = QMessageBox(self)
+        box.setWindowTitle("GPU Installation Failed")
+        box.setIcon(QMessageBox.Critical)
+        box.setText(f"GPU support could not be installed.\n\n{err}")
+        box.addButton(QMessageBox.Ok)
+        info_btn = box.addButton("More Info", QMessageBox.HelpRole)
+        box.exec()
+        if box.clickedButton() is info_btn:
+            from PySide6.QtCore import QUrl
+            from PySide6.QtGui import QDesktopServices
+            QDesktopServices.openUrl(QUrl(_GPU_BUILD_URL))
+
+    def _on_gpu_help_clicked(self):
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        QDesktopServices.openUrl(QUrl(_GPU_BUILD_URL))
+
+    def _on_gpu_clear_clicked(self):
+        from PySide6.QtWidgets import QMessageBox
+        from modules.gpu_pack import clear_gpu_files, get_override_dir
+        confirm = QMessageBox.question(
+            self,
+            "Clear GPU Support Files",
+            "This will delete the GPU support files so you can start a fresh install.\n\n"
+            "You can reinstall them at any time from this Settings page.\n\n"
+            "Continue?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        ok, detail = clear_gpu_files()
+        if ok:
+            QMessageBox.information(
+                self,
+                "GPU Support Files Cleared",
+                "GPU support files have been removed. Click Install GPU Support to start fresh."
+            )
+        else:
+            override_dir = get_override_dir()
+            QMessageBox.critical(
+                self,
+                "Could Not Clear GPU Files",
+                f"Some files could not be removed. You can delete this folder manually:\n\n"
+                f"{override_dir}\n\n"
+                f"Details: {detail}"
+            )
+
+    def _on_nvidia_later_clicked(self):
+        SETTINGS.setValue("nvidia_banner_dismissed", True)
         self._nvidia_banner.setVisible(False)
+
+    def _refresh_compute_section(self):
+        if not hasattr(self, "_compute_status_label"):
+            return
+        import platform as _pl
+        device = self._compute_device
+        outcome = self._nvidia_outcome
+        gpu_mismatch = bool(os.environ.get('STC_GPU_VERSION_MISMATCH'))
+
+        if device == "mps":
+            status = "Apple MPS — GPU acceleration active"
+        elif device == "cuda":
+            status = "NVIDIA CUDA — GPU acceleration active"
+        elif device == "cpu" and outcome == "yes" and gpu_mismatch:
+            status = ("CPU — GPU pack version mismatch. "
+                      "Reinstall the GPU pack for this version of Star Trail CleanR "
+                      "to re-enable acceleration.")
+        elif device == "cpu" and outcome == "yes" and os.environ.get('STC_CUDA_UNSUPPORTED'):
+            status = ("NVIDIA GPU detected but your card isn't supported by the current "
+                      "GPU pack — running on CPU.")
+        elif device == "cpu" and outcome == "yes":
+            status = "CPU — NVIDIA GPU detected. Install the GPU pack for faster processing."
+        elif device == "cpu" and _pl.system() == "Windows":
+            status = "CPU — no GPU acceleration"
+        elif device == "cpu":
+            status = "CPU processing only — GPU acceleration not available on this device"
+        else:
+            return
+
+        self._compute_status_label.setText(status)
+        show_upgrade = (
+            _pl.system() == "Windows"
+            and outcome == "yes"
+            and device == "cpu"
+            and not gpu_mismatch
+            and not os.environ.get('STC_CUDA_UNSUPPORTED')
+        )
+        self._gpu_install_widget.setVisible(show_upgrade)
+        self._gpu_upgrade_browser.setVisible(show_upgrade)
+        self._gpu_download_btn.setVisible(show_upgrade)
+        if hasattr(self, '_gpu_clear_btn'):
+            self._gpu_clear_btn.setVisible(show_upgrade)
+        if hasattr(self, '_gpu_help_btn'):
+            self._gpu_help_btn.setVisible(show_upgrade)
 
     def _relaunch(self):
         """Close and reopen the app."""
         import subprocess
+        from PySide6.QtWidgets import QApplication as _QApp
+        _sock = getattr(_QApp.instance(), '_lock_socket', None)
+        if _sock is not None:
+            try:
+                _sock.close()
+            except Exception:
+                pass
         if getattr(sys, 'frozen', False):
-            subprocess.Popen([sys.executable])
+            subprocess.Popen([sys.executable, '--cleanr-relaunch'])
         else:
-            subprocess.Popen([sys.executable, os.path.abspath(__file__)])
+            subprocess.Popen([sys.executable, os.path.abspath(__file__), '--cleanr-relaunch'])
         self.close()
 
     # ── Setup page ───────────────────────────────────────────────────────────
@@ -1916,15 +2756,24 @@ class MainWindow(QMainWindow):
         step1.setTextFormat(Qt.RichText)
         step1_row.addWidget(step1)
         step1_row.addStretch(1)
-        self._frame_count_label = QLabel("")
-        # padding-right shifts the text leftward inside the label so it
-        # visually centers between Browse and Open Folder below it instead
-        # of hugging the right edge of the row.
-        self._frame_count_label.setStyleSheet(
-            "color: #5b9bd5; font-size: 15pt; padding-right: 100px;"
-        )
-        step1_row.addWidget(self._frame_count_label)
         layout.addLayout(step1_row)
+
+        # Frame count label sits in its own row above the input field, with
+        # stretch proportions matching row_in below (4 empty : 2 label).
+        # That keeps the label horizontally centered above the Browse +
+        # Open Folder buttons no matter how wide the window is. Replaces
+        # the prior "padding-right: 100px" workaround which only worked at
+        # one fixed window width.
+        count_row = QHBoxLayout()
+        count_row.setContentsMargins(0, 0, 0, 0)
+        count_row.addStretch(4)
+        self._frame_count_label = QLabel("")
+        self._frame_count_label.setAlignment(Qt.AlignCenter)
+        self._frame_count_label.setStyleSheet(
+            "color: #5b9bd5; font-size: 15pt;"
+        )
+        count_row.addWidget(self._frame_count_label, 2)
+        layout.addLayout(count_row)
 
         row_in = QHBoxLayout()
         self._folder_input = QLineEdit()
@@ -1934,9 +2783,13 @@ class MainWindow(QMainWindow):
         self._folder_input.editingFinished.connect(self._on_input_edited)
         row_in.addWidget(self._folder_input, 4)
         browse_in = QPushButton("Browse\u2026")
+        browse_in.setFixedHeight(34)
+        browse_in.setStyleSheet(_secondary_btn_css())
         browse_in.clicked.connect(self._browse_input)
         row_in.addWidget(browse_in, 1)
         self._input_open_btn = QPushButton("Open Folder")
+        self._input_open_btn.setFixedHeight(34)
+        self._input_open_btn.setStyleSheet(_secondary_btn_css())
         self._input_open_btn.setEnabled(False)
         self._input_open_btn.clicked.connect(self._open_setup_input_folder)
         row_in.addWidget(self._input_open_btn, 1)
@@ -1957,9 +2810,13 @@ class MainWindow(QMainWindow):
         self._output_input.textChanged.connect(self._update_output_open_btn_state)
         row_out.addWidget(self._output_input, 4)
         browse_out = QPushButton("Browse\u2026")
+        browse_out.setFixedHeight(34)
+        browse_out.setStyleSheet(_secondary_btn_css())
         browse_out.clicked.connect(self._browse_output)
         row_out.addWidget(browse_out, 1)
         self._output_open_btn = QPushButton("Open Folder")
+        self._output_open_btn.setFixedHeight(34)
+        self._output_open_btn.setStyleSheet(_secondary_btn_css())
         self._output_open_btn.setEnabled(False)
         self._output_open_btn.clicked.connect(self._open_setup_output_folder)
         row_out.addWidget(self._output_open_btn, 1)
@@ -2002,9 +2859,37 @@ class MainWindow(QMainWindow):
         layout.addWidget(step4)
 
         self._frame_limit = QComboBox()
-        self._frame_limit.addItems(["20", "50", "100", "250", "All Frames"])
-        self._frame_limit.setFixedWidth(140)
+        self._frame_limit.setEditable(True)
+        self._frame_limit.addItems(["20", "50", "100", "250", "500", "1000", "All Frames"])
+        self._frame_limit.lineEdit().setPlaceholderText("All Frames")
+        self._frame_limit.lineEdit().setValidator(QIntValidator(1, 999999))
+        self._frame_limit.setFixedWidth(160)
         layout.addWidget(self._frame_limit)
+
+        if not getattr(sys, 'frozen', False):
+            dev_row = QHBoxLayout()
+            dev_label = QLabel("Dev: Start:")
+            dev_label.setFont(step_font)
+            dev_row.addWidget(dev_label)
+            self._dev_start_frame = QSpinBox()
+            self._dev_start_frame.setRange(0, 99999)
+            self._dev_start_frame.setValue(0)
+            self._dev_start_frame.setFixedWidth(90)
+            dev_row.addWidget(self._dev_start_frame)
+            dev_end_label = QLabel("End (0 = last):")
+            dev_end_label.setFont(step_font)
+            dev_row.addWidget(dev_end_label)
+            self._dev_end_frame = QSpinBox()
+            self._dev_end_frame.setRange(0, 99999)
+            self._dev_end_frame.setValue(0)
+            self._dev_end_frame.setFixedWidth(90)
+            dev_row.addWidget(self._dev_end_frame)
+            dev_row.addStretch()
+            layout.addLayout(dev_row)
+        else:
+            self._dev_start_frame = None
+            self._dev_end_frame = None
+
         layout.addSpacing(4)
 
         # ── Step 5: Output Options ───────────────────────────────────────────
@@ -2046,6 +2931,31 @@ class MainWindow(QMainWindow):
 
         layout.addLayout(hp_row)
         layout.addSpacing(6)
+
+        if _DEV_SWITCHER_ENABLED:
+            dev_row = QHBoxLayout()
+            dev_label = QLabel("Model (dev):")
+            dev_label.setFont(step_font)
+            dev_row.addWidget(dev_label)
+            self._dev_model_combo = QComboBox()
+            self._dev_model_combo.setFixedWidth(300)
+            _choices = _get_dev_model_choices()
+            _saved = SETTINGS.value("dev_model_override", "", type=str)
+            _saved_idx = 0
+            for i, (name, pt_path) in enumerate(_choices):
+                self._dev_model_combo.addItem(name, pt_path)
+                if pt_path == _saved:
+                    _saved_idx = i
+            if _choices:
+                self._dev_model_combo.setCurrentIndex(_saved_idx)
+                SETTINGS.setValue("dev_model_override", _choices[_saved_idx][1])
+            self._dev_model_combo.currentIndexChanged.connect(
+                lambda idx: SETTINGS.setValue(
+                    "dev_model_override", self._dev_model_combo.itemData(idx)))
+            dev_row.addWidget(self._dev_model_combo)
+            dev_row.addStretch(1)
+            layout.addLayout(dev_row)
+            layout.addSpacing(6)
 
         # ── Step 6: Run ──────────────────────────────────────────────────────
         step6 = QLabel(
@@ -2114,6 +3024,8 @@ class MainWindow(QMainWindow):
         fli = self._frame_limit.findText(last_frame_limit)
         if fli >= 0:
             self._frame_limit.setCurrentIndex(fli)
+        else:
+            self._frame_limit.setCurrentText(last_frame_limit)
 
         # Persist on change
         self._format_combo.currentTextChanged.connect(
@@ -2141,7 +3053,26 @@ class MainWindow(QMainWindow):
         title_font.setBold(True)
         title.setFont(title_font)
         self._process_title = title
-        layout.addWidget(title)
+
+        self._trail_counter_label = QLabel("")
+        self._trail_counter_label.setStyleSheet(
+            f"font-size: 22px; font-weight: bold; color: {MUTED_TEXT};"
+        )
+        self._trail_counter_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self._trail_counter_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+
+        self._run_source_label = QLabel("")
+        self._run_source_label.setStyleSheet(f"font-size: 19px; color: {MUTED_TEXT};")
+        self._run_source_label.setAlignment(Qt.AlignCenter | Qt.AlignVCenter)
+        self._run_source_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+
+        title_row = QHBoxLayout()
+        title_row.addWidget(title)
+        title_row.addStretch()
+        title_row.addWidget(self._run_source_label)
+        title_row.addStretch()
+        title_row.addWidget(self._trail_counter_label)
+        layout.addLayout(title_row)
 
         # ── Overall progress bar (fat) ──
         frame_label_row = QHBoxLayout()
@@ -2177,6 +3108,7 @@ class MainWindow(QMainWindow):
         time_row.addWidget(self._time_label)
         time_row.addStretch()
         self._elapsed_label = QLabel("")
+        self._elapsed_label.setStyleSheet(f"font-size: 14px; color: {MUTED_TEXT};")
         self._elapsed_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         time_row.addWidget(self._elapsed_label)
         layout.addLayout(time_row)
@@ -2201,6 +3133,7 @@ class MainWindow(QMainWindow):
         step1_row = QHBoxLayout()
         self._step1_label = QLabel("Detecting\nwaiting")
         self._step1_label.setFixedWidth(120)
+        self._step1_label.setWordWrap(True)
         self._step1_label.setStyleSheet(f"font-size: 14px; color: {HINT_TEXT};")
         self._step1_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         step1_row.addWidget(self._step1_label)
@@ -2222,6 +3155,7 @@ class MainWindow(QMainWindow):
         step2_row = QHBoxLayout()
         self._step2_label = QLabel("Repairing\nwaiting")
         self._step2_label.setFixedWidth(120)
+        self._step2_label.setWordWrap(True)
         self._step2_label.setStyleSheet(f"font-size: 14px; color: {HINT_TEXT};")
         self._step2_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         step2_row.addWidget(self._step2_label)
@@ -2256,12 +3190,12 @@ class MainWindow(QMainWindow):
         log_col.setSpacing(8)
         log_col.setContentsMargins(0, 0, 0, 0)
 
-        star_log_title = QLabel("Star Log")
-        star_log_title.setAlignment(Qt.AlignCenter)
-        star_log_title.setStyleSheet(
+        self._star_log_title = QLabel("Star Log")
+        self._star_log_title.setAlignment(Qt.AlignCenter)
+        self._star_log_title.setStyleSheet(
             f"font-size: 18px; font-weight: bold; color: {CARD_TEXT};"
         )
-        log_col.addWidget(star_log_title)
+        log_col.addWidget(self._star_log_title)
 
         self._status_out = QTextEdit()
         self._status_out.setReadOnly(True)
@@ -2349,6 +3283,11 @@ class MainWindow(QMainWindow):
         v = QVBoxLayout(panel)
         v.setContentsMargins(24, 0, 24, 12)
         v.setSpacing(0)
+        # Top stretch paired with the existing bottom stretch below so the
+        # content (community message + status flash) sits vertically
+        # centered in the panel at any window size, instead of pinned to
+        # the top.
+        v.addStretch(1)
 
         # Two separate QLabels — one per paragraph. Single-paragraph
         # plain word-wrapped QLabels size themselves cleanly via
@@ -2415,9 +3354,32 @@ class MainWindow(QMainWindow):
         pre-filled. A short status line confirms the click registered."""
         from PySide6.QtCore import QUrl as _QUrl
         from PySide6.QtGui import QDesktopServices as _QDS
+        import urllib.parse as _urlp
+        import platform as _plat
 
         QApplication.clipboard().setText(self._support_email)
-        _QDS.openUrl(_QUrl(url))
+
+        log_text = self._status_out.toPlainText() if hasattr(self, '_status_out') else ""
+        if len(log_text) > 1500:
+            log_text = "...(truncated)\n" + log_text[-1500:]
+
+        sysname = _plat.system()
+        machine = _plat.machine()
+        subject = "Star Trail CleanR error report"
+        body = (
+            "Hi Bruce,\n\n"
+            "[Describe what happened]\n\n"
+            f"App version: Beta v{VERSION}\n"
+            f"OS: {sysname} ({machine})\n\n"
+            "--- Star Log ---\n"
+            f"{log_text}\n"
+        )
+        mailto_url = (
+            f"mailto:{self._support_email}"
+            f"?subject={_urlp.quote(subject)}"
+            f"&body={_urlp.quote(body)}"
+        )
+        _QDS.openUrl(_QUrl(mailto_url))
         self._community_status.setText("Email copied. Paste it anywhere.")
         QTimer.singleShot(
             3000, lambda: self._community_status.setText("")
@@ -2472,8 +3434,20 @@ class MainWindow(QMainWindow):
             if count == 0:
                 self._frame_count_label.setText("No images found")
             else:
+                dim_str = ""
+                try:
+                    first = next(
+                        os.path.join(folder, n) for n in sorted(os.listdir(folder))
+                        if os.path.splitext(n)[1].lower() in exts
+                    )
+                    from PIL import Image as _PILImage
+                    with _PILImage.open(first) as _im:
+                        _w, _h = _im.size
+                    dim_str = f"  ({_w:,}px x {_h:,}px)"
+                except Exception:
+                    pass
                 self._frame_count_label.setText(
-                    f"<b>{count:,}</b> frame{'s' if count != 1 else ''} found")
+                    f"<b>{count:,}</b> frame{'s' if count != 1 else ''} found{dim_str}")
 
         model = self._frame_limit.model()
         for i in range(self._frame_limit.count()):
@@ -2564,6 +3538,7 @@ class MainWindow(QMainWindow):
         if os.path.exists(mask_path):
             self._mask_window.load_existing_mask(mask_path)
 
+        self._mask_window._painter._set_mode(False)
         self._mask_window.show()
         self._mask_window.raise_()
         self._mask_window.activateWindow()
@@ -2609,17 +3584,142 @@ class MainWindow(QMainWindow):
                 _f.write("probe")
             os.remove(_probe_path)
         except (PermissionError, OSError) as _err:
+            import errno as _errno
             from PySide6.QtWidgets import QMessageBox as _QMB
-            _QMB.warning(
-                self,
-                "Cannot write to output folder",
-                f"Star Trail CleanR cannot write to:\n\n{output}\n\n"
-                "Pick a different folder, or check that it isn't on a read-only "
-                "drive, a OneDrive synced location, or a folder where files are "
-                "open in another app.\n\n"
-                f"(Detail: {type(_err).__name__}: {_err})"
-            )
+            if getattr(_err, "errno", None) == _errno.ENOSPC:
+                _QMB.warning(
+                    self,
+                    "Drive is full",
+                    f"The output drive is full.\n\n{output}\n\n"
+                    "Free up space on that drive, or pick a different output folder."
+                )
+            else:
+                _QMB.warning(
+                    self,
+                    "Cannot write to output folder",
+                    f"Star Trail CleanR cannot write to:\n\n{output}\n\n"
+                    "Pick a different folder, or check that it isn't on a read-only "
+                    "drive, a OneDrive synced location, or a folder where files are "
+                    "open in another app.\n\n"
+                    f"(Detail: {type(_err).__name__}: {_err})"
+                )
             return None
+
+        # Disk space + memory check: estimate resources needed before the run starts.
+        try:
+            import shutil as _shutil
+            _exts = ["*.jpg", "*.jpeg", "*.png", "*.tif", "*.tiff",
+                     "*.JPG", "*.JPEG", "*.PNG", "*.TIF", "*.TIFF"]
+            _frames = sorted(set(
+                f for e in _exts for f in glob.glob(os.path.join(folder, e))
+            ))
+            if _frames:
+                _lim_text = self._frame_limit.currentText().strip()
+                try:
+                    _total_frames = (len(_frames) if _lim_text in ("All Frames", "")
+                                     else min(int(_lim_text), len(_frames)))
+                except ValueError:
+                    _total_frames = len(_frames)
+
+                if _total_frames < 3:
+                    from PySide6.QtWidgets import QMessageBox as _QMB
+                    _QMB.warning(
+                        self,
+                        "Not enough frames",
+                        f"Star Trail CleanR needs at least 3 frames to run.\n\n"
+                        f"Your folder has {_total_frames} image(s). "
+                        "Add more frames and try again.\n\n"
+                        "Star Trail CleanR works on individual frames before "
+                        "stacking, not on a finished star trail image.",
+                        _QMB.Ok,
+                    )
+                    return None
+
+                with Image.open(_frames[0]) as _im:
+                    _w, _h = _im.size
+
+                _out_fmt = self._format_combo.currentText()
+                if _out_fmt == "TIFF 16-bit":
+                    _bpp = 6.0
+                elif _out_fmt == "TIFF 8-bit":
+                    _bpp = 3.0
+                else:
+                    _bpp = 0.6  # conservative for JPG quality 95
+                _estimated_bytes = int(_w * _h * _bpp * _total_frames)
+
+                def _fmt_gb(b):
+                    return f"{b / 1_073_741_824:.1f} GB"
+
+                _free_bytes = _shutil.disk_usage(output).free
+                if _free_bytes < _estimated_bytes:
+                    from PySide6.QtWidgets import QMessageBox as _QMB
+                    _dlg = _QMB(self)
+                    _dlg.setIcon(_QMB.Warning)
+                    _dlg.setWindowTitle("Low disk space")
+                    _dlg.setText(
+                        f"The output drive may not have enough space for this run.\n\n"
+                        f"Estimated space needed:  {_fmt_gb(_estimated_bytes)}\n"
+                        f"Free space available:      {_fmt_gb(_free_bytes)}\n\n"
+                        "You can continue anyway or cancel and pick a different output folder."
+                    )
+                    _cont_btn = _dlg.addButton("Continue", _QMB.AcceptRole)
+                    _dlg.addButton("Cancel", _QMB.RejectRole)
+                    _dlg.setDefaultButton(_cont_btn)
+                    _dlg.exec()
+                    if _dlg.clickedButton().text() == "Cancel":
+                        return None
+
+                try:
+                    import psutil as _psutil
+                    _batch_frames = min(22, _total_frames)  # batch (20) + 2 neighbor frames
+                    _peak_bytes = int(_batch_frames * _w * _h * 3 * 4) + 1_500_000_000
+                    _available = _psutil.virtual_memory().available
+                    if _peak_bytes > _available * 0.85:
+                        from PySide6.QtWidgets import QMessageBox as _QMB
+                        resp = _QMB.warning(
+                            self,
+                            "Low memory",
+                            f"This run may use more RAM than your computer has available "
+                            f"and could cause it to slow down or freeze.\n\n"
+                            f"Estimated RAM needed:  {_fmt_gb(_peak_bytes)}\n"
+                            f"RAM available now:        {_fmt_gb(_available)}\n\n"
+                            "Close any other open programs to free up memory before running. "
+                            "If you still see this warning, try setting 'Number of images' to a smaller value.\n\n"
+                            "You can continue anyway or cancel.",
+                            _QMB.Ok | _QMB.Cancel,
+                            _QMB.Cancel,
+                        )
+                        if resp == _QMB.Cancel:
+                            return None
+                except ImportError:
+                    pass
+        except Exception:
+            pass  # best-effort, never block a run on a failed resource check
+
+        # Pre-flight mask check: if a mask was saved but can't be read now,
+        # ask the user whether to proceed without it rather than crashing mid-run.
+        if self._mask_path:
+            try:
+                import cv2 as _cv2
+                _test = _cv2.imread(self._mask_path, _cv2.IMREAD_GRAYSCALE)
+            except Exception:
+                _test = None
+            if _test is None:
+                from PySide6.QtWidgets import QMessageBox as _QMB
+                resp = _QMB.warning(
+                    self,
+                    "Saved mask can't be opened",
+                    "The saved foreground mask couldn't be read:\n\n"
+                    f"{self._mask_path}\n\n"
+                    "The file may be corrupted or missing. "
+                    "Proceed without the mask (trails in the foreground area may be flagged), "
+                    "or cancel and re-draw it.",
+                    _QMB.Ok | _QMB.Cancel,
+                    _QMB.Cancel,
+                )
+                if resp == _QMB.Cancel:
+                    return None
+                self._mask_path = None
 
         self._error_label.setText("")
         return folder, output
@@ -2642,6 +3742,10 @@ class MainWindow(QMainWindow):
 
         # Go to process page — reset all widgets
         self._process_title.setText("Cleaning in Progress")
+        _p = Path(folder)
+        _display = f"{_p.parent.name}/{_p.name}" if _p.parent.name else _p.name
+        self._run_source_label.setText(_display)
+        self._trail_counter_label.setText("")
         self._progress_bar.setValue(0)
         self._progress_bar.setFormat("%p%")
         self._progress_bar.setStyleSheet(
@@ -2711,10 +3815,15 @@ class MainWindow(QMainWindow):
 
         fmt_map = {"JPG": "jpg", "TIFF 8-bit": "tif8", "TIFF 16-bit": "tif16"}
         out_fmt = fmt_map.get(self._format_combo.currentText(), "jpg")
+        self._run_cancelled = False
+        frame_start = self._dev_start_frame.value() if self._dev_start_frame is not None else 0
+        frame_end = self._dev_end_frame.value() if self._dev_end_frame is not None else 0
         self.worker = CleanerWorker(
             folder, output, self._frame_limit.currentText(), self._mask_path,
             output_format=out_fmt,
-            jpeg_quality=self._jpeg_quality.value())
+            jpeg_quality=self._jpeg_quality.value(),
+            frame_start=frame_start,
+            frame_end=frame_end)
         self.worker.progress.connect(self._on_progress)
         self.worker.status.connect(self._on_status)
         self.worker.batch_info.connect(self._on_batch_info)
@@ -2730,10 +3839,17 @@ class MainWindow(QMainWindow):
         self.worker.bad_file_prompt.connect(self._on_bad_file_prompt)
         self.worker.too_many_bad_files.connect(self._on_too_many_bad_files)
         self.worker.frames_filter_prompt.connect(self._on_frames_filter_prompt)
+        self.worker.trail_count_update.connect(self._on_trail_count_update)
+        self._trail_counter_label.setText("0 Trails Cleaned")
+        self._trail_counter_label.setStyleSheet(
+            "font-size: 22px; font-weight: bold; color: #5b9bd5;"
+        )
         self.worker.start()
+        self._set_updates_run_state(True)
 
     def _cancel_run(self):
         if self.worker and self.worker.isRunning():
+            self._run_cancelled = True
             self.worker.cancel()
             self._cancel_btn.setEnabled(False)
             self._cancel_btn.setText("Cancelling\u2026")
@@ -2760,6 +3876,8 @@ class MainWindow(QMainWindow):
             self._spinner_timer.stop()
         if hasattr(self, '_warmup_timer') and self._warmup_timer.isActive():
             self._warmup_timer.stop()
+        if hasattr(self, '_star_log_title'):
+            self._star_log_title.setText("Star Log")
 
     def _go_to_setup(self):
         self._stop_elapsed_timer()
@@ -2770,8 +3888,9 @@ class MainWindow(QMainWindow):
         ch = self._spinner_chars[self._spinner_idx % len(self._spinner_chars)]
         start = getattr(self, '_run_start_time', None)
         elapsed = (time.time() - start.timestamp()) if start is not None else 0
-        m, s = divmod(int(elapsed), 60)
-        self._elapsed_label.setText(f"{ch}  Elapsed: {m}m {s:02d}s")
+        self._elapsed_label.setText(f"{ch}  Elapsed: {fmt_estimate(elapsed)}")
+        if hasattr(self, '_star_log_title'):
+            self._star_log_title.setText(f"Star Log  {ch}")
 
 
         # Pulse "Estimating..." before real estimate arrives
@@ -2780,6 +3899,8 @@ class MainWindow(QMainWindow):
             self._time_label.setText(f"Estimating{dots}")
 
     def _on_progress(self, pct, total, remaining_str):
+        if getattr(self, "_run_cancelled", False):
+            return
         self._progress_bar.setRange(0, 100)
         pct = max(0, min(100, pct))
         self._progress_bar.setValue(pct)
@@ -2807,7 +3928,9 @@ class MainWindow(QMainWindow):
         self._step2_label.setText("Repairing\nwaiting")
         self._step2_bar.setStyleSheet(step1_style)
 
-    def _on_step_progress(self, step, current, total):
+    def _on_step_progress(self, step, current, total, global_current, global_total):
+        if getattr(self, "_run_cancelled", False):
+            return
         green_style = (
             f"QProgressBar {{ border: 1px solid {CARD_BORDER}; border-radius: 8px; "
             f"background: {CARD_BG}; text-align: center; font-weight: bold; font-size: 13px; color: {CARD_TEXT}; }}"
@@ -2815,6 +3938,18 @@ class MainWindow(QMainWindow):
             "x1:0, y1:0, x2:1, y2:0, stop:0 #34c759, stop:1 #5dd87a); border-radius: 7px; }"
         )
         pct = int(current / total * 100) if total > 0 else 0
+        # Name the frames this batch is actually working, as a global range with
+        # whole-job context, e.g. "frames 21-40 (of 450)". The bar % is progress
+        # through just those frames, so the label and the % refer to the same set.
+        range_start = global_current - current + 1
+        range_end = range_start + total - 1
+        # Action word + "frame(s)" on line 1, just the numbers on line 2. Keeps the
+        # number line short ("21-40 (of 450)") so it fits the fixed label column at
+        # any frame count; the bar never moves. Word-wrap on the label is the safety.
+        if range_start == range_end:
+            head, nums = "frame", f"{range_start} (of {global_total})"
+        else:
+            head, nums = "frames", f"{range_start}-{range_end} (of {global_total})"
         if step == 1:
             self._step1_bar.setValue(pct)
             if pct >= 100:
@@ -2823,7 +3958,7 @@ class MainWindow(QMainWindow):
                 self._step1_bar.setStyleSheet(green_style)
             else:
                 self._step1_bar.setFormat(f"{pct}%")
-                self._step1_label.setText(f"Detecting\nframe {current}/{total}")
+                self._step1_label.setText(f"Detecting {head}\n{nums}")
         elif step == 2:
             self._step2_bar.setValue(pct)
             if pct >= 100:
@@ -2832,14 +3967,16 @@ class MainWindow(QMainWindow):
                 self._step2_bar.setStyleSheet(green_style)
             else:
                 self._step2_bar.setFormat(f"{pct}%")
-                self._step2_label.setText(f"Repairing\nframe {current}/{total}")
+                self._step2_label.setText(f"Repairing {head}\n{nums}")
 
     def _on_warmup_active(self, active):
         if active:
             # Idempotent: if the heartbeat is already running (because we triggered
             # it at "frames loaded"), don't reset the rotation when "Step 1" arrives.
             if not self._warmup_timer.isActive():
-                self._warmup_counter = 0
+                last_phrase = self._warmup_counter // 4
+                next_phrase = (last_phrase + 1) % len(self._warmup_phrases)
+                self._warmup_counter = next_phrase * 4 if self._warmup_counter > 0 else 0
                 self._warmup_tick()
                 self._warmup_timer.start(500)
         else:
@@ -2862,7 +3999,7 @@ class MainWindow(QMainWindow):
             # warm up): show a steady "still warming up" line so the
             # rotation doesn't loop back to "Studying your stars" looking
             # like the run restarted.
-            text = "Still warming up the AI trail detector"
+            text = "Warming up the AI trail detector"
         if sub_step == 0:
             self._status_out.append("  " + text + "...")
             sb = self._status_out.verticalScrollBar()
@@ -2884,13 +4021,27 @@ class MainWindow(QMainWindow):
         self._jpeg_quality.setEnabled(is_jpg)
         self._jpeg_quality_label.setEnabled(is_jpg)
 
+    def _on_trail_count_update(self, count):
+        self._trail_counter_label.setText(f"{count:,} Trails Cleaned")
+
     def _on_stats_ready(self, total_trails, total_frames):
-        # Capture for the run-summary file even on zero-trail runs.
+        # Capture for the run-summary file and the run-complete dialog.
         self._run_total_trails = total_trails
         self._run_total_frames = total_frames
+        color = SUCCESS_TEXT if total_trails > 0 else MUTED_TEXT
+        self._trail_counter_label.setStyleSheet(
+            f"font-size: 22px; font-weight: bold; color: {color};"
+        )
         if total_trails <= 0:
+            self._stats_trail_line = (
+                f"Sky was clean — no airplane or satellite trails found<br>"
+                f"in your <b>{total_frames:,}</b> frames.<br><br>"
+                f"<b>Time to stack!</b><br>"
+                f"Open the Cleaned Folder, then load the frames into your favorite "
+                f"stacker (StarStaX, Sequator, Photoshop, etc.) for the final composite."
+            )
             return
-        SECONDS_PER_MANUAL_TRAIL = 20
+        SECONDS_PER_MANUAL_TRAIL = 30
         saved_sec = total_trails * SECONDS_PER_MANUAL_TRAIL
         if saved_sec >= 60:
             rounded_min = int(round(saved_sec / 900.0) * 15)
@@ -2909,7 +4060,7 @@ class MainWindow(QMainWindow):
         self._stats_trail_line = (
             f"Swept <b>{total_trails:,}</b> airplane and satellite trails from your stars<br>"
             f"across <b>{total_frames:,}</b> twinkling frames.<br>"
-            f"<i>Based on manual cleanup at 20 seconds per trail.</i><br><br>"
+            f"<i>Based on manual cleanup at 30 seconds per trail.</i><br><br>"
             f"<span style='font-size:20px; font-weight:bold;'>TIME SAVED: {time_saved}</span>"
             f"<br><br><b>Time to stack!</b><br>"
             f"Open the Cleaned Folder, then load the frames into your favorite "
@@ -2921,10 +4072,12 @@ class MainWindow(QMainWindow):
         self._run_initial_est_sec = initial_est_sec
         self._run_actual_sec = actual_sec
         tail = "You're welcome." if actual_sec <= initial_est_sec else "My apologies."
+        frames = getattr(self, '_run_total_frames', 0)
+        pf = f"  ({actual_sec / frames:.1f}s/frame)" if frames > 0 else ""
         self._stats_timing_line = (
             f"<br><br><span style='font-size:14px; color:{MUTED_TEXT};'>"
             f"Thought it'd take <b>{fmt_hms(initial_est_sec)}</b>. "
-            f"Took <b>{fmt_hms(actual_sec)}</b>. {tail}"
+            f"Took <b>{fmt_hms(actual_sec)}</b>{pf}. {tail}"
             f"</span>"
         )
         # Modal dialog will read this on _on_done.
@@ -2944,8 +4097,12 @@ class MainWindow(QMainWindow):
         self._cancel_btn.clicked.connect(self._go_to_setup)
 
     def _on_error(self, msg):
+        import platform as _plat
         self._stop_elapsed_timer()
-        self._status_out.setText(f"ERROR: {msg}")
+        self._status_out.append(f"\nERROR: {msg}")
+        self._status_out.append(
+            f"App: Beta v{VERSION}  |  {_plat.system()} {_plat.machine()}"
+        )
         self._switch_to_back_btn()
 
     def _on_bad_file_prompt(self, path, diagnosis):
@@ -3117,10 +4274,9 @@ class MainWindow(QMainWindow):
         self._update_open_btn_state()
         self._switch_to_back_btn()
         self._write_run_summary()
-        # Show the run-complete dialog if there's anything to celebrate
-        # (i.e. trails were swept). Zero-trail runs skip the popup.
-        if getattr(self, '_run_total_trails', 0) > 0:
-            self._show_run_complete_dialog()
+        # Run-complete dialog fires for every finished run, including
+        # zero-trail runs (the dialog message branches on trail count).
+        self._show_run_complete_dialog()
 
     def _show_run_complete_dialog(self):
         """Centered modal showing run summary. Replaces the old inline card
@@ -3240,7 +4396,7 @@ class MainWindow(QMainWindow):
         actual_sec = getattr(self, '_run_actual_sec', 0)
 
         # Mirror the on-screen "TIME SAVED" formatting.
-        SECONDS_PER_MANUAL_TRAIL = 20
+        SECONDS_PER_MANUAL_TRAIL = 30
         saved_sec = trails * SECONDS_PER_MANUAL_TRAIL
         if saved_sec >= 60:
             rounded_min = int(round(saved_sec / 900.0) * 15)
@@ -3308,6 +4464,59 @@ class MainWindow(QMainWindow):
         tile_val = 640
         overlap_val = 0.2
 
+        # Read EXIF from the first image in the input folder.
+        def _read_exif_summary(folder):
+            from PIL import Image as _PILImage
+            from PIL.ExifTags import TAGS
+            exts = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
+            first = next(
+                (p for p in sorted(os.listdir(folder))
+                 if os.path.splitext(p)[1].lower() in exts),
+                None
+            )
+            fields = {
+                "camera": "Unknown",
+                "lens":   "Unknown",
+                "taken":  "Unknown",
+                "fstop":  "Unknown",
+                "iso":    "Unknown",
+            }
+            if first is None:
+                return fields
+            try:
+                with _PILImage.open(os.path.join(folder, first)) as _im:
+                    raw = _im.getexif()
+                    if not raw:
+                        return fields
+                    tag_map = {TAGS.get(k, k): v for k, v in raw.items()}
+                    # get_ifd() must be called while the file is still open.
+                    sub_map = {TAGS.get(k, k): v for k, v in raw.get_ifd(0x8769).items()}
+                make  = str(tag_map.get("Make",  "")).strip()
+                model = str(tag_map.get("Model", "")).strip()
+                if make or model:
+                    if make and model.startswith(make):
+                        fields["camera"] = model
+                    else:
+                        fields["camera"] = f"{make} {model}".strip() or "Unknown"
+                lens = str(sub_map.get("LensModel", "")).strip()
+                fields["lens"] = lens or "Unknown"
+                taken = str(sub_map.get("DateTimeOriginal", "")).strip()
+                fields["taken"] = taken or "Unknown"
+                fnum = sub_map.get("FNumber")
+                if fnum is not None:
+                    try:
+                        fields["fstop"] = f"f/{float(fnum):.1f}"
+                    except Exception:
+                        fields["fstop"] = str(fnum)
+                iso = sub_map.get("ISOSpeedRatings")
+                if iso is not None:
+                    fields["iso"] = str(iso)
+            except Exception:
+                pass
+            return fields
+
+        exif = _read_exif_summary(input_folder)
+
         lines = [
             "================================================",
             "  Star Trail CleanR",
@@ -3322,7 +4531,14 @@ class MainWindow(QMainWindow):
             f"Finished:              {end.strftime('%H:%M:%S')}",
             "",
             f"App version:           Beta v{VERSION}",
-            f"Trail Detector:        {detector}",
+            f"Trail DetectoR:        {detector}",
+            "",
+            "Camera Info",
+            f"  Camera:              {exif['camera']}",
+            f"  Lens:                {exif['lens']}",
+            f"  Date/Time taken:     {exif['taken']}",
+            f"  F-stop:              {exif['fstop']}",
+            f"  ISO:                 {exif['iso']}",
             "",
             "Input folder:",
             f"  {input_folder}",
@@ -3365,7 +4581,7 @@ class MainWindow(QMainWindow):
             f"Thought it'd take {fmt_hms(est_sec)}. "
             f"Took {fmt_hms(actual_sec)}. {tail}",
             "",
-            f"Time saved vs cleaning manually (at ~20 sec per trail):  {time_saved}",
+            f"Time saved vs cleaning manually (at ~30 sec per trail):  {time_saved}",
             "",
             "================================================",
             "",
@@ -3423,7 +4639,7 @@ class MainWindow(QMainWindow):
         workspace = os.path.join(input_folder, WORKSPACE_DIR)
         try:
             os.makedirs(workspace, exist_ok=True)
-            fname = f"run_summary_{start.strftime('%Y-%m-%d_%H-%M-%S')}.txt"
+            fname = f"star_trail_cleanr_log_{start.strftime('%Y-%m-%d_%H-%M-%S')}.txt"
             with open(os.path.join(workspace, fname), 'w', encoding='utf-8') as f:
                 f.write('\n'.join(lines) + '\n')
         except OSError:
@@ -3456,6 +4672,7 @@ class MainWindow(QMainWindow):
     def _on_finished(self):
         self._stop_elapsed_timer()
         self._switch_to_back_btn()
+        self._set_updates_run_state(False)
 
     def closeEvent(self, event):
         """Save window size and clean up worker thread before closing."""
@@ -3516,6 +4733,7 @@ if __name__ == '__main__':
         sys.exit(1)
 
     app = QApplication(sys.argv)
+    app._lock_socket = _lock_socket  # exposed so _relaunch can close it before spawning
 
     # Bundle our own font so widgets render at the same widths on every OS.
     # Without this, Mac uses San Francisco, Windows uses Segoe UI, Linux uses
@@ -3570,42 +4788,141 @@ if __name__ == '__main__':
 
     _apply_theme()
 
-    # First-run crash-reporting opt-in. Asked once; choice persists in
-    # QSettings. Only shown when a DSN is actually present (CI builds), so
-    # dev runs don't see the prompt at all.
-    if _SENTRY_DSN and not SETTINGS.contains("crash_reporting_choice_made"):
-        from PySide6.QtWidgets import QMessageBox
-        prompt = QMessageBox()
-        prompt.setWindowTitle("Star Trail CleanR")
-        prompt.setIcon(QMessageBox.Question)
-        prompt.setText("Help improve Star Trail CleanR by sending anonymous crash reports?")
-        prompt.setInformativeText(
-            "If the app ever crashes, an automatic error report is sent so the bug "
-            "can be fixed.\n\nThe report contains a stack trace, your operating "
-            "system, and the app version. No images, no folder paths, no personal "
-            "information."
-        )
-        prompt.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
-        prompt.setDefaultButton(QMessageBox.Yes)
-        choice = prompt.exec()
-        SETTINGS.setValue("crash_reporting_enabled", choice == QMessageBox.Yes)
-        SETTINGS.setValue("crash_reporting_choice_made", True)
+    # Startup splash: visible while the slow first-launch work runs (theme
+    # detection, Sentry/Sparkle init, MainWindow construction, font setup).
+    # Without this, users see a frozen-looking app for 1-3 seconds on first
+    # launch, since the GUI renders before the event loop is fully unblocked.
+    # Frameless+StaysOnTop combo per feedback_qt_splash_flags.md (Qt's
+    # SplashScreen flag is unreliable on macOS).
+    from PySide6.QtWidgets import QProgressBar
+    _splash = QWidget()
+    _splash.setWindowFlags(Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+    _splash.setAttribute(Qt.WA_TranslucentBackground)
+    _splash.setFixedSize(600, 338)
+    _splash_outer = QVBoxLayout(_splash)
+    _splash_outer.setContentsMargins(0, 0, 0, 0)
+    _splash_card = QFrame()
+    _splash_card.setStyleSheet(
+        "QFrame#stcSplashCard { background: #f4f6f9; border-radius: 12px; border: 1px solid #d6dde6; }"
+    )
+    _splash_card.setObjectName("stcSplashCard")
+    _splash_outer.addWidget(_splash_card)
 
+    # Card body: top bar, content row, bottom bar
+    _splash_body = QVBoxLayout(_splash_card)
+    _splash_body.setContentsMargins(0, 0, 0, 0)
+    _splash_body.setSpacing(0)
+
+    _splash_top_bar = QFrame()
+    _splash_top_bar.setFixedHeight(64)
+    _splash_top_bar.setStyleSheet(
+        f"QFrame {{ background: {BRAND_HEADER_BG}; border: none; "
+        "border-top-left-radius: 11px; border-top-right-radius: 11px; }"
+    )
+    _splash_body.addWidget(_splash_top_bar)
+
+    _splash_content = QWidget()
+    _splash_content.setStyleSheet("background: transparent;")
+    _splash_row = QHBoxLayout(_splash_content)
+    _splash_row.setContentsMargins(32, 20, 32, 20)
+    _splash_row.setSpacing(24)
+    _splash_body.addWidget(_splash_content, 1)
+
+    _splash_bottom_bar = QFrame()
+    _splash_bottom_bar.setFixedHeight(64)
+    _splash_bottom_bar.setStyleSheet(
+        f"QFrame {{ background: {BRAND_HEADER_BG}; border: none; "
+        "border-bottom-left-radius: 11px; border-bottom-right-radius: 11px; }"
+    )
+    _splash_body.addWidget(_splash_bottom_bar)
+    _splash_icon = QLabel()
+    if os.path.exists(_icon_path):
+        _splash_icon.setPixmap(QIcon(_icon_path).pixmap(140, 140))
+    _splash_icon.setFixedSize(140, 140)
+    # No frame around the icon graphic; the icon file already has its own
+    # rounded shape baked in.
+    _splash_icon.setStyleSheet("background: transparent; border: none;")
+    _splash_row.addWidget(_splash_icon, 0, Qt.AlignVCenter)
+    _splash_text_col = QVBoxLayout()
+    _splash_text_col.setContentsMargins(0, 0, 0, 0)
+    _splash_text_col.setSpacing(8)
+    _splash_text_col.addStretch(1)
+    _splash_title = QLabel("Star Trail CleanR")
+    _splash_title.setStyleSheet("font-size: 24pt; font-weight: bold; color: #1a1f2c; background: transparent; border: none;")
+    _splash_text_col.addWidget(_splash_title)
+    _splash_sub = QLabel("Remove the Trails. Keep the Stars.")
+    _splash_sub.setStyleSheet("font-size: 14pt; color: #4a5568; background: transparent; border: none;")
+    _splash_text_col.addWidget(_splash_sub)
+    _splash_hashtag = QLabel("#StarTrailCleanR")
+    _splash_hashtag.setStyleSheet("font-size: 12pt; color: #2d3748; background: transparent; border: none;")
+    _splash_text_col.addWidget(_splash_hashtag)
+    _splash_text_col.addSpacing(14)
+    _splash_bar = QProgressBar()
+    _splash_bar.setRange(0, 0)
+    _splash_bar.setTextVisible(False)
+    _splash_bar.setFixedHeight(8)
+    _splash_bar.setStyleSheet(
+        "QProgressBar { background: #e2e8f0; border: none; border-radius: 4px; }"
+        "QProgressBar::chunk { background: #4a9eff; border-radius: 4px; }"
+    )
+    _splash_text_col.addWidget(_splash_bar)
+    _splash_status = QLabel("Initializing…")
+    _splash_status.setStyleSheet("font-size: 18pt; color: #6b7280; background: transparent; border: none;")
+    _splash_text_col.addWidget(_splash_status)
+    _splash_text_col.addStretch(1)
+    _splash_row.addLayout(_splash_text_col, 1)
+    _screen = QApplication.primaryScreen()
+    if _screen:
+        _g = _screen.availableGeometry()
+        _splash.move(_g.x() + (_g.width() - 600) // 2, _g.y() + (_g.height() - 338) // 2)
     _maybe_init_sentry()
+
+    import time as _time
+    _cleanr_relaunch = '--cleanr-relaunch' in sys.argv
+    if _cleanr_relaunch:
+        _splash_shown_at = 0.0
+    else:
+        _splash.show()
+        app.processEvents()
+        _splash_shown_at = _time.monotonic()
 
     # Pre-window launch recovery (added v1.99-beta after v1.97-beta shipped a
     # NameError that crashed MainWindow.__init__ before the in-app update
     # banner could render — users had no signal that a fix existed). Two
     # safety nets, both running entirely outside MainWindow's setup code so
     # a future launch-class crash cannot block them:
-    #   (1) _pre_window_update_check: tight-budget GitHub poll. If a newer
-    #       release exists, offer to open the download page before
-    #       MainWindow tries to build.
+    #   (1) Sparkle (Mac) / WinSparkle (Windows) auto-update infrastructure.
+    #       Native popup appears IN-APP when an update is available; the
+    #       app downloads only the changed bytes and restarts itself.
+    #       Replaces the v1.x GitHub-Releases-API poll. Linux falls through
+    #       to a no-op for now; banner-style notification can be added
+    #       later if Linux usage warrants.
     #   (2) try/except around MainWindow construction + show, routed to
     #       _handle_launch_failure (defined at module scope so the test
     #       suite treats its imports as lazy). Sentry still gets the
     #       report; a fallback dialog points the user at the download page.
-    _pre_window_update_check()
+    _splash_status.setText("Checking for updates…")
+    app.processEvents()
+    if sys.platform == "darwin":
+        from modules.sparkle_updater import init_sparkle
+
+        def _dismiss_splash_for_update():
+            try:
+                _splash.close()
+            except Exception:
+                pass
+
+        init_sparkle(on_update_found=_dismiss_splash_for_update)
+    elif sys.platform == "win32":
+        from modules.winsparkle_updater import init_winsparkle
+        init_winsparkle(
+            appcast_url="https://bruceherwig-dot.github.io/star-trail-cleanr/appcast-windows.xml",
+            app_name="Star Trail CleanR",
+            app_version=VERSION,
+            company_name="Star Trail CleanR",
+        )
+    _splash_status.setText("Warming up the trail detector…")
+    app.processEvents()
     try:
         window = MainWindow()
         window.show()
@@ -3613,12 +4930,23 @@ if __name__ == '__main__':
         _handle_launch_failure(_launch_exc)
         sys.exit(1)
 
+    # Dismiss the startup splash. Minimum on-screen duration of 1500 ms so
+    # the user gets to see the title + tagline + progress bar even on a
+    # cached relaunch where the rest of startup is fast. On a true cold
+    # first launch, the slow imports keep the splash up longer than the
+    # minimum and this delay is effectively zero.
+    _elapsed_ms = int((_time.monotonic() - _splash_shown_at) * 1000)
+    _remaining_ms = max(0, 3000 - _elapsed_ms)
+    QTimer.singleShot(_remaining_ms, _splash.close)
+
     # Live OS appearance switching: when the user toggles macOS Light/Dark
     # mid-session, relaunch so every themed widget rebuilds with the new
     # palette. QSettings preserves folder selections and options, so the
     # user lands right back where they were.
     def _on_color_scheme_changed(_scheme):
         try:
+            if window.worker and window.worker.isRunning():
+                return
             window._relaunch()
         except Exception:
             pass

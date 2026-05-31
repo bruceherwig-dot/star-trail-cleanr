@@ -15,13 +15,13 @@ from typing import Optional
 from modules.user_folder import get_installed_model_version
 
 REPO = "bruceherwig-dot/star-trail-cleanr"
-RELEASES_URL = f"https://api.github.com/repos/{REPO}/releases?per_page=30"
+RELEASES_URL = f"https://api.github.com/repos/{REPO}/releases?per_page=100"
 TIMEOUT_S = 5
 
 # Version label of the model shipped inside the app bundle. Bumped only when
 # we publish a new app release that carries a newer bundled model. Downloaded
 # models in the user folder always take precedence over this.
-BUNDLED_MODEL_VERSION = "model-v3"
+BUNDLED_MODEL_VERSION = "model-v4"
 
 _TAG_RE = re.compile(r"^model-v(\d+(?:\.\d+)?)")
 

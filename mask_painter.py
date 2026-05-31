@@ -171,6 +171,8 @@ class MaskGraphicsView(QGraphicsView):
         # Initialize blank mask
         self._mask_np = np.zeros((self._img_h, self._img_w), dtype=np.uint8)
         self._refresh_overlay()
+        pad = 500
+        self.setSceneRect(self._photo_item.boundingRect().adjusted(-pad, -pad, pad, pad))
         self.fitInView(self._photo_item, Qt.KeepAspectRatio)
         self._update_zoom_label()
 
@@ -286,12 +288,6 @@ class MaskGraphicsView(QGraphicsView):
         self._cursor_circle = self.scene().addEllipse(
             scene_pos.x() - r, scene_pos.y() - r, 2 * r, 2 * r, pen)
         self._cursor_circle.setZValue(10)
-        # Prevent cursor circle from extending the scene bounding rect
-        from PySide6.QtWidgets import QGraphicsItem
-        self._cursor_circle.setFlag(QGraphicsItem.ItemHasNoContents, False)
-        # Lock scene rect to the image bounds so cursor doesn't shift the view
-        if self._photo_item:
-            self.setSceneRect(self._photo_item.boundingRect())
 
     # ── Undo helpers ─────────────────────────────────────────────────────────
 
@@ -386,12 +382,9 @@ class MaskGraphicsView(QGraphicsView):
         scene_pos = self.mapToScene(event.position().toPoint())
         if self._panning:
             pass
-        elif self._pos_in_image(scene_pos):
+        else:
             self._move_cursor_circle(scene_pos)
             self.setCursor(Qt.CrossCursor)
-        else:
-            self._hide_cursor_circle()
-            self.setCursor(Qt.ArrowCursor)
 
         if self._panning and self._last_pan_pos is not None:
             delta = event.position().toPoint() - self._last_pan_pos
@@ -517,7 +510,7 @@ class MaskPainterWidget(QWidget):
         banner_text = QLabel(
             "<b style='font-size: 20px;'>Roughly paint over the ground, rocks, and buildings. Stay BELOW the skyline.</b><br>"
             "No need to mask trees \u2014 trails are visible through branches and the AI will still detect them there.<br>"
-            "You're just marking areas where you know trails won't appear."
+            "You're just marking areas where you know trails won't appear, so the AI doesn't try to 'fix' the ground."
         )
         banner_text.setStyleSheet("color: #a0d0a0; font-size: 16px;")
         banner_layout.addWidget(banner_text)

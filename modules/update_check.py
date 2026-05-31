@@ -17,8 +17,8 @@ TIMEOUT_S = 5
 
 # Asset filenames published by .github/workflows/build.yml on every tag.
 # Keep these in sync with the artifact-upload step names in that workflow.
-MAC_AS_ASSET = "StarTrailCleanR-Mac-AppleSilicon.zip"
-MAC_INTEL_ASSET = "StarTrailCleanR-Mac-Intel.zip"
+MAC_AS_ASSET = "StarTrailCleanR-Mac-AppleSilicon.dmg"
+MAC_INTEL_ASSET = "StarTrailCleanR-Mac-Intel.dmg"
 WIN_ASSET = "StarTrailCleanRSetup.zip"
 LINUX_ASSET = "StarTrailCleanR-Linux-x86_64.tar.gz"
 

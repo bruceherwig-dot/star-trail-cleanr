@@ -1,6 +1,7 @@
 # Astrophotography Airplane & Satellite Trail Removal — v5
 
 ## Standing instructions (apply to every response)
+- **Trail ScreenR / Tile ScreenR copy reference = use the embedded job ID and image path, always.** The reference format is: `TrailScreenR | frame N (IMG_XXXX) | polygon #N (cvat id NNNNN) | job J | /full/path/to/image.jpg`. Use the job ID and CVAT shape ID to query `GET http://localhost:8080/api/jobs/{job_id}/annotations` (auth: username bherwig2, password from `~/.star_trail_cleanr/cvat_credentials`), find the shape where `shape['id'] == cvat_id`, and use the embedded image path directly. Never search labelme JSON files as a substitute — they are stale. Tile ScreenR references have the same job/path fields but no cvat shape id (tile-based, not polygon-based).
 - **NEVER claim what our code does or doesn't do without reading the code first.** Bruce is not a programmer. He believes every technical claim I make and acts on it (defers features, reshapes plans). Before saying "our pipeline uses X," "we strip Y," "we can't do Z because of library W" — grep or Read the actual file. If I catch myself hedging with "I think" or "given that we use" about our own code, STOP and check. Past examples where I got this wrong: told Bruce EXIF couldn't be preserved when the code already had PIL pass-through, told him the tile-merge step was the polygon step, told him the detection grid matched the training grid when it didn't. Full rule and trip-wire phrases in `feedback_never_guess_about_our_code.md`.
 - **Before giving any recommendation or advice:** verify the reasoning applies to the actual system in use. Check relevant source files or context before advising. Flag uncertainty explicitly with "I think" or "I'm not sure" — do not present unverified reasoning as fact.
 - **Do NOT touch `version.txt` during development.** The per-edit .001 bump rule was retired 2026-04-24. `version.txt` now matches the shipped GitHub tag exactly (e.g., `1.7` for `v1.7-beta`) and is updated ONLY at release time, once, to match the new tag. See `feedback_version_scheme.md` for the ship procedure.
@@ -19,16 +20,25 @@
 - Star motion between frames is NOT a simple rotation — only true with pole-centered framing + no lens distortion. Off-axis framing and wide-angle lenses create non-uniform motion fields.
 - Hot pixels are multi-pixel clusters (~5px wide after demosaic), not single-pixel defects. Detected via color imbalance filter (single-channel Bayer CFA defect → ratio 5-100x).
 - GUI (`star_trail_cleanr.py`) chunks frames into 20-frame batches and runs `astro_clean_v5.py` as a subprocess per batch.
+- All users shoot on fixed tripods. No tracking mounts. Foreground is perfectly static across every frame — same pixel, every shot.
+- Airplane and satellite trails can each span 2 to 20 consecutive frames. Do not assume short duration for either.
+- Satellite constellation growth will roughly double the number of visible satellites in the next few years, increasing both the frequency of satellite trail events and the variety of crossing angles (including low-angle crossings). Robust crossing detection is increasingly critical.
+- Sequences are typically night sky, but twilight-to-darkness sequences are common (timelapse converted to star trail). Users run STC on the dark portion where trails are visible -- pure twilight frames are too bright for trails to show in a lighten-max stack so they're irrelevant. Twilight frames are out-of-distribution for the model (gradient sky, warm tones) and may produce more FPs or misses.
+- Framing: most sequences include a horizon with foreground (landscape, buildings, trees). Full-sky framing with no horizon is possible but uncommon.
+- Source files: predominantly full-resolution TIFFs, not JPEGs. Bruce expected mostly JPEGs but real-world usage is mostly TIFFs. Design and performance decisions should treat TIFF as the primary case.
 
 ## Release checklist (ALWAYS do all steps before tagging)
 0. **Run the smoke tests — must be all-green: `python3 tests/run_all.py`**
 1. **If `build_helper.py` was edited or any change to it was stashed, audit the runtime first.** Removing a `--collect-all` line or stashing one away breaks the frozen bundle the moment a top-level import in worker code depends on it. The `test_runtime_imports_bundled.py` smoke test catches this, but only if you actually ran step 0. The v1.81-beta crash (every new install died on Batch 1 with `ModuleNotFoundError: skimage`) was caused by exactly this: stashing a `--collect-all skimage` line while a top-level `from skimage import ...` was still in `modules/detect_trails.py`. Never stash `build_helper.py` changes without confirming the runtime still works without them.
 2. **Pyflakes lint gate runs in CI on every tag and blocks the four bundle builds on any `undefined name` finding** in `star_trail_cleanr.py`, `astro_clean_v5.py`, or `modules/*.py`. The v1.97-beta launch crash (`name 'screen' is not defined` on first-time-launch) was caused by a one-line drop during a refactor and would have been blocked by this gate. Locally the same check runs as part of `tests/run_all.py` (test_lint.py). If a future release fails the gate, fix the underlying name reference. Do NOT add the file to an exclusion list; do NOT weaken the gate; do NOT bypass with `--skip` flags. The gate exists because Bruce's reputation is on the line every release and this class of bug is invisible until a fresh user opens the app.
-3. Update `CHANGELOG.md` with the new version and a plain-English summary of changes
+3. **If `assets/best.pt` is being updated to a new model, update `_DEV_FALLBACK_MODEL` in `star_trail_cleanr.py` to match in the same commit.** The fallback is only reached when running live Python source (no bundled model present), but if it's stale, all live-source testing silently runs the wrong model. v11 sat as the fallback while v12 was shipped for months because this step was missed.
+4. Update `CHANGELOG.md` with the new version and a plain-English summary of changes
 4. Commit `CHANGELOG.md` together with the code changes (same commit or immediately before tag)
 5. Tag the release (`git tag vX.XX-beta`)
 6. Push commits and tag (`git push && git push origin vX.XX-beta`)
 7. Watch the GitHub Actions build with `bash scripts/watch_ci.sh` — when it reports "Build succeeded", post the download links to the user. (This is the standard watcher; never invent a new one each release.)
+
+**Model-only releases (`model-v*` tags):** Always publish as prerelease (`gh release create --prerelease` or `gh release edit --prerelease`). Model releases contain only `best.pt` — no app installers. If published as a full release, GitHub's `/releases/latest` resolves to the model tag instead of the most recent app release, breaking the permanent download link on startrailcleanr.com. The model updater is not affected — it queries all releases via `/releases?per_page=100` and sees prereleases too.
 
 ## Smoke test suite (`tests/`)
 Regression safety net for Claude's edits — Bruce does not run these himself.
@@ -47,10 +57,15 @@ Regression safety net for Claude's edits — Bruce does not run these himself.
 - Hot pixels: `modules/hot_pixels.py`
 - Build: `build_helper.py` (PyInstaller)
 - Tools: `tools/` folder (inference, training, LabelMe utilities)
+- Mask CheckR: `tools/mask_checkr.py` — picks a CVAT task + frame range, fetches reviewed polygons directly from CVAT API (NOT from local labelme_json files — those are stale pre-annotation starting points and never reflect Bruce's CVAT review work), black-fills each polygon, lighten-max stacks all frames; any visible trail = missed annotation. Outputs two JPEGs: plain stack and tile-grid overlay with A1/B2-style labels. Single-instance locked. Output folder: `mask_checkr_output/`
+- YOLO MaskViewR: `tools/mask_viewr.py` — frame-by-frame STC detection mask viewer. Shows colored numbered outlines for every detected trail region. Navigate with arrow keys; scroll/pinch to zoom; drag to pan. Tile grid overlay toggleable.
+- TileFixR: `tools/tile_fixr.py` — per-tile CVAT polygon editor. Walks 640x640 tile windows per frame, pulls polygons from CVAT, lets you click to mark polygons for deletion, then pushes deletions back to CVAT in one batch.
+- TrailFixR: `tools/trail_fixr.py` — visual polygon reviewer for YOLO trail detections. Pulls annotations from CVAT, crops each polygon with proportional padding, presents for review with brightness control and zoom/pan.
 
 ## Trained YOLO models
 All trained models live on the **local Mac** at `/Users/bruceherwig/Documents/yolo_runs/` — NOT on T7 Shield. Default ultralytics output path.
-- Current best: `trail_detector_v11s_tiled/weights/best.pt` — mAP50 box 0.891, mAP50 mask 0.880 (2026-04-07)
+- Shipped in app (Trail DetectoR v3): `trail_detector_v12s_tiled/weights/best.pt` — in `assets/best.pt`
+- Latest trained (Trail DetectoR v4 candidate): `trail_detector_v13s_tiled/weights/best.pt` — mAP50 box 0.859, mask 0.850 (2026-05-19, 80 epochs, broader dataset than v12)
 - If you think a model is "missing" because it's not in `/Volumes/T7 Shield/AI Projects/Star Trail CleanR/models/`, check `~/Documents/yolo_runs/` first before panicking.
 
 ## CVAT setup (annotation review)

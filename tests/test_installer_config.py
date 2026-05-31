@@ -65,13 +65,15 @@ def test_iss_parameterizes_output_name():
 
 
 def test_workflow_has_mac_intel_build():
-    """Intel Mac build job present, runs on Intel runner, produces its own zip."""
+    """Intel Mac build job present, runs on Intel runner, produces its own DMG.
+    DMG instead of ZIP because macOS App Translocation silently disables
+    Sparkle auto-updates when the .app is launched from a downloaded ZIP."""
     text = WORKFLOW.read_text()
     assert "build-mac-intel:" in text, "build.yml is missing the Mac Intel build job"
     assert "macos-15-intel" in text or "macos-26-intel" in text, \
         "Mac Intel job does not select an Intel macOS runner"
-    assert "StarTrailCleanR-Mac-Intel.zip" in text, \
-        "Mac Intel zip filename missing from workflow"
+    assert "StarTrailCleanR-Mac-Intel.dmg" in text, \
+        "Mac Intel DMG filename missing from workflow"
 
 
 def test_workflow_has_linux_build():
@@ -94,8 +96,8 @@ def test_release_job_includes_all_four_artifacts():
     """
     text = WORKFLOW.read_text()
     for needed in (
-        "StarTrailCleanR-Mac-AppleSilicon.zip",
-        "StarTrailCleanR-Mac-Intel.zip",
+        "StarTrailCleanR-Mac-AppleSilicon.dmg",
+        "StarTrailCleanR-Mac-Intel.dmg",
         "StarTrailCleanRSetup.zip",
         "StarTrailCleanR-Linux-x86_64.tar.gz",
     ):

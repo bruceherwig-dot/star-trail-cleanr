@@ -2,6 +2,229 @@
 
 ---
 
+## v2.37-beta
+- **Faster detection.** The step that fits trail outlines now works on a small cropped region around each detection instead of scanning the whole image for every detection. The results are identical, but that step runs about 3x faster, shaving roughly a minute off a typical run.
+- **Clearer progress.** The Run screen now names exactly which frames are being detected and repaired, with the whole-job total, for example "Detecting frames 21-40 (of 450)". The numbers no longer get cut off on large jobs and the progress bars stay put.
+- **Smoke tests:** 133 passing.
+
+## v2.36-beta
+- **Improvement: Detection is significantly faster on images with a visible horizon or foreground.** Star Trail CleanR now skips AI inference on tiles that are entirely in the foreground — trees, buildings, ground — where trails can never appear. On sequences with a clear horizon in the lower third of the frame, this cuts the detection time per frame by 30 to 60 percent. Sequences that are mostly sky (very low horizon) are unaffected.
+- **Improvement: Trail-crossing detection is faster.** The step that separates two crossing trails from a single merged detection now runs 4x faster. It uses a cropped region instead of scanning the full frame, and processes pixels as a batch instead of one at a time.
+- **Improvement: Elongation filtering is faster.** The step that rejects blob-shaped detections that are too round to be a trail now runs 2x faster using the same cropping approach.
+- **Fix: Gap between trail fragments at tile boundaries is now reliably bridged.** The angle tolerance was tightened and two new geometric checks were added — one confirming the gap closes in the direction the trail is traveling, and one confirming the gap actually straddles a tile boundary. Fixes cases where a trail split at a corner would not be re-joined.
+- **Improvement: Time estimate now shows hours, minutes, and seconds** instead of rounded minutes only.
+- **Smoke tests:** 133 passing.
+
+## v2.35-beta
+- **Improvement: Running time estimate and elapsed time are now shown in minutes and hours only.** The "Time remaining" and "Time elapsed" displays in the Run screen no longer show seconds. Short jobs show "5 min"; longer jobs show "1 hr 46 min".
+- **Improvement: Folder selection now shows image dimensions.** After you select a folder, the frame count label now includes the width and height of your images, for example "206 frames found (6,720px x 4,480px)".
+- **Improvement: In-depth plain-English documentation added to all pipeline modules.** Each major source file now has a full description of what it does, why, and how the key steps work. Intended for anyone reading the code for the first time.
+- **Smoke tests:** 133 passing.
+
+## v2.34-beta
+- **Improvement: Static false-positive suppressor is significantly faster.** The suppressor now pre-computes per-component bounding boxes for every frame before comparing, then works entirely within each component's bounding box instead of scanning the full image. On a 40-frame batch of 6000x4000 images, the suppressor step dropped from 36 seconds to under 6 seconds.
+- **Smoke tests:** 133 passing.
+
+## v2.33-beta
+- **Fix: Download button in the update banner now opens the browser on Windows.** The button was silently doing nothing on Windows due to a platform compatibility issue. It now uses the same method as the pre-launch update prompt, which works correctly on all platforms.
+- **Smoke tests:** 133 passing.
+
+## v2.32-beta
+- **Fix: Two parallel airplane trails in the same frame are no longer merged into one fat polygon.** When two trails run close together (roughly 40 pixels apart), the grouper was treating them as one trail because their detection masks touched. The merging threshold has been tightened so each trail gets its own polygon.
+- **Fix: Curved trails are now traced with multiple fitted segments instead of one straight rectangle.** When a trail curves significantly across the frame (spanning more than 1,500 pixels with at least 5 degrees of angle change), Star Trail CleanR now divides it into overlapping strip segments and fits each one separately. This prevents the single-rectangle fit from cutting across stars on either side of the curve.
+- **Smoke tests:** 133 passing.
+
+## v2.31-beta
+- **Fix: GPU installation no longer fails with a misleading error on networks that block pytorch.org.** When pytorch.org returns a 403 Forbidden error, Star Trail CleanR now automatically retries the download from a backup server. If both servers are blocked, the error message now explains the situation clearly and suggests connecting to a VPN, with a More Info button linking to step-by-step instructions.
+- **Fix: GPU installation error dialog no longer gives wrong advice.** The previous dialog told users to check their internet connection and free disk space regardless of what actually went wrong. The message now shows only the specific reason for the failure.
+- **Fix: Batch processing no longer drops the last frame of each batch.** A frame-counting bug was causing the final frame in every batch to be skipped during the trail cleaning pass.
+- **Fix: Mask output folder moved.** Detection masks now save to the `cleanr_workspace` folder inside your image folder instead of the `cleaned` folder, keeping all intermediate files in one place.
+- **New: Static false-positive suppressor.** Detections that appear in the same location across multiple frames are now automatically suppressed. Stationary bright objects — hot pixels, fixed reflections — that the AI occasionally mistakes for trails are filtered out before repair, so they are no longer blacked out.
+- **Improvement: Suppressor now also vetoes detections with bright, non-moving pixels.** A detection where the brightest pixels are fixed across frames, or where the centroid does not move between frames, is treated as a static artifact and skipped.
+- **Improvement: Edge rescue is more aggressive.** Trails that pass within 20 pixels of the image edge (up from 5) are now pulled in from the edge and included in the detection.
+- **Improvement: Trail grouper minimum area raised.** Small stray detections below 1000 pixels are no longer grouped with larger trails, reducing polygon noise on faint detections.
+- **Smoke tests:** 133 passing.
+
+## v2.30-beta
+- **Fix: App no longer hangs on first launch on Windows.** A crash-reporting consent question was appearing hidden behind the startup screen, leaving the app waiting for an answer no one could see. The app now loads fully first, then asks the question after the main window is open.
+- **Fix: Version history link in About now shows the complete history.** The link was pointing to a branch that only had history up to v1.995.
+- **Fix: Trail repair no longer causes solid black rectangles on multi-frame trails.** An offset bug was applying neighbor masks at the wrong positions, causing large areas of sky to be blacked out instead of repaired.
+- **Fix: Polygon centering on trails that cross tile boundaries.** When a trail crossed a tile seam, the detection polygon was landing between two detection bands instead of on the actual trail pixels. Polygons now center on the real trail pixels regardless of how the trail was split across tiles.
+- **Fix: Polygon length no longer clips when one detection is near the size threshold.** A detection just barely pruned by the width filter was excluding its pixels from the polygon extent calculation, chopping the end off the polygon. All detections now contribute to the polygon length.
+
+## v2.29-beta
+- **Fix: Download button in the update banner now links to the correct file.** The Mac download URL was pointing to a .zip that does not exist on the release. It now correctly links to the .dmg installer.
+
+## v2.28-beta
+- **Fix: Trail repair no longer blacks out entire components on multi-frame trails.** When a trail spans adjacent frames, the repair now uses sky pixels from all neighbor frames and blacks out only the pixels where a neighbor's own trail mask overlaps. Previously, any mask overlap above a threshold caused the entire component to be skipped and filled with black.
+- **Fix: Red nav-light trails with diluted color are now detected correctly.** The red channel check now uses the brightest pixels in the detection mask instead of the average. Masks that include surrounding dark sky were dragging the mean down and causing real nav-light trails to be filtered out.
+- **Fix: Splitting a combined trail blob no longer discards a valid single-trail detection.** When two parallel trails overlap in a tile seam zone, the splitter now checks whether both halves are trail-shaped before committing to the split. If one half is a fat blob, it reverts to the original detection.
+- **Fix: Polygon tips are now tighter and polygon width is closer to the actual trail.** End-cap padding and perpendicular width were both trimmed to reduce overshoot into surrounding sky.
+- **Fix: Short diagonal trails are no longer dropped.** The minimum aspect ratio gate was lowered so trails at wider angles pass through.
+- **New: TileFixR Cleaned mode.** A new radio button in TileFixR lets you switch to a view-only mode showing the cleaned tiles with mask contours overlaid. No editing is possible in this mode.
+- **Smoke tests:** 133 passing.
+
+## v2.27-beta
+- **New: Trail DetectoR v4 is now built in.** The AI model has been retrained on a larger, more diverse dataset. It finds more trails, especially faint ones and those near the edges of the frame. Detection accuracy (mAP50) improved from 0.805 to 0.859.
+- **Fix: Trails at tile boundaries are no longer missed.** Star Trail CleanR divides each frame into tiles for processing. A suppression bug was causing detections near tile seams to cancel each other out, leaving gaps in the mask. This is now fixed.
+- **Fix: Crossing trails are now detected separately more reliably.** When two airplane trails cross at a shallow angle, they can appear as one connected blob. The splitter that handles this case now works correctly for crossing angles and complex intersections that previously caused one trail to be missed entirely.
+- **Fix: Closely spaced parallel trails are no longer merged into one polygon.** Two trails flying close together now each get their own mask instead of being combined.
+- **Fix: Small red airplane nav-light blobs are no longer filtered out.** Short red trail segments — typical of a flashing port nav light — were being blocked by a size gate. They now pass through regardless of length as long as the underlying pixels are red.
+- **Fix: Run screen now shows the dataset folder and its parent.** When your images are in a folder with a generic name like "TIFF," the run screen now shows "Dataset Name/TIFF" so you can see at a glance which set is being cleaned.
+- **Fix: Mask painter always opens in Paint mode.** Previously, if you switched to Erase mode and closed the foreground mask editor, it would reopen in Erase mode next time. It now resets to Paint mode on every open.
+- **Smoke tests:** 133 passing.
+
+## v2.26-beta
+- **Fix: 8-bit TIFF files are now uncompressed.** Same fix as v2.25-beta for 16-bit — all TIFF output is now uncompressed and compatible with Sequator and other stacking apps that require uncompressed TIFF.
+- **Smoke tests:** 133 passing.
+
+## v2.25-beta
+- **Fix: 16-bit TIFF files are now uncompressed.** Some stacking software (including Sequator) requires uncompressed TIFF and would reject the files Star Trail CleanR produced. The 16-bit TIFF option now writes uncompressed files, which are compatible with all stacking apps. Files will be somewhat larger on disk.
+- **Smoke tests:** 133 passing.
+
+## v2.24-beta
+- **New: A fitted polygon layer now sits on top of the YOLO detection.** After the AI finds a trail, Star Trail CleanR fits a tight rectangle to the detected trail pixels — closer-fitting ends, more accurate width, and fragments from the same trail joined into one shape. The repair now works from this fitted polygon instead of the raw AI mask blob, which reduces bleed into surrounding sky.
+- **Fix: Repair no longer imports trail from a neighboring frame.** When Star Trail CleanR fills a masked area using pixels from the frames before and after, it now checks whether those imported pixels are themselves trail-bright. Any that are get zeroed out instead of pasted in, leaving clean sky.
+- **Fix: GPU error message now says to reboot instead of "Clear GPU Support Files."**
+- **Fix: Frame limit field now accepts any number you type, not just preset values from the dropdown.**
+- **Smoke tests:** 133 passing.
+
+## v2.23-beta
+- **Fix: App no longer crashes on image sets that include TIFF files with an embedded alpha channel.** Some software exports TIFFs with a transparency layer that Star Trail CleanR doesn't need. The app now strips the alpha automatically and notes it in the Star Log, so the run continues without interruption.
+- **Smoke tests:** 133 passing.
+
+## v2.22-beta
+- **Fix: App no longer crashes on incompatible NVIDIA GPUs (Windows).** Some GPU cards aren't supported by the PyTorch CUDA build we ship. Previously this caused a crash on startup. The app now tests CUDA before committing to it, falls back to CPU automatically, and shows an honest status in Settings: "NVIDIA GPU detected but your card isn't supported by the current GPU pack — running on CPU." When a compatible GPU pack becomes available, the app picks it up automatically on next launch with no action required.
+- **Smoke tests:** 132 passing.
+
+## v2.21-beta
+- **Fix: Finder Comments now write correctly on Mac.** Cleaned files now show the Star Trail CleanR stamp in the Comments field in macOS Get Info. The previous approach was unreliable; it now uses the same mechanism Finder uses internally.
+- **Fix: Friendly message when fewer than 3 frames are selected.** Instead of crashing silently, the app now shows a clear dialog explaining the minimum and noting that Star Trail CleanR works on individual frames before stacking, not a finished star trail image.
+- **Tweak: "Warming up the AI trail detector" wording cleaned up.** Removed the word "Still" from the fallback warmup message in the Star Log.
+- **Smoke tests:** 132 passing.
+
+## v2.20-beta
+- **New: Run details appear at the top of the Star Log when a run starts.** The log now shows which AI model is running, which processor (Apple Silicon, CPU, or GPU), the output format, and whether Second ScrubbeR is on — so you have the full picture without digging through Settings.
+- **New: The "Email Me" support link includes your Star Log, version, and OS automatically.** Clicking the link opens a pre-filled email with the last 1,500 characters of your Star Log, your app version, and your OS. Much easier to get the right information for a bug report.
+- **Fix: Low memory warning now leads with the right advice.** The warning now tells you to close other open programs first, then reduce the number of images only if that isn't enough. The old message led with reducing frames, which most people don't want to hear.
+- **Smoke tests:** 132 passing.
+
+## v2.19-beta
+- **Fix: Saving as 8-bit TIFF no longer crashes when source files are TIFFs.** The error (RuntimeError: Error setting from dictionary) happened because reading EXIF from a TIFF source pulled in image-structure tags that the TIFF writer already owns internally. The fix strips those tags before writing and adds a safety-net fallback — the same multi-step approach used for JPEG EXIF since v2.09. Camera metadata (make, model, lens, ISO, GPS, date) is preserved intact.
+- **New: Low disk space warning before a run starts.** Star Trail CleanR estimates how much space the cleaned output will need based on your first source frame, checks the output drive, and warns you if it looks tight. You can cancel and pick a different output folder, or continue anyway.
+- **Splash screen status text is larger and easier to read.**
+- **Smoke tests:** 132 passing.
+
+## v2.18-beta
+- **Fix: Progress bar stays "Cancelled" after you cancel a run.** Previously the bar could flicker back to a stale percentage while the subprocess was finishing up. It now locks the moment you click Cancel.
+- **Fix: GPU installer now shows which files blocked cleanup.** If a previous GPU install left locked files behind, the error message now names the specific files Windows couldn't remove instead of giving a generic message.
+- **Fix: Background worker no longer hangs if a dialog is force-closed.** Two dialogs (mixed-resolution warning, unreadable file prompt) waited indefinitely for user input with no timeout. They now release the worker after 5 minutes if no response, stopping the run gracefully.
+- **Smoke tests:** 132 passing.
+
+## v2.17-beta
+- **GPU installer now shows download progress on the Main screen (Windows).** When you click Install from the orange banner, the banner transforms in place to show a live download progress bar. No need to switch to the Settings tab to see what's happening. Settings still shows progress too for users who install from there.
+- **Fix: Orange GPU banner no longer reappears after a successful install.** After installing GPU support and restarting, the "NVIDIA GPU detected" banner now stays gone — it only appears when GPU support genuinely isn't installed yet.
+- **Smoke tests:** 132 passing.
+
+## v2.16-beta
+- **Fix: GPU installer no longer crashes on large downloads (Windows).** The progress signal used a 32-bit integer that overflows at 2.1 GB. The PyTorch CUDA wheel is 2.75 GB, so the app crashed every time partway through the download. Fixed — the installer now completes the full download without crashing.
+- **Smoke tests:** 132 passing.
+
+## v2.15-beta
+- **Fix: Finder Comments now actually appear on Mac.** Cleaned files have always been stamped with the Star Trail CleanR version and website in the EXIF Software tag. The Finder Comments field (Get Info) was supposed to show the same stamp but was always blank. The previous code wrote plain text, which Finder ignores — the fix writes the binary plist format Finder expects.
+- **Settings tab spacing fixed.** Each section had a large blank gap below its heading. Replaced the fixed-height text boxes that caused it with auto-sizing labels — spacing is now even across all four sections.
+- **Checkbox alignment.** Second ScrubbeR and Crash Reporting checkboxes now have matching left indent.
+- **Second ScrubbeR locks during a run.** The checkbox grays out and shows a message while a run is in progress so you can't change it mid-job.
+- **Tabs now fill edge to edge.** The four tabs stretch evenly to fill the window width. The first tab no longer disappears when the window is narrow.
+- **GPU installer cleanup is more reliable (Windows).** Before installing GPU support, leftover files from a previous attempt are cleared with a 3-attempt retry loop that handles read-only files and Windows antivirus locks. If cleanup still fails, the error now tells you exactly what to do.
+- **New: Clear GPU Support Files button (Windows).** In the GPU Acceleration section of Settings — removes all GPU support files so you can start a clean install. If it can't delete everything, it shows you the folder path to delete manually.
+- **Smoke tests:** 132 passing.
+
+## v2.14-beta
+- **Settings: Crash Reporting toggle.** A new Crash Reporting section in Settings shows whether anonymous crash reporting is turned on or off, and lets you change it at any time. The choice you made at first launch is reflected immediately.
+- **Smoke tests:** 132 passing.
+
+## v2.13-beta
+- **Fix: GPU support retry now works after a failed install (Windows).** If the first GPU support installation attempt failed partway through, clicking Install again would hit a "Permission denied" error because Windows locked the partially-extracted files. The installer now clears any leftover files before each attempt, so retrying always starts clean.
+- **Clearer GPU installation error messages.** A Windows permission error now explains what happened and what to do ("Try clicking Install again"), instead of incorrectly suggesting an internet or disk space problem.
+- **Cleaned output files now appear in macOS Finder Comments.** After cleaning, each output file's Finder Comments field (visible in Get Info) shows the Star Trail CleanR version, Trail DetectoR version, and website — the same stamp already written to the EXIF Software tag. Skipped if the file already has a comment. Mac only.
+- **Settings polish.** GPU Acceleration section no longer shows a redundant description sentence — the status line below it says the same thing. Mac Intel and Linux users see "CPU processing only — GPU acceleration not available on this device" instead of the ambiguous "CPU — no GPU acceleration."
+- **FAQ wording.** "The result is a clean set of frames you can stack into a perfect star trail composite" softened to "...star trail composite. (That's the goal, anyway.)"
+- **Smoke tests:** 132 passing.
+
+## v2.12-beta
+- **In-app GPU support installer (Windows).** When Star Trail CleanR detects an NVIDIA GPU and GPU support is not yet installed, a prompt appears offering to install it automatically. Clicking Install downloads approximately 3-4 GB from pytorch.org, extracts it into a permanent folder the app installer never touches, and asks you to restart. After restarting, the trail detector runs on your GPU automatically. This is a one-time setup — every future app update picks up GPU support without needing to reinstall it.
+- **Fix: GPU support button now works.** The "Install GPU Support" button in Settings (and the banner that appears when an NVIDIA GPU is detected) previously opened the GitHub releases page, which had no NVIDIA download on it. The button now launches the in-app installer described above.
+- **Smoke tests:** 132 passing.
+
+## v2.11-beta
+- **Settings polish.** "Compute Device" renamed to "GPU Acceleration." "Second Scrub" renamed to "Second ScrubbeR" throughout Settings. "Trail Detector" updated to "Trail DetectoR" in the header, run log, and Settings.
+- **Second ScrubbeR trail count fix.** Trails found during the Second ScrubbeR pass are now included in the Trails Detected counter in the upper right. Previously only first-pass trails were counted.
+- **Smoke tests:** 132 passing.
+
+## v2.10-beta
+- **New: Second Scrub option in Settings.** Runs the trail detector a second time on each frame after rotating it 180 degrees, then merges any newly found trails into the repair pass. Catches trails the first pass tends to miss, especially those at angles the detector underweights. Detection takes roughly twice as long — repair time is unchanged. Turn it on in Settings. Works on CPU and GPU builds. If the second pass fails for any reason, the run continues normally on first-pass results with a warning in the log.
+- **Smoke tests:** 132 passing.
+
+## v2.09-beta
+- **Crash fix: large camera EXIF no longer kills the save step.** Some cameras (especially Sony and certain Canon bodies) write very large blocks of manufacturer-specific data into their EXIF. When that data was close to JPEG's built-in size limit and we added our Software stamp on top, the save failed with a crash. The fix trims only the unreadable manufacturer blob if needed — all the meaningful metadata (camera model, lens, f-stop, shutter speed, ISO, timestamps, GPS) is preserved. If somehow even that isn't enough, the file saves cleanly without EXIF rather than crashing. Original source files are never affected.
+- **Smoke tests:** 132 passing.
+
+## v2.08-beta
+- **GPU pack survives updates (Windows).** NVIDIA GPU users previously had to redo the 4 GB CUDA swap after every Star Trail CleanR update, because the installer overwrote the app folder. The GPU files now live in a permanent folder the installer never touches. Set it up once, and every future update continues to use your GPU automatically. If a future release requires a different PyTorch version, the app detects the mismatch, falls back to CPU, and tells you exactly what to do in Settings.
+- **Smoke tests:** 132 passing.
+
+## v2.07-beta
+- **Trail counter now updates live during detection.** The trails-detected count on the Run page now ticks up frame by frame as the AI scans each image, instead of jumping at the end of each batch after repair. The counter shows in blue while the run is active and turns green when the run finishes.
+- **Run log renamed and expanded.** The file saved to your `cleanr_workspace` folder after each run is now named `star_trail_cleanr_log_date_time.txt` (previously `run_summary_...`). It now includes a Camera Info section near the top — camera make and model, lens, date and time the sequence was shot, f-stop, and ISO — pulled automatically from your image files' EXIF metadata.
+- **TIFF output now carries full camera metadata.** When cleaning TIFF source files and saving as JPEG or TIFF, the output now correctly inherits the original camera data (make, model, lens, exposure, GPS, etc.). A gap in how the app read EXIF from TIFF files meant this metadata was being lost on TIFF inputs; JPEG inputs were unaffected.
+- **Crash fix: corrupt or missing mask file no longer kills the run.** One tester's run failed immediately on batch 1 with no useful error message because a foreground mask file had become unreadable since it was saved. The app now catches this before the run starts and shows a clear dialog: proceed without the mask, or cancel and re-draw it.
+- **Settings tab: Compute Device section.** A new section in the Settings tab shows what the AI trail detector is running on — Apple MPS on Apple Silicon Macs, NVIDIA CUDA on the GPU build, or CPU otherwise. Lets you confirm at a glance that GPU acceleration is active.
+- **NVIDIA GPU detected: upgrade path now built in.** Warren Hatch confirmed the NVIDIA-Accelerated Build cuts processing time in half on large files. When the app detects an NVIDIA GPU on Windows but you're running the standard build, a Download button now appears in Settings (and in the startup banner) linking directly to the NVIDIA-Accelerated Build. The banner text has been updated to reflect this — it no longer says "coming in a future update."
+- **Smoke tests:** 132 passing.
+
+## v2.06-beta
+- **Settings tab.** A new Settings tab sits between FAQ and About. The first setting is a "Check for Updates" button that triggers the native update dialog on Mac and Windows (or opens the website on Linux). GPU settings will be added here in a future release.
+- **Run summary always fires.** Running a clean batch with no trails found used to produce no end-of-run popup. Now the summary appears regardless.
+- **Switching macOS Light/Dark mode no longer cancels a running batch.** The mode switch triggers an app relaunch to rebuild the themed UI; that relaunch now waits until any active run finishes.
+- **No startup splash on theme-switch relaunch.** When the app relaunches after a Light/Dark mode switch, it skips the startup splash since the app was already open and imports are cached.
+- **Warmup phrases no longer repeat back to back.** The Star Log warmup rotation (shown while the trail detector loads) could show the same phrase twice in a row across consecutive batches. It now always advances to the next phrase.
+
+## v2.05-beta
+- **First release with delta updates.** Past releases forced every user to redownload the entire ~600 MB app on every update, even when only a few Python files actually changed. v2.05-beta is the first release published with binary delta files alongside the full bundle. Users on a recent prior version (currently v2.04-beta) only download the bytes that actually changed since their version, typically a small fraction of the full 600 MB. Sparkle handles the delta application transparently. New first-time installs still download the full bundle. Mac only — WinSparkle has no delta-update support, so Windows continues to ship the full bundle each release.
+- **Update popup no longer hides behind the splash screen.** v2.03-beta exposed a layering issue: when the startup splash was still on screen and Sparkle's "update available" popup appeared, the popup landed *behind* the splash because the splash claims stay-on-top. v2.05-beta wires a Sparkle delegate that fires the moment a valid update is found, dismissing the splash early so the popup is the only thing on screen.
+- **No functional changes** to trail detection, repair, output, or other behavior.
+
+## v2.04-beta
+- **Auto-update install no longer fails with "improperly signed and could not be validated."** v2.03-beta finally got the update popup working (the App Translocation fix landed), but clicking Install produced an "Update Error" dialog. Sparkle's logs revealed the new app's outer code-sign seal was broken: PyInstaller ad-hoc-signs the bundle on Apple Silicon, then the build script copies in `Sparkle.framework` and patches the Info.plist, both of which invalidate the seal. Sparkle 2.x has a strict safety check — if the new bundle claims to be code-signed but the signature is corrupt, the update is rejected outright. v2.04-beta re-applies a fresh ad-hoc signature on the outer `.app` after all build modifications, so the seal is intact when Sparkle inspects it.
+- **No functional changes** to trail detection, repair, output, GUI, or other behavior. v2.04-beta is the second half of the auto-update fix that started in v2.03-beta.
+
+## v2.03-beta
+- **Mac builds now ship as DMG instead of ZIP.** Diagnostic logging in v2.02-beta confirmed the v2.0/v2.01/v2.02 auto-update silent-fail was caused by macOS App Translocation: when a `.app` is unzipped from a downloaded `.zip` and launched without first being moved to `/Applications`, macOS runs the app from a randomized read-only path under `/private/var/folders/.../AppTranslocation/...`. Sparkle correctly detects the translocation and refuses to operate (it can't write back to a read-only path to install an update). The fix is the canonical macOS install flow: ship a `.dmg`, user mounts it, drags the app to `/Applications`, launches from there. macOS does not translocate apps installed from a DMG into a known location. v2.03-beta is the first release that uses DMG end-to-end.
+- **First real chance for the auto-update flow to work.** v2.0-beta installed the Sparkle infrastructure but couldn't deliver an update because of translocation. v2.01-beta and v2.02-beta hit the same wall. v2.03-beta breaks the cycle. v2.02-beta users (installed from `/Applications`) launching the app should see the native update popup advertising v2.03-beta within seconds.
+- **No functional changes** to trail detection, repair, output, GUI, or other behavior.
+
+## v2.02-beta
+- **Diagnostic logging for the auto-update flow.** v2.01-beta was supposed to be the first auto-update test (v2.0-beta installs would see a popup advertising v2.01-beta and install it in-app). The popup never appeared. PyInstaller's `--windowed` mode on Mac swallows Python stderr, so the silent-fail mode was invisible. v2.02-beta adds step-by-step file-based diagnostic logging to `~/.star_trail_cleanr/sparkle_debug.log` covering every stage of Sparkle initialization (framework path lookup, PyObjC import, `objc.loadBundle`, the `SPUStandardUpdaterController` init call, exceptions, and update-check invocations). Read the file after launching to see exactly which step failed.
+- **Splash status text refinements.** The splash now shows three messages instead of four: "Initializing…" → "Checking for updates…" → "Warming up the trail detector…". Dropped the "Loading components…" message because the phase it described (Sentry SDK init) finishes in 100-300 ms, faster than the eye can read.
+- **Mask painter banner copy update.** Added the *why* to the masking instruction: "You're just marking areas where you know trails won't appear, **so the AI doesn't try to 'fix' the ground.**"
+- **No functional changes** to trail detection, repair, or output.
+
+## v2.01-beta
+- **First real test of the auto-update flow.** v2.0-beta installed Sparkle (Mac) and WinSparkle (Windows) but the appcast feed was empty, so no update dialog ever fired. With v2.01-beta tagged and signed, the feed now advertises v2.01-beta as the newest version. v2.0-beta installs running the app should see a native update dialog on next launch (or within 24 hours if already running) saying v2.01-beta is available. Click Install, the app downloads only the changed parts, and restarts itself into v2.01-beta. **If it works as designed, every future release from here is in-app.** If anything misbehaves we'll catch it in Sentry or your support inbox and fix it.
+- **Startup splash screen.** First launches used to show a frozen-looking GUI for a few seconds while the app warmed up (PyTorch imports, model paths, theme detection, Sparkle init). Now you see a splash window with the STC logo, tagline, `#StarTrailCleanR`, and an animated progress bar while the app loads. Brand-navy bars top and bottom match the main app banner. Stays visible for at least 5 seconds, longer if startup runs longer.
+- **UI polish on Setup and Run pages:**
+  - Run page community panel (the share-message + email link box on the right): now sits roughly vertically centered in its column at any window height, instead of pinned to the top.
+  - Setup page "N frames found" label: moved to its own row above the input field, width-matched to the Browse + Open Folder buttons. Stays centered above them as the window resizes. Replaces the prior fixed-padding workaround that drifted off-center when the window grew.
+- **No functional changes** to trail detection, repair, or output. Pure UI polish plus the auto-update test payload.
+
+## v2.0-beta
+- **First release with auto-update infrastructure built in.** The app now ships with Sparkle (Mac) and WinSparkle (Windows) embedded. The intent: when a future release is published, the app fetches a small XML feed in the background and pops a native update dialog asking if you want to install. **This is a beta, the auto-update flow has not yet been exercised end-to-end with real artifacts.** The first real test happens when the next release after v2.0-beta ships and v2.0-beta users see (or don't see) the popup. If it doesn't work, we fix it; if it does, every future release is in-app from v2.0-beta forward. Linux stays on the current notification-banner approach for now.
+- **Maximized window now uses the extra space.** v1.995 unlocked the height; v2.0 lets the content grow into the unlocked space: the Star Log on the Run page gets taller, the Setup tab's scroll area expands. Buttons, banners, and headers stay their normal sizes.
+- **One last manual install.** Existing v1.x users download v2.0-beta from the GitHub Releases page one more time. From there, the app starts checking for updates on its own. Whether the auto-install actually delivers the next release cleanly is what this beta is for.
+- **Polish:** the rotating astro phrases during the AI warmup no longer cycle back to "Studying your stars" looking like the run restarted; long warmups settle on a steady "Still warming up the AI trail detector" line. The `#StarTrailCleanR` hashtag in the Run-page sharing message is now bold.
+- **Smoke tests:** 132 still passing, plus the bundled-app smoke that runs the actual frozen binary on synthetic frames on Mac Apple Silicon, Mac Intel, Windows, and Linux.
+
 ## v1.995-beta
 - **Fix: maximize now fills the whole screen on Windows.** Warren reported that clicking maximize only filled the top portion of his monitor with empty desktop below. Root cause: yesterday's run-screen layout work locked the window's minimum and maximum height to a single value so Run tab content would match Setup tab perfectly. That same lock prevented Windows from growing the window vertically on maximize. Removed the maximum-height lock; the minimum stays in place so the Setup tab can never clip below the Clean My Stars button. Trade-off: if the window is noticeably taller than the Setup tab's natural height, the Run tab may show empty space at the bottom — a smaller cost than not filling the screen.
 - **Fix: displayed output folder uses consistent forward slashes on Windows.** Same Warren screenshot caught a path-separator inconsistency: the auto-output field showed "L:/for Bruce/Camera 1\cleaned" — forward slashes from Qt's file picker, then a backslash where the GUI appended "cleaned". Two conventions in one path. Now consistent forward slashes regardless of how the input folder arrived (browse picker, hand-typed, or pasted from elsewhere).

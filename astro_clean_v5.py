@@ -14,16 +14,66 @@ try:
 except Exception:
     pass
 """
-astro_clean_v5.py — YOLO-based astrophotography airplane trail removal
+astro_clean_v5.py — trail detection and repair worker
 
-ALGORITHM: Per-frame YOLO segmentation + temporal median repair
+ROLE IN THE APP
+---------------
+This script runs as a subprocess, not directly. Star Trail CleanR (the GUI in
+star_trail_cleanr.py) spawns this file via --cleanr-worker for each 20-frame batch.
+It reads raw frames from disk, finds every airplane and satellite trail in each frame,
+removes them, writes cleaned replacements, and logs per-frame results to a JSONL file.
+The GUI monitors stdout for progress updates while this worker runs.
 
-Pipeline:
-  1. Detect trails per frame using YOLO/SAHI tiled inference.
-     - Apply foreground/sky mask to suppress false positives.
-     - Filter small components (preserve red nav lights).
-  2. Repair: Star Bridge morph from neighbors, black fill fallback
-     (black is transparent in lighten-max stacks).
+THE TWO STEPS
+-------------
+Step 1 — DETECT (modules/detect_trails.py + modules/trail_grouper.py)
+  The YOLO model (Trail DetectoR) was trained to recognize the pixel shape of a trail
+  in a single astrophotography frame. Because our frames are large (often 6000x4000+)
+  and the model works on 640x640 tiles, we use SAHI (Slicing Aided Hyper Inference)
+  to divide each frame into overlapping tiles, run the model on each tile, then stitch
+  all results back to full-frame coordinates. The grouper fuses tile-boundary fragments
+  that belong to the same physical trail into one clean detection polygon.
+
+  The foreground/sky mask is computed once per batch: any pixel that is bright across
+  the majority of frames is foreground (landscape, buildings) rather than sky. The
+  mask is applied to each detection mask so that foreground false positives are
+  discarded before they reach the repair step.
+
+  The static FP suppressor runs after detection. It looks at each detected region and
+  checks whether the same pixel region is detected in neighboring frames too. If a
+  "trail" shows up in the same location across many frames, it's a static object (a
+  bright edge, a roofline, an illuminated antenna) — not a moving trail. Those
+  detections are removed before repair.
+
+Step 2 — REPAIR (modules/repair.py)
+  For each detected trail, Star Bridge synthesizes what the frame would look like
+  without it. It tracks bright star features from the frame before (N-1) to the frame
+  after (N+1) using Lucas-Kanade sparse optical flow, measures how far the stars moved
+  between those two neighbors, then shifts each neighbor by half that motion and
+  averages them. The result is a synthetic version of frame N with the stars in the
+  right position and the trail gone. Only the masked trail pixels are replaced — the
+  rest of the frame is untouched.
+
+  First/last frame fallback: only one neighbor is available, so that neighbor is
+  used directly (no blending).
+
+  Tracking failure fallback: if too few stars are found or their displacements are
+  implausible, the trail is filled with pure black (zero in all channels). Black is
+  invisible in a lighten-max composite because the real star pixel in any other frame
+  always wins.
+
+KEY ASSUMPTIONS
+---------------
+- Fixed tripod: all users shoot on non-tracking mounts. The foreground is
+  pixel-perfect static in every frame. Stars move; everything else stays still.
+- Trails span 2-20 consecutive frames for both airplanes and satellites.
+- Source files are predominantly full-resolution TIFFs (not JPEGs). Performance
+  decisions should treat TIFF as the primary case.
+- Batch size is capped at 20 frames. Beyond that, accumulated star rotation
+  between the first and last frame of a batch becomes large enough to degrade
+  the Star Bridge repair quality.
+- The GUI passes one extra frame before and after each batch (overlap frames)
+  so repair can stitch trails that cross batch boundaries.
 """
 
 import argparse
@@ -36,9 +86,35 @@ from pathlib import Path
 from typing import List
 
 from modules.detect_trails import (
-    load_model, detect_frame, apply_sky_mask, filter_small_components
+    load_model, apply_sky_mask, filter_small_components
 )
+from modules import detect_pipeline as dp
+from modules.trail_grouper import detection_props
 from modules.repair import repair_frame
+from modules.run_logger import RunLogger
+
+
+def _raw_labeled_from_state(state, h, w):
+    """Build the raw-SAHI labeled mask (pixel value = prediction index 1..N) from
+    a new-pipeline state, matching the (final_mask, raw_labeled) contract that the
+    legacy detect_frame_polygon returns. Used so MaskViewR's yellow raw layer and
+    the run log keep working when the new pipeline is the detector."""
+    raw = np.zeros((h, w), dtype=np.uint8)
+    for ri, pred in enumerate(state.raw_detections or []):
+        label_id = min(ri + 1, 255)
+        try:
+            bm = pred.mask.bool_mask
+        except AttributeError:
+            continue
+        if not isinstance(bm, np.ndarray):
+            continue
+        bm_bool = bm.astype(bool) if bm.dtype != np.bool_ else bm
+        if bm_bool.shape == (h, w):
+            raw[bm_bool] = label_id
+        else:
+            rz = cv2.resize(bm.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST)
+            raw[rz > 0] = label_id
+    return raw
 from modules.io_safe import robust_imread, robust_imread_diag, robust_imwrite
 
 
@@ -240,6 +316,317 @@ def load_with_neighbors(frame_dir: Path, start: int, batch: int,
     return sliced, core_start, core_end
 
 
+_CENTROID_MOTION_PX = 20   # centroid offset above which a neighbor is a different object
+_BRIGHT_TRAIL_RATIO  = 2.5  # 90th-pct inside brightness / median surrounding; above = real trail
+
+
+def _is_bright_trail(comp_pixels, img_bgr):
+    """Return (is_bright, ratio): True if mask pixels stand out from surroundings.
+
+    Compares the 90th-percentile max-channel brightness of pixels inside the
+    component mask against the median brightness of a surrounding ring. Any color
+    (red, white, green) triggers the veto as long as the pixels are significantly
+    brighter than the local sky background.
+    """
+    if img_bgr is None:
+        return False, 0.0
+    ys, xs = np.where(comp_pixels)
+    if len(ys) == 0:
+        return False, 0.0
+    inside = img_bgr[ys, xs].astype(np.float32)
+    inside_bright = float(np.percentile(np.max(inside, axis=1), 90))
+    m = comp_pixels.astype(np.uint8) * 255
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (21, 21))
+    ring = (cv2.dilate(m, kernel) > 0) & ~comp_pixels
+    ry, rx = np.where(ring)
+    if len(ry) == 0:
+        return False, 0.0
+    surrounding = img_bgr[ry, rx].astype(np.float32)
+    surround_med = float(np.median(np.max(surrounding, axis=1)))
+    if surround_med < 1:
+        return False, 0.0
+    ratio = round(inside_bright / surround_med, 2)
+    return ratio >= _BRIGHT_TRAIL_RATIO, ratio
+
+
+def _suppress_static_fps(masks_all, core_start, core_end,
+                         iou_threshold=0.70, min_matches=1,
+                         raw_masks_all=None, frames_all=None, debug_out=None,
+                         timing_out=None):
+    """Remove detection components that are static false positives.
+
+    PURPOSE: The AI sometimes detects fixed foreground objects (building edges,
+    rooflines, fence posts) as airplane trails because they are long, thin, and
+    high-contrast against the sky. These false positives appear at the SAME pixel
+    position in every frame. Real airplane trails appear in at most 1-2 frames
+    and move significantly between frames.
+
+    HOW IT WORKS: For each detected component in a core frame N, we check the 8
+    surrounding frames {N-4, N-3, N-2, N-1, N+1, N+2, N+3, N+4}. This covers any
+    pair of frames that could serve as N-2 and N+2 of some center point (max
+    distance = 4). The component counts as 1 occurrence (itself); if it also
+    matches any 1 neighbor at iou_threshold IoU, the total is 2 and it is
+    suppressed. The intermediate frames between the two matching frames do not
+    need to fire.
+
+    SPATIAL OPTIMIZATION: Neighbor comparisons use only the component's bounding
+    box region instead of the full frame.  All pixels of a component lie within
+    their own bbox, so (comp_pixels & nb_hit) is equivalent to
+    (comp_pixels[bbox] & nb_hit[bbox]).  For a 6000x4000 frame with a 400x12
+    trail bbox, this reduces each comparison from 24 million pixel ops to ~4 800 --
+    roughly a 5 000x reduction per check.  Neighbor boolean masks are also
+    precomputed once before the outer loop so the (mask > 0) conversion is not
+    repeated for every component.
+
+    Each neighbor is checked against BOTH the fitted polygon mask AND the raw SAHI
+    hit map (raw_masks_all). A static FP that passes elongation filters in some
+    frames but not others still leaves raw SAHI evidence in the skipped frames.
+    Using both sources closes the gap.
+
+    WHY IoU: Intersection over Union measures whether two detections are the same
+    object. For the same physical object in two frames the IoU is 70-98% because
+    the regions are similar in size and position. For a large merged detection that
+    merely contains a small unrelated patch from a neighboring frame, the union is
+    huge and the IoU is tiny (2-3%) even when the small patch is mostly inside the
+    large one. Forward/reverse overlap ratios cannot distinguish this case because
+    they use each region's own area as the denominator rather than the union.
+    Validated values: Sompting Church rooflines 78-97%, cx=1802 skip-frame FP 73%,
+    Green Park real trail (false suppression with prior logic) 2.4%.
+
+    WHY ±4 WINDOW: Any two frames that are the N-2 and N+2 of some center point
+    are at most 4 apart. Checking ±4 ensures that any such pair can see each other
+    and trigger mutual suppression, even when the frames between them are empty.
+    Real trails cannot reach 70% IoU with a static foreground object because they
+    are moving -- their pixel position changes every frame.
+
+    TWO VETOES prevent suppression of real trails even when IoU fires:
+
+    Veto 1 -- Bright/distinctive pixels: if the detection pixels are significantly
+    brighter than the local sky background (ratio >= _BRIGHT_TRAIL_RATIO), the
+    component is a real trail (nav light, strobe, or bright streak) and is kept.
+    This catches red, white, green, and any other bright airplane lights. Requires
+    frames_all to be passed; skipped otherwise.
+
+    Veto 3 -- Frame edge: if the component's bbox touches any image edge within
+    20px, suppression is skipped entirely. Trails go off the page; static
+    foreground objects (rooflines, fence posts, building edges) do not. This
+    is the same 20px threshold used by the edge rescue in filter_masks_with_props
+    and applies the same reasoning: proximity to the frame boundary is strong
+    evidence of a real trail, not a fixed object.
+
+    Veto 2 -- Centroid motion: when a neighbor matches at IoU >= iou_threshold,
+    the centroid of the neighbor's pixels inside the component bounding box is
+    compared to the component centroid. If the offset exceeds _CENTROID_MOTION_PX,
+    the neighbor is at a different position and is NOT counted as a static match.
+    This prevents two different airplanes on the same flight path from mutually
+    suppressing each other.
+    """
+    # Precompute per-component records for every frame so the inner compare loop
+    # can do a fast bbox-overlap check before touching any pixels.  Each record
+    # stores the component's bbox, area, cropped boolean pixels, and source tag.
+    # This replaces the prior full-frame OR mask: instead of slicing a 6000x4000
+    # array for every (query component, neighbor frame) pair, we iterate a small
+    # list (~5-15 items) and skip with four integer comparisons when bboxes don't
+    # overlap -- zero numpy work for the common case of a real trail with no
+    # neighbor at the same location.
+    _t0_pre = time.perf_counter()
+    _nb_comps = {}  # frame_idx -> list of {x1,y1,x2,y2,area,crop,source}
+    for _fi in range(len(masks_all)):
+        _m = masks_all[_fi]
+        _src = "polygon"
+        _use = (_m > 0).astype(np.uint8) if (_m is not None and _m.max() > 0) else None
+        if _use is None and raw_masks_all is not None:
+            _r = raw_masks_all[_fi] if _fi < len(raw_masks_all) else None
+            if _r is not None and _r.max() > 0:
+                _use = (_r > 0).astype(np.uint8)
+                _src = "raw_sahi"
+        if _use is None:
+            _nb_comps[_fi] = []
+            continue
+        _nc, _lbl, _stats, _ = cv2.connectedComponentsWithStats(_use)
+        _comps = []
+        for _ci in range(1, _nc):
+            _cx1 = int(_stats[_ci, cv2.CC_STAT_LEFT])
+            _cy1 = int(_stats[_ci, cv2.CC_STAT_TOP])
+            _cw  = int(_stats[_ci, cv2.CC_STAT_WIDTH])
+            _ch  = int(_stats[_ci, cv2.CC_STAT_HEIGHT])
+            _cx2, _cy2 = _cx1 + _cw - 1, _cy1 + _ch - 1
+            _ca  = int(_stats[_ci, cv2.CC_STAT_AREA])
+            _crop = (_lbl[_cy1:_cy2 + 1, _cx1:_cx2 + 1] == _ci)
+            _comps.append((_cx1, _cy1, _cx2, _cy2, _ca, _crop, _src))
+        _nb_comps[_fi] = _comps
+    if timing_out is not None:
+        timing_out["sfp_precompute_s"] = time.perf_counter() - _t0_pre
+
+    # Pass 1: identify every component to suppress using the ORIGINAL unmodified masks.
+    # All overlap checks happen before any mask is zeroed, so later frames see the
+    # same reference masks as earlier frames. The prior single-pass approach zeroed
+    # masks in order, causing the last 2 frames in a batch to lose their reference
+    # points (already-zeroed earlier frames), which prevented suppression there.
+    suppress_maps  = {}  # frame_idx -> bool array of pixels to zero
+    debug_by_frame = {}  # frame_idx -> [suppressed records] for log
+    kept_by_veto   = {}  # frame_idx -> [veto records] for log
+
+    _t0_cmp = time.perf_counter()
+    for i in range(core_start, core_end):
+        mask = masks_all[i]
+        if mask.max() == 0:
+            continue
+
+        h_mask, w_mask = mask.shape
+        to_suppress = np.zeros(mask.shape, dtype=bool)
+
+        for (x1, y1, x2, y2, comp_area, comp_crop, _) in _nb_comps.get(i, []):
+            if comp_area == 0:
+                continue
+
+            # Centroid from bbox-local crop -- no full-frame array needed.
+            _ys_loc, _xs_loc = np.where(comp_crop)
+            cx = int(_xs_loc.mean()) + x1
+            cy = int(_ys_loc.mean()) + y1
+
+            # Frame-edge veto: trails go off the page -- static foreground
+            # objects do not. If the bbox touches any image edge within 20px,
+            # this is a trail entering or exiting the frame, not a static FP.
+            if y1 <= 19 or y2 >= h_mask - 20 or x1 <= 19 or x2 >= w_mask - 20:
+                kept_by_veto.setdefault(i, []).append({
+                    "area": comp_area,
+                    "cx": cx, "cy": cy,
+                    "bbox": [x1, y1, x2, y2],
+                    "veto": "frame_edge",
+                    "reason": (
+                        f"Suppression skipped: bbox touches frame edge within 20px "
+                        f"(x1={x1} y1={y1} x2={x2} y2={y2}, frame {w_mask}x{h_mask}). "
+                        f"Trails go off the page -- static foreground objects do not."
+                    ),
+                })
+                continue
+
+            matched_neighbors = []
+            for ni in [i - 4, i - 3, i - 2, i - 1, i + 1, i + 2, i + 3, i + 4]:
+                if ni < 0 or ni >= len(masks_all):
+                    continue
+                # Accumulate the union of all overlapping neighbor components
+                # into a query-bbox-sized boolean array.  A static FP detected
+                # as multiple fragments in a neighbor frame still triggers
+                # suppression because the fragments are OR'd together before
+                # IoU is computed -- same result as the original full-frame OR.
+                _union_in_bbox = np.zeros((y2 - y1 + 1, x2 - x1 + 1), dtype=bool)
+                _first_src = None
+                for (_nx1, _ny1, _nx2, _ny2, _na, _ncrop, _nsrc) in _nb_comps.get(ni, []):
+                    # Fast bbox overlap test -- O(1), no numpy.
+                    if _nx2 < x1 or _nx1 > x2 or _ny2 < y1 or _ny1 > y2:
+                        continue
+                    # Overlap region in global coordinates.
+                    _ox1, _oy1 = max(x1, _nx1), max(y1, _ny1)
+                    _ox2, _oy2 = min(x2, _nx2), min(y2, _ny2)
+                    _nb_slice = _ncrop[_oy1 - _ny1:_oy2 - _ny1 + 1,
+                                       _ox1 - _nx1:_ox2 - _nx1 + 1]
+                    _union_in_bbox[_oy1 - y1:_oy2 - y1 + 1,
+                                   _ox1 - x1:_ox2 - x1 + 1] |= _nb_slice
+                    if _first_src is None:
+                        _first_src = _nsrc
+                _union_area = int(_union_in_bbox.sum())
+                if _union_area == 0:
+                    continue
+                _intersection = int((comp_crop & _union_in_bbox).sum())
+                if _intersection == 0:
+                    continue
+                _iou = _intersection / (comp_area + _union_area - _intersection)
+                if _iou < iou_threshold:
+                    continue
+                # Centroid motion veto: union centroid in the query bbox must
+                # be close to the query component centroid.
+                _ncy_arr, _ncx_arr = np.where(_union_in_bbox)
+                if len(_ncy_arr) > 0:
+                    _nb_cx_f = float(_ncx_arr.mean()) + x1
+                    _nb_cy_f = float(_ncy_arr.mean()) + y1
+                    _centroid_dist = float(np.sqrt((cx - _nb_cx_f) ** 2
+                                                   + (cy - _nb_cy_f) ** 2))
+                    if _centroid_dist > _CENTROID_MOTION_PX:
+                        continue
+                matched_neighbors.append({
+                    "frame_idx": ni,
+                    "source": _first_src or "polygon",
+                    "iou_pct": round(_iou * 100, 1),
+                    "local_nb_area": _union_area,
+                })
+
+            if len(matched_neighbors) >= min_matches:
+                # Bright-trail veto: if pixels inside the component are
+                # significantly brighter than the surrounding sky, it is a
+                # real trail (nav light, strobe, or bright streak) -- keep it
+                # regardless of the neighbor match count.
+                if frames_all is not None and i < len(frames_all):
+                    _comp_pixels_full = np.zeros(mask.shape, dtype=bool)
+                    _comp_pixels_full[y1:y2 + 1, x1:x2 + 1] = comp_crop
+                    is_bright, bright_ratio = _is_bright_trail(_comp_pixels_full, frames_all[i])
+                    if is_bright:
+                        match_desc = "; ".join(
+                            f"frame {m['frame_idx']} via {m['source']} (IoU {m['iou_pct']}%)"
+                            for m in matched_neighbors
+                        )
+                        kept_by_veto.setdefault(i, []).append({
+                            "area": comp_area,
+                            "cx": cx, "cy": cy,
+                            "bbox": [x1, y1, x2, y2],
+                            "match_count": len(matched_neighbors),
+                            "matched_neighbors": matched_neighbors,
+                            "veto": "bright_trail",
+                            "bright_ratio": bright_ratio,
+                            "reason": (
+                                f"Kept despite {len(matched_neighbors)} neighbor match(es) "
+                                f"({match_desc}): detection pixels are {bright_ratio}x "
+                                f"brighter than surroundings -- real trail "
+                                f"(nav light, strobe, or bright streak)."
+                            ),
+                        })
+                        continue  # do not suppress
+
+                to_suppress[y1:y2 + 1, x1:x2 + 1] |= comp_crop
+                match_desc = "; ".join(
+                    f"frame {m['frame_idx']} via {m['source']} (IoU {m['iou_pct']}%)"
+                    for m in matched_neighbors
+                )
+                reason = (
+                    f"Matched {match_desc} at IoU >= {iou_threshold*100:.0f}%. "
+                    f"Same pixel position in {len(matched_neighbors)} neighboring "
+                    f"frame(s) within ±4 window -- consistent with static foreground "
+                    f"object (roofline, fence post, building edge). "
+                    f"cx={cx} cy={cy} area={comp_area}px."
+                )
+                debug_by_frame.setdefault(i, []).append({
+                    "area": comp_area,
+                    "cx": cx, "cy": cy,
+                    "bbox": [x1, y1, x2, y2],
+                    "match_count": len(matched_neighbors),
+                    "matched_neighbors": matched_neighbors,
+                    "reason": reason,
+                })
+
+        if to_suppress.any():
+            suppress_maps[i] = to_suppress
+
+    if timing_out is not None:
+        timing_out["sfp_compare_s"] = time.perf_counter() - _t0_cmp
+
+    # Pass 2: apply all suppressions now that overlap checks are complete.
+    _t0_apply = time.perf_counter()
+    suppressed_count = 0
+    for i, to_suppress in suppress_maps.items():
+        masks_all[i][to_suppress] = 0
+        n_cc, _ = cv2.connectedComponents(to_suppress.astype(np.uint8))
+        suppressed_count += max(0, n_cc - 1)
+    if timing_out is not None:
+        timing_out["sfp_apply_s"] = time.perf_counter() - _t0_apply
+
+    if debug_out is not None:
+        debug_out["suppressed_by_frame"] = debug_by_frame
+        debug_out["kept_by_veto_by_frame"] = kept_by_veto
+
+    return suppressed_count
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="astro_clean_v5 — YOLO-based airplane trail removal")
@@ -264,7 +651,7 @@ def main():
     parser.add_argument("--hot-pixel-map", type=str, default=None,
                         help="Path to hot pixel map file (load if exists, save if not)")
     parser.add_argument("--save-masks", action="store_true",
-                        help="Save detection masks to output_dir/masks/")
+                        help="Save detection masks to cleanr_workspace/masks/")
     parser.add_argument("--output-format", choices=["jpg", "tif8", "tif16"],
                         default="jpg",
                         help="Output file format (default jpg)")
@@ -274,10 +661,28 @@ def main():
                         help="Expected image width — when provided, skips per-batch resolution detection")
     parser.add_argument("--expected-height", type=int, default=None,
                         help="Expected image height")
+    parser.add_argument("--second-scrub", action="store_true",
+                        help="Run detection a second time on each frame rotated 180°, merging any new trails found")
     args = parser.parse_args()
+
+    # Dev flag: auto-enable mask saving when ~/.star_trail_cleanr/.dev_save_masks exists
+    if not args.save_masks and (Path.home() / ".star_trail_cleanr" / ".dev_save_masks").exists():
+        args.save_masks = True
 
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
+
+    # ── Dev-only run logger ───────────────────────────────────────────────────
+    # Written to {input_dir}/cleanr_workspace/run_log_{timestamp}.jsonl.
+    # Dev-only: sys.frozen is True in the frozen bundle, so users never get this file.
+    _is_dev = not getattr(sys, "frozen", False)
+    if _is_dev:
+        _ws_dir = input_dir / "cleanr_workspace"
+        _ws_dir.mkdir(parents=True, exist_ok=True)
+        _log_ts = time.strftime("%Y-%m-%d_%H-%M-%S")
+        logger = RunLogger(str(_ws_dir / f"run_log_{_log_ts}.jsonl"))
+    else:
+        logger = None
 
     def _write_output(stem: str, img: np.ndarray, icc_profile=None, exif_bytes=None, dpi=None):
         from PIL import Image
@@ -304,23 +709,31 @@ def main():
             save_kwargs = {"quality": int(args.jpeg_quality), "subsampling": 0}
             if icc_profile:
                 save_kwargs["icc_profile"] = icc_profile
-            if exif_bytes:
-                save_kwargs["exif"] = exif_bytes
+            _jpeg_exif = _fit_exif_for_jpeg(exif_bytes)
+            if _jpeg_exif:
+                save_kwargs["exif"] = _jpeg_exif
             if dpi:
                 save_kwargs["dpi"] = dpi
-            pil.save(str(cleaned_dir / (stem + ".jpg")), "JPEG", **save_kwargs)
+            out_path = str(cleaned_dir / (stem + ".jpg"))
+            pil.save(out_path, "JPEG", **save_kwargs)
         elif args.output_format == "tif8":
             out = img if img.dtype == np.uint8 else (img >> 8).astype(np.uint8)
             rgb = cv2.cvtColor(out, cv2.COLOR_BGR2RGB)
             pil = Image.fromarray(rgb, mode="RGB")
-            save_kwargs = {"compression": "tiff_deflate"}
+            save_kwargs = {}
             if icc_profile:
                 save_kwargs["icc_profile"] = icc_profile
-            if exif_bytes:
-                save_kwargs["exif"] = exif_bytes
+            _tiff_exif = _fit_exif_for_tiff(exif_bytes)
+            if _tiff_exif:
+                save_kwargs["exif"] = _tiff_exif
             if dpi:
                 save_kwargs["dpi"] = dpi
-            pil.save(str(cleaned_dir / (stem + ".tif")), "TIFF", **save_kwargs)
+            out_path = str(cleaned_dir / (stem + ".tif"))
+            try:
+                pil.save(out_path, "TIFF", **save_kwargs)
+            except RuntimeError:
+                save_kwargs.pop("exif", None)
+                pil.save(out_path, "TIFF", **save_kwargs)
         else:  # tif16
             # PIL has no first-class 16-bit RGB image mode, so its fromarray
             # raises KeyError on uint16 RGB arrays. Use tifffile (a scientific
@@ -338,17 +751,18 @@ def main():
                 extratags.append((34675, 'B', len(icc_profile), icc_profile, False))
             tiff_kwargs = {
                 "photometric": "rgb",
-                "compression": "deflate",
                 "extratags": extratags,
             }
             if dpi:
                 # tifffile expects (xres, yres) floats and a unit string.
                 tiff_kwargs["resolution"] = (float(dpi[0]), float(dpi[1]))
                 tiff_kwargs["resolutionunit"] = "inch"
-            tifffile.imwrite(str(cleaned_dir / (stem + ".tif")), rgb, **tiff_kwargs)
+            out_path = str(cleaned_dir / (stem + ".tif"))
+            tifffile.imwrite(out_path, rgb, **tiff_kwargs)
+        _write_finder_comment(out_path)
     cleaned_dir = output_dir
     cleaned_dir.mkdir(parents=True, exist_ok=True)
-    masks_dir = output_dir / "masks" if args.save_masks else None
+    masks_dir = input_dir / "cleanr_workspace" / "masks" if args.save_masks else None
     if masks_dir:
         masks_dir.mkdir(parents=True, exist_ok=True)
 
@@ -358,10 +772,10 @@ def main():
     if args.foreground_mask:
         fg_mask = robust_imread(args.foreground_mask, cv2.IMREAD_GRAYSCALE)
         if fg_mask is None:
-            print(f"ERROR: cannot load foreground mask: {args.foreground_mask}")
-            sys.exit(1)
-        sky_mask = cv2.bitwise_not(fg_mask)
-        print(f"  Applying sky mask")
+            print(f"  WARN: foreground mask could not be loaded - continuing without it: {args.foreground_mask}")
+        else:
+            sky_mask = cv2.bitwise_not(fg_mask)
+            print(f"  Applying sky mask")
 
     # ── Load frames ───────────────────────────────────────────────────────
     frame_files_all, core_start, core_end = load_with_neighbors(
@@ -384,8 +798,14 @@ def main():
         from PIL import Image as _PILImage
         with _PILImage.open(str(frame_files_all[core_start])) as _meta_im:
             icc_profile = _meta_im.info.get("icc_profile")
-            exif_bytes = _meta_im.info.get("exif")
             dpi = _meta_im.info.get("dpi")
+            # info.get("exif") works for JPEGs but returns None for TIFFs.
+            # getexif().tobytes() works for both formats.
+            try:
+                _exif_obj = _meta_im.getexif()
+                exif_bytes = _exif_obj.tobytes() if _exif_obj else None
+            except Exception:
+                exif_bytes = _meta_im.info.get("exif")
     except Exception as _e:
         print(f"  WARN: could not read color profile ({_e})")
 
@@ -412,23 +832,89 @@ def main():
     _stamp = f"Star Trail CleanR v{_resolve_app_version()} / Trail Detector {_resolve_model_version()} / www.startrailcleanr.com"
 
     def _stamp_exif(source_bytes):
-        """Return EXIF bytes with our stamp in three places for max viewer
-        compatibility. Preserves all other EXIF unchanged.
-            0x010E ImageDescription — shown as "Description/Caption" in Preview, Photoshop, Lightroom
-            0x0131 Software         — shown in EXIF viewers, Lightroom, Photoshop Origin panel
-            0x9C9C XPComment        — shown in Windows Explorer "Comments" column (UTF-16LE encoded)
-        """
+        """Return EXIF bytes with Software stamp added. Preserves all source EXIF unchanged."""
         try:
             from PIL import Image as _PILImage
             ex = _PILImage.Exif()
             if source_bytes:
                 ex.load(source_bytes)
-            ex[0x010E] = _stamp  # ImageDescription (ASCII)
-            ex[0x0131] = _stamp  # Software (ASCII)
-            ex[0x9C9C] = _stamp.encode('utf-16le') + b'\x00\x00'  # XPComment (UTF-16LE, null-terminated)
+            ex[0x0131] = _stamp  # Software tag — shown in Lightroom, Photoshop, and EXIF viewers
             return ex.tobytes()
         except Exception:
             return source_bytes
+
+    def _write_finder_comment(out_path: str) -> None:
+        """Write _stamp to macOS Finder Comments field via Finder AppleScript. No-op if not macOS."""
+        if sys.platform != 'darwin':
+            return
+        try:
+            import subprocess as _sp
+            _safe = _stamp.replace('"', '')
+            _sp.run(
+                ['osascript', '-e',
+                 f'tell application "Finder" to set comment of (POSIX file "{out_path}" as alias) to "{_safe}"'],
+                capture_output=True, timeout=5,
+            )
+        except Exception:
+            pass
+
+    def _fit_exif_for_jpeg(exif_bytes):
+        """Ensure EXIF fits in JPEG's 65535-byte APP1 limit. Customer data takes priority.
+        Falls back: full EXIF > MakerNote-stripped EXIF > no EXIF (never crashes).
+        MakerNote (0x927C) is manufacturer binary data no standard tool can read.
+        """
+        _JPEG_EXIF_MAX = 65000
+        if not exif_bytes or len(exif_bytes) <= _JPEG_EXIF_MAX:
+            return exif_bytes
+        try:
+            from PIL import Image as _PILImage
+            ex = _PILImage.Exif()
+            ex.load(exif_bytes)
+            ex.pop(0x927C, None)
+            trimmed = ex.tobytes()
+            if len(trimmed) <= _JPEG_EXIF_MAX:
+                return trimmed
+        except Exception:
+            pass
+        return None  # save without EXIF rather than crash; originals are untouched
+
+    def _fit_exif_for_tiff(exif_bytes):
+        """Strip tags that libtiff owns on the output file and MakerNote from TIFF EXIF.
+        Structural tags (width, height, compression, etc.) describe the source file's
+        geometry and conflict with libtiff's internal state on a new file. MakerNote
+        contains proprietary binary data with internal offsets into the source file.
+        Returns cleaned bytes; on any error returns the original so the save still runs.
+        """
+        if not exif_bytes:
+            return exif_bytes
+        # Tags libtiff sets itself when writing a new TIFF — passing them causes
+        # RuntimeError: Error setting from dictionary
+        _TIFF_STRUCTURAL = {
+            256,  # ImageWidth
+            257,  # ImageLength
+            258,  # BitsPerSample
+            259,  # Compression
+            262,  # PhotometricInterpretation
+            273,  # StripOffsets
+            277,  # SamplesPerPixel
+            278,  # RowsPerStrip
+            279,  # StripByteCounts
+            284,  # PlanarConfiguration
+            322,  # TileWidth
+            323,  # TileLength
+            324,  # TileOffsets
+            325,  # TileByteCounts
+            0x927C,  # MakerNote — proprietary binary with source-file offsets
+        }
+        try:
+            from PIL import Image as _PILImage
+            ex = _PILImage.Exif()
+            ex.load(exif_bytes)
+            for tag in _TIFF_STRUCTURAL:
+                ex.pop(tag, None)
+            return ex.tobytes()
+        except Exception:
+            return exif_bytes
 
     exif_bytes = _stamp_exif(exif_bytes)
 
@@ -441,10 +927,6 @@ def main():
     for fi, fp in enumerate(frame_files_all):
         is_core = core_start <= fi < core_end
         is_before_core = fi < core_start
-        if is_core:
-            core_pos = fi - core_start + 1
-            print(f"  loading {core_pos}/{n}: {fp.name}", flush=True)
-
         img, diag = robust_imread_diag(fp, cv2.IMREAD_UNCHANGED)
         if img is None:
             # Best-effort developer telemetry — captured before we ask the GUI
@@ -484,6 +966,29 @@ def main():
             img_exif = robust_imread(fp, cv2.IMREAD_COLOR)
             if img_exif is not None and img_exif.shape[:2] != img.shape[:2]:
                 img = img_exif
+
+        # Some TIFFs carry an embedded alpha channel. IMREAD_UNCHANGED preserves
+        # it, producing (H,W,4) arrays that crash Star Bridge repair when mixed
+        # with normal (H,W,3) neighbor frames. Strip the alpha here.
+        if img.ndim == 3 and img.shape[2] == 4:
+            alpha = img[:, :, 3]
+            if alpha.min() < 255:
+                print(
+                    f"  Warning: {fp.name} has a transparency layer that was ignored."
+                    f" If you masked this image intentionally, re-export it as a"
+                    f" standard RGB TIFF and try again.",
+                    flush=True,
+                )
+            else:
+                print(f"  Note: stripped alpha channel from {fp.name} - RGB data is intact", flush=True)
+            img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+
+        if is_core:
+            core_pos = fi - core_start + 1
+            h, w = img.shape[:2]
+            ch = img.shape[2] if img.ndim == 3 else 1
+            print(f"  loading {core_pos}/{n}: {fp.name} ({w}x{h}, {ch}ch)", flush=True)
+
         frames_all.append(img)
         files_kept.append(fp)
 
@@ -580,32 +1085,262 @@ def main():
     model = load_model(str(args.model), args.confidence, args.device)
 
     masks_all = []
+    raw_masks_all = []
+    segs_all = []           # per-frame polygon segment lists for independent repair
+    corners_all = []        # per-frame polygon corner coordinate lists for JSON export
+    edge_candidates_all = []  # per-frame lists of edge-touching detections that failed elongation
+    detect_infos = []  # buffered per-frame detect data; written after static FP pass
+    running_trail_total = 0
+
+    _timing = {}
+
+    def _tacc(key, elapsed):
+        if key in _timing:
+            _timing[key][0] += 1
+            _timing[key][1] += elapsed
+        else:
+            _timing[key] = [1, elapsed]
+
+    # New modular pipeline is THE detector -- no fallback. Stages 3/4
+    # (fallback_polys, link_gaps) are not built yet -> off. The static FP
+    # suppressor runs as Step 1c below, so the pipeline's own one stays off.
+    new_cfg = dp.StageConfig(
+        tile_size=args.tile_size, overlap=args.overlap,
+        fit_polygons=True, fallback_polys=False, link_gaps=False,
+        seam_second_pass=True, suppress_fp=False,
+    )
+
     for i, fp in enumerate(frame_files_all):
-        mask = detect_frame(model, frames_8bit_all[i], args.tile_size,
-                            args.overlap, args.dilate)
+        is_neighbor = i < core_start or i >= core_end
+        dbg = {} if logger is not None else None
+
+        edge_cands = []
+        frame_segs = []
+        frame_corners = []
+        _t0 = time.perf_counter()
+        state = dp.detect_frame(model=model, image=frames_8bit_all[i],
+                                foreground_mask=fg_mask, frame_name=fp.stem,
+                                cfg=new_cfg)
+        _tacc("new_pipeline_s", time.perf_counter() - _t0)
+        for _sname, _ssec in state.stage_seconds.items():
+            _tacc(f"dp_{_sname}_s", _ssec)
+        mask = state.final_mask
+        frame_segs = list(state.polygon_segs)
+        frame_corners = list(state.polygons)
+        raw_labeled = _raw_labeled_from_state(state, *mask.shape[:2]) \
+            if mask is not None else None
+        edge_candidates_all.append(edge_cands)
         if mask is None:
             masks_all.append(np.zeros((h, w), dtype=np.uint8))
+            raw_masks_all.append(np.zeros((h, w), dtype=np.uint8))
+            segs_all.append([])
+            corners_all.append([])
+            if dbg is not None:
+                dbg.update({"frame": fp.stem, "frame_idx": i,
+                            "is_neighbor": is_neighbor,
+                            "detect_error": "detect_frame returned None mask"})
+            detect_infos.append(dbg)
             continue
 
+        sky_px_removed = 0
         if sky_mask is not None:
+            before_px = int((mask > 0).sum())
+            _t0 = time.perf_counter()
             mask = apply_sky_mask(mask, sky_mask)
+            _tacc("apply_sky_mask_s", time.perf_counter() - _t0)
+            sky_px_removed = before_px - int((mask > 0).sum())
+            # New pipeline doesn't sky-mask its predictions (it only skips fully
+            # foreground tiles), so trim each repair segment to sky here and drop
+            # any that vanish -- keeps repair off the foreground. Corners stay
+            # index-aligned with segs for the _polys.json export.
+            if frame_segs:
+                kept_segs, kept_corners = [], []
+                for _si, _seg in enumerate(frame_segs):
+                    _sm = apply_sky_mask(_seg, sky_mask)
+                    if (_sm > 0).any():
+                        kept_segs.append(_sm)
+                        if _si < len(frame_corners):
+                            kept_corners.append(frame_corners[_si])
+                frame_segs = kept_segs
+                frame_corners = kept_corners
 
+        small_dbg = {} if dbg is not None else None
         if min_area_scaled > 0 and mask.max() > 0:
-            mask = filter_small_components(mask, frames_8bit_all[i], min_area_scaled)
+            _t0 = time.perf_counter()
+            mask = filter_small_components(mask, frames_8bit_all[i], min_area_scaled,
+                                           debug_out=small_dbg)
+            _tacc("filter_small_s", time.perf_counter() - _t0)
 
         masks_all.append(mask)
-        if mask.max() > 0:
-            n_cc, _ = cv2.connectedComponents((mask > 0).astype(np.uint8))
-            trail_count = max(0, n_cc - 1)
-        else:
-            trail_count = 0
-        trail_label = f"{trail_count} trail{'s' if trail_count != 1 else ''}"
-        is_neighbor = i < core_start or i >= core_end
+        raw_masks_all.append(raw_labeled if raw_labeled is not None
+                             else np.zeros((h, w), dtype=np.uint8))
+        segs_all.append(frame_segs)
+        corners_all.append(frame_corners)
         if is_neighbor:
-            print(f"  detecting neighbor: {fp.name} - {trail_label}", flush=True)
+            print(f"  detecting neighbor: {fp.name}", flush=True)
         else:
             core_num = i - core_start + 1
-            print(f"  detecting {core_num}/{n}: {fp.name} - {trail_label}", flush=True)
+            print(f"  detecting {core_num}/{n}: {fp.name}", flush=True)
+
+        if dbg is not None:
+            dbg.update({
+                "frame":                  fp.stem,
+                "frame_idx":              i,
+                "is_neighbor":            is_neighbor,
+                "sky_mask_pixels_removed": sky_px_removed,
+                "small_filter":           small_dbg or {},
+            })
+        detect_infos.append(dbg)
+
+    if args.second_scrub:
+        print("\nStep 1b - second scrub (180-degree rotation)", flush=True)
+        try:
+            for i, fp in enumerate(frame_files_all):
+                rotated = np.rot90(frames_8bit_all[i], 2)
+                _t0 = time.perf_counter()
+                rot_fg = np.rot90(fg_mask, 2) if fg_mask is not None else None
+                state2 = dp.detect_frame(model=model, image=rotated,
+                                         foreground_mask=rot_fg,
+                                         frame_name=fp.stem + "_rot180", cfg=new_cfg)
+                _tacc("second_scrub_s", time.perf_counter() - _t0)
+                mask2 = state2.final_mask
+                if mask2 is None:
+                    continue
+                mask2 = np.rot90(mask2, 2)
+                if sky_mask is not None:
+                    mask2 = apply_sky_mask(mask2, sky_mask)
+                if min_area_scaled > 0 and mask2.max() > 0:
+                    mask2 = filter_small_components(mask2, frames_8bit_all[i], min_area_scaled)
+                masks_all[i] = np.maximum(masks_all[i], mask2)
+                is_neighbor = i < core_start or i >= core_end
+                if not is_neighbor:
+                    core_num = i - core_start + 1
+                    if masks_all[i].max() > 0:
+                        n_cc, _ = cv2.connectedComponents((masks_all[i] > 0).astype(np.uint8))
+                        trail_count = max(0, n_cc - 1)
+                    else:
+                        trail_count = 0
+                    print(f"  second scrub {core_num}/{n}: {fp.name} - {trail_count} trail{'s' if trail_count != 1 else ''}", flush=True)
+        except Exception as e:
+            print(f"  WARN: second scrub failed ({e}) - continuing with first-pass results only", flush=True)
+
+    print("\nStep 1c - removing static false positives...", flush=True)
+    static_fp_dbg = {} if logger is not None else None
+    _sfp_timing = {}
+    _t0 = time.perf_counter()
+    n_static = _suppress_static_fps(masks_all, core_start, core_end,
+                                    raw_masks_all=raw_masks_all,
+                                    frames_all=frames_all,
+                                    debug_out=static_fp_dbg,
+                                    timing_out=_sfp_timing)
+    _tacc("static_fp_s", time.perf_counter() - _t0)
+    for _k, _v in _sfp_timing.items():
+        _tacc(_k, _v)
+    if n_static:
+        print(f"  Suppressed {n_static} static detection(s) present in 2+ neighboring frames",
+              flush=True)
+    else:
+        print("  No static false positives found", flush=True)
+
+    # Step 1d - Edge rescue: recover trails that were clipped at the frame boundary.
+    #
+    # The elongation filter rejects detections whose bounding box is too square
+    # (aspect ratio < 2:1), because real trails are long and thin. But a trail
+    # that exits the frame at any edge gets clipped to a short stub that fails
+    # this test even though it is real. The grouper flags these as "edge
+    # candidates" instead of discarding them entirely.
+    #
+    # Here we check each edge candidate against the post-suppression masks of
+    # neighboring frames (within ±4). If 2 or more neighboring frames contain
+    # a mask component whose major-axis direction matches the candidate within
+    # 15 degrees, the candidate is reinstated: its pixels are merged into the
+    # frame's mask so repair can fill it in.
+    #
+    # Running AFTER the static FP suppressor means rescued candidates are checked
+    # against already-cleaned neighbor masks -- static objects that got suppressed
+    # in neighbor frames won't accidentally rescue a matching edge stub.
+    _EDGE_WINDOW      = 4    # check up to 4 frames before and after
+    _EDGE_SLOPE_TOL   = 15.0 # degrees -- how closely slopes must match
+    _EDGE_MIN_MATCHES = 1    # 1 neighbor suffices: static FPs were already removed
+                             # by the suppressor above; raw fallback handles the
+                             # case where every frame has a stub that failed elongation
+    _t0 = time.perf_counter()
+    n_rescued = 0
+    if any(len(ec) > 0 for ec in edge_candidates_all):
+        print("\nStep 1d - rescuing edge-clipped detections...", flush=True)
+        try:
+            for i, cands in enumerate(edge_candidates_all):
+                if not cands:
+                    continue
+                for cand in cands:
+                    match_count = 0
+                    for offset in range(-_EDGE_WINDOW, _EDGE_WINDOW + 1):
+                        if offset == 0:
+                            continue
+                        j = i + offset
+                        if j < 0 or j >= len(masks_all):
+                            continue
+                        nb_mask = masks_all[j]
+                        if nb_mask.max() == 0:
+                            # Fitted mask is empty in this neighbor -- fall back to
+                            # raw SAHI hits. If the trail stub also failed elongation
+                            # in every neighboring frame (circular dependency), the
+                            # raw hits still confirm the trail's slope and location.
+                            raw_nb = raw_masks_all[j] if j < len(raw_masks_all) else None
+                            if raw_nb is not None and raw_nb.max() > 0:
+                                nb_mask = (raw_nb > 0).astype(np.uint8) * 255
+                            else:
+                                continue
+                        # Split the neighbor mask into individual components and
+                        # check each one for a slope match with the edge candidate.
+                        n_labels, labeled = cv2.connectedComponents(
+                            (nb_mask > 0).astype(np.uint8))
+                        for lbl_id in range(1, n_labels):
+                            comp = (labeled == lbl_id).astype(np.uint8) * 255
+                            nb_props = detection_props(comp, min_aspect=0.0)
+                            if nb_props is None:
+                                continue
+                            cos_sim = min(abs(float(np.dot(cand["u"], nb_props["u"]))), 1.0)
+                            adiff = min(np.degrees(np.arccos(cos_sim)),
+                                        180.0 - np.degrees(np.arccos(cos_sim)))
+                            if adiff <= _EDGE_SLOPE_TOL:
+                                match_count += 1
+                                break  # one matching component per frame is enough
+                    if match_count >= _EDGE_MIN_MATCHES:
+                        masks_all[i] = np.maximum(masks_all[i], cand["mask"])
+                        n_rescued += 1
+        except Exception as e:
+            # Edge rescue is a best-effort step. If it fails for any reason
+            # (unexpected mask shape, bad coords, etc.) we log the error and
+            # continue with whatever masks were already restored. Detection and
+            # repair still run; only the clipped-trail recovery is skipped.
+            print(f"  WARN: edge rescue failed and was skipped ({e})", flush=True)
+        if n_rescued:
+            print(f"  Restored {n_rescued} edge-clipped detection(s) confirmed by "
+                  f"{_EDGE_MIN_MATCHES}+ neighboring frames", flush=True)
+        else:
+            print("  No edge-clipped detections qualified for rescue", flush=True)
+
+    _tacc("edge_rescue_s", time.perf_counter() - _t0)
+
+    # Write all detect records now that static FP suppression is complete.
+    # final_trail_components is computed here (post-suppression) from masks_all.
+    if logger is not None:
+        _sfp_by_frame  = (static_fp_dbg or {}).get("suppressed_by_frame", {})
+        _veto_by_frame = (static_fp_dbg or {}).get("kept_by_veto_by_frame", {})
+        for _i, _dbg in enumerate(detect_infos):
+            if _dbg is None:
+                continue
+            _m = masks_all[_i] if _i < len(masks_all) else None
+            if _m is not None and _m.max() > 0:
+                _ncc, _ = cv2.connectedComponents((_m > 0).astype(np.uint8))
+                _dbg["final_trail_components"] = max(0, _ncc - 1)
+            else:
+                _dbg["final_trail_components"] = 0
+            _dbg["static_fp_suppressed"]    = _sfp_by_frame.get(_i, [])
+            _dbg["static_fp_kept_by_veto"]  = _veto_by_frame.get(_i, [])
+            _dbg["type"] = "detect"
+            logger.log(_dbg)
 
     masks_per_frame = masks_all[core_start:core_end]
     trail_frames = sum(1 for m in masks_per_frame if m.max() > 0)
@@ -616,17 +1351,45 @@ def main():
             continue
         n_cc, _ = cv2.connectedComponents((m > 0).astype(np.uint8))
         batch_trail_count += max(0, n_cc - 1)  # subtract background
+
     print(f"  Step 1 complete - {trail_frames}/{n} frames have trails", flush=True)
 
     if masks_dir:
-        for fp, mask in zip(frame_files, masks_per_frame):
+        import json as _json
+        raw_masks_per_frame = raw_masks_all[core_start:core_end]
+        corners_per_frame = corners_all[core_start:core_end]
+        for fp, mask, raw_mask, frm_corners in zip(
+                frame_files, masks_per_frame, raw_masks_per_frame, corners_per_frame):
             robust_imwrite(masks_dir / (fp.stem + ".png"), mask)
+            if raw_mask.max() > 0:
+                robust_imwrite(masks_dir / (fp.stem + "_raw.png"), raw_mask)
+            if frm_corners:
+                h_fr, w_fr = mask.shape
+                polys_data = {
+                    "frame": fp.stem,
+                    "width": w_fr,
+                    "height": h_fr,
+                    "polygons": [{"id": idx, "corners": c}
+                                 for idx, c in enumerate(frm_corners)],
+                }
+                (masks_dir / (fp.stem + "_polys.json")).write_text(
+                    _json.dumps(polys_data))
 
     # ── Step 2: Repair ────────────────────────────────────────────────────
     sb = args.skip_boundary
-    print(f"\nStep 2 - repairing frames (skipping first/last {sb})", flush=True)
+    print(f"\nStep 2 - cleaning frames (skipping first/last {sb})", flush=True)
+
+    # Build neighbor_masks aligned with frames_all so repair_frame can check
+    # whether each neighbor frame has a trail at the component being repaired.
+    # Boundary frames (before/after core) have no mask — leave as None.
+    neighbor_masks = [None] * len(frames_all)
+    for _j, _m in enumerate(masks_all):
+        _abs = _j
+        if 0 <= _abs < len(frames_all):
+            neighbor_masks[_abs] = _m
 
     n_repaired = 0
+    running_trail_total = 0
     total_trail = 0
     for i, (fp, img, mask) in enumerate(zip(frame_files, frames, masks_per_frame)):
         trail_px = int((mask > 0).sum())
@@ -641,15 +1404,69 @@ def main():
 
         if not skip:
             if trail_px > 0:
-                # Use i + core_start as index into the full (with-neighbors) arrays
+                repair_dbg = {} if logger is not None else None
+                _t0 = time.perf_counter()
                 cleaned = repair_frame(img, mask, i + core_start,
-                                       frames_all)
+                                       frames_all,
+                                       neighbor_masks=neighbor_masks,
+                                       polygon_segs=segs_all[i + core_start],
+                                       debug_out=repair_dbg)
+                _tacc("repair_s", time.perf_counter() - _t0)
                 _write_output(fp.stem, cleaned, icc_profile=icc_profile, exif_bytes=exif_bytes, dpi=dpi)
                 n_repaired += 1
+                if logger is not None:
+                    repair_dbg["type"] = "repair"
+                    repair_dbg["frame"] = fp.stem
+                    repair_dbg["frame_idx"] = i + core_start
+                    repair_dbg["trail_px"] = trail_px
+                    logger.log(repair_dbg)
             else:
                 _write_output(fp.stem, img, icc_profile=icc_profile, exif_bytes=exif_bytes, dpi=dpi)
+                if logger is not None:
+                    logger.log({"type": "repair", "frame": fp.stem,
+                                "frame_idx": i + core_start,
+                                "trail_px": 0, "components": []})
 
-        print(f"  repairing {i+1}/{n}: {fp.name} - {trail_label}", flush=True)
+        print(f"  cleaning {i+1}/{n}: {fp.name} - {trail_label}", flush=True)
+        running_trail_total += trail_count
+        print(f"FRAME_TRAIL_COUNT: {running_trail_total}", flush=True)
+
+    def _fmt_s(s):
+        m, sec = divmod(int(s), 60)
+        if m:
+            return f"{m}m {sec:02d}s"
+        if s >= 1.0:
+            return f"{s:.1f}s"
+        return f"{s * 1000:.0f}ms"
+
+    if _timing:
+        _STEP_ORDER = [
+            ("new_pipeline_s",          "detect (new pipeline)"),
+            ("dp_tiled_inference_s",    "  tiled_inference (SAHI)"),
+            ("dp_fit_polygons_s",       "  fit_polygons"),
+            ("dp_seam_second_pass_s",   "  seam_second_pass"),
+            ("dp_fallback_polys_s",     "  fallback_polys"),
+            ("dp_link_gaps_s",          "  link_gaps"),
+            ("dp_suppress_fp_s",        "  suppress_fp (pipeline)"),
+            ("apply_sky_mask_s",  "apply_sky_mask"),
+            ("filter_small_s",    "filter_small_comps"),
+            ("second_scrub_s",    "second_scrub"),
+            ("static_fp_s",          "static_fp_suppressor"),
+            ("sfp_precompute_s",     "  sfp_precompute"),
+            ("sfp_compare_s",        "  sfp_compare"),
+            ("sfp_apply_s",          "  sfp_apply"),
+            ("edge_rescue_s",        "edge_rescue"),
+            ("repair_s",          "repair_frame"),
+        ]
+        print("\nTiming summary:")
+        print(f"  {'Step':<26} {'Calls':>6}  {'Total':>8}  {'Avg':>8}")
+        for _key, _label in _STEP_ORDER:
+            if _key not in _timing:
+                print(f"  {_label:<26} {'0':>6}  {'--':>8}  {'--':>8}")
+                continue
+            _cnt, _tot = _timing[_key]
+            _avg = _tot / _cnt if _cnt else 0.0
+            print(f"  {_label:<26} {_cnt:>6}  {_fmt_s(_tot):>8}  {_fmt_s(_avg):>8}")
 
     elapsed = time.time() - t_total
     mins, secs = divmod(int(elapsed), 60)
@@ -663,6 +1480,27 @@ def main():
     print(f"BATCH_TRAIL_COUNT: {batch_trail_count}", flush=True)
     print(f"BATCH_FRAME_COUNT: {n}", flush=True)
     print(f"\nOutput: {output_dir}")
+
+    if logger is not None:
+        logger.log({
+            "type":                 "summary",
+            "input_dir":            str(input_dir),
+            "output_dir":           str(output_dir),
+            "batch_start":          args.start,
+            "batch_size":           args.batch,
+            "total_frames":         n,
+            "trail_frames":         trail_frames,
+            "total_trail_components": batch_trail_count,
+            "frames_repaired":      n_repaired,
+            "elapsed_sec":          round(elapsed, 1),
+            "model":                str(args.model),
+            "confidence":           args.confidence,
+            "dilate":               args.dilate,
+            "min_area":             args.min_area,
+            "min_area_scaled":      min_area_scaled,
+            "second_scrub":         args.second_scrub,
+        })
+        logger.close()
 
 
 if __name__ == "__main__":

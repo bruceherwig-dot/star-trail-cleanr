@@ -5,6 +5,17 @@ Prevents missing-data-file crashes without requiring a manually maintained list.
 """
 import os, site, subprocess, sys
 
+# Reproducible builds: pin a deterministic timestamp before PyInstaller starts.
+# Python's bytecode compiler embeds the source file's mtime in every .pyc; on
+# CI runners every fresh checkout gives source files a brand-new mtime, so the
+# same source produces different .pyc bytes between builds. Setting
+# SOURCE_DATE_EPOCH overrides that mtime with a fixed value, making .pyc
+# output deterministic. This is what cuts Sparkle/WinSparkle delta updates
+# from ~237 MB (v1.98 → v1.99 measured 2026-04-30) toward the 30-50 MB range.
+# Value is the standard "reproducible-builds-friendly" timestamp (2020-01-01);
+# the exact number is irrelevant as long as it never changes.
+os.environ['SOURCE_DATE_EPOCH'] = '1577836800'
+
 sep = ';' if sys.platform == 'win32' else ':'
 
 # Extensions PyInstaller handles natively — exclude from --add-data
@@ -35,7 +46,6 @@ SKIP_PACKAGES = {
     # (lxml, imgviz, labelme). Verified via grep across modules/ + top-level
     # *.py — zero direct imports.
     'pandas',                       # ultralytics training output, not runtime
-    'matplotlib',                   # ultralytics plots, not runtime
     'lxml',                         # labelme XML, not used at runtime
     'openai',                       # sahi optional VLM detector, not used
     'anthropic',                    # sahi optional VLM detector, not used
@@ -47,7 +57,7 @@ SKIP_PACKAGES = {
     #   fontTools: required only by borb + matplotlib (both already excluded)
     'pip',                          # package installer, not needed at runtime
     'astropy_iers_data',            # orphan from astropy exclusion
-    'fontTools',                    # orphan from matplotlib + borb exclusions
+    'fontTools',                    # orphan from borb exclusion
 }
 
 site_dirs = []
@@ -108,8 +118,12 @@ cmd = [
     '--collect-all', 'PySide6',
     '--collect-all', 'sahi',
     '--collect-all', 'ultralytics',
+    '--collect-all', 'matplotlib',
     '--collect-all', 'skimage',
+    '--collect-all', 'scipy',
     '--collect-all', 'tifffile',
+    '--collect-all', 'psutil',
+    '--runtime-hook', 'rthooks/pyi_rthook_gpu_override.py',
 ]
 # Force PyInstaller to exclude the same skip list at the module-analysis level,
 # not just the data-file walker. This stops transitive imports from pulling
@@ -405,6 +419,138 @@ if sys.platform == 'win32':
     else:
         print('\nWindows Qt-DLL cleanup: nothing matched. '
               'Check Qt module naming if this is unexpected.')
+
+# ── Sparkle / WinSparkle integration ────────────────────────────────────
+# Copy the vendored auto-update framework into the bundle and inject the
+# config keys Sparkle needs. WinSparkle on Windows reads its config at
+# runtime via the ctypes wrapper in modules/winsparkle_updater.py — no
+# Info.plist equivalent needed; just the DLL placement.
+
+# GitHub Pages hosts the appcast XML feeds (one per platform) on the
+# repo's gh-pages branch. URLs are stable across releases; only the
+# advertised version inside the XML changes.
+APPCAST_BASE = 'https://bruceherwig-dot.github.io/star-trail-cleanr'
+
+sparkle_pubkey_path = os.path.join(os.path.dirname(__file__), 'assets', 'sparkle_public_key.txt')
+sparkle_pubkey = None
+if os.path.isfile(sparkle_pubkey_path):
+    with open(sparkle_pubkey_path) as f:
+        sparkle_pubkey = f.read().strip()
+
+if sys.platform == 'darwin':
+    import platform as _plat
+    arch = 'apple-silicon' if _plat.machine() == 'arm64' else 'intel'
+    appcast_url = f'{APPCAST_BASE}/appcast-mac-{arch}.xml'
+
+    # Step 1: copy Sparkle.framework into the bundle. Use ditto, not cp -R
+    # — ditto preserves Versions/A symlinks and code-signing seals; cp -R
+    # corrupts both. (Per fman blog post on PyInstaller + Sparkle.)
+    sparkle_src = os.path.join(os.path.dirname(__file__), 'vendored', 'Sparkle.framework')
+    sparkle_dest = os.path.join(dist_root, 'Contents', 'Frameworks', 'Sparkle.framework')
+    if os.path.isdir(sparkle_src):
+        os.makedirs(os.path.dirname(sparkle_dest), exist_ok=True)
+        if os.path.exists(sparkle_dest):
+            shutil.rmtree(sparkle_dest, ignore_errors=True)
+        result = subprocess.run(['ditto', sparkle_src, sparkle_dest], capture_output=True)
+        if result.returncode == 0:
+            sz = dir_size_mb(sparkle_dest)
+            print(f'\nSparkle.framework copied into bundle ({sz:.1f} MB)')
+        else:
+            print(f'\nWARNING: ditto Sparkle.framework failed: {result.stderr.decode()}')
+    else:
+        print(f'\nWARNING: vendored Sparkle.framework not found at {sparkle_src}')
+
+    # Step 2: inject Sparkle keys + version metadata into Info.plist via
+    # PlistBuddy. Sparkle refuses to start (error code 7) if CFBundleVersion
+    # is missing or CFBundleShortVersionString is the PyInstaller default
+    # "0.0.0" — both must reflect the real app version. Same value works
+    # for both since we don't maintain a separate build number.
+    info_plist = os.path.join(dist_root, 'Contents', 'Info.plist')
+    pb = '/usr/libexec/PlistBuddy'
+    version_file = os.path.join(os.path.dirname(__file__), 'version.txt')
+    app_version = '0.0.0'
+    if os.path.isfile(version_file):
+        with open(version_file) as vf:
+            app_version = vf.read().strip() or '0.0.0'
+    if os.path.isfile(info_plist) and sparkle_pubkey:
+        sparkle_keys = [
+            ('SUFeedURL', 'string', appcast_url),
+            ('SUPublicEDKey', 'string', sparkle_pubkey),
+            ('SUEnableAutomaticChecks', 'bool', 'true'),
+            ('SUScheduledCheckInterval', 'integer', '86400'),
+            ('CFBundleVersion', 'string', app_version),
+            ('CFBundleShortVersionString', 'string', app_version),
+        ]
+        print('\nInjecting Sparkle keys into Info.plist:')
+        for key, ktype, value in sparkle_keys:
+            r = subprocess.run([pb, '-c', f'Set :{key} {value}', info_plist],
+                               capture_output=True)
+            if r.returncode != 0:
+                r = subprocess.run([pb, '-c', f'Add :{key} {ktype} {value}', info_plist],
+                                   capture_output=True)
+            if r.returncode == 0:
+                print(f'  {key} = {value}')
+            else:
+                print(f'  WARNING: failed to set {key}: {r.stderr.decode().strip()}')
+    elif not sparkle_pubkey:
+        print('\nWARNING: no Sparkle public key — skipping Info.plist injection')
+
+    # Step 3: re-sign the outer .app with an ad-hoc signature. Both copying
+    # Sparkle.framework into Contents/Frameworks and patching Info.plist
+    # invalidate PyInstaller's seal on the outer bundle. Sparkle 2.x's update
+    # validator rejects updates whose outer seal is broken (the inner
+    # frameworks remain validly signed, so we only re-seal the outermost
+    # bundle). errSecCSBadResource (-67030) is the symptom; this is the cure.
+    # Confirmed by Sparkle maintainer that ad-hoc + EdDSA is supported.
+    print('\nRe-signing outer .app bundle (ad-hoc) to repair Info.plist seal...')
+    cs = subprocess.run(
+        ['codesign', '--force', '--sign', '-', dist_root],
+        capture_output=True,
+    )
+    if cs.returncode != 0:
+        print(f'  WARNING: codesign failed: {cs.stderr.decode().strip()}')
+    else:
+        verify = subprocess.run(
+            ['codesign', '--verify', '--verbose=2', dist_root],
+            capture_output=True,
+        )
+        if verify.returncode == 0:
+            print('  outer bundle signature: valid')
+        else:
+            print(f'  WARNING: outer bundle still invalid: {verify.stderr.decode().strip()}')
+
+if sys.platform == 'win32':
+    # Place WinSparkle.dll at the top of the bundle (next to the .exe) so
+    # Windows' default DLL search finds it without PATH manipulation.
+    winsparkle_src = os.path.join(os.path.dirname(__file__), 'vendored', 'winsparkle', 'WinSparkle.dll')
+    winsparkle_dest = os.path.join(dist_root, 'WinSparkle.dll')
+    if os.path.isfile(winsparkle_src):
+        shutil.copy2(winsparkle_src, winsparkle_dest)
+        sz = os.path.getsize(winsparkle_dest) / 1024 / 1024
+        print(f'\nWinSparkle.dll copied into bundle ({sz:.1f} MB)')
+    else:
+        print(f'\nWARNING: vendored WinSparkle.dll not found at {winsparkle_src}')
+
+    # Write bundled torch + torchvision versions into _internal so the GPU override
+    # runtime hook and in-app installer can match the correct CUDA wheels.
+    try:
+        import torch as _torch
+        _torch_ver = _torch.__version__
+        _ver_dest = os.path.join(dist_root, '_internal', 'stc_expected_torch_version.txt')
+        with open(_ver_dest, 'w') as _f:
+            _f.write(_torch_ver)
+        print(f'\nWrote stc_expected_torch_version.txt: {_torch_ver}')
+    except Exception as _e:
+        print(f'\nWARNING: could not write stc_expected_torch_version.txt: {_e}')
+    try:
+        import torchvision as _tv
+        _tv_ver = _tv.__version__
+        _tv_dest = os.path.join(dist_root, '_internal', 'stc_expected_torchvision_version.txt')
+        with open(_tv_dest, 'w') as _f:
+            _f.write(_tv_ver)
+        print(f'Wrote stc_expected_torchvision_version.txt: {_tv_ver}')
+    except Exception as _e:
+        print(f'WARNING: could not write stc_expected_torchvision_version.txt: {_e}')
 
 after = dir_size_mb(os.path.join('dist'))
 print(f'\nAfter cleanup: {after:.1f} MB  (saved {before - after:.1f} MB)')

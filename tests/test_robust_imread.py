@@ -425,6 +425,46 @@ def test_run_summary_appends_star_log_with_head_tail_trim():
 
 
 
+def test_alpha_channel_tiff_stripped_in_loading_loop():
+    """v2.22 crash fix: 4-channel RGBA TIFFs must have their alpha stripped
+    in the frame loading loop in astro_clean_v5.py. Regression for the
+    Andrews-iMac crash: 'operands could not be broadcast together with shapes
+    (2635,3315,3) (2635,3315,4)' in Star Bridge repair when one neighbor
+    frame was BGRA and the other was BGR."""
+    import tifffile
+
+    # Structural: confirm the strip is wired into the loader
+    text = (REPO / "astro_clean_v5.py").read_text()
+    assert "img.shape[2] == 4" in text, (
+        "alpha-channel stripping is missing from the frame loader — "
+        "4-channel TIFFs will crash Star Bridge repair"
+    )
+    assert "COLOR_BGRA2BGR" in text, (
+        "BGRA→BGR conversion missing from the frame loader"
+    )
+
+    # Functional: RGBA TIFF → load → strip → must be 3-channel BGR.
+    # Use PIL to write the RGBA TIFF — tifffile's photometric arg varies by version.
+    from PIL import Image as _PILImage
+    from modules.io_safe import robust_imread_diag
+    arr = np.zeros((20, 30, 4), dtype=np.uint8)
+    arr[..., 0] = 50    # R
+    arr[..., 1] = 100   # G
+    arr[..., 2] = 150   # B
+    arr[..., 3] = 255   # alpha
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "rgba.tif"
+        _PILImage.fromarray(arr, mode="RGBA").save(str(p))
+        img, diag = robust_imread_diag(p, cv2.IMREAD_UNCHANGED)
+        assert img is not None, f"failed to read RGBA TIFF: {diag}"
+        if img.ndim == 3 and img.shape[2] == 4:
+            img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+        assert img.shape == (20, 30, 3), (
+            f"alpha strip did not produce 3-channel result: {img.shape}"
+        )
+        assert int(img[0, 0, 1]) == 100, "G channel should survive the strip"
+
+
 def test_gui_scan_uses_tifffile_fallback_for_unreadable_tiffs():
     """v1.993: the GUI's pre-flight scan must mirror the worker's reader
     ladder so TIFFs that PIL can't parse (BigTIFF, unusual compressions,

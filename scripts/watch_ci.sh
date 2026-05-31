@@ -2,31 +2,32 @@
 # Watch the latest Star Trail CleanR GitHub Actions build until it finishes.
 #
 # Usage:
-#   bash tools/watch_ci.sh
+#   bash scripts/watch_ci.sh
 #
-# Polls the latest workflow run for bruceherwig-dot/star-trail-cleanr every
-# 45 seconds. Prints a timestamp + status on each check. Exits 0 if the build
-# succeeded, 1 if it failed or returned an unexpected status. Designed to be
-# run after `git push origin <tag>` as the standard last step before posting
-# download links to the user.
+# Polls the latest workflow run every 45 seconds using the gh CLI (authenticated).
+# Exits 0 on success, 1 on failure.
 
 REPO="bruceherwig-dot/star-trail-cleanr"
-API="https://api.github.com/repos/${REPO}/actions/runs"
 
-run_json=$(curl -sS "${API}?per_page=1") || { echo "API unreachable."; exit 1; }
-RUN_ID=$(printf '%s' "$run_json" | python3 -c "import json,sys; print(json.load(sys.stdin)['workflow_runs'][0]['id'])")
-TAG=$(printf '%s' "$run_json"    | python3 -c "import json,sys; r=json.load(sys.stdin)['workflow_runs'][0]; print(r.get('head_branch') or r.get('display_title') or 'unknown')")
-URL=$(printf '%s' "$run_json"    | python3 -c "import json,sys; print(json.load(sys.stdin)['workflow_runs'][0]['html_url'])")
+run_json=$(gh run list --repo "$REPO" --limit 1 --json databaseId,headBranch,status,conclusion,url 2>&1) \
+  || { echo "gh CLI error: $run_json"; exit 1; }
+
+RUN_ID=$(printf '%s' "$run_json" | python3 -c "import json,sys; print(json.load(sys.stdin)[0]['databaseId'])")
+TAG=$(printf '%s' "$run_json"    | python3 -c "import json,sys; print(json.load(sys.stdin)[0]['headBranch'])")
+URL=$(printf '%s' "$run_json"    | python3 -c "import json,sys; print(json.load(sys.stdin)[0]['url'])")
 
 echo "Watching build for ${TAG} (run ${RUN_ID})"
 echo "  ${URL}"
 echo
 
 while true; do
-  s=$(curl -sS "${API}/${RUN_ID}" | python3 -c "import json,sys; r=json.load(sys.stdin); print(r['status'], r.get('conclusion') or '-')")
-  echo "$(date '+%H:%M:%S')  ${s}"
-  case "$s" in
-    in_progress*|queued*)
+  row=$(gh run view "$RUN_ID" --repo "$REPO" --json status,conclusion 2>&1) \
+    || { echo "gh CLI error: $row"; sleep 45; continue; }
+  status=$(printf '%s' "$row" | python3 -c "import json,sys; r=json.load(sys.stdin); print(r.get('status','unknown'))")
+  conclusion=$(printf '%s' "$row" | python3 -c "import json,sys; r=json.load(sys.stdin); print(r.get('conclusion') or '-')")
+  echo "$(date '+%H:%M:%S')  ${status} ${conclusion}"
+  case "${status} ${conclusion}" in
+    "in_progress -"|"queued -")
       sleep 45
       ;;
     "completed success")
@@ -34,12 +35,11 @@ while true; do
       exit 0
       ;;
     completed*)
-      echo "Build did not succeed: ${s}"
+      echo "Build did not succeed: ${status} ${conclusion}"
       exit 1
       ;;
     *)
-      echo "Unexpected status: ${s}"
-      exit 1
+      sleep 45
       ;;
   esac
 done
