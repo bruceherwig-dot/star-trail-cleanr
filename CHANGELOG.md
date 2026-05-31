@@ -2,6 +2,11 @@
 
 ---
 
+## v2.37-beta
+- **Faster detection.** The step that fits trail outlines now works on a small cropped region around each detection instead of scanning the whole image for every detection. The results are identical, but that step runs about 3x faster, shaving roughly a minute off a typical run.
+- **Clearer progress.** The Run screen now names exactly which frames are being detected and repaired, with the whole-job total, for example "Detecting frames 21-40 (of 450)". The numbers no longer get cut off on large jobs and the progress bars stay put.
+- **Smoke tests:** 133 passing.
+
 ## v2.36-beta
 - **Improvement: Detection is significantly faster on images with a visible horizon or foreground.** Star Trail CleanR now skips AI inference on tiles that are entirely in the foreground — trees, buildings, ground — where trails can never appear. On sequences with a clear horizon in the lower third of the frame, this cuts the detection time per frame by 30 to 60 percent. Sequences that are mostly sky (very low horizon) are unaffected.
 - **Improvement: Trail-crossing detection is faster.** The step that separates two crossing trails from a single merged detection now runs 4x faster. It uses a cropped region instead of scanning the full frame, and processes pixels as a batch instead of one at a time.
