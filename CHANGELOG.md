@@ -2,6 +2,12 @@
 
 ---
 
+## v2.38-beta
+- **Tighter trail outlines.** The detection outlines now hug each trail more closely, grabbing about 24% less surrounding sky. The thickness (across the trail) and the length (along it) are tuned independently, and both scale with your image so they behave the same at any resolution. The result is a cleaner repair with less chance of disturbing nearby stars.
+- **New run stats.** The Run screen now shows two live figures under the trail counter: the average number of trails per frame and the average seconds per frame, so you can see how busy your sky is and how fast the run is going.
+- **Slightly faster repair.** A redundant step was removed when repairing each trail, trimming a little time off every frame.
+- **Smoke tests:** 133 passing.
+
 ## v2.37-beta
 - **Faster detection.** The step that fits trail outlines now works on a small cropped region around each detection instead of scanning the whole image for every detection. The results are identical, but that step runs about 3x faster, shaving roughly a minute off a typical run.
 - **Clearer progress.** The Run screen now names exactly which frames are being detected and repaired, with the whole-job total, for example "Detecting frames 21-40 (of 450)". The numbers no longer get cut off on large jobs and the progress bars stay put.
