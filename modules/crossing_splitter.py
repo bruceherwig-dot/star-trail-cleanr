@@ -160,7 +160,7 @@ def _measure_spine_width(xs_f, ys_f, along, perp, n_samples=20, pctl=20):
 
 # -- Public API ----------------------------------------------------------------
 
-def split_crossing(mask):
+def split_crossing(mask, frame_px=None):
     """Split a crossing blob into spine + tip masks.
 
     The spine is the longest trail, running unbroken through the junction
@@ -168,12 +168,16 @@ def split_crossing(mask):
     extend above and below the spine band. Full SAHI coverage is preserved:
     union(spine + tips) == original blob.
 
+    frame_px: total pixels of the FULL frame, used to normalise the area
+    thresholds. Pass it when `mask` is a cropped region so the thresholds match
+    the full-frame behaviour. Defaults to the mask's own size (full-frame call).
+
     Returns [mask] unchanged if no valid split is found.
     Returns [spine, tip1, tip2, ...] if the blob splits.
     """
     area = int((mask > 0).sum())
     h, w = mask.shape[:2]
-    area_scale = (h * w) / _REF_FRAME_PX
+    area_scale = (frame_px if frame_px else (h * w)) / _REF_FRAME_PX
     min_px = int(_MIN_AREA * area_scale)
     if area < _SPLIT_AREA_MIN * area_scale:
         return [mask]

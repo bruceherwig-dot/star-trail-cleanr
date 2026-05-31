@@ -328,7 +328,7 @@ def stage_tiled_inference(state: PipelineState, cfg: StageConfig,
 
 
 def _props_with_log(mask: np.ndarray, cfg: StageConfig, log: StageLog,
-                    skip_aspect: bool = False):
+                    skip_aspect: bool = False, frame_px=None):
     """Region properties for one detection mask, or None if it fails a gate.
     Same gates as the shipped elongation filter, except the fat-blob gate is
     toggleable and every drop (and every fat-blob the gate would have killed)
@@ -336,8 +336,10 @@ def _props_with_log(mask: np.ndarray, cfg: StageConfig, log: StageLog,
 
     skip_aspect: when True, bypass the aspect-ratio (elongation) gate. Used for
     crossing-splitter output where the splitter already validated the pieces as
-    real trail arms -- re-filtering by shape would kill short stubby tips."""
-    area_scale = (mask.shape[0] * mask.shape[1]) / _REF_FRAME_PX
+    real trail arms -- re-filtering by shape would kill short stubby tips.
+    frame_px: total pixels of the FULL frame for area normalisation; pass when
+    `mask` is a crop so thresholds match full-frame. Defaults to mask size."""
+    area_scale = (frame_px if frame_px else (mask.shape[0] * mask.shape[1])) / _REF_FRAME_PX
     min_area = MIN_AREA * area_scale
     ys, xs = np.where(mask > 0)
     if len(ys) == 0:
@@ -438,7 +440,8 @@ def stage_fit_polygons(state: PipelineState, cfg: StageConfig,
     # pieces bypass the aspect gate -- the splitter already validated them as
     # real trail arms. Short stubby tips would otherwise be killed.
     det_list = []
-    t_premask = t_split = t_par = t_props = 0.0
+    frame_px = h * w
+    t_premask = t_scan = t_split = t_par = t_props = 0.0
     n_split_fired = 0
     for pred in preds:
         _t = time.perf_counter()
@@ -446,22 +449,38 @@ def stage_fit_polygons(state: PipelineState, cfg: StageConfig,
         t_premask += time.perf_counter() - _t
         if m is None:
             continue
+        # Scan ONCE to find this detection's bounding box, then crop. The split
+        # and props steps each re-scan, but now on the small crop instead of the
+        # whole frame. frame_px=h*w keeps their area thresholds normalised to the
+        # full frame, so the result is identical -- just without the redundant
+        # full-frame scans. coords/centroid come back crop-local and are offset.
         _t = time.perf_counter()
-        crossing_pieces = split_crossing(m)
+        ys, xs = np.where(m > 0)
+        t_scan += time.perf_counter() - _t
+        if len(xs) == 0:
+            continue
+        r0, c0 = int(ys.min()), int(xs.min())
+        mc = m[r0:int(ys.max()) + 1, c0:int(xs.max()) + 1]
+        off = np.array([r0, c0])
+        _t = time.perf_counter()
+        crossing_pieces = split_crossing(mc, frame_px=frame_px)
         t_split += time.perf_counter() - _t
         is_confirmed_crossing = len(crossing_pieces) > 1
         if is_confirmed_crossing:
             n_split_fired += 1
         for cm in crossing_pieces:
             _t = time.perf_counter()
-            parallel_pieces = _try_split_parallel(cm)
+            parallel_pieces = _try_split_parallel(cm, frame_px=frame_px)
             t_par += time.perf_counter() - _t
             for em in parallel_pieces:
                 _t = time.perf_counter()
                 props = _props_with_log(em, cfg, log,
-                                        skip_aspect=is_confirmed_crossing)
+                                        skip_aspect=is_confirmed_crossing,
+                                        frame_px=frame_px)
                 t_props += time.perf_counter() - _t
                 if props is not None:
+                    props["coords"] = props["coords"] + off
+                    props["centroid"] = props["centroid"] + off
                     props["conf"] = float(
                         getattr(getattr(pred, "score", None), "value", 0.0) or 0.0)
                     det_list.append(props)
@@ -469,6 +488,7 @@ def stage_fit_polygons(state: PipelineState, cfg: StageConfig,
     log.count("crossings_split", n_split_fired)
     # Per-step timing so the log shows what fired and how long (no probes needed).
     log.event("substep_timing", pred_to_mask_s=round(t_premask, 3),
+              bbox_scan_s=round(t_scan, 3),
               split_crossing_s=round(t_split, 3),
               parallel_split_s=round(t_par, 3), props_s=round(t_props, 3))
     if not det_list:

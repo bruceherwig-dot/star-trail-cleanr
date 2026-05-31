@@ -441,7 +441,7 @@ def detection_props(mask, min_aspect=None, min_area=None):
     }
 
 
-def _try_split_parallel(mask):
+def _try_split_parallel(mask, frame_px=None):
     """Split a fat SAHI mask into two parallel trail masks when a perpendicular gap exists.
 
     Some SAHI predictions merge two close parallel trails into one fat blob. Samples
@@ -449,10 +449,14 @@ def _try_split_parallel(mask):
     show two filled spans separated by a gap >= 3px (each span >= 10px), splits all
     blob pixels at the median gap position.
 
+    frame_px: total pixels of the FULL frame, used to normalise the fat-blob
+    threshold. Pass it when `mask` is a cropped region so the threshold matches the
+    full-frame behaviour. Defaults to the mask's own size (full-frame call).
+
     Returns [mask] unchanged if the blob is not fat enough (minor < 65px at 24MP)
     or no consistent gap is found. Returns [mask_a, mask_b] on a successful split.
     """
-    area_scale = (mask.shape[0] * mask.shape[1]) / _REF_FRAME_PX
+    area_scale = (frame_px if frame_px else (mask.shape[0] * mask.shape[1])) / _REF_FRAME_PX
     fat_threshold = 65.0 * math.sqrt(area_scale)
 
     ys, xs = np.where(mask > 0)
