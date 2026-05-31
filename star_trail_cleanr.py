@@ -3061,6 +3061,15 @@ class MainWindow(QMainWindow):
         self._trail_counter_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self._trail_counter_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
 
+        # Secondary run stats under the trail counter: avg trails/frame and
+        # avg seconds/frame. Running averages over the whole run so far,
+        # refreshed once per frame (not on the 250ms clock).
+        self._run_stats_label = QLabel("")
+        self._run_stats_label.setStyleSheet(f"font-size: 14px; color: {MUTED_TEXT};")
+        self._run_stats_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self._run_stats_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._stats_frames_done = 0
+
         self._run_source_label = QLabel("")
         self._run_source_label.setStyleSheet(f"font-size: 19px; color: {MUTED_TEXT};")
         self._run_source_label.setAlignment(Qt.AlignCenter | Qt.AlignVCenter)
@@ -3071,7 +3080,11 @@ class MainWindow(QMainWindow):
         title_row.addStretch()
         title_row.addWidget(self._run_source_label)
         title_row.addStretch()
-        title_row.addWidget(self._trail_counter_label)
+        counter_col = QVBoxLayout()
+        counter_col.setSpacing(2)
+        counter_col.addWidget(self._trail_counter_label)
+        counter_col.addWidget(self._run_stats_label)
+        title_row.addLayout(counter_col)
         layout.addLayout(title_row)
 
         # ── Overall progress bar (fat) ──
@@ -3758,6 +3771,8 @@ class MainWindow(QMainWindow):
         self._initial_est_label.setText("")
         self._time_label.setText("")
         self._elapsed_label.setText("")
+        self._run_stats_label.setText("")
+        self._stats_frames_done = 0
         self._batch_label.setText("")
         self._step1_bar.setValue(0)
         self._step1_bar.setFormat("0%")
@@ -4008,6 +4023,7 @@ class MainWindow(QMainWindow):
 
     def _on_frame_count(self, current, total):
         self._frame_counter.setText(f"Scrubbing the stars\u2026 {current} of {total}")
+        self._stats_frames_done = current
 
     def _on_initial_estimate(self, seconds):
         m, s = divmod(int(round(seconds)), 60)
@@ -4023,6 +4039,17 @@ class MainWindow(QMainWindow):
 
     def _on_trail_count_update(self, count):
         self._trail_counter_label.setText(f"{count:,} Trails Cleaned")
+        # Running averages over the whole run so far. frame_count fires just
+        # before this on each frame, so _stats_frames_done is current.
+        frames = self._stats_frames_done
+        if frames > 0:
+            start = getattr(self, '_run_start_time', None)
+            elapsed = (time.time() - start.timestamp()) if start is not None else 0
+            tpf = count / frames
+            spf = elapsed / frames
+            self._run_stats_label.setText(
+                f"{tpf:.0f} trails/frame · {spf:.1f}s/frame"
+            )
 
     def _on_stats_ready(self, total_trails, total_frames):
         # Capture for the run-summary file and the run-complete dialog.
