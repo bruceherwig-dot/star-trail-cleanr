@@ -86,11 +86,35 @@ from pathlib import Path
 from typing import List
 
 from modules.detect_trails import (
-    load_model, detect_frame_polygon, apply_sky_mask, filter_small_components
+    load_model, apply_sky_mask, filter_small_components
 )
+from modules import detect_pipeline as dp
 from modules.trail_grouper import detection_props
 from modules.repair import repair_frame
 from modules.run_logger import RunLogger
+
+
+def _raw_labeled_from_state(state, h, w):
+    """Build the raw-SAHI labeled mask (pixel value = prediction index 1..N) from
+    a new-pipeline state, matching the (final_mask, raw_labeled) contract that the
+    legacy detect_frame_polygon returns. Used so MaskViewR's yellow raw layer and
+    the run log keep working when the new pipeline is the detector."""
+    raw = np.zeros((h, w), dtype=np.uint8)
+    for ri, pred in enumerate(state.raw_detections or []):
+        label_id = min(ri + 1, 255)
+        try:
+            bm = pred.mask.bool_mask
+        except AttributeError:
+            continue
+        if not isinstance(bm, np.ndarray):
+            continue
+        bm_bool = bm.astype(bool) if bm.dtype != np.bool_ else bm
+        if bm_bool.shape == (h, w):
+            raw[bm_bool] = label_id
+        else:
+            rz = cv2.resize(bm.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST)
+            raw[rz > 0] = label_id
+    return raw
 from modules.io_safe import robust_imread, robust_imread_diag, robust_imwrite
 
 
@@ -1077,6 +1101,15 @@ def main():
         else:
             _timing[key] = [1, elapsed]
 
+    # New modular pipeline is THE detector -- no fallback. Stages 3/4
+    # (fallback_polys, link_gaps) are not built yet -> off. The static FP
+    # suppressor runs as Step 1c below, so the pipeline's own one stays off.
+    new_cfg = dp.StageConfig(
+        tile_size=args.tile_size, overlap=args.overlap,
+        fit_polygons=True, fallback_polys=False, link_gaps=False,
+        seam_second_pass=True, suppress_fp=False,
+    )
+
     for i, fp in enumerate(frame_files_all):
         is_neighbor = i < core_start or i >= core_end
         dbg = {} if logger is not None else None
@@ -1084,21 +1117,19 @@ def main():
         edge_cands = []
         frame_segs = []
         frame_corners = []
-        _ft = {}
-        result = detect_frame_polygon(model, frames_8bit_all[i], args.tile_size,
-                                      args.overlap, args.dilate,
-                                      return_raw=True,
-                                      debug_out=dbg,
-                                      edge_candidates_out=edge_cands,
-                                      sky_mask=sky_mask,
-                                      timing_out=_ft,
-                                      fg_mask=fg_mask,
-                                      polygon_segs_out=frame_segs,
-                                      polygon_corners_out=frame_corners)
-        for _k, _v in _ft.items():
-            _tacc(_k, _v)
+        _t0 = time.perf_counter()
+        state = dp.detect_frame(model=model, image=frames_8bit_all[i],
+                                foreground_mask=fg_mask, frame_name=fp.stem,
+                                cfg=new_cfg)
+        _tacc("new_pipeline_s", time.perf_counter() - _t0)
+        for _sname, _ssec in state.stage_seconds.items():
+            _tacc(f"dp_{_sname}_s", _ssec)
+        mask = state.final_mask
+        frame_segs = list(state.polygon_segs)
+        frame_corners = list(state.polygons)
+        raw_labeled = _raw_labeled_from_state(state, *mask.shape[:2]) \
+            if mask is not None else None
         edge_candidates_all.append(edge_cands)
-        mask, raw_labeled = result
         if mask is None:
             masks_all.append(np.zeros((h, w), dtype=np.uint8))
             raw_masks_all.append(np.zeros((h, w), dtype=np.uint8))
@@ -1107,7 +1138,7 @@ def main():
             if dbg is not None:
                 dbg.update({"frame": fp.stem, "frame_idx": i,
                             "is_neighbor": is_neighbor,
-                            "detect_error": "detect_frame_polygon returned None"})
+                            "detect_error": "detect_frame returned None mask"})
             detect_infos.append(dbg)
             continue
 
@@ -1118,6 +1149,20 @@ def main():
             mask = apply_sky_mask(mask, sky_mask)
             _tacc("apply_sky_mask_s", time.perf_counter() - _t0)
             sky_px_removed = before_px - int((mask > 0).sum())
+            # New pipeline doesn't sky-mask its predictions (it only skips fully
+            # foreground tiles), so trim each repair segment to sky here and drop
+            # any that vanish -- keeps repair off the foreground. Corners stay
+            # index-aligned with segs for the _polys.json export.
+            if frame_segs:
+                kept_segs, kept_corners = [], []
+                for _si, _seg in enumerate(frame_segs):
+                    _sm = apply_sky_mask(_seg, sky_mask)
+                    if (_sm > 0).any():
+                        kept_segs.append(_sm)
+                        if _si < len(frame_corners):
+                            kept_corners.append(frame_corners[_si])
+                frame_segs = kept_segs
+                frame_corners = kept_corners
 
         small_dbg = {} if dbg is not None else None
         if min_area_scaled > 0 and mask.max() > 0:
@@ -1153,10 +1198,12 @@ def main():
             for i, fp in enumerate(frame_files_all):
                 rotated = np.rot90(frames_8bit_all[i], 2)
                 _t0 = time.perf_counter()
-                mask2 = detect_frame_polygon(model, rotated, args.tile_size, args.overlap, args.dilate,
-                                         sky_mask=np.rot90(sky_mask, 2) if sky_mask is not None else None,
-                                         fg_mask=np.rot90(fg_mask, 2) if fg_mask is not None else None)
+                rot_fg = np.rot90(fg_mask, 2) if fg_mask is not None else None
+                state2 = dp.detect_frame(model=model, image=rotated,
+                                         foreground_mask=rot_fg,
+                                         frame_name=fp.stem + "_rot180", cfg=new_cfg)
                 _tacc("second_scrub_s", time.perf_counter() - _t0)
+                mask2 = state2.final_mask
                 if mask2 is None:
                     continue
                 mask2 = np.rot90(mask2, 2)
@@ -1394,17 +1441,13 @@ def main():
 
     if _timing:
         _STEP_ORDER = [
-            ("sahi_s",            "sahi_inference"),
-            ("sky_mask_s",        "sky_mask_zero"),
-            ("raw_labeled_s",     "raw_labeled_mask"),
-            ("try_split_s",       "try_split"),
-            ("elongation_s",      "elongation_filter"),
-            ("edge_cand_s",       "edge_candidates"),
-            ("group_s",           "group_detections"),
-            ("bridge_s",          "gap_bridge"),
-            ("bridge_rot90_s",     "gap_bridge_rot90"),
-            ("poly_fit_s",        "poly_fit"),
-            ("dilate_s",          "dilation"),
+            ("new_pipeline_s",          "detect (new pipeline)"),
+            ("dp_tiled_inference_s",    "  tiled_inference (SAHI)"),
+            ("dp_fit_polygons_s",       "  fit_polygons"),
+            ("dp_seam_second_pass_s",   "  seam_second_pass"),
+            ("dp_fallback_polys_s",     "  fallback_polys"),
+            ("dp_link_gaps_s",          "  link_gaps"),
+            ("dp_suppress_fp_s",        "  suppress_fp (pipeline)"),
             ("apply_sky_mask_s",  "apply_sky_mask"),
             ("filter_small_s",    "filter_small_comps"),
             ("second_scrub_s",    "second_scrub"),

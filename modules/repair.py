@@ -72,7 +72,10 @@ import numpy as np
 
 PAD            = 120   # pixels around each trail bbox for feature search
 MIN_AREA       = 500   # skip tiny mask components (noise)
-MAX_SEG_LENGTH = 500   # components longer than this are split for tighter repair
+MAX_SEG_LENGTH = 500   # reference segment length at full-frame resolution; scaled
+                       # per-frame in _split_component (see _REF_FRAME_PX) so the
+                       # chop point is a fixed fraction of the frame, not a hard px count
+_REF_FRAME_PX  = 6000 * 4000  # reference resolution the 500px value is calibrated for
 MIN_DISP  = 1.0   # minimum plausible star displacement N-1 to N+1 (px)
 MAX_DISP  = 60.0  # maximum plausible star displacement N-1 to N+1 (px)
 MIN_STARS = 5     # minimum tracked stars needed to trust the shift
@@ -161,22 +164,31 @@ def _track_stars(prev: np.ndarray, nxt: np.ndarray, trail_mask=None):
 def _split_component(comp_full: np.ndarray) -> list:
     """Split a full-frame boolean component mask into sub-masks along the major axis.
 
-    If the major axis length exceeds MAX_SEG_LENGTH, splits into
-    ceil(length / MAX_SEG_LENGTH) equal rectangle segments. Each sub-mask
-    contains only the original component pixels that fall inside that segment's
-    bounding rectangle. Returns a list of uint8 masks.
+    The split threshold is frame-relative, not a fixed pixel count: MAX_SEG_LENGTH
+    (500px) is the value calibrated for a full-size 6000x4000 frame, and it is scaled
+    by the square root of the frame's area relative to that reference. This keeps the
+    chop point at a constant fraction of the frame at any resolution, so small frames
+    are not over-chopped into too many tiny segments.
+
+    If the major axis length exceeds the scaled threshold, splits into
+    ceil(length / threshold) equal rectangle segments. Each sub-mask contains only
+    the original component pixels that fall inside that segment's bounding rectangle.
+    Returns a list of uint8 masks.
     """
+    H, W = comp_full.shape
+    seg_len_max = MAX_SEG_LENGTH * math.sqrt((H * W) / _REF_FRAME_PX)
+
     ys, xs = np.where(comp_full)
     pts = np.column_stack([xs, ys]).astype(np.float32)
     rect = cv2.minAreaRect(pts.reshape(-1, 1, 2))
     trail_len = float(max(rect[1]))
 
-    if trail_len <= MAX_SEG_LENGTH:
+    if trail_len <= seg_len_max:
         m = np.zeros(comp_full.shape, dtype=np.uint8)
         m[comp_full] = 255
         return [m]
 
-    n_segs = math.ceil(trail_len / MAX_SEG_LENGTH)
+    n_segs = math.ceil(trail_len / seg_len_max)
     box = cv2.boxPoints(rect)
     e01 = np.linalg.norm(box[1] - box[0])
     e12 = np.linalg.norm(box[2] - box[1])
@@ -185,7 +197,6 @@ def _split_component(comp_full: np.ndarray) -> list:
     else:
         a0, a1, b0, b1 = box[1], box[2], box[0], box[3]
 
-    H, W = comp_full.shape
     result = []
     for si in range(n_segs):
         t0, t1 = si / n_segs, (si + 1) / n_segs
