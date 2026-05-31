@@ -219,7 +219,7 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                  neighbor_frames: list,
                  neighbor_masks: list = None,
                  polygon_segs: list = None,
-                 debug_out=None, _timing_acc=None) -> np.ndarray:
+                 debug_out=None, _timing_acc=None, _single_component=False) -> np.ndarray:
     """Replace masked trail pixels using Star Bridge sparse-track morph repair.
 
     Args:
@@ -269,7 +269,8 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
             if not (seg_mask > 0).any():
                 continue
             result = repair_frame(result, seg_mask, frame_idx, neighbor_frames,
-                                  neighbor_masks=neighbor_masks, _timing_acc=_timing_acc)
+                                  neighbor_masks=neighbor_masks, _timing_acc=_timing_acc,
+                                  _single_component=True)
         if debug_out is not None:
             debug_out["timing"] = {k: round(v, 3) for k, v in _timing_acc.items()}
         return result
@@ -288,23 +289,34 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
     if not has_prev and not has_next:
         return result
 
-    _ts = time.perf_counter()
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
-        trail.astype(np.uint8))
-    _addt("cc_s", time.perf_counter() - _ts)
+    # Identify connected components. A polygon segment (the recursive per-arm
+    # call) is a single filled polygon = exactly one component, so connected-
+    # components is redundant there -- skip it and take the segment as the one
+    # component. Pixel-identical to running CC, just far cheaper.
+    if _single_component:
+        _ts = time.perf_counter()
+        ys0, xs0 = np.where(trail)
+        _addt("cc_s", time.perf_counter() - _ts)
+        if len(xs0) >= MIN_AREA:
+            bx0, by0 = int(xs0.min()), int(ys0.min())
+            _comp_iter = [(int(len(xs0)), bx0, by0,
+                           int(xs0.max()) - bx0 + 1, int(ys0.max()) - by0 + 1, trail)]
+        else:
+            _comp_iter = []
+    else:
+        _ts = time.perf_counter()
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+            trail.astype(np.uint8))
+        _addt("cc_s", time.perf_counter() - _ts)
+        _comp_iter = [(int(stats[i, cv2.CC_STAT_AREA]),
+                       int(stats[i, cv2.CC_STAT_LEFT]), int(stats[i, cv2.CC_STAT_TOP]),
+                       int(stats[i, cv2.CC_STAT_WIDTH]), int(stats[i, cv2.CC_STAT_HEIGHT]),
+                       (labels == i))
+                      for i in range(1, num_labels)
+                      if stats[i, cv2.CC_STAT_AREA] >= MIN_AREA]
 
-    for i in range(1, num_labels):
-        if stats[i, cv2.CC_STAT_AREA] < MIN_AREA:
-            continue
-
+    for _ci, (comp_area, bx, by, bw, bh, comp_full) in enumerate(_comp_iter, start=1):
         # ── Per-component setup ───────────────────────────────────────────────
-        comp_area = int(stats[i, cv2.CC_STAT_AREA])
-        bx = int(stats[i, cv2.CC_STAT_LEFT])
-        by = int(stats[i, cv2.CC_STAT_TOP])
-        bw = int(stats[i, cv2.CC_STAT_WIDTH])
-        bh = int(stats[i, cv2.CC_STAT_HEIGHT])
-
-        comp_full = (labels == i)
         _ts = time.perf_counter()
         sub_masks = _split_component(comp_full)
         _addt("split_s", time.perf_counter() - _ts)
@@ -312,7 +324,7 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
         comp_dbg = None
         if debug_out is not None:
             comp_dbg = {
-                "id": i,
+                "id": _ci,
                 "area": comp_area,
                 "bbox": [bx, by, bx + bw, by + bh],
                 "split_into": len(sub_masks),
