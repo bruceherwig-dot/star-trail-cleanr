@@ -163,6 +163,7 @@ class PipelineState:
     polygon_segs: list[Any] = field(default_factory=list)     # per-polygon binary masks (1 per polygon, for repair + MaskViewR)
     final_mask: Optional[np.ndarray] = None                   # output mask
     stage_seconds: dict = field(default_factory=dict)         # {stage_name: seconds} for timing reporting
+    stage_log: list = field(default_factory=list)             # per-stage records (seconds + counts + events) for the run log
 
 
 # --- Stage 1 helpers (ported verbatim from the proven detect_trails.py path so
@@ -1012,6 +1013,9 @@ def detect_frame(model: Any,
     # detection time goes without re-parsing the JSONL.
     state.stage_seconds = {st["stage"]: st.get("seconds", 0.0)
                            for st in flog.stages}
+    # Full per-stage records (seconds + counts + events) so callers can record
+    # what fired and how long in their own run log without a separate log file.
+    state.stage_log = flog.stages
 
     if log_path:
         with open(log_path, "a") as f:

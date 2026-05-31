@@ -1124,6 +1124,10 @@ def main():
         _tacc("new_pipeline_s", time.perf_counter() - _t0)
         for _sname, _ssec in state.stage_seconds.items():
             _tacc(f"dp_{_sname}_s", _ssec)
+        if dbg is not None:
+            # Record per-stage timing + what fired (counts/events) in this frame's
+            # log record, so a real run answers "what fired / how long" directly.
+            dbg["detect_stages"] = state.stage_log
         mask = state.final_mask
         frame_segs = list(state.polygon_segs)
         frame_corners = list(state.polygons)
