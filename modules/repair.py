@@ -57,6 +57,7 @@ FALLBACKS IN ORDER
 4. Black fill (tracking fails, no usable neighbors)       -> invisible in lighten-max
 """
 import math
+import time
 import cv2
 import numpy as np
 
@@ -218,7 +219,7 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                  neighbor_frames: list,
                  neighbor_masks: list = None,
                  polygon_segs: list = None,
-                 debug_out=None) -> np.ndarray:
+                 debug_out=None, _timing_acc=None) -> np.ndarray:
     """Replace masked trail pixels using Star Bridge sparse-track morph repair.
 
     Args:
@@ -242,10 +243,23 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
     Returns:
         Repaired copy of frame.
     """
+    _tc = time.perf_counter()
     result = frame.copy()
+    _copy_dt = time.perf_counter() - _tc
     trail = mask > 0
     if not trail.any():
         return result
+
+    # Per-step timing accumulator (diagnostic only; written to debug_out["timing"]).
+    # Created at the top-level call and threaded through the per-segment recursion.
+    if _timing_acc is None and debug_out is not None:
+        _timing_acc = {}
+
+    def _addt(key, dt):
+        if _timing_acc is not None:
+            _timing_acc[key] = _timing_acc.get(key, 0.0) + dt
+
+    _addt("copy_s", _copy_dt)
 
     # When polygon segments are provided, repair each arm independently.
     # Each recursive call processes one narrow polygon with its own Star Bridge
@@ -255,7 +269,9 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
             if not (seg_mask > 0).any():
                 continue
             result = repair_frame(result, seg_mask, frame_idx, neighbor_frames,
-                                  neighbor_masks=neighbor_masks)
+                                  neighbor_masks=neighbor_masks, _timing_acc=_timing_acc)
+        if debug_out is not None:
+            debug_out["timing"] = {k: round(v, 3) for k, v in _timing_acc.items()}
         return result
 
     if debug_out is not None:
@@ -272,8 +288,10 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
     if not has_prev and not has_next:
         return result
 
+    _ts = time.perf_counter()
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
         trail.astype(np.uint8))
+    _addt("cc_s", time.perf_counter() - _ts)
 
     for i in range(1, num_labels):
         if stats[i, cv2.CC_STAT_AREA] < MIN_AREA:
@@ -287,7 +305,9 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
         bh = int(stats[i, cv2.CC_STAT_HEIGHT])
 
         comp_full = (labels == i)
+        _ts = time.perf_counter()
         sub_masks = _split_component(comp_full)
+        _addt("split_s", time.perf_counter() - _ts)
 
         comp_dbg = None
         if debug_out is not None:
@@ -336,14 +356,18 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                 # ── Star feature tracking (Lucas-Kanade sparse optical flow) ──
                 patch_prev = neighbor_frames[prev_idx][y0:y1, x0:x1]
                 patch_next = neighbor_frames[next_idx][y0:y1, x0:x1]
+                _ts = time.perf_counter()
                 dx, dy, ok, n_stars = _track_stars(patch_prev, patch_next,
                                                    trail_mask=comp_mask)
+                _addt("track_s", time.perf_counter() - _ts)
                 _dx, _dy, _ok, _n_stars = dx, dy, ok, n_stars
 
                 if ok:
                     # ── Warp synthesis ────────────────────────────────────────
+                    _ts = time.perf_counter()
                     warped_prev = _shift_image(patch_prev,  dx / 2.0,  dy / 2.0)
                     warped_next = _shift_image(patch_next, -dx / 2.0, -dy / 2.0)
+                    _addt("warp_s", time.perf_counter() - _ts)
                     if neighbor_masks is None:
                         # No masks provided — fall back to color-based contamination check
                         _CONTAM_THRESH = 0.20
@@ -394,6 +418,7 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                 synth = neighbor_frames[next_idx][y0:y1, x0:x1].copy()
                 _method = "next_only"
 
+            _tp = time.perf_counter()
             result[y0:y1, x0:x1][comp_mask] = synth[comp_mask]
 
             # ── Warm-pixel cleanup (still-trail remnants after warp) ──────────
@@ -425,6 +450,7 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                 union_both = comp_mask & prev_c & next_c
                 result[y0:y1, x0:x1][union_both] = 0
                 _union_zeroed_px = int(union_both.sum())
+            _addt("paste_s", time.perf_counter() - _tp)
 
             if seg_info is not None:
                 seg_info.update({
@@ -441,4 +467,6 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
         if debug_out is not None and comp_dbg is not None:
             debug_out["components"].append(comp_dbg)
 
+    if debug_out is not None and _timing_acc is not None:
+        debug_out["timing"] = {k: round(v, 3) for k, v in _timing_acc.items()}
     return result

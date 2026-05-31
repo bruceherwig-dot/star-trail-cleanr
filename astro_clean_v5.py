@@ -924,6 +924,7 @@ def main():
     skipped = []
     skipped_before_core = 0
     skipped_in_core = 0
+    _tread = time.perf_counter()
     for fi, fp in enumerate(frame_files_all):
         is_core = core_start <= fi < core_end
         is_before_core = fi < core_start
@@ -991,6 +992,7 @@ def main():
 
         frames_all.append(img)
         files_kept.append(fp)
+    _read_s = time.perf_counter() - _tread
 
     # Rebind to kept-only lists with adjusted core pointers so downstream
     # indexing stays correct even when one or more files were skipped.
@@ -1036,6 +1038,7 @@ def main():
         frames_8bit_all = frames_all
         frames_8bit = frames
 
+    _thot = time.perf_counter()
     if fg_mask is not None:
         from modules.hot_pixels import build_hot_pixel_map
 
@@ -1071,6 +1074,7 @@ def main():
             for j, idx in enumerate(range(core_start, core_end)):
                 frames_all[idx] = frames[j]
                 frames_8bit_all[idx] = frames_8bit[j]
+    _hotpix_s = time.perf_counter() - _thot
 
     # Resolution scaling for min_area filter
     REF_PIXELS = 5472 * 3648
@@ -1082,7 +1086,9 @@ def main():
     # ── Step 1: Detect trails (YOLO) ────────────────────────────────────
     print("\nStep 1 - detecting trails", flush=True)
     print("  Loading AI trail detector...", flush=True)
+    _tload = time.perf_counter()
     model = load_model(str(args.model), args.confidence, args.device)
+    _model_load_s = time.perf_counter() - _tload
 
     masks_all = []
     raw_masks_all = []
@@ -1100,6 +1106,13 @@ def main():
             _timing[key][1] += elapsed
         else:
             _timing[key] = [1, elapsed]
+
+    # Startup cost, measured not guessed: reading frames off the drive, building
+    # the hot-pixel map, and loading the model (this batch's subprocess). The
+    # first-inference warmup shows up as the first frame's tiled_inference.
+    _tacc("frame_read_s", _read_s)
+    _tacc("hot_pixel_s", _hotpix_s)
+    _tacc("model_load_s", _model_load_s)
 
     # New modular pipeline is THE detector -- no fallback. Stages 3/4
     # (fallback_polys, link_gaps) are not built yet -> off. The static FP
@@ -1415,17 +1428,23 @@ def main():
                                        neighbor_masks=neighbor_masks,
                                        polygon_segs=segs_all[i + core_start],
                                        debug_out=repair_dbg)
-                _tacc("repair_s", time.perf_counter() - _t0)
+                _rep_s = time.perf_counter() - _t0
+                _tacc("repair_s", _rep_s)
+                _tw = time.perf_counter()
                 _write_output(fp.stem, cleaned, icc_profile=icc_profile, exif_bytes=exif_bytes, dpi=dpi)
+                _tacc("write_s", time.perf_counter() - _tw)
                 n_repaired += 1
                 if logger is not None:
                     repair_dbg["type"] = "repair"
                     repair_dbg["frame"] = fp.stem
                     repair_dbg["frame_idx"] = i + core_start
                     repair_dbg["trail_px"] = trail_px
+                    repair_dbg["repair_sec"] = round(_rep_s, 3)
                     logger.log(repair_dbg)
             else:
+                _tw = time.perf_counter()
                 _write_output(fp.stem, img, icc_profile=icc_profile, exif_bytes=exif_bytes, dpi=dpi)
+                _tacc("write_s", time.perf_counter() - _tw)
                 if logger is not None:
                     logger.log({"type": "repair", "frame": fp.stem,
                                 "frame_idx": i + core_start,
@@ -1503,6 +1522,11 @@ def main():
             "min_area":             args.min_area,
             "min_area_scaled":      min_area_scaled,
             "second_scrub":         args.second_scrub,
+            # Per-step timing for the whole batch so the log shows where time went
+            # (detection vs repair vs image write vs suppressor vs filters).
+            "timing":               {k: {"calls": v[0], "total_s": round(v[1], 2),
+                                         "avg_s": round(v[1] / v[0], 3) if v[0] else 0.0}
+                                     for k, v in sorted(_timing.items())},
         })
         logger.close()
 
