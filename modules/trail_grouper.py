@@ -111,7 +111,15 @@ HOUGH_MIN_LINE      = 25
 HOUGH_MAX_GAP       = 15
 DBSCAN_EPS          = 5.0
 DBSCAN_MIN_SAMPLES  = 2
-TIP_PAD_PX          = 0   # pixels added to each tip of the fitted polygon; negative trims
+# --- Two independent mask-shape knobs (ratios, resolution-independent) ------
+# Both scale off the trail's MEASURED thickness, so changing one does not move
+# the other. No pixel constants, so they behave the same at any resolution.
+#   THICKNESS (across the trail): mask thickness = MASK_THICKNESS_MULT x the
+#     measured trail thickness. 1.2 leaves a 20% margin beyond the trail.
+#   LENGTH (along the trail): each tip is pulled inward by TIP_TRIM_FRAC x the
+#     measured thickness. 0.25 trims a little off each end; 0 disables.
+MASK_THICKNESS_MULT = 1.2    # thickness knob
+TIP_TRIM_FRAC       = 0.25   # length knob (trim per tip, x measured thickness)
 MIN_SPLIT_ANGLE_DEG = 10.0
 SEAM_MARGIN         = 3.0
 
@@ -748,7 +756,7 @@ def group_detections(det_list):
 # ── Polygon fitting ───────────────────────────────────────────────────────────
 # Fits one tight 4-corner rectangle to each detection group.
 # Width is derived from the median minor axis of the group members plus a
-# length-scaled bonus. TIP_PAD_PX trims or extends each tip.
+# length-scaled bonus. TIP_TRIM_FRAC pulls each tip inward (length knob).
 # Log field: detect record polygon_count = number of polygons filled onto the mask.
 
 def thicken_mask(mask, h, w):
@@ -834,17 +842,28 @@ def fit_polygon(group_indices, det_list):
     u_avg = u_sum / np.linalg.norm(u_sum)
 
     t_centroid = centroid @ u_avg
-    tip_pad = TIP_PAD_PX
-    t_min = min(float((d["coords"] @ u_avg).min()) for d in all_dets) - tip_pad
-    t_max = max(float((d["coords"] @ u_avg).max()) for d in all_dets) + tip_pad
-    p_min = centroid + (t_min - t_centroid) * u_avg
-    p_max = centroid + (t_max - t_centroid) * u_avg
+    raw_min = min(float((d["coords"] @ u_avg).min()) for d in all_dets)
+    raw_max = max(float((d["coords"] @ u_avg).max()) for d in all_dets)
+    trail_length = raw_max - raw_min
 
-    trail_length = t_max - t_min
-    width = (float(np.median([
+    # Measured trail thickness (across the trail), before any inflation.
+    measured_thick = float(np.median([
         min(d["minor"], d["area"] / max(d["major"], 1))
         for d in dets
-    ])) * 1.5) + min(trail_length / 200.0, 40.0)
+    ]))
+
+    # THICKNESS knob: mask thickness = MASK_THICKNESS_MULT x measured thickness,
+    # plus a small length-scaled margin.
+    width = measured_thick * MASK_THICKNESS_MULT + min(trail_length / 200.0, 20.0)
+
+    # LENGTH knob: pull each tip inward by TIP_TRIM_FRAC x measured thickness.
+    # Short-trail guard: never trim more than 0.25x the trail's own length per
+    # tip, so a stubby trail cannot be eaten into an inverted polygon.
+    tip_trim = min(TIP_TRIM_FRAC * measured_thick, 0.25 * trail_length)
+    t_min = raw_min + tip_trim
+    t_max = raw_max - tip_trim
+    p_min = centroid + (t_min - t_centroid) * u_avg
+    p_max = centroid + (t_max - t_centroid) * u_avg
 
     u_perp   = np.array([-u_avg[1], u_avg[0]])
     half_w   = width / 2.0
@@ -901,7 +920,9 @@ def _fit_poly_from_pixels(coords_rc):
         if len(rows) > 2:
             widths.append(float(rows.max() - rows.min()))
         c += step
-    half_w = (float(np.median(widths)) if widths else 20.0) * 0.75
+    # half_w -> full thickness = measured thickness x MASK_THICKNESS_MULT.
+    # Uses the same thickness knob as the straight fitter (half of it here).
+    half_w = (float(np.median(widths)) if widths else 20.0) * (MASK_THICKNESS_MULT / 2.0)
     p_min = centroid + (t_min - t_centroid) * u
     p_max = centroid + (t_max - t_centroid) * u
     corners_rc = [
