@@ -3133,6 +3133,7 @@ class MainWindow(QMainWindow):
         step1_row = QHBoxLayout()
         self._step1_label = QLabel("Detecting\nwaiting")
         self._step1_label.setFixedWidth(120)
+        self._step1_label.setWordWrap(True)
         self._step1_label.setStyleSheet(f"font-size: 14px; color: {HINT_TEXT};")
         self._step1_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         step1_row.addWidget(self._step1_label)
@@ -3154,6 +3155,7 @@ class MainWindow(QMainWindow):
         step2_row = QHBoxLayout()
         self._step2_label = QLabel("Repairing\nwaiting")
         self._step2_label.setFixedWidth(120)
+        self._step2_label.setWordWrap(True)
         self._step2_label.setStyleSheet(f"font-size: 14px; color: {HINT_TEXT};")
         self._step2_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         step2_row.addWidget(self._step2_label)
@@ -3936,6 +3938,18 @@ class MainWindow(QMainWindow):
             "x1:0, y1:0, x2:1, y2:0, stop:0 #34c759, stop:1 #5dd87a); border-radius: 7px; }"
         )
         pct = int(current / total * 100) if total > 0 else 0
+        # Name the frames this batch is actually working, as a global range with
+        # whole-job context, e.g. "frames 21-40 (of 450)". The bar % is progress
+        # through just those frames, so the label and the % refer to the same set.
+        range_start = global_current - current + 1
+        range_end = range_start + total - 1
+        # Action word + "frame(s)" on line 1, just the numbers on line 2. Keeps the
+        # number line short ("21-40 (of 450)") so it fits the fixed label column at
+        # any frame count; the bar never moves. Word-wrap on the label is the safety.
+        if range_start == range_end:
+            head, nums = "frame", f"{range_start} (of {global_total})"
+        else:
+            head, nums = "frames", f"{range_start}-{range_end} (of {global_total})"
         if step == 1:
             self._step1_bar.setValue(pct)
             if pct >= 100:
@@ -3944,7 +3958,7 @@ class MainWindow(QMainWindow):
                 self._step1_bar.setStyleSheet(green_style)
             else:
                 self._step1_bar.setFormat(f"{pct}%")
-                self._step1_label.setText(f"Detecting\nframe {global_current}/{global_total}")
+                self._step1_label.setText(f"Detecting {head}\n{nums}")
         elif step == 2:
             self._step2_bar.setValue(pct)
             if pct >= 100:
@@ -3953,7 +3967,7 @@ class MainWindow(QMainWindow):
                 self._step2_bar.setStyleSheet(green_style)
             else:
                 self._step2_bar.setFormat(f"{pct}%")
-                self._step2_label.setText(f"Repairing\nframe {global_current}/{global_total}")
+                self._step2_label.setText(f"Repairing {head}\n{nums}")
 
     def _on_warmup_active(self, active):
         if active:
