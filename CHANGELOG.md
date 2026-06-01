@@ -2,6 +2,10 @@
 
 ---
 
+## v2.40-beta
+- **Split trails now reconnect even when the AI can't see the gap.** When the AI breaks one trail into two pieces with an empty stretch in the middle, the app already had a bridge that checks six things (matching angle, matching width, the pieces line up, the gap straddles a tile boundary, etc.) to confirm the two pieces are really one trail. Until now, after those checks passed, it would only join the pieces if a fresh look from the AI re-detected something in the gap. On darker, low-contrast sequences the AI sometimes can't see that middle stretch at all, so the trail stayed broken. Now, once the six checks confirm it's one trail, the pieces are joined regardless, the checks are the decision. The result is fewer broken trails in the cleaned output, especially on faint sequences. Trails that aren't really one piece (and static foreground objects) fail the six checks and are left alone, so nothing gets joined that shouldn't be.
+- **Smoke tests:** 133 passing.
+
 ## v2.39-beta
 - **Diagonal and curved trails now get a tight outline.** The fitter that handles long and curved trails was measuring a trail's thickness as its up-and-down height in each slice of the image. On a steep diagonal or a curve that reads far thicker than the trail really is, so those outlines ballooned into wide bands. It now measures thickness straight across the trail at its true angle, so the outline hugs the trail no matter which way it runs. Straight trails are unchanged.
 - **One outline per trail.** When the AI produced extra overlapping pieces sitting on top of a trail another outline already covered, those redundant pieces are now folded in. Each trail shows a single clean outline and gets repaired once instead of several times, which means cleaner repairs and a little less work per frame. Crossing trails and genuinely separate trails are untouched.
