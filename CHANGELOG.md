@@ -2,6 +2,12 @@
 
 ---
 
+## v2.39-beta
+- **Diagonal and curved trails now get a tight outline.** The fitter that handles long and curved trails was measuring a trail's thickness as its up-and-down height in each slice of the image. On a steep diagonal or a curve that reads far thicker than the trail really is, so those outlines ballooned into wide bands. It now measures thickness straight across the trail at its true angle, so the outline hugs the trail no matter which way it runs. Straight trails are unchanged.
+- **One outline per trail.** When the AI produced extra overlapping pieces sitting on top of a trail another outline already covered, those redundant pieces are now folded in. Each trail shows a single clean outline and gets repaired once instead of several times, which means cleaner repairs and a little less work per frame. Crossing trails and genuinely separate trails are untouched.
+- **More reliable gap bridging.** When one trail gets split into two pieces, the step that reconnects them was wrongly rejecting some clearly-straight trails (it judged alignment from the far center of each piece, which exaggerates a tiny angle difference on a long trail). It now judges alignment right at the gap, so straight trails reconnect properly.
+- **Smoke tests:** 133 passing.
+
 ## v2.38-beta
 - **Tighter trail outlines.** The detection outlines now hug each trail more closely, grabbing about 24% less surrounding sky. The thickness (across the trail) and the length (along it) are tuned independently, and both scale with your image so they behave the same at any resolution. The result is a cleaner repair with less chance of disturbing nearby stars.
 - **New run stats.** The Run screen now shows two live figures under the trail counter: the average number of trails per frame and the average seconds per frame, so you can see how busy your sky is and how fast the run is going.
