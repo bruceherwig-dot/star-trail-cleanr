@@ -386,19 +386,112 @@ def _props_with_log(mask: np.ndarray, cfg: StageConfig, log: StageLog,
     }
 
 
-def _segs_from_polygons(polygons: list, h: int, w: int) -> list:
-    """Rasterise each fitted polygon into its OWN binary mask. One uint8 mask per
-    polygon (255=trail). The union of these equals the final mask, but kept as
-    separate entries so Star Bridge repair morphs each trail/arm independently
-    (repair_frame's polygon_segs path) and MaskViewR can outline each separately.
-    Crossing-split arms are distinct polygons here, so they stay distinct."""
+# De-dup thresholds for redundant same-trail fragments (see _polys_and_segs_deduped).
+_SEG_MERGE_CONTAINMENT = 0.90   # a polygon >=90% inside a bigger one is redundant
+_SEG_MERGE_ANGLE       = 20.0   # deg: only treat as the same trail if angles agree
+
+
+def _poly_angle(corners):
+    """Orientation (degrees, 0-180) of a fitted polygon, from its longer edge."""
+    c = np.asarray(corners, dtype=float)
+    e01 = c[0] - c[1]
+    e12 = c[1] - c[2]
+    le = e12 if (e12[0] ** 2 + e12[1] ** 2) >= (e01[0] ** 2 + e01[1] ** 2) else e01
+    return float(np.degrees(np.arctan2(le[1], le[0]))) % 180.0
+
+
+def _angle_diff(a, b):
+    """Smallest difference between two 0-180 orientations (handles the wrap)."""
+    d = abs(a - b) % 180.0
+    return min(d, 180.0 - d)
+
+
+def _polys_and_segs_deduped(polygons: list, h: int, w: int):
+    """Rasterise each fitted polygon into its OWN binary mask, then drop away
+    redundant same-trail fragments so repair runs once per real trail AND the
+    viewer shows one outline per trail.
+
+    Returns (kept_polygons, kept_segs): index-aligned lists, one uint8 mask
+    (255=trail) per kept polygon. Star Bridge repair morphs each segment
+    independently (repair_frame's polygon_segs path), and MaskViewR outlines each
+    kept polygon, so what you see equals what gets repaired.
+
+    De-dup: a polygon that sits >=90% INSIDE a BIGGER polygon of similar angle is
+    a redundant piece of the same trail (the detector produced an extra fragment
+    on a trail another polygon already covers). It is NOT a crossing arm -- those
+    differ in angle and only overlap at the junction, never 90% contained -- so
+    crossings and genuinely separate trails are left untouched. Each redundant
+    piece has its pixels folded into the bigger polygon's segment, then the
+    redundant polygon AND its segment are dropped. ZERO coverage loss: the union
+    of the kept segments still equals the union of all original polygons, so the
+    final mask is unchanged; only the wasted repair pass and the duplicate
+    outline go away. A bbox-overlap gate keeps the pairwise check cheap.
+    """
     segs = []
     for corners in polygons:
         seg = np.zeros((h, w), dtype=np.uint8)
         pts = np.asarray(corners, dtype=np.int32).reshape(-1, 1, 2)
         cv2.fillPoly(seg, [pts], 255)
         segs.append(seg)
-    return segs
+
+    n = len(segs)
+    if n < 2:
+        return polygons, segs
+
+    bmasks = [s > 0 for s in segs]
+    areas = [int(b.sum()) for b in bmasks]
+    angles = [_poly_angle(p) for p in polygons]
+    # Per-polygon bbox (cheap axis reductions) to skip non-overlapping pairs.
+    bboxes = []
+    for b in bmasks:
+        if areas[len(bboxes)] == 0:
+            bboxes.append(None); continue
+        rr = np.where(b.any(axis=1))[0]
+        cc = np.where(b.any(axis=0))[0]
+        bboxes.append((int(rr[0]), int(rr[-1]), int(cc[0]), int(cc[-1])))
+
+    parent = list(range(n))
+    def _find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for i in range(n):
+        if bboxes[i] is None:
+            continue
+        ri1, ri2, ci1, ci2 = bboxes[i]
+        for j in range(n):
+            if i == j or bboxes[j] is None or areas[j] <= areas[i]:
+                continue
+            if _angle_diff(angles[i], angles[j]) > _SEG_MERGE_ANGLE:
+                continue
+            rj1, rj2, cj1, cj2 = bboxes[j]
+            r1 = max(ri1, rj1); r2 = min(ri2, rj2)
+            c1 = max(ci1, cj1); c2 = min(ci2, cj2)
+            if r1 > r2 or c1 > c2:
+                continue  # bboxes do not overlap -> not contained
+            inter = int((bmasks[i][r1:r2 + 1, c1:c2 + 1]
+                         & bmasks[j][r1:r2 + 1, c1:c2 + 1]).sum())
+            if inter / areas[i] >= _SEG_MERGE_CONTAINMENT:
+                parent[_find(i)] = _find(j)
+                break
+
+    comps = {}
+    for i in range(n):
+        comps.setdefault(_find(i), []).append(i)
+    keep_flags = [True] * n
+    for members in comps.values():
+        if len(members) == 1:
+            continue
+        keep = max(members, key=lambda k: areas[k])
+        for k in members:
+            if k != keep:
+                segs[keep] = np.maximum(segs[keep], segs[k])  # fold pixels in (coverage preserved)
+                keep_flags[k] = False                          # drop the redundant fragment + its outline
+    kept_polygons = [polygons[i] for i in range(n) if keep_flags[i]]
+    kept_segs = [segs[i] for i in range(n) if keep_flags[i]]
+    return kept_polygons, kept_segs
 
 
 def _fit_groups(det_list: list, groups: list, h: int, w: int):
@@ -523,8 +616,7 @@ def stage_fit_polygons(state: PipelineState, cfg: StageConfig,
                   (final > 0).astype(np.uint8))[0] - 1))
     state.det_list = det_list
     state.groups = groups
-    state.polygons = polygons
-    state.polygon_segs = _segs_from_polygons(polygons, h, w)
+    state.polygons, state.polygon_segs = _polys_and_segs_deduped(polygons, h, w)
     state.final_mask = final
     return state
 
@@ -578,11 +670,26 @@ def _group_tips(grp, det_list):
 
 
 def _find_gap_bridge_tiles(groups, det_list, h, w, tile_size):
-    """Return [(gi, gj, tile_x, tile_y), ...] for group pairs that show the
-    seam-gap signature (similar angle/width, co-linear, tips within range, a
-    tile seam line inside the gap). One tile per qualifying pair, centered on
-    the gap. This only chooses WHERE to re-infer; it does not bridge."""
+    """Find pairs of trail fragments that are really one trail broken by a gap.
+
+    Returns two lists:
+      tiles      -- [(gi, gj, tile_x, tile_y), ...]: one re-inference tile per
+                    qualifying pair, centered on the gap. This only chooses
+                    WHERE to re-infer; it does not bridge.
+      gap_misses -- [{cx, cy, tile, gap_px, frag_a_bbox, frag_b_bbox}, ...]: one
+                    record per qualifying pair describing WHERE the detector
+                    missed. A pair only qualifies after the geometric criteria
+                    (matching angle, matching width, co-linear tips, a tile seam
+                    inside the gap, tip-to-tip vector aligned with the trail)
+                    prove the two fragments are a single real trail. So every
+                    record is a spot where a real trail exists but the model
+                    produced no detection in between -- a genuine model miss.
+                    These are captured as TRAINING FEEDBACK: the highest-value
+                    examples to add to the next training round so the model
+                    learns to fire where it currently does not.
+    """
     extra = []
+    gap_misses = []
     seen = set()
     n = len(groups)
     _stride = int(tile_size * 0.8)
@@ -624,14 +731,8 @@ def _find_gap_bridge_tiles(groups, det_list, h, w, tile_size):
 
             all_i = np.vstack([det_list[k]["coords"] for k in groups[gi]])
             all_j = np.vstack([det_list[k]["coords"] for k in groups[gj]])
-            ci = all_i.mean(axis=0)
-            cj = all_j.mean(axis=0)
-            diff = cj - ci
-            along = float(np.dot(diff, u_i))
-            perp = float(np.sqrt(max(float(np.dot(diff, diff)) - along ** 2, 0.0)))
-            if perp > 0.9 * max(minor_i, minor_j):
-                continue
 
+            # Facing tips: the two ends that sit nearest each other across the gap.
             tip_i_min, tip_i_max, _ = _group_tips(groups[gi], det_list)
             tip_j_min, tip_j_max, _ = _group_tips(groups[gj], det_list)
             combos = [
@@ -644,6 +745,18 @@ def _find_gap_bridge_tiles(groups, det_list, h, w, tile_size):
                 if d < best_dist:
                     best_dist, best_a, best_b = d, ta, tb
             if best_dist > _BRIDGE_MAX_GAP:
+                continue
+
+            # Lateral (perpendicular) offset measured ACROSS THE GAP at the facing
+            # tips, not between the group centroids. A centroid-based offset blows
+            # up when one fragment is far longer than the other: the long
+            # fragment's centroid sits far down-trail, so a tiny angle difference
+            # turns into a large perpendicular distance and wrongly rejects a
+            # straight trail. The facing-tip offset stays local to the gap.
+            diff = best_b - best_a
+            along = float(np.dot(diff, u_i))
+            perp = float(np.sqrt(max(float(np.dot(diff, diff)) - along ** 2, 0.0)))
+            if perp > 0.9 * max(minor_i, minor_j):
                 continue
 
             min_c_i = float(all_i[:, 1].min()); max_c_i = float(all_i[:, 1].max())
@@ -686,7 +799,22 @@ def _find_gap_bridge_tiles(groups, det_list, h, w, tile_size):
             if pair_key not in seen:
                 seen.add(pair_key)
                 extra.append((gi, gj, new_tx, new_ty))
-    return extra
+                # Record this confirmed gap as a model MISS for training feedback.
+                # All criteria above have passed, so we KNOW these two fragments
+                # are one real trail; the detector simply fired nothing in the
+                # stretch between them. cx/cy is the gap centre, and the two
+                # fragment boxes pinpoint exactly where the model should have
+                # detected a trail but did not.
+                gap_misses.append({
+                    "cx": mid_x, "cy": mid_y,
+                    "tile": _tile_coord(mid_x, mid_y, _stride),
+                    "gap_px": round(float(best_dist), 1),
+                    "frag_a_bbox": [int(all_i[:, 1].min()), int(all_i[:, 0].min()),
+                                    int(all_i[:, 1].max()), int(all_i[:, 0].max())],
+                    "frag_b_bbox": [int(all_j[:, 1].min()), int(all_j[:, 0].min()),
+                                    int(all_j[:, 1].max()), int(all_j[:, 0].max())],
+                })
+    return extra, gap_misses
 
 
 def _targeted_tile_dets(model, img_rgb, tile_x, tile_y, tile_size, h, w,
@@ -749,8 +877,18 @@ def stage_seam_second_pass(state: PipelineState, cfg: StageConfig,
     h, w = state.image.shape[:2]
     img_rgb = state.image
 
-    pairs = _find_gap_bridge_tiles(groups, det_list, h, w, cfg.tile_size)
+    pairs, gap_misses = _find_gap_bridge_tiles(groups, det_list, h, w, cfg.tile_size)
     log.count("candidate_pairs", len(pairs))
+    # Training-feedback log. Each confirmed gap is a place the detector should
+    # have fired but did not. Record it in the run log (one "bridge_gap_miss"
+    # event per gap) REGARDLESS of whether the follow-up re-inference below
+    # manages to fill the gap -- the miss is real either way, and these are the
+    # highest-value examples to add to the next training round. This mirrors how
+    # the FP suppressor logs every false positive it removes; here we log every
+    # real trail the model failed to detect. Pull these from the run log when
+    # assembling the next training batch.
+    for _m in gap_misses:
+        log.event("bridge_gap_miss", **_m)
     if not pairs:
         return state
 
@@ -777,8 +915,7 @@ def stage_seam_second_pass(state: PipelineState, cfg: StageConfig,
     final, polygons = _fit_groups(det_list, groups, h, w)
     state.det_list = det_list
     state.groups = groups
-    state.polygons = polygons
-    state.polygon_segs = _segs_from_polygons(polygons, h, w)
+    state.polygons, state.polygon_segs = _polys_and_segs_deduped(polygons, h, w)
     state.final_mask = final
     return state
 
