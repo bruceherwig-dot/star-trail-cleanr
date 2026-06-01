@@ -904,13 +904,43 @@ def stage_seam_second_pass(state: PipelineState, cfg: StageConfig,
                                             cfg.tile_size, h, w, cfg, log, rot90=True))
     log.count("tiles_run", len(seen_tiles))
     log.count("new_dets", len(new_dets))
-    if not new_dets:
-        return state
 
-    groups_before = len(groups)
-    det_list = list(det_list) + new_dets
-    groups = group_detections(det_list)
-    log.event("regroup", groups_before=groups_before, groups_after=len(groups))
+    # Re-inference enrichment: when the model DID fire in a gap (e.g. B10), fold
+    # those real pixels in and regroup, which physically connects the fragments
+    # they span. When the model fired nothing (e.g. IMG_3540, model blind), this
+    # adds nothing and the fragments stay split for now.
+    if new_dets:
+        groups_before = len(groups)
+        det_list = list(det_list) + new_dets
+        groups = group_detections(det_list)
+        log.event("regroup", groups_before=groups_before, groups_after=len(groups))
+
+    # Bridge on the criteria. Any candidate pair still unmerged after the step
+    # above is a gap the 6 gates ALREADY confirmed is one real trail, the model
+    # just couldn't see across it. The 6 gates ARE the decision (that is the
+    # whole point of the bridge: it exists for detection failures), so merge the
+    # two groups directly, like the original detect_trails bridge did. fit_groups
+    # then spans the gap. Non-trail pairs (the telescope mount) never get here:
+    # the 6 gates reject them, so they are not candidates. Re-find candidates on
+    # the (possibly regrouped) set so indices are current.
+    pairs2, _ = _find_gap_bridge_tiles(groups, det_list, h, w, cfg.tile_size)
+    if pairs2:
+        parent = list(range(len(groups)))
+        def _bf(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+        bridged = 0
+        for gi, gj, _tx, _ty in pairs2:
+            if _bf(gi) != _bf(gj):
+                parent[_bf(gi)] = _bf(gj)
+                bridged += 1
+        comp = {}
+        for idx, grp in enumerate(groups):
+            comp.setdefault(_bf(idx), []).extend(grp)
+        groups = list(comp.values())
+        log.count("bridge_merges_on_criteria", bridged)
 
     final, polygons = _fit_groups(det_list, groups, h, w)
     state.det_list = det_list
