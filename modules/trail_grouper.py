@@ -910,19 +910,17 @@ def _fit_poly_from_pixels(coords_rc):
     t = coords_rc @ u
     t_centroid = float(centroid @ u)
     t_min, t_max = float(t.min()), float(t.max())
-    col_lo = float(coords_rc[:,1].min())
-    col_hi = float(coords_rc[:,1].max())
-    step = max((col_hi - col_lo) / 15, 1.0)
-    widths = []
-    c = col_lo
-    while c < col_hi:
-        rows = coords_rc[(coords_rc[:,1] >= c) & (coords_rc[:,1] < c + step), 0]
-        if len(rows) > 2:
-            widths.append(float(rows.max() - rows.min()))
-        c += step
-    # half_w -> full thickness = measured thickness x MASK_THICKNESS_MULT.
-    # Uses the same thickness knob as the straight fitter (half of it here).
-    half_w = (float(np.median(widths)) if widths else 20.0) * (MASK_THICKNESS_MULT / 2.0)
+    # Thickness measured PERPENDICULAR to this strip's own direction (u_perp),
+    # NOT as the vertical row-span the old code used. Row-span over-measures any
+    # sloped or curved trail because it includes the trail's own rise across the
+    # slice (a steep diagonal looked far thicker than it really is). The
+    # perpendicular spread is the true across-the-trail width at any angle, the
+    # same honest measure the straight fitter uses. A robust 2.5-97.5 percentile
+    # band ignores a few stray pixels. Scaled by the shared thickness knob (half
+    # here, since half_w is a half-width).
+    perp = (coords_rc - centroid) @ u_perp
+    thickness = float(np.percentile(perp, 97.5) - np.percentile(perp, 2.5))
+    half_w = (thickness if thickness > 0 else 20.0) * (MASK_THICKNESS_MULT / 2.0)
     p_min = centroid + (t_min - t_centroid) * u
     p_max = centroid + (t_max - t_centroid) * u
     corners_rc = [
