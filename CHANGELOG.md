@@ -2,6 +2,12 @@
 
 ---
 
+## v2.41-beta
+- **The foreground mask now keeps the AI from looking at the ground at all.** Until now the mask only skipped fully-covered areas and cleaned up afterward, so the AI could still detect trail-shaped things on hills, buildings, or equipment wherever they poked into a partly-sky region. Those false hits were removed from the final result but still showed in the mask viewer, which made it look like a mask had fired on the ground. Now the masked foreground is hidden from the AI before it ever looks, so it never detects on the ground in the first place. Your cleaned images are unchanged for real sky trails; the difference is fewer false detections and a mask view that matches what actually gets repaired.
+- **Faint "phantom" lines over empty sky are removed.** The AI sometimes drew a thin, dotted line shooting off a real trail into blank sky where nothing is actually there. These are now spotted (thin, faint, with no real streak underneath) and removed before repair, while real trails and real bright crossings are kept. As a bonus this also cleared up some false bridges, since those stray thin pieces were what the bridge step was wrongly grabbing onto.
+- **Mixed portrait and landscape batches now stop with a clear message** instead of a confusing error. One foreground mask can't fit both orientations, so run each orientation as its own batch. An empty foreground mask (nothing painted) is now treated as no mask and simply runs.
+- **Smoke tests:** 133 passing.
+
 ## v2.40-beta
 - **Split trails now reconnect even when the AI can't see the gap.** When the AI breaks one trail into two pieces with an empty stretch in the middle, the app already had a bridge that checks six things (matching angle, matching width, the pieces line up, the gap straddles a tile boundary, etc.) to confirm the two pieces are really one trail. Until now, after those checks passed, it would only join the pieces if a fresh look from the AI re-detected something in the gap. On darker, low-contrast sequences the AI sometimes can't see that middle stretch at all, so the trail stayed broken. Now, once the six checks confirm it's one trail, the pieces are joined regardless, the checks are the decision. The result is fewer broken trails in the cleaned output, especially on faint sequences. Trails that aren't really one piece (and static foreground objects) fail the six checks and are left alone, so nothing gets joined that shouldn't be.
 - **Smoke tests:** 133 passing.
