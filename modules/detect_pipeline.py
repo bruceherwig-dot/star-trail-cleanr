@@ -273,6 +273,12 @@ def _sahi_predict_skip(model, img_rgb, tile_size, overlap, fg_mask):
                 n_skipped += 1
                 continue
             crop_bgr = np.ascontiguousarray(img_rgb[ty:ty2, tx:tx2, ::-1])
+            # Black out the foreground BEFORE the model sees it -- the whole
+            # point of the mask. Tile-skip only handles 100%-foreground tiles;
+            # a partial-sky tile would otherwise let YOLO detect on the ground.
+            fg_crop = fm[ty:ty2, tx:tx2]
+            if fg_crop.shape == crop_bgr.shape[:2]:
+                crop_bgr[fg_crop > 0] = 0
             if crop_h < tile_size or crop_w < tile_size:
                 padded = np.zeros((tile_size, tile_size, 3), dtype=np.uint8)
                 padded[:crop_h, :crop_w] = crop_bgr
