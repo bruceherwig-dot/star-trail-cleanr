@@ -1121,6 +1121,7 @@ def main():
         tile_size=args.tile_size, overlap=args.overlap,
         fit_polygons=True, fallback_polys=False, link_gaps=False,
         seam_second_pass=True, suppress_fp=False,
+        prune_phantoms=True,
     )
 
     for i, fp in enumerate(frame_files_all):

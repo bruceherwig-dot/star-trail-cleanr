@@ -69,6 +69,10 @@ class StageConfig:
     link_gaps: bool = True
     seam_second_pass: bool = True
     suppress_fp: bool = True
+    # Stage 1b: remove thin, dotted, "nothing under it" phantom detections the
+    # model emits over empty sky. OFF by default so test suites see legacy
+    # behaviour; the STC worker turns it on.
+    prune_phantoms: bool = False
 
     # Core tunables (carried over from the old pipeline; revisit per stage).
     tile_size: int = 640
@@ -515,6 +519,119 @@ def _fit_groups(det_list: list, groups: list, h: int, w: int):
             cv2.fillPoly(final, [pts], 255)
             polygons.append(corners)
     return final, polygons
+
+
+# --------------------------------------------------------------------------- #
+# Stage 1b: phantom pruning
+# --------------------------------------------------------------------------- #
+# A "phantom" is a thin, dotted, usually perpendicular detection the model emits
+# over EMPTY sky (a hair-thin spur off a trail tip, or a sparse dashed line in
+# blank sky). Discriminator proven on real frames: it is a THIN part of the raw
+# mask (survives subtracting the morphological opening, so it is not a solid
+# trail body) AND has NO real light under it in the source (brightness barely
+# above the local sky). Real trails and real crossings are solid + bright and
+# sit on actual light, so they are never touched.
+_PHANTOM_SIG = 12          # source must beat local sky by this to be a real streak
+_PHANTOM_OPEN_R = 6        # parts thinner than ~2*R px are "thin" (spurs / lines)
+_PHANTOM_MIN_INK = 12      # min phantom pixels in a bridged line
+_PHANTOM_MIN_EXTENT = 40   # min bounding extent of a bridged line
+_PHANTOM_KEEP_FRAC = 0.20  # drop a detection if < this fraction survives trimming
+
+
+def _phantom_local_sky(gray: np.ndarray) -> np.ndarray:
+    """Estimate the local sky level (the thin streak vanishes under a heavy
+    median), at quarter resolution for speed, upsampled back."""
+    sh, sw = max(1, gray.shape[0] // 4), max(1, gray.shape[1] // 4)
+    small = cv2.resize(gray, (sw, sh), interpolation=cv2.INTER_AREA)
+    small = cv2.medianBlur(small, 31)
+    return cv2.resize(small, (gray.shape[1], gray.shape[0]), interpolation=cv2.INTER_LINEAR)
+
+
+def stage_prune_phantoms(state: PipelineState, cfg: StageConfig,
+                         log: StageLog) -> PipelineState:
+    """Stage 1b: remove thin, dotted phantom detections that sit on empty sky.
+
+    Builds the union of the raw SAHI masks, keeps only the THIN parts (union
+    minus its morphological opening) that have NO real light under them in the
+    source, bridges those dots into lines, and removes only the elongated lines.
+    The removed pixels are subtracted from every raw detection; a detection that
+    loses almost all of its pixels is dropped entirely. Runs after tiled
+    inference and before polygon fitting, so phantoms never reach the output or
+    repair. Solid/bright real trails and real crossings are untouched."""
+    preds = state.raw_detections
+    if not preds:
+        return state
+    h, w = state.image.shape[:2]
+    gray = state.image.max(2).astype(np.uint8) if state.image.ndim == 3 else state.image.astype(np.uint8)
+
+    pred_masks = [_pred_to_mask(p, h, w) for p in preds]
+    union = np.zeros((h, w), np.uint8)
+    for m in pred_masks:
+        if m is not None:
+            union[m > 0] = 1
+    if union.sum() == 0:
+        return state
+
+    sky = _phantom_local_sky(gray)
+    real = (gray.astype(np.int16) - sky.astype(np.int16)) > _PHANTOM_SIG
+    se = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
+                                   (2 * _PHANTOM_OPEN_R + 1, 2 * _PHANTOM_OPEN_R + 1))
+    core = cv2.morphologyEx(union, cv2.MORPH_OPEN, se)
+    thin = (union > 0) & (core == 0)
+    ph = (thin & (~real)).astype(np.uint8)
+    # Only look at sky: never test or prune inside the foreground (sky-mask)
+    # region, which also skips any tile that is 100% foreground.
+    if state.foreground_mask is not None:
+        fm = state.foreground_mask
+        if fm.shape != (h, w):
+            fm = cv2.resize(fm, (w, h), interpolation=cv2.INTER_NEAREST)
+        ph[fm > 0] = 0
+    if ph.sum() == 0:
+        return state
+
+    bridged = cv2.dilate(ph, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15)))
+    n, lab, st, _ = cv2.connectedComponentsWithStats(bridged)
+    kill = np.zeros((h, w), bool)
+    n_lines = 0
+    for i in range(1, n):
+        extent = max(st[i, cv2.CC_STAT_WIDTH], st[i, cv2.CC_STAT_HEIGHT])
+        comp = (lab == i) & (ph > 0)
+        if extent < _PHANTOM_MIN_EXTENT or int(comp.sum()) < _PHANTOM_MIN_INK:
+            continue
+        kill[comp] = True
+        n_lines += 1
+    if not kill.any():
+        return state
+
+    new_preds = []
+    n_dropped = n_trimmed = 0
+    for pred, m in zip(preds, pred_masks):
+        if m is None:
+            new_preds.append(pred)
+            continue
+        orig = int((m > 0).sum())
+        trimmed = (m > 0) & (~kill)
+        kept = int(trimmed.sum())
+        if orig > 0 and kept < orig * _PHANTOM_KEEP_FRAC:
+            n_dropped += 1
+            continue
+        if kept < orig:
+            try:
+                conf = float(pred.score.value)
+            except Exception:
+                conf = 0.5
+            new_preds.append(_SyntheticPred(trimmed, conf))
+            n_trimmed += 1
+        else:
+            new_preds.append(pred)
+
+    state.raw_detections = new_preds
+    log.count("phantom_lines", n_lines)
+    log.count("detections_dropped", n_dropped)
+    log.count("detections_trimmed", n_trimmed)
+    if n_dropped or n_trimmed:
+        log.event("phantoms_pruned", lines=n_lines, dropped=n_dropped, trimmed=n_trimmed)
+    return state
 
 
 def stage_fit_polygons(state: PipelineState, cfg: StageConfig,
@@ -1160,6 +1277,9 @@ def detect_frame(model: Any,
     if cfg.tiled_inference:
         with flog.stage("tiled_inference") as s:
             state = stage_tiled_inference(state, cfg, s, model)
+    if cfg.prune_phantoms:
+        with flog.stage("prune_phantoms") as s:
+            state = stage_prune_phantoms(state, cfg, s)
     if cfg.fit_polygons:
         with flog.stage("fit_polygons") as s:
             state = stage_fit_polygons(state, cfg, s)
