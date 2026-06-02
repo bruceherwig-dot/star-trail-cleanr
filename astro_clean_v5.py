@@ -1029,6 +1029,33 @@ def main():
               "same format, then try again.")
         sys.exit(1)
 
+    # The foreground mask, hot-pixel step and Star Bridge repair all assume every
+    # frame in the batch shares one shape. A mixed portrait/landscape batch (or a
+    # mask painted for the other orientation) would otherwise crash deep in the
+    # hot-pixel step with an opaque OpenCV "sizes do not match" error. Stop early
+    # with a plain message instead.
+    shapes = {f.shape[:2] for f in frames_all}
+    if len(shapes) > 1:
+        print("\nERROR: this batch mixes portrait and landscape frames. "
+              "Run the portrait frames and the landscape frames as separate "
+              "batches -- each orientation needs its own foreground mask because "
+              "the framing is different.")
+        sys.exit(1)
+    # An empty foreground mask (nothing painted) means "exclude nothing" -- treat
+    # it as no mask. It then never blocks on a shape mismatch and never reaches
+    # the size-sensitive hot-pixel / sky-mask steps.
+    if fg_mask is not None and not np.any(fg_mask):
+        print("  Note: foreground mask is empty (nothing painted); "
+              "running without it.", flush=True)
+        fg_mask = None
+        sky_mask = None
+    if fg_mask is not None and fg_mask.shape[:2] != (h, w):
+        print("\nERROR: the foreground mask does not match these frames "
+              f"(mask is {fg_mask.shape[1]}x{fg_mask.shape[0]}, frames are {w}x{h}). "
+              "It was likely painted for a different orientation or image size. "
+              "Re-create the foreground mask for these frames, then try again.")
+        sys.exit(1)
+
     # 16-bit handling
     is_16bit = frames_all[0].dtype == np.uint16
     if is_16bit:
