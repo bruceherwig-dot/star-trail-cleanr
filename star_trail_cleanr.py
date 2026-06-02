@@ -4026,11 +4026,13 @@ class MainWindow(QMainWindow):
         self._stats_frames_done = current
 
     def _on_initial_estimate(self, seconds):
-        m, s = divmod(int(round(seconds)), 60)
-        if m:
-            self._initial_est_label.setText(f"Estimated Time: {m}m {s:02d}s")
+        secs = int(round(seconds))
+        if secs < 60:
+            self._initial_est_label.setText(f"Estimated Time: {secs}s")
         else:
-            self._initial_est_label.setText(f"Estimated Time: {s}s")
+            # Hour-aware (1h 7m 50s, or 7m 50s under an hour) -- matches the
+            # live "remaining" line instead of running minutes past 60.
+            self._initial_est_label.setText(f"Estimated Time: {fmt_estimate(secs)}")
 
     def _on_format_changed(self, text):
         is_jpg = text == "JPG"
