@@ -2,6 +2,12 @@
 
 ---
 
+## v2.42-beta
+- **Large-image runs no longer run out of memory.** On computers with limited RAM, large photos (especially 16-bit TIFFs) could need more memory than the machine had, and the operating system would kill the run partway through with a confusing error. Star Trail CleanR now checks your photos' size and bit depth and your free memory before each run, and automatically processes fewer images at a time when needed so the run fits in memory and finishes. It always picks the largest amount that fits, which is no slower. If a computer is too tight even at the smallest setting, it tells you plainly to close other programs and try again, instead of crashing.
+- **New "View Star Log" link.** After a run finishes, is stopped, or hits an error, a "View Star Log" link appears next to the Star Log on the run screen. Click it to open that run's full log, everything that scrolled by plus a run summary, in your text viewer. Handy for your own records or for emailing if something goes wrong.
+- **A cancelled run now saves an honest log.** If you stop a run partway, the saved log shows the real progress made so far (frames cleaned, trails found, and time elapsed) and clearly notes the run was cancelled, instead of reporting all zeros.
+- **Smoke tests:** 133 passing.
+
 ## v2.41-beta
 - **The foreground mask now keeps the AI from looking at the ground at all.** Until now the mask only skipped fully-covered areas and cleaned up afterward, so the AI could still detect trail-shaped things on hills, buildings, or equipment wherever they poked into a partly-sky region. Those false hits were removed from the final result but still showed in the mask viewer, which made it look like a mask had fired on the ground. Now the masked foreground is hidden from the AI before it ever looks, so it never detects on the ground in the first place. Your cleaned images are unchanged for real sky trails; the difference is fewer false detections and a mask view that matches what actually gets repaired.
 - **Faint "phantom" lines over empty sky are removed.** The AI sometimes drew a thin, dotted line shooting off a real trail into blank sky where nothing is actually there. These are now spotted (thin, faint, with no real streak underneath) and removed before repair, while real trails and real bright crossings are kept. As a bonus this also cleared up some false bridges, since those stray thin pieces were what the bridge step was wrongly grabbing onto.
