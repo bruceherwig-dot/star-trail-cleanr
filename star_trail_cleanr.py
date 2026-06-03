@@ -584,7 +584,8 @@ class CleanerWorker(QThread):
     BAD_FILE_SKIP_CAP = 1
 
     def __init__(self, folder, output_folder, frame_limit, mask_path=None,
-                 output_format="jpg", jpeg_quality=85, frame_start=0, frame_end=0):
+                 output_format="jpg", jpeg_quality=85, frame_start=0, frame_end=0,
+                 max_batch=20, mem_note=""):
         super().__init__()
         self.folder = folder
         self.output_folder = output_folder
@@ -594,6 +595,11 @@ class CleanerWorker(QThread):
         self.mask_path = mask_path
         self.output_format = output_format
         self.jpeg_quality = jpeg_quality
+        # Largest batch the machine's memory can hold, chosen in _validate from
+        # free RAM + the frames' bit depth (falls back to 20). mem_note is a
+        # human-readable record of that decision, logged at run start.
+        self.max_batch = max_batch
+        self.mem_note = mem_note
         self._cancelled = False
         self._proc = None  # current subprocess
         # Bad-file dialog plumbing. The QThread blocks reading subprocess
@@ -759,7 +765,7 @@ class CleanerWorker(QThread):
             self._skipped_unreadable_count = len(unreadable_sorted)
             self._dominant_size_str = f"{dominant[0]} × {dominant[1]}"
 
-            MAX_BATCH = 20
+            MAX_BATCH = self.max_batch  # memory-aware cap (20 unless RAM is tight)
             n_batches = (total + MAX_BATCH - 1) // MAX_BATCH
             batch_size = (total + n_batches - 1) // n_batches if n_batches else MAX_BATCH
             starts = list(range(0, total, batch_size))
@@ -939,7 +945,8 @@ class CleanerWorker(QThread):
                 return (remaining_work / rate) * EST_PAD_FACTOR
 
             _log_est("run_start", None, None, None, 0, None, force=True,
-                     note=f"n={total} batches={n_batches} res={dominant[0]}x{dominant[1]}")
+                     note=f"n={total} batches={n_batches} res={dominant[0]}x{dominant[1]}"
+                          + (f" {self.mem_note}" if self.mem_note else ""))
 
             for i, start in enumerate(starts):
                 if self._cancelled:
@@ -958,7 +965,14 @@ class CleanerWorker(QThread):
                 self.batch_info.emit(i + 1, n_batches)
                 _add_log(f"Batch {i+1}/{n_batches}")
 
-                this_batch = min(batch_size, total - start)
+                # The last batch absorbs any remainder: a tiny tail batch
+                # (<3 frames) is merged into the previous one above, so the
+                # final batch must cover everything left or those frames would
+                # be silently dropped -- which happens once batches are small.
+                if i == len(starts) - 1:
+                    this_batch = total - start
+                else:
+                    this_batch = min(batch_size, total - start)
                 _log_est("batch_start", i, 0, this_batch, None, None, force=True)
                 abs_start = start + self.frame_start
                 if getattr(sys, 'frozen', False):
@@ -3203,12 +3217,37 @@ class MainWindow(QMainWindow):
         log_col.setSpacing(8)
         log_col.setContentsMargins(0, 0, 0, 0)
 
+        # Title row: centered "Star Log" heading with a "View Star Log" link to
+        # its right. The link opens the saved run-log text file; it stays hidden
+        # during a run and appears only once the run ends (finished/stopped/error).
+        _title_row = QHBoxLayout()
+        _title_row.setContentsMargins(0, 0, 0, 0)
+        _title_row.addStretch(1)
         self._star_log_title = QLabel("Star Log")
         self._star_log_title.setAlignment(Qt.AlignCenter)
         self._star_log_title.setStyleSheet(
             f"font-size: 18px; font-weight: bold; color: {CARD_TEXT};"
         )
-        log_col.addWidget(self._star_log_title)
+        _title_row.addWidget(self._star_log_title)
+        # A flat QPushButton styled to look like a link. QLabel's <a> link did
+        # not reliably fire linkActivated in this layout; a button's clicked
+        # signal always fires.
+        self._view_log_link = QPushButton("View Star Log")
+        self._view_log_link.setFlat(True)
+        self._view_log_link.setCursor(Qt.PointingHandCursor)
+        _vlf = self._view_log_link.font()
+        _vlf.setPointSize(14)
+        _vlf.setUnderline(True)
+        self._view_log_link.setFont(_vlf)
+        self._view_log_link.setStyleSheet(
+            f"QPushButton {{ border: none; background: transparent; "
+            f"color: {BRAND_HEADING_BLUE}; padding: 0 0 0 10px; }}"
+        )
+        self._view_log_link.clicked.connect(self._view_star_log)
+        self._view_log_link.setVisible(False)
+        _title_row.addWidget(self._view_log_link)
+        _title_row.addStretch(1)
+        log_col.addLayout(_title_row)
 
         self._status_out = QTextEdit()
         self._status_out.setReadOnly(True)
@@ -3682,28 +3721,74 @@ class MainWindow(QMainWindow):
                     if _dlg.clickedButton().text() == "Cancel":
                         return None
 
+                # Memory-aware batch sizing. Loading frames plus the AI model
+                # can peak well past a modest Mac's RAM on big images, so the OS
+                # kills the worker (SIGBUS / SIGKILL). Predict the peak from the
+                # frames' real size and bit depth, then pick the largest batch
+                # that fits -- from 20 down to a floor of 5 (Star Bridge repair
+                # needs neighbor frames; fewer than ~5 hurts quality, and the
+                # worker hard-refuses below 3). Measured model on 6000x4000:
+                #     peak GB = 4.4 (model+torch) + 5 x (one decoded frame) x frames
+                # so per frame ~0.36 GB at 8-bit, ~0.72 GB at 16-bit.
+                self._max_batch = 20
+                self._mem_note = ""
                 try:
                     import psutil as _psutil
-                    _batch_frames = min(22, _total_frames)  # batch (20) + 2 neighbor frames
-                    _peak_bytes = int(_batch_frames * _w * _h * 3 * 4) + 1_500_000_000
+                    # Decoded in-memory bytes for ONE frame = w x h x channels x
+                    # bytes-per-sample. The file size on disk is NOT this (a
+                    # 12 MB JPG decodes to 72 MB). Read the real bit depth from
+                    # the header. PIL mislabels 16-bit RGB TIFFs, so use
+                    # tifffile for TIFFs; anything unreadable falls back to the
+                    # heavier 16-bit guess so we never over-size the batch.
+                    _suf = os.path.splitext(_frames[0])[1].lower()
+                    if _suf in (".tif", ".tiff"):
+                        try:
+                            import tifffile as _tf
+                            _pg = _tf.TiffFile(_frames[0]).pages[0]
+                            _bytes_per = max(1, _pg.dtype.itemsize)
+                            _spp = getattr(_pg, "samplesperpixel", 3) or 3
+                            _channels = 3 if _spp >= 3 else 1
+                        except Exception:
+                            _bytes_per, _channels = 2, 3  # conservative (16-bit RGB)
+                    else:
+                        _bytes_per, _channels = 1, 3  # jpg / png are 8-bit
+                    _decoded_frame = _w * _h * _channels * _bytes_per
+                    _BASE = int(4.4 * 1_073_741_824)   # model + torch floor
+                    _PER_FRAME = 5 * _decoded_frame    # measured peak per frame
+                    _SAFETY = 0.8                      # leave 20% for OS + our window
                     _available = _psutil.virtual_memory().available
-                    if _peak_bytes > _available * 0.85:
+                    _usable = _available * _SAFETY
+                    _fit = int((_usable - _BASE) / _PER_FRAME) if _PER_FRAME else 20
+                    _bit = _bytes_per * 8
+                    if _fit < 5:
+                        # Even the smallest safe batch won't fit. Don't shrink
+                        # below 5 -- tell the user honestly and let them decide.
                         from PySide6.QtWidgets import QMessageBox as _QMB
+                        _need = _fmt_gb(_BASE + _PER_FRAME * 5)
                         resp = _QMB.warning(
                             self,
-                            "Low memory",
-                            f"This run may use more RAM than your computer has available "
-                            f"and could cause it to slow down or freeze.\n\n"
-                            f"Estimated RAM needed:  {_fmt_gb(_peak_bytes)}\n"
-                            f"RAM available now:        {_fmt_gb(_available)}\n\n"
-                            "Close any other open programs to free up memory before running. "
-                            "If you still see this warning, try setting 'Number of images' to a smaller value.\n\n"
+                            "Not enough memory",
+                            f"These photos are large for this computer's available "
+                            f"memory, so the run may fail partway through.\n\n"
+                            f"Memory needed:           {_need}\n"
+                            f"Memory available now:  {_fmt_gb(_available)}\n\n"
+                            "Close any other open programs to free up memory, then "
+                            "try again.\n\n"
                             "You can continue anyway or cancel.",
                             _QMB.Ok | _QMB.Cancel,
                             _QMB.Cancel,
                         )
                         if resp == _QMB.Cancel:
                             return None
+                        self._max_batch = 5
+                    else:
+                        self._max_batch = min(20, _fit)
+                    self._mem_note = (
+                        f"mem_avail={_available // (1024 * 1024)}MB "
+                        f"bit={_bit} frame={_decoded_frame // (1024 * 1024)}MB "
+                        f"peak={_fmt_gb(_BASE + _PER_FRAME * self._max_batch)} "
+                        f"max_batch={self._max_batch}"
+                    )
                 except ImportError:
                     pass
         except Exception:
@@ -3752,6 +3837,8 @@ class MainWindow(QMainWindow):
         self._run_total_frames = 0
         self._run_initial_est_sec = 0
         self._run_actual_sec = 0
+        self._run_cancelled = False        # set True by _cancel_run
+        self._stats_last_trail_count = 0   # live trail count for cancelled-run logs
 
         # Go to process page — reset all widgets
         self._process_title.setText("Cleaning in Progress")
@@ -3783,6 +3870,7 @@ class MainWindow(QMainWindow):
         # Stats are now shown in a modal dialog (see _show_run_complete_dialog),
         # not in an inline label. No widget to reset here.
         self._status_out.setText("")
+        self._view_log_link.setVisible(False)  # reappears when the run ends
         self._cancel_btn.setText("Cancel Cleaning")
         self._cancel_btn.setEnabled(True)
         try:
@@ -3838,7 +3926,9 @@ class MainWindow(QMainWindow):
             output_format=out_fmt,
             jpeg_quality=self._jpeg_quality.value(),
             frame_start=frame_start,
-            frame_end=frame_end)
+            frame_end=frame_end,
+            max_batch=getattr(self, "_max_batch", 20),
+            mem_note=getattr(self, "_mem_note", ""))
         self.worker.progress.connect(self._on_progress)
         self.worker.status.connect(self._on_status)
         self.worker.batch_info.connect(self._on_batch_info)
@@ -4040,6 +4130,7 @@ class MainWindow(QMainWindow):
         self._jpeg_quality_label.setEnabled(is_jpg)
 
     def _on_trail_count_update(self, count):
+        self._stats_last_trail_count = count  # kept for cancelled-run summaries
         self._trail_counter_label.setText(f"{count:,} Trails Cleaned")
         # Running averages over the whole run so far. frame_count fires just
         # before this on each frame, so _stats_frames_done is current.
@@ -4302,7 +4393,8 @@ class MainWindow(QMainWindow):
         self._done_output_folder = output_folder
         self._update_open_btn_state()
         self._switch_to_back_btn()
-        self._write_run_summary()
+        # The run log is written in _on_finished (covers stop/error too), which
+        # always fires after this handler.
         # Run-complete dialog fires for every finished run, including
         # zero-trail runs (the dialog message branches on trail count).
         self._show_run_complete_dialog()
@@ -4410,6 +4502,7 @@ class MainWindow(QMainWindow):
     def _write_run_summary(self):
         """Write a plain-text run summary into <input>/cleanr_workspace/."""
         import datetime as _dt
+        self._last_log_path = None  # set on success; stays None if we can't write
         input_folder = self._folder_input.text().strip()
         if not input_folder or not os.path.isdir(input_folder):
             return
@@ -4423,6 +4516,18 @@ class MainWindow(QMainWindow):
         frames = getattr(self, '_run_total_frames', 0)
         est_sec = getattr(self, '_run_initial_est_sec', 0)
         actual_sec = getattr(self, '_run_actual_sec', 0)
+
+        # A cancelled or errored run never emits its final stats, so the totals
+        # above stay 0. Fall back to the live running values (frames cleaned so
+        # far, the last trail count, wall-clock elapsed) and flag the summary as
+        # an incomplete run. A normal finish always has _run_total_frames > 0.
+        incomplete = getattr(self, '_run_cancelled', False) or frames == 0
+        if frames == 0:
+            frames = getattr(self, '_stats_frames_done', 0)
+        if trails == 0:
+            trails = getattr(self, '_stats_last_trail_count', 0)
+        if actual_sec == 0:
+            actual_sec = max(0.0, (end - start).total_seconds())
 
         # Mirror the on-screen "TIME SAVED" formatting.
         SECONDS_PER_MANUAL_TRAIL = 30
@@ -4575,7 +4680,8 @@ class MainWindow(QMainWindow):
             "Output folder:",
             f"  {output_folder}",
             "",
-            f"Frames processed:      {frames:,}",
+            f"Frames processed:      {frames:,}"
+            + ("   (run cancelled before it finished)" if incomplete else ""),
             f"Trails found:          {trails:,}",
         ]
 
@@ -4602,15 +4708,28 @@ class MainWindow(QMainWindow):
                         f"resolution"
                     )
 
+        if incomplete:
+            lines += [
+                "",
+                f"Time before cancel:    {fmt_hms(actual_sec)}",
+                "",
+                "Run cancelled before completion — the numbers above are the "
+                "progress made so far, not a finished run.",
+                "",
+                f"Time saved so far (at ~30 sec per trail):  {time_saved}",
+            ]
+        else:
+            lines += [
+                "",
+                f"Estimated time:        {fmt_hms(est_sec)}",
+                f"Actual time:           {fmt_hms(actual_sec)}",
+                "",
+                f"Thought it'd take {fmt_hms(est_sec)}. "
+                f"Took {fmt_hms(actual_sec)}. {tail}",
+                "",
+                f"Time saved vs cleaning manually (at ~30 sec per trail):  {time_saved}",
+            ]
         lines += [
-            "",
-            f"Estimated time:        {fmt_hms(est_sec)}",
-            f"Actual time:           {fmt_hms(actual_sec)}",
-            "",
-            f"Thought it'd take {fmt_hms(est_sec)}. "
-            f"Took {fmt_hms(actual_sec)}. {tail}",
-            "",
-            f"Time saved vs cleaning manually (at ~30 sec per trail):  {time_saved}",
             "",
             "================================================",
             "",
@@ -4669,8 +4788,10 @@ class MainWindow(QMainWindow):
         try:
             os.makedirs(workspace, exist_ok=True)
             fname = f"star_trail_cleanr_log_{start.strftime('%Y-%m-%d_%H-%M-%S')}.txt"
-            with open(os.path.join(workspace, fname), 'w', encoding='utf-8') as f:
+            _full = os.path.join(workspace, fname)
+            with open(_full, 'w', encoding='utf-8') as f:
                 f.write('\n'.join(lines) + '\n')
+            self._last_log_path = _full  # opened by the "View Star Log" link
         except OSError:
             pass
 
@@ -4702,6 +4823,19 @@ class MainWindow(QMainWindow):
         self._stop_elapsed_timer()
         self._switch_to_back_btn()
         self._set_updates_run_state(False)
+        # Write this run's log (covers a clean finish, a stop/cancel, and an
+        # error) and reveal the "View Star Log" link only if the file exists.
+        self._write_run_summary()
+        if getattr(self, "_last_log_path", None) and os.path.isfile(self._last_log_path):
+            self._view_log_link.setVisible(True)
+
+    def _view_star_log(self, *args):
+        """Open this run's saved Star Log text file in the system text viewer."""
+        path = getattr(self, "_last_log_path", None)
+        if path and os.path.isfile(path):
+            from PySide6.QtGui import QDesktopServices
+            from PySide6.QtCore import QUrl
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
     def closeEvent(self, event):
         """Save window size and clean up worker thread before closing."""
