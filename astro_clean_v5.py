@@ -1149,6 +1149,9 @@ def main():
         fit_polygons=True, fallback_polys=False, link_gaps=False,
         seam_second_pass=True, suppress_fp=False,
         prune_phantoms=True,
+        # Hard-negative phantom logging is dev-only (Bruce's source runs), never
+        # in the shipped frozen bundle. sys.frozen is True only in the bundle.
+        log_phantom_negatives=not getattr(sys, "frozen", False),
     )
 
     for i, fp in enumerate(frame_files_all):

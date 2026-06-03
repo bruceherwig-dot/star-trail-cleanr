@@ -73,6 +73,11 @@ class StageConfig:
     # model emits over empty sky. OFF by default so test suites see legacy
     # behaviour; the STC worker turns it on.
     prune_phantoms: bool = False
+    # Dev-only: log each removed phantom's location to the run log for
+    # hard-negative training-data mining. OFF for shipped users (it only adds
+    # noise to their logs that never reaches us); the STC worker turns it on
+    # only when running from source (Bruce's machine), not in the frozen bundle.
+    log_phantom_negatives: bool = False
 
     # Core tunables (carried over from the old pipeline; revisit per stage).
     tile_size: int = 640
@@ -608,13 +613,14 @@ def stage_prune_phantoms(state: PipelineState, cfg: StageConfig,
             continue
         kill[comp] = True
         n_lines += 1
-        cys, cxs = np.where(comp)
-        phantom_records.append({
-            "cx": int(cxs.mean()), "cy": int(cys.mean()),
-            "bbox": [int(cxs.min()), int(cys.min()), int(cxs.max()), int(cys.max())],
-            "area": ink,
-            "note": "thin FP over empty sky; nothing to see here (hard negative)",
-        })
+        if cfg.log_phantom_negatives:   # dev-only hard-negative mining
+            cys, cxs = np.where(comp)
+            phantom_records.append({
+                "cx": int(cxs.mean()), "cy": int(cys.mean()),
+                "bbox": [int(cxs.min()), int(cys.min()), int(cxs.max()), int(cys.max())],
+                "area": ink,
+                "note": "thin FP over empty sky; nothing to see here (hard negative)",
+            })
     if not kill.any():
         return state
 
