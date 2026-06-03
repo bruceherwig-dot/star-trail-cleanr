@@ -599,24 +599,34 @@ def stage_prune_phantoms(state: PipelineState, cfg: StageConfig,
     n, lab, st, _ = cv2.connectedComponentsWithStats(bridged)
     kill = np.zeros((h, w), bool)
     n_lines = 0
+    phantom_records = []   # one per removed phantom line -> hard-negative training data
     for i in range(1, n):
         extent = max(st[i, cv2.CC_STAT_WIDTH], st[i, cv2.CC_STAT_HEIGHT])
         comp = (lab == i) & (ph > 0)
-        if extent < _PHANTOM_MIN_EXTENT or int(comp.sum()) < _PHANTOM_MIN_INK:
+        ink = int(comp.sum())
+        if extent < _PHANTOM_MIN_EXTENT or ink < _PHANTOM_MIN_INK:
             continue
         kill[comp] = True
         n_lines += 1
+        cys, cxs = np.where(comp)
+        phantom_records.append({
+            "cx": int(cxs.mean()), "cy": int(cys.mean()),
+            "bbox": [int(cxs.min()), int(cys.min()), int(cxs.max()), int(cys.max())],
+            "area": ink,
+            "note": "thin FP over empty sky; nothing to see here (hard negative)",
+        })
     if not kill.any():
         return state
 
     new_preds = []
     n_dropped = n_trimmed = 0
+    notkill = ~kill
     for pred, m in zip(preds, pred_masks):
         if m is None:
             new_preds.append(pred)
             continue
         orig = int((m > 0).sum())
-        trimmed = (m > 0) & (~kill)
+        trimmed = (m > 0) & notkill
         kept = int(trimmed.sum())
         if orig > 0 and kept < orig * _PHANTOM_KEEP_FRAC:
             n_dropped += 1
@@ -637,6 +647,8 @@ def stage_prune_phantoms(state: PipelineState, cfg: StageConfig,
     log.count("detections_trimmed", n_trimmed)
     if n_dropped or n_trimmed:
         log.event("phantoms_pruned", lines=n_lines, dropped=n_dropped, trimmed=n_trimmed)
+    for rec in phantom_records:   # per-phantom location for hard-negative mining
+        log.event("phantom_removed", **rec)
     return state
 
 
