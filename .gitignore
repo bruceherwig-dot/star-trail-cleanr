@@ -11,8 +11,13 @@ datasets/
 v5_star_bridge_backup_*/
 claude-skills-video/
 
-# Internal / diagnostic scripts (not shipped)
-tools/
+# Internal / diagnostic scripts (not shipped). The four internal review apps
+# ARE tracked (version-controlled / backed up); everything else in tools/ is ignored.
+tools/*
+!tools/mask_checkr.py
+!tools/tile_fixr.py
+!tools/trail_fixr.py
+!tools/mask_viewr.py
 
 # Generic pretrained models (we only ship trail_detector.pt)
 yolov8n-seg.pt
