@@ -24,6 +24,20 @@ import os
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
 _TIF_EXTS = {".tif", ".tiff"}
 
+# Minimum frame size for trail detection. The detector tiles each frame into
+# 640px windows; a frame whose shorter side is below this both detects poorly
+# (trails are only a few pixels) and is below the tile size, which the tiler
+# cannot form. Real camera frames are always far larger (thousands of px);
+# only downsized web previews (e.g. 800x533) fall below this. The app blocks
+# these up front with a clear message instead of producing junk or crashing.
+MIN_FRAME_SHORT_SIDE = 1280
+
+
+def frame_too_small(width, height):
+    """True if a frame is too small for reliable trail detection: its shorter
+    side is under MIN_FRAME_SHORT_SIDE pixels."""
+    return min(int(width), int(height)) < MIN_FRAME_SHORT_SIDE
+
 
 def _stem_and_ext(path):
     """Return (stem, lowercased extension) for a str or Path, type-agnostic."""

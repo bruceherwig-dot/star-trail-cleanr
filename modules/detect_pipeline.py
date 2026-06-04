@@ -234,7 +234,11 @@ def _tile_starts(size, tile_size, stride):
         starts.append(x)
         x += stride
     if not starts or starts[-1] + tile_size < size:
-        starts.append(size - tile_size)
+        # Floor at 0: when a whole dimension is smaller than the tile, size -
+        # tile_size goes negative, which corrupts the crop bookkeeping and
+        # crashes the mask paste. A sub-tile image becomes one padded tile.
+        # No-op for any dimension >= tile_size.
+        starts.append(max(0, size - tile_size))
     return starts
 
 
@@ -312,8 +316,13 @@ def _sahi_predict_skip(model, img_rgb, tile_size, overlap, fg_mask):
             local_u8 = np.zeros((tile_size, tile_size), dtype=np.uint8)
             cv2.fillPoly(local_u8, [np.array(seg_xy, dtype=np.int32)], 1)
             global_mask = np.zeros((h, w), dtype=bool)
-            global_mask[ty:ty + crop_h, tx:tx + crop_w] = (
-                local_u8[:crop_h, :crop_w].astype(bool))
+            # Clamp the paste to the rows/cols actually available in the frame,
+            # so a tile that runs past the edge can never trigger a broadcast
+            # crash. No-op for in-bounds tiles (gh==crop_h, gw==crop_w).
+            gh = min(crop_h, h - ty)
+            gw = min(crop_w, w - tx)
+            global_mask[ty:ty + gh, tx:tx + gw] = (
+                local_u8[:gh, :gw].astype(bool))
             if global_mask.any():
                 preds.append(_SyntheticPred(global_mask, seg_conf))
 

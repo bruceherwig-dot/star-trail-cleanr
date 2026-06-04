@@ -669,7 +669,8 @@ class CleanerWorker(QThread):
             # photos and the worker (which applies the identical rule) stays in
             # lockstep. Doing this here is what keeps a final batch from
             # collapsing below the 3-frame minimum after the worker drops twins.
-            from modules.frame_list import dedupe_jpg_tiff
+            from modules.frame_list import (
+                dedupe_jpg_tiff, frame_too_small, MIN_FRAME_SHORT_SIDE)
             _pre_dedup = len(frames)
             frames = dedupe_jpg_tiff(frames)
             self._deduped_pairs_count = _pre_dedup - len(frames)
@@ -726,6 +727,14 @@ class CleanerWorker(QThread):
 
             size_counts = Counter(readable.values())
             dominant = size_counts.most_common(1)[0][0]
+            if frame_too_small(dominant[0], dominant[1]):
+                self.error.emit(
+                    f"These images are too small for trail detection "
+                    f"(minimum {MIN_FRAME_SHORT_SIDE} pixels on the shorter side). "
+                    f"They look like downsized previews. Run Star Trail CleanR on "
+                    f"your full-size original images."
+                )
+                return
             matching = sorted(f for f, s in readable.items() if s == dominant)
             mismatched = sorted(f for f, s in readable.items() if s != dominant)
             unreadable_sorted = sorted(unreadable)
@@ -937,6 +946,13 @@ class CleanerWorker(QThread):
             est_completed_batch_dts = []
 
             def _estimate_remaining(now, this_batch_size, phase, frame_num, frame_total):
+                # Returns (remaining_seconds_or_None, measured) where `measured`
+                # is True only when the number comes from the rate we've actually
+                # timed this run -- False while we're still falling back to the
+                # cold-start seed from the previous run. The headline "Estimated
+                # Time" locks only on a measured value, so a wrong seed (e.g. a
+                # slow-TIFF prior run seeding a fast-JPG run) can't freeze a
+                # bogus 3-hour headline next to an accurate live estimate.
                 if phase == "detect":
                     frac = (frame_num / frame_total) * DETECT_FRAC
                 else:
@@ -945,7 +961,7 @@ class CleanerWorker(QThread):
                 work_done = est_batches_done_frames + cur_batch_work
                 remaining_work = total - work_done
                 if remaining_work <= 0:
-                    return 0.0
+                    return 0.0, True
                 rate = None
                 if (est_processing_start_t is not None
                         and work_done >= EST_MIN_WORK_FOR_MEASURED):
@@ -954,9 +970,9 @@ class CleanerWorker(QThread):
                         rate = work_done / elapsed  # frames/sec
                 if rate is None or rate <= 0:
                     if seeded_sec_per_frame is None or seeded_sec_per_frame <= 0:
-                        return None
-                    return remaining_work * seeded_sec_per_frame * EST_PAD_FACTOR
-                return (remaining_work / rate) * EST_PAD_FACTOR
+                        return None, False
+                    return remaining_work * seeded_sec_per_frame * EST_PAD_FACTOR, False
+                return (remaining_work / rate) * EST_PAD_FACTOR, True
 
             _log_est("run_start", None, None, None, 0, None, force=True,
                      note=f"n={total} batches={n_batches} res={dominant[0]}x{dominant[1]}"
@@ -1127,13 +1143,13 @@ class CleanerWorker(QThread):
                             self.step_progress.emit(1, frame_num, frame_total, start + frame_num, total)
                             self.step_detail.emit(proc_line)
 
-                            remaining = _estimate_remaining(now_t, this_batch, "detect", frame_num, frame_total)
+                            remaining, est_measured = _estimate_remaining(now_t, this_batch, "detect", frame_num, frame_total)
                             if remaining is not None:
                                 batch_pct = (detect_count / frame_total) * 0.67
                                 overall_pct = int(((i + batch_pct) / n_batches) * 100)
                                 overall_pct = max(0, min(99, overall_pct))
                                 self.progress.emit(overall_pct, 100, fmt_estimate(remaining))
-                                if est_initial_shown is None:
+                                if est_initial_shown is None and est_measured:
                                     est_initial_shown = remaining + (now_t - t0)
                                     self.initial_estimate.emit(float(est_initial_shown))
                                 _log_est("detect", i, frame_num, frame_total,
@@ -1149,13 +1165,13 @@ class CleanerWorker(QThread):
                             self.frame_count.emit(frames_cleaned, total)
                             self.step_detail.emit(proc_line)
 
-                            remaining = _estimate_remaining(now_t, this_batch, "repair", frame_num, frame_total)
+                            remaining, est_measured = _estimate_remaining(now_t, this_batch, "repair", frame_num, frame_total)
                             if remaining is not None:
                                 batch_pct = 0.67 + (repair_count / frame_total) * 0.33
                                 overall_pct = int(((i + batch_pct) / n_batches) * 100)
                                 overall_pct = max(0, min(99, overall_pct))
                                 self.progress.emit(overall_pct, 100, fmt_estimate(remaining))
-                                if est_initial_shown is None:
+                                if est_initial_shown is None and est_measured:
                                     est_initial_shown = remaining + (now_t - t0)
                                     self.initial_estimate.emit(float(est_initial_shown))
                                 _log_est("repair", i, frame_num, frame_total,
@@ -3869,7 +3885,7 @@ class MainWindow(QMainWindow):
             "x1:0, y1:0, x2:1, y2:0, stop:0 #4a9eff, stop:1 #66b3ff); border-radius: 9px; }"
         )
         self._frame_counter.setText("Scrubbing the stars\u2026")
-        self._initial_est_label.setText("")
+        self._initial_est_label.setText("Estimated Time: estimating\u2026")
         self._time_label.setText("")
         self._elapsed_label.setText("")
         self._run_stats_label.setText("")
