@@ -13,6 +13,16 @@ try:
         sys.stdout.reconfigure(encoding='utf-8')
 except Exception:
     pass
+# matplotlib (pulled in transitively by ultralytics) scans the OS font set when
+# it loads and logs an ERROR for any installed Type1/AFM font with a
+# non-standard header — e.g. old Adobe fonts on some Macs ("Value error parsing
+# header in AFM"). We never draw with matplotlib, so that complaint is pure
+# noise, but Sentry's default logging integration promotes any ERROR-level log
+# into a reported event, producing false crash reports. Silencing the
+# matplotlib logger to CRITICAL drops the font-scan chatter at the source (it
+# never reaches stderr or Sentry). Must run before ultralytics imports.
+import logging
+logging.getLogger("matplotlib").setLevel(logging.CRITICAL)
 """
 astro_clean_v5.py — trail detection and repair worker
 
