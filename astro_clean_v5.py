@@ -126,6 +126,7 @@ def _raw_labeled_from_state(state, h, w):
             raw[rz > 0] = label_id
     return raw
 from modules.io_safe import robust_imread, robust_imread_diag, robust_imwrite
+from modules.frame_list import dedupe_jpg_tiff
 
 
 def _init_worker_sentry():
@@ -237,28 +238,15 @@ def _filter_by_resolution(files: List[Path],
                           expected_height: int = None) -> List[Path]:
     """Keep only files matching the expected (or dominant) resolution.
     Uses PIL header-only reads, no full image decode. Silent (no per-file output).
-    When a folder has both JPG and TIFF of the same frame, keep the TIFF.
+
+    JPG+TIFF duplicate removal is NO LONGER done here. It now happens once on
+    the full folder list (via dedupe_jpg_tiff) before any index slicing, in both
+    load_with_neighbors / load_frame_files and the GUI, so the GUI's batch plan
+    and the worker's slicing stay aligned. Removing it per-slice was the cause of
+    the misaligned batches and the sub-3 final-batch crash.
     """
     if len(files) <= 1:
         return files
-
-    # De-duplicate: if both foo.jpg and foo.tiff exist, keep the TIFF
-    stems_seen = {}
-    tif_exts = {'.tif', '.tiff'}
-    for fp in files:
-        stem = fp.stem
-        ext = fp.suffix.lower()
-        if stem in stems_seen:
-            prev_ext = stems_seen[stem].suffix.lower()
-            if ext in tif_exts and prev_ext not in tif_exts:
-                stems_seen[stem] = fp
-        else:
-            stems_seen[stem] = fp
-    deduped = sorted(stems_seen.values())
-    n_dupes = len(files) - len(deduped)
-    if n_dupes:
-        print(f"  De-duplicated {n_dupes} file(s) (JPG+TIFF pairs -> kept TIFF)")
-    files = deduped
 
     from PIL import Image as _PILImage
 
@@ -292,6 +280,9 @@ def load_frame_files(frame_dir: Path, start: int, batch: int,
                      expected_height: int = None) -> List[Path]:
     exts = {'.jpg', '.jpeg', '.png', '.tif', '.tiff'}
     files = sorted(p for p in frame_dir.iterdir() if p.suffix.lower() in exts)
+    # Drop JPG+TIFF twins on the FULL list before slicing, so frame indices
+    # match the GUI's (which dedups the same way before planning batches).
+    files = dedupe_jpg_tiff(files)
     sliced = files[start:start + batch] if batch > 0 else files[start:]
     return _filter_by_resolution(sliced, expected_width, expected_height)
 
@@ -307,6 +298,9 @@ def load_with_neighbors(frame_dir: Path, start: int, batch: int,
     """
     exts = {'.jpg', '.jpeg', '.png', '.tif', '.tiff'}
     all_sorted = sorted(p for p in frame_dir.iterdir() if p.suffix.lower() in exts)
+    # Drop JPG+TIFF twins on the FULL list before slicing/indexing, so frame
+    # numbers match the GUI's batch plan (which dedups identically up front).
+    all_sorted = dedupe_jpg_tiff(all_sorted)
     total = len(all_sorted)
 
     end = start + batch if batch > 0 else total

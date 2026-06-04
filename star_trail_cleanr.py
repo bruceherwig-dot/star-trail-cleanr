@@ -664,6 +664,16 @@ class CleanerWorker(QThread):
                 self.error.emit(f"No image files found in: {folder}")
                 return
 
+            # Remove JPG+TIFF duplicate pairs ONCE, before counting or splitting
+            # into batches, so the frame count is the true number of unique
+            # photos and the worker (which applies the identical rule) stays in
+            # lockstep. Doing this here is what keeps a final batch from
+            # collapsing below the 3-frame minimum after the worker drops twins.
+            from modules.frame_list import dedupe_jpg_tiff
+            _pre_dedup = len(frames)
+            frames = dedupe_jpg_tiff(frames)
+            self._deduped_pairs_count = _pre_dedup - len(frames)
+
             if self.frame_end > 0:
                 frames = frames[self.frame_start : self.frame_end + 1]
             elif self.frame_start > 0:
@@ -784,6 +794,10 @@ class CleanerWorker(QThread):
             skipped_total = self._skipped_resolution_count + self._skipped_unreadable_count
             header = (f"Processing {total} frames ({dominant[0]}\u00d7{dominant[1]}){mask_note}"
                       + (f" \u2014 skipped {skipped_total} file(s)" if skipped_total else ""))
+            _dups = getattr(self, "_deduped_pairs_count", 0)
+            if _dups:
+                header += (f"\nMerged {_dups} duplicate JPG/TIFF pair"
+                           f"{'s' if _dups != 1 else ''} (kept the TIFF)")
             header += f"\n{n_batches} batch{'es' if n_batches > 1 else ''} to run"
             self.status.emit(header + "\nStarting\u2026")
 
