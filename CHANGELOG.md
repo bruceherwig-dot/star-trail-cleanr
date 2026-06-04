@@ -2,6 +2,13 @@
 
 ---
 
+## v2.43-beta
+- **Very small images are now caught up front instead of crashing.** If you point Star Trail CleanR at downsized previews or web-sized exports (anything under 1280 pixels on the shorter side), it now stops with a clear message asking you to use your full-size originals, instead of failing partway through with a confusing error. Trail detection needs full-resolution frames, so these were never going to give good results anyway. Real camera files are far larger and are completely unaffected.
+- **Folders that hold both a JPG and a TIFF of the same photo no longer crash the last batch.** When both versions of a frame were present, the app counted them twice while planning the run, then removed the duplicates later, which could leave the final batch too short and stop with an error. Duplicates are now removed once, up front (keeping the TIFF), so the count is honest, the batches split cleanly, and no frame gets cleaned twice.
+- **The up-front "Estimated Time" no longer shows a wildly wrong number.** It used to freeze a first guess based on your previous run, which could read hours off when this run was much faster (for example switching from large TIFFs to quick JPEGs). It now shows "estimating" briefly, then settles on a figure based on the actual measured speed of this run, so the headline matches the live time-remaining.
+- **Fewer false internal error reports.** Silenced a harmless font-related message from a background library that was being mistakenly logged as an error. No effect on your runs.
+- **Smoke tests:** 143 passing.
+
 ## v2.42-beta
 - **Large-image runs no longer run out of memory.** On computers with limited RAM, large photos (especially 16-bit TIFFs) could need more memory than the machine had, and the operating system would kill the run partway through with a confusing error. Star Trail CleanR now checks your photos' size and bit depth and your free memory before each run, and automatically processes fewer images at a time when needed so the run fits in memory and finishes. It always picks the largest amount that fits, which is no slower. If a computer is too tight even at the smallest setting, it tells you plainly to close other programs and try again, instead of crashing.
 - **New "View Star Log" link.** After a run finishes, is stopped, or hits an error, a "View Star Log" link appears next to the Star Log on the run screen. Click it to open that run's full log, everything that scrolled by plus a run summary, in your text viewer. Handy for your own records or for emailing if something goes wrong.
