@@ -472,20 +472,35 @@ def test_gui_scan_uses_tifffile_fallback_for_unreadable_tiffs():
     'unreadable header' bucket. From the customer's chair: every TIFF we
     can actually process should silently process; the skip modal should
     only fire when something is genuinely wrong with the file."""
-    text = (REPO / "star_trail_cleanr.py").read_text()
-    # Pull just _img_size out of the GUI source for a structural check.
-    start = text.index("def _img_size(path):")
-    end = text.index("# Inspect every frame's size up front", start)
-    fn_src = text[start:end]
+    # The GUI's pre-flight scan now routes through the shared image_size()
+    # helper in modules/io_safe.py instead of an inline _img_size, so the
+    # structural check moved with it. The intent is unchanged: the size scan
+    # must mirror the worker's reader ladder (PIL, then tifffile for TIFFs PIL
+    # can't parse, plus rawpy for RAW) so files we can actually process don't
+    # land in the unreadable bucket.
+    gui = (REPO / "star_trail_cleanr.py").read_text()
+    assert "from modules.io_safe import image_size" in gui, (
+        "GUI pre-flight scan no longer uses the shared image_size() helper — "
+        "the size scan may diverge from the worker's reader coverage"
+    )
+
+    io_src = (REPO / "modules" / "io_safe.py").read_text()
+    start = io_src.index("def image_size(")
+    end = io_src.index("def robust_imwrite(", start)
+    fn_src = io_src[start:end]
     assert "import tifffile" in fn_src, (
-        "_img_size no longer falls back to tifffile — TIFFs PIL can't "
+        "image_size no longer falls back to tifffile — TIFFs PIL can't "
         "parse will land in the unreadable bucket and trigger a modal "
         "that the customer didn't need to see"
     )
-    assert "TiffFile(path)" in fn_src, (
-        "_img_size doesn't open a TiffFile — the fallback isn't doing the "
+    assert "TiffFile(p)" in fn_src, (
+        "image_size doesn't open a TiffFile — the fallback isn't doing the "
         "actual rescue read"
     )
-    assert ".tif" in fn_src and ".tiff" in fn_src, (
-        "_img_size fallback isn't gated on TIFF extension"
+    assert "_TIFF_EXTS" in fn_src, (
+        "image_size fallback isn't gated on TIFF extension"
+    )
+    assert "import rawpy" in fn_src and "RAW_EXTS" in fn_src, (
+        "image_size doesn't read RAW sizes via rawpy — RAW frames would be "
+        "treated as unreadable in the pre-flight scan"
     )

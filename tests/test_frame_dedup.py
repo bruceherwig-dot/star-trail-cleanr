@@ -17,7 +17,8 @@ from pathlib import Path
 REPO = Path(__file__).parent.parent
 sys.path.insert(0, str(REPO))
 
-from modules.frame_list import dedupe_jpg_tiff, gather_frames
+from modules.frame_list import (
+    dedupe_jpg_tiff, dedupe_frames, count_raw_twins, gather_frames)
 
 
 def _load_worker():
@@ -56,6 +57,51 @@ def test_dedupe_preserves_input_type():
     out = dedupe_jpg_tiff(paths)
     assert out == [Path("/x/F001.tiff")]
     assert isinstance(out[0], Path)
+
+
+# ── RAW twin preference ───────────────────────────────────────────────────
+
+def test_raw_wins_by_default():
+    # RAW beats both TIFF and JPG when prefer_raw is the default.
+    files = ["/x/F001.cr2", "/x/F001.jpg", "/x/F001.tiff",
+             "/x/F002.nef", "/x/F002.jpg"]
+    out = dedupe_frames(files)
+    assert out == ["/x/F001.cr2", "/x/F002.nef"], out
+
+
+def test_nonraw_preference_keeps_jpg_tiff_but_not_raw():
+    # User chose JPG/TIFF: a twinned frame uses the TIFF (then JPG); the RAW
+    # is dropped only because a non-RAW twin exists.
+    files = ["/x/F001.cr2", "/x/F001.tiff", "/x/F002.arw", "/x/F002.jpg"]
+    out = dedupe_frames(files, prefer_raw=False)
+    assert out == ["/x/F001.tiff", "/x/F002.jpg"], out
+
+
+def test_raw_only_frame_survives_nonraw_preference():
+    # A frame that exists ONLY as RAW must still be kept when the user chose
+    # JPG/TIFF -- otherwise that frame would silently vanish from the run.
+    files = ["/x/F001.jpg", "/x/F002.cr3"]
+    assert dedupe_frames(files, prefer_raw=False) == ["/x/F001.jpg", "/x/F002.cr3"]
+    assert dedupe_frames(files, prefer_raw=True) == ["/x/F001.jpg", "/x/F002.cr3"]
+
+
+def test_count_raw_twins():
+    files = ["/x/F001.cr2", "/x/F001.jpg",   # twin
+             "/x/F002.nef",                   # raw only
+             "/x/F003.jpg", "/x/F003.tiff",   # jpg+tiff, not a raw twin
+             "/x/F004.arw", "/x/F004.tiff"]   # twin
+    assert count_raw_twins(files) == 2
+    assert count_raw_twins(["/x/A.jpg", "/x/B.tiff"]) == 0
+
+
+def test_gather_frames_includes_raw():
+    d = Path(tempfile.mkdtemp())
+    (d / "F001.cr2").write_bytes(b"")
+    (d / "F002.NEF").write_bytes(b"")
+    (d / "F003.jpg").write_bytes(b"")
+    (d / "notes.txt").write_bytes(b"")
+    out = [Path(p).name for p in gather_frames(str(d))]
+    assert set(out) == {"F001.cr2", "F002.NEF", "F003.jpg"}, out
 
 
 # ── batch planning + worker slicing stay aligned ──────────────────────────

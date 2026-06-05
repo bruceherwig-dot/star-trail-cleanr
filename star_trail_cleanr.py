@@ -585,7 +585,7 @@ class CleanerWorker(QThread):
 
     def __init__(self, folder, output_folder, frame_limit, mask_path=None,
                  output_format="jpg", jpeg_quality=85, frame_start=0, frame_end=0,
-                 max_batch=20, mem_note=""):
+                 max_batch=20, mem_note="", twin_prefer="raw"):
         super().__init__()
         self.folder = folder
         self.output_folder = output_folder
@@ -595,6 +595,10 @@ class CleanerWorker(QThread):
         self.mask_path = mask_path
         self.output_format = output_format
         self.jpeg_quality = jpeg_quality
+        # "raw" or "nonraw": when a frame exists as both a RAW and a JPG/TIFF,
+        # which to process. Chosen by the user in _validate's one-time prompt;
+        # passed through to each worker subprocess so both sides dedup alike.
+        self.twin_prefer = twin_prefer
         # Largest batch the machine's memory can hold, chosen in _validate from
         # free RAM + the frames' bit depth (falls back to 20). mem_note is a
         # human-readable record of that decision, logged at run start.
@@ -655,24 +659,23 @@ class CleanerWorker(QThread):
         try:
             os.makedirs(output_folder, exist_ok=True)
 
-            exts = ["*.jpg", "*.jpeg", "*.png", "*.tif", "*.tiff",
-                    "*.JPG", "*.JPEG", "*.PNG", "*.TIF", "*.TIFF"]
+            from modules.frame_list import (
+                dedupe_frames, glob_patterns, frame_too_small, MIN_FRAME_SHORT_SIDE)
             frames = sorted(set(
-                f for e in exts for f in glob.glob(os.path.join(folder, e))
+                f for e in glob_patterns() for f in glob.glob(os.path.join(folder, e))
             ))
             if not frames:
                 self.error.emit(f"No image files found in: {folder}")
                 return
 
-            # Remove JPG+TIFF duplicate pairs ONCE, before counting or splitting
-            # into batches, so the frame count is the true number of unique
-            # photos and the worker (which applies the identical rule) stays in
+            # Remove duplicate twins (JPG/TIFF/RAW of the same frame) ONCE,
+            # before counting or splitting into batches, so the frame count is
+            # the true number of unique photos and the worker (which applies the
+            # identical rule and the same RAW-vs-JPG/TIFF preference) stays in
             # lockstep. Doing this here is what keeps a final batch from
             # collapsing below the 3-frame minimum after the worker drops twins.
-            from modules.frame_list import (
-                dedupe_jpg_tiff, frame_too_small, MIN_FRAME_SHORT_SIDE)
             _pre_dedup = len(frames)
-            frames = dedupe_jpg_tiff(frames)
+            frames = dedupe_frames(frames, prefer_raw=(self.twin_prefer == "raw"))
             self._deduped_pairs_count = _pre_dedup - len(frames)
 
             if self.frame_end > 0:
@@ -687,28 +690,11 @@ class CleanerWorker(QThread):
                     pass
                 frames = frames[:total]
 
-            def _img_size(path):
-                """Return (width, height) for a frame's header. Tries Pillow
-                first (fast, handles JPEG/PNG/most TIFFs); falls back to
-                tifffile for TIFFs Pillow can't parse (BigTIFF, unusual
-                compression, multi-IFD layouts). Mirrors the worker's
-                cv2 → tifffile → PIL ladder so the GUI scan doesn't reject
-                files the worker would actually be able to process.
-                """
-                try:
-                    with Image.open(path) as img:
-                        return img.size
-                except Exception:
-                    pass
-                if path.lower().endswith(('.tif', '.tiff')):
-                    try:
-                        import tifffile
-                        with tifffile.TiffFile(path) as tf:
-                            page = tf.pages[0]
-                            return (page.imagewidth, page.imagelength)
-                    except Exception:
-                        return None
-                return None
+            from modules.io_safe import image_size as _img_size
+            # image_size returns (width, height) for JPEG/PNG (Pillow), TIFF
+            # (Pillow with tifffile fallback for BigTIFF/odd compression), and
+            # RAW (rawpy .sizes), mirroring the worker's read coverage so the
+            # GUI scan never rejects a file the worker could actually process.
 
             # Inspect every frame's size up front (not just a 10-sample) so
             # we know exactly what's in the folder. The pre-flight modal
@@ -1019,6 +1005,7 @@ class CleanerWorker(QThread):
                     cmd.extend(["--hot-pixel-map", hot_map_file])
                 cmd.extend(["--output-format", self.output_format,
                             "--jpeg-quality", str(self.jpeg_quality)])
+                cmd.extend(["--twin-prefer", self.twin_prefer])
                 cmd.extend(["--expected-width", str(dominant[0]),
                             "--expected-height", str(dominant[1])])
                 if SETTINGS.value("second_scrub_enabled", False, type=bool):
@@ -1750,9 +1737,10 @@ class MainWindow(QMainWindow):
         <li><b>Meteors will be removed too.</b> Their streaks look similar to airplane
         and satellite trails, so the detector can't tell them apart. If you want to
         keep them, use your originals to mask them back in.</li>
-        <li><b>RAW files (.CR2, .NEF, .ARW, etc.) are not yet supported.</b> Convert
-        your sequence to JPG or TIFF first, then run Star Trail CleanR on the converted
-        frames.</li>
+        <li><b>RAW files are supported</b> (.CR2, .CR3, .NEF, .ARW, .RAF, .DNG, and most
+        others). Just drop the folder in. If a frame has both a RAW and a JPG/TIFF,
+        Star Trail CleanR asks once which to use (RAW by default). Keep your output
+        format set to TIFF 16-bit if you want to preserve the RAW's full bit depth.</li>
         <li><b>Not a one-click fix.</b> You'll still want to touch up the final
         composite in Photoshop or your editor of choice. But if we did our job
         right, it's a fraction of the time you used to spend.</li>
@@ -2795,7 +2783,7 @@ class MainWindow(QMainWindow):
         step1_row.setSpacing(12)
         step1 = QLabel(
             "<span style='font-size:19pt; font-weight:bold;'>1. Select Folder with Your Star Trail Images</span>"
-            f"&nbsp;&nbsp;<span style='font-size:14pt; color:{MUTED_TEXT}; vertical-align:baseline;'>(.JPG, .TIF \u2014 8 &amp; 16 bit files accepted)</span>"
+            f"&nbsp;&nbsp;<span style='font-size:14pt; color:{MUTED_TEXT}; vertical-align:baseline;'>(.JPG, .TIF 8/16-bit, and RAW)</span>"
         )
         step1.setTextFormat(Qt.RichText)
         step1_row.addWidget(step1)
@@ -3501,7 +3489,7 @@ class MainWindow(QMainWindow):
 
     def _update_frame_count(self):
         folder = self._folder_input.text().strip()
-        exts = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
+        from modules.frame_list import IMAGE_EXTS as exts
         count = None
         if not folder:
             self._frame_count_label.setText("")
@@ -3522,10 +3510,11 @@ class MainWindow(QMainWindow):
                         os.path.join(folder, n) for n in sorted(os.listdir(folder))
                         if os.path.splitext(n)[1].lower() in exts
                     )
-                    from PIL import Image as _PILImage
-                    with _PILImage.open(first) as _im:
-                        _w, _h = _im.size
-                    dim_str = f"  ({_w:,}px x {_h:,}px)"
+                    from modules.io_safe import image_size as _image_size
+                    _sz = _image_size(first)
+                    if _sz is not None:
+                        _w, _h = _sz
+                        dim_str = f"  ({_w:,}px x {_h:,}px)"
                 except Exception:
                     pass
                 self._frame_count_label.setText(
@@ -3598,10 +3587,9 @@ class MainWindow(QMainWindow):
         self._error_label.setText("")
 
         # Find first image
-        exts = ["*.jpg", "*.jpeg", "*.png", "*.tif", "*.tiff",
-                "*.JPG", "*.JPEG", "*.PNG", "*.TIF", "*.TIFF"]
+        from modules.frame_list import glob_patterns
         frames = sorted(set(
-            f for e in exts for f in glob.glob(os.path.join(folder, e))
+            f for e in glob_patterns() for f in glob.glob(os.path.join(folder, e))
         ))
         if not frames:
             self._error_label.setText("No image files found in the selected folder.")
@@ -3690,10 +3678,9 @@ class MainWindow(QMainWindow):
         # Disk space + memory check: estimate resources needed before the run starts.
         try:
             import shutil as _shutil
-            _exts = ["*.jpg", "*.jpeg", "*.png", "*.tif", "*.tiff",
-                     "*.JPG", "*.JPEG", "*.PNG", "*.TIF", "*.TIFF"]
+            from modules.frame_list import glob_patterns as _glob_patterns
             _frames = sorted(set(
-                f for e in _exts for f in glob.glob(os.path.join(folder, e))
+                f for e in _glob_patterns() for f in glob.glob(os.path.join(folder, e))
             ))
             if _frames:
                 _lim_text = self._frame_limit.currentText().strip()
@@ -3717,8 +3704,11 @@ class MainWindow(QMainWindow):
                     )
                     return None
 
-                with Image.open(_frames[0]) as _im:
-                    _w, _h = _im.size
+                from modules.io_safe import image_size as _image_size
+                _sz0 = _image_size(_frames[0])
+                if _sz0 is None:
+                    raise ValueError("could not read first frame's size")
+                _w, _h = _sz0
 
                 _out_fmt = self._format_combo.currentText()
                 if _out_fmt == "TIFF 16-bit":
@@ -3849,6 +3839,33 @@ class MainWindow(QMainWindow):
                     return None
                 self._mask_path = None
 
+        # RAW vs JPG/TIFF twin choice. If any frame exists as BOTH a RAW and a
+        # JPG/TIFF, ask once which to process (default RAW). When there are no
+        # such pairs, no prompt appears and the default is harmless. The choice
+        # is stored on self and handed to the worker so both sides dedup alike.
+        self._twin_prefer = "raw"
+        try:
+            from modules.frame_list import gather_frames, count_raw_twins
+            _all_files = gather_frames(folder)
+            _twins = count_raw_twins(_all_files)
+        except Exception:
+            _twins = 0
+        if _twins > 0:
+            from PySide6.QtWidgets import QMessageBox as _QMB
+            _dlg = _QMB(self)
+            _dlg.setIcon(_QMB.Question)
+            _dlg.setWindowTitle("RAW and JPEG/TIFF found")
+            _dlg.setText(
+                f"{_twins} of your frames have BOTH a RAW file and a "
+                f"JPEG/TIFF version.\n\n"
+                "Which should Star Trail CleanR process?"
+            )
+            _raw_btn = _dlg.addButton("Use RAW files", _QMB.AcceptRole)
+            _other_btn = _dlg.addButton("Use JPEG/TIFF", _QMB.RejectRole)
+            _dlg.setDefaultButton(_raw_btn)
+            _dlg.exec()
+            self._twin_prefer = "nonraw" if _dlg.clickedButton() is _other_btn else "raw"
+
         self._error_label.setText("")
         return folder, output
 
@@ -3958,7 +3975,8 @@ class MainWindow(QMainWindow):
             frame_start=frame_start,
             frame_end=frame_end,
             max_batch=getattr(self, "_max_batch", 20),
-            mem_note=getattr(self, "_mem_note", ""))
+            mem_note=getattr(self, "_mem_note", ""),
+            twin_prefer=getattr(self, "_twin_prefer", "raw"))
         self.worker.progress.connect(self._on_progress)
         self.worker.status.connect(self._on_status)
         self.worker.batch_info.connect(self._on_batch_info)
@@ -4280,15 +4298,39 @@ class MainWindow(QMainWindow):
             if diagnostic_sent
             else ""
         )
+        from modules.frame_list import RAW_EXTS as _RAW_EXTS
+        _is_raw = _Path(path).suffix.lower() in _RAW_EXTS if path else False
+        if _is_raw:
+            # RAW-specific: the file is a camera RAW we couldn't debayer (an
+            # unusual/newer RAW variant, or a corrupted file). Point the user at
+            # the reliable fix — export that sequence to TIFF or JPEG first.
+            _problem = (
+                "<p>This is a camera RAW file, and Star Trail CleanR couldn't "
+                "decode it. That usually means it's a newer or unusual RAW "
+                "variant, or the file is damaged.</p>"
+            )
+            _workaround = (
+                "<p><b>The fix:</b> export your sequence from Lightroom, Camera "
+                "Raw, DPP, or your editor to <b>16-bit TIFF</b> (keeps the full "
+                "quality) or <b>JPEG</b>, then run Star Trail CleanR on that "
+                "folder.</p>"
+            )
+        else:
+            _problem = (
+                "<p>We tried our image readers three times. None could read "
+                "the file. It may be damaged, or it may have a format our "
+                "readers can't handle.</p>"
+            )
+            _workaround = (
+                "<p><b>As a workaround:</b> export your entire sequence as "
+                "JPEGs and run Star Trail CleanR on the JPEG folder.</p>"
+            )
         msg.setInformativeText(
-            "<p>We tried our image readers three times. None could read "
-            "the file. It may be damaged, or it may have a format our "
-            "readers can't handle.</p>"
+            _problem +
             "<p>If you continue, Star Trail CleanR will skip this frame. "
             "There may be a small gap in your final star trail where this "
             "image would have been.</p>"
-            "<p><b>As a workaround:</b> export your entire sequence as "
-            "JPEGs and run Star Trail CleanR on the JPEG folder.</p>"
+            + _workaround +
             "<p>If you'd like to help us improve, please email this file to "
             "<a href='mailto:bruceherwig+startrailcleanr@gmail.com"
             "?subject=Star%20Trail%20CleanR%20unreadable%20file'>"
@@ -4632,7 +4674,7 @@ class MainWindow(QMainWindow):
         def _read_exif_summary(folder):
             from PIL import Image as _PILImage
             from PIL.ExifTags import TAGS
-            exts = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
+            from modules.frame_list import IMAGE_EXTS as exts
             first = next(
                 (p for p in sorted(os.listdir(folder))
                  if os.path.splitext(p)[1].lower() in exts),

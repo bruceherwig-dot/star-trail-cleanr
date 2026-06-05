@@ -126,7 +126,7 @@ def _raw_labeled_from_state(state, h, w):
             raw[rz > 0] = label_id
     return raw
 from modules.io_safe import robust_imread, robust_imread_diag, robust_imwrite
-from modules.frame_list import dedupe_jpg_tiff
+from modules.frame_list import dedupe_frames, IMAGE_EXTS, RAW_EXTS
 
 
 def _init_worker_sentry():
@@ -248,14 +248,11 @@ def _filter_by_resolution(files: List[Path],
     if len(files) <= 1:
         return files
 
-    from PIL import Image as _PILImage
-
-    def _hdr_size(fp):
-        try:
-            with _PILImage.open(str(fp)) as im:
-                return im.size  # (w, h)
-        except Exception:
-            return None
+    # Use the shared size helper, NOT PIL directly: PIL can't open a camera RAW
+    # (CR2/NEF/ARW/...), so a PIL-only check returns None for every RAW frame and
+    # drops the entire batch as "different resolution". image_size handles RAW
+    # (rawpy), TIFF (tifffile fallback), and JPG/PNG (PIL). Returns (w, h)/None.
+    from modules.io_safe import image_size as _hdr_size
 
     if expected_width and expected_height:
         target = (expected_width, expected_height)
@@ -277,30 +274,31 @@ def _filter_by_resolution(files: List[Path],
 
 def load_frame_files(frame_dir: Path, start: int, batch: int,
                      expected_width: int = None,
-                     expected_height: int = None) -> List[Path]:
-    exts = {'.jpg', '.jpeg', '.png', '.tif', '.tiff'}
-    files = sorted(p for p in frame_dir.iterdir() if p.suffix.lower() in exts)
-    # Drop JPG+TIFF twins on the FULL list before slicing, so frame indices
-    # match the GUI's (which dedups the same way before planning batches).
-    files = dedupe_jpg_tiff(files)
+                     expected_height: int = None,
+                     prefer_raw: bool = True) -> List[Path]:
+    files = sorted(p for p in frame_dir.iterdir() if p.suffix.lower() in IMAGE_EXTS)
+    # Drop twins (JPG/TIFF/RAW of the same frame) on the FULL list before
+    # slicing, so frame indices match the GUI's (which dedups the same way,
+    # with the same RAW-vs-JPG/TIFF preference, before planning batches).
+    files = dedupe_frames(files, prefer_raw=prefer_raw)
     sliced = files[start:start + batch] if batch > 0 else files[start:]
     return _filter_by_resolution(sliced, expected_width, expected_height)
 
 
 def load_with_neighbors(frame_dir: Path, start: int, batch: int,
                         expected_width: int = None,
-                        expected_height: int = None):
+                        expected_height: int = None,
+                        prefer_raw: bool = True):
     """Load batch frames plus one neighbor on each side for repair context.
 
     Returns (all_files, core_start, core_end) where all_files includes
     up to one extra frame before and after, and core_start/core_end
     mark the indices of the actual batch frames within all_files.
     """
-    exts = {'.jpg', '.jpeg', '.png', '.tif', '.tiff'}
-    all_sorted = sorted(p for p in frame_dir.iterdir() if p.suffix.lower() in exts)
-    # Drop JPG+TIFF twins on the FULL list before slicing/indexing, so frame
-    # numbers match the GUI's batch plan (which dedups identically up front).
-    all_sorted = dedupe_jpg_tiff(all_sorted)
+    all_sorted = sorted(p for p in frame_dir.iterdir() if p.suffix.lower() in IMAGE_EXTS)
+    # Drop twins on the FULL list before slicing/indexing, so frame numbers
+    # match the GUI's batch plan (which dedups identically, same preference, up front).
+    all_sorted = dedupe_frames(all_sorted, prefer_raw=prefer_raw)
     total = len(all_sorted)
 
     end = start + batch if batch > 0 else total
@@ -656,6 +654,10 @@ def main():
                         help="Path to hot pixel map file (load if exists, save if not)")
     parser.add_argument("--save-masks", action="store_true",
                         help="Save detection masks to cleanr_workspace/masks/")
+    parser.add_argument("--twin-prefer", choices=["raw", "nonraw"], default="raw",
+                        help="When a frame exists as both a RAW and a JPG/TIFF, "
+                             "which to process. Mirrors the GUI's one-time prompt; "
+                             "default RAW.")
     parser.add_argument("--output-format", choices=["jpg", "tif8", "tif16"],
                         default="jpg",
                         help="Output file format (default jpg)")
@@ -784,7 +786,8 @@ def main():
     # ── Load frames ───────────────────────────────────────────────────────
     frame_files_all, core_start, core_end = load_with_neighbors(
         input_dir, args.start, args.batch,
-        args.expected_width, args.expected_height)
+        args.expected_width, args.expected_height,
+        prefer_raw=(args.twin_prefer == "raw"))
     frame_files = frame_files_all[core_start:core_end]  # core batch files
     n = len(frame_files)
     n_all = len(frame_files_all)
@@ -929,10 +932,19 @@ def main():
     skipped_before_core = 0
     skipped_in_core = 0
     _tread = time.perf_counter()
+    _raw_decode_s = 0.0   # cumulative RAW debayer time (rawpy); 0 for JPG/TIFF
+    _raw_decode_n = 0
     for fi, fp in enumerate(frame_files_all):
         is_core = core_start <= fi < core_end
         is_before_core = fi < core_start
+        _t_read1 = time.perf_counter()
         img, diag = robust_imread_diag(fp, cv2.IMREAD_UNCHANGED)
+        if fp.suffix.lower() in RAW_EXTS and img is not None:
+            # RAW frames are debayered with rawpy, which is far slower than
+            # decoding a JPG/TIFF. Track it so the per-frame cost of RAW input
+            # is visible in the run log instead of hidden in total load time.
+            _raw_decode_s += time.perf_counter() - _t_read1
+            _raw_decode_n += 1
         if img is None:
             # Best-effort developer telemetry — captured before we ask the GUI
             # so we still have data even if the user clicks Stop.
@@ -1024,6 +1036,19 @@ def main():
             flush=True,
         )
     print(f"  {n} frames loaded ({w}x{h})", flush=True)
+    if _raw_decode_n:
+        print(
+            f"  RAW debayer: {_raw_decode_s:.1f}s for {_raw_decode_n} frame(s) "
+            f"({_raw_decode_s / _raw_decode_n:.2f}s/frame)",
+            flush=True,
+        )
+        if logger is not None:
+            logger.log({
+                "type": "raw_decode_timing",
+                "frames": _raw_decode_n,
+                "total_s": round(_raw_decode_s, 3),
+                "avg_s": round(_raw_decode_s / _raw_decode_n, 3),
+            })
 
     dtypes = {str(f.dtype) for f in frames_all}
     if len(dtypes) > 1:
