@@ -2,6 +2,13 @@
 
 ---
 
+## v2.44-beta
+- **RAW files are now supported.** Drop in a folder of camera RAW files (Canon CR2/CR3, Nikon NEF, Sony ARW, Fujifilm RAF, Adobe DNG, and most others) and Star Trail CleanR processes them directly. No more converting to JPEG or TIFF first. Every frame in the sequence is developed the same way (fixed brightness, the camera's own white balance) so your final stack stays even. Your output choice is unchanged: pick 16-bit TIFF to keep the RAW's full quality, or JPEG for smaller files.
+- **If a folder holds both a RAW and a JPEG/TIFF of the same frame**, Star Trail CleanR asks once which to process (RAW by default). A frame that exists in only one format is always kept.
+- **RAW works everywhere:** the folder picker, the foreground mask painter, and the previews all read RAW files.
+- **Clearer message when a RAW can't be read.** If a RAW file can't be decoded (a very new or unusual variant, or a damaged file), the app now says so plainly and points you to exporting that sequence as 16-bit TIFF or JPEG.
+- **Smoke tests:** 148 passing.
+
 ## v2.43-beta
 - **Very small images are now caught up front instead of crashing.** If you point Star Trail CleanR at downsized previews or web-sized exports (anything under 1280 pixels on the shorter side), it now stops with a clear message asking you to use your full-size originals, instead of failing partway through with a confusing error. Trail detection needs full-resolution frames, so these were never going to give good results anyway. Real camera files are far larger and are completely unaffected.
 - **Folders that hold both a JPG and a TIFF of the same photo no longer crash the last batch.** When both versions of a frame were present, the app counted them twice while planning the run, then removed the duplicates later, which could leave the final batch too short and stop with an error. Duplicates are now removed once, up front (keeping the TIFF), so the count is honest, the batches split cleanly, and no frame gets cleaned twice.
