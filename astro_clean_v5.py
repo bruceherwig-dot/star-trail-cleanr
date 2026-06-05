@@ -1380,6 +1380,17 @@ def main():
     if logger is not None:
         _sfp_by_frame  = (static_fp_dbg or {}).get("suppressed_by_frame", {})
         _veto_by_frame = (static_fp_dbg or {}).get("kept_by_veto_by_frame", {})
+
+        def _fp_in_sky(cx, cy):
+            # True if this point is over open sky (foreground mask is 0 there).
+            # With no mask we can't tell, so default to True (treat as sky).
+            if fg_mask is None or cx is None or cy is None:
+                return True
+            yy = min(fg_mask.shape[0] - 1, max(0, int(cy)))
+            xx = min(fg_mask.shape[1] - 1, max(0, int(cx)))
+            return bool(fg_mask[yy, xx] == 0)
+
+        _harvest_sky = _harvest_fg = _harvest_miss = 0
         for _i, _dbg in enumerate(detect_infos):
             if _dbg is None:
                 continue
@@ -1389,10 +1400,36 @@ def main():
                 _dbg["final_trail_components"] = max(0, _ncc - 1)
             else:
                 _dbg["final_trail_components"] = 0
-            _dbg["static_fp_suppressed"]    = _sfp_by_frame.get(_i, [])
+            # Tag every suppressed false positive sky-vs-foreground at log time,
+            # so future analysis never has to re-derive it from the mask.
+            _sfp = _sfp_by_frame.get(_i, [])
+            for _d in _sfp:
+                _sky = _fp_in_sky(_d.get("cx"), _d.get("cy"))
+                _d["in_sky"] = _sky
+                _d["note"] = ("over open sky -- genuine false positive, hard-negative candidate"
+                              if _sky else
+                              "on foreground (wall/tree/building) -- expected, not training material")
+                if _sky:
+                    _harvest_sky += 1
+                else:
+                    _harvest_fg += 1
+            _dbg["static_fp_suppressed"]    = _sfp
             _dbg["static_fp_kept_by_veto"]  = _veto_by_frame.get(_i, [])
+            for _st in (_dbg.get("detect_stages") or []):
+                for _ev in (_st.get("events") or []):
+                    if _ev.get("reason") == "bridge_gap_miss":
+                        _harvest_miss += 1
             _dbg["type"] = "detect"
             logger.log(_dbg)
+
+        logger.log({
+            "type": "harvest",
+            "_doc": "Training examples this batch produced. sky_false_positives = hard negatives; "
+                    "missed_trails_bridged = hard positives; foreground false positives are skipped.",
+            "sky_false_positives": _harvest_sky,
+            "foreground_false_positives": _harvest_fg,
+            "missed_trails_bridged": _harvest_miss,
+        })
 
     masks_per_frame = masks_all[core_start:core_end]
     trail_frames = sum(1 for m in masks_per_frame if m.max() > 0)
