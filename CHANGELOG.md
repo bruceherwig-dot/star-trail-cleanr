@@ -2,6 +2,10 @@
 
 ---
 
+## v2.45-beta
+- **You can now pick a clearer photo to trace your foreground mask against.** The mask painter used to always show the first photo in the folder, which sometimes isn't the easiest one to see the skyline in (clouds, headlights, or a bright glow right along the horizon). A new "Skyline hard to see?" control with left/right arrows sits in the green banner at the top, letting you step through your photos and trace against whichever one shows the ground most clearly. It only changes the background picture you're looking at; the mask you paint is shared by every frame, and your painting, zoom, and pan are kept as you switch. (Single-photo folders don't show the arrows.)
+- **Smoke tests:** 148 passing.
+
 ## v2.44-beta
 - **RAW files are now supported.** Drop in a folder of camera RAW files (Canon CR2/CR3, Nikon NEF, Sony ARW, Fujifilm RAF, Adobe DNG, and most others) and Star Trail CleanR processes them directly. No more converting to JPEG or TIFF first. Every frame in the sequence is developed the same way (fixed brightness, the camera's own white balance) so your final stack stays even. Your output choice is unchanged: pick 16-bit TIFF to keep the RAW's full quality, or JPEG for smaller files.
 - **If a folder holds both a RAW and a JPEG/TIFF of the same frame**, Star Trail CleanR asks once which to process (RAW by default). A frame that exists in only one format is always kept.
