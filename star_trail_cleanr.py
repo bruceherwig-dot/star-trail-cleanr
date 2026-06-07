@@ -3376,7 +3376,7 @@ class MainWindow(QMainWindow):
             "<div style='text-align:center;'>"
             f"<p style='margin:0; font-size:16px; color:{CARD_TEXT};'>"
             "Help spread the word! When you share on social media, "
-            "tag your image with <b>#StarTrailCleanR</b>"
+            "tag <b>@bruceherwig #StarTrailCleanR</b>"
             "</p>"
             f"<p style='margin:24px 0 0 0; font-size:16px; color:{CARD_TEXT};'>"
             "Did you get an error message? Take a screenshot and email "
@@ -3600,7 +3600,7 @@ class MainWindow(QMainWindow):
             self._mask_window = MaskEditorWindow(self)
             self._mask_window.mask_saved.connect(self._on_mask_saved)
 
-        self._mask_window.load_image(frames[0])
+        self._mask_window.load_frames(frames, 0)
 
         # Load existing mask if available
         migrate_workspace(folder)
@@ -4515,7 +4515,7 @@ class MainWindow(QMainWindow):
         v.addSpacing(8)
         share = QLabel(
             "Help spread the word! When you share on social media, "
-            "tag your image with <b>#StarTrailCleanR</b>"
+            "tag <b>@bruceherwig #StarTrailCleanR</b>"
         )
         share.setTextFormat(Qt.RichText)
         share.setWordWrap(True)
@@ -4946,6 +4946,9 @@ class MaskEditorWindow(QMainWindow):
 
     def load_image(self, img_path: str):
         self._painter.load_image(img_path)
+
+    def load_frames(self, paths, index=0):
+        self._painter.load_frames(paths, index)
 
     def load_existing_mask(self, mask_path: str):
         self._painter.load_existing_mask(mask_path)

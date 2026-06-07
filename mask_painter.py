@@ -176,6 +176,28 @@ class MaskGraphicsView(QGraphicsView):
         self.fitInView(self._photo_item, Qt.KeepAspectRatio)
         self._update_zoom_label()
 
+    def set_background_image(self, img_np: np.ndarray):
+        """Swap the background photo only — keep the painted mask and the
+        current zoom/pan. Used when stepping through frames to find a clearer
+        sky to trace against. Star-trail frames share dimensions, so the mask
+        carries over unchanged; if a frame somehow differs in size, the mask is
+        resized to match so the painting still applies."""
+        new_h, new_w = img_np.shape[:2]
+        self._original_img = img_np.copy()
+        if (new_h, new_w) != (self._img_h, self._img_w):
+            if self._mask_np is not None:
+                import cv2
+                self._mask_np = cv2.resize(self._mask_np, (new_w, new_h),
+                                           interpolation=cv2.INTER_NEAREST)
+            self._img_h, self._img_w = new_h, new_w
+            self._update_photo_display()
+            self._refresh_overlay()
+            pad = 500
+            self.setSceneRect(
+                self._photo_item.boundingRect().adjusted(-pad, -pad, pad, pad))
+        else:
+            self._update_photo_display()
+
     def load_mask(self, mask_np: np.ndarray):
         """Load an existing mask (255=foreground)."""
         if mask_np.shape[:2] != (self._img_h, self._img_w):
@@ -492,6 +514,8 @@ class MaskPainterWidget(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._frame_paths = []   # all photos in the folder, in order
+        self._frame_idx = 0      # which one is currently shown as the background
         self._build_ui()
         self._setup_shortcuts()
 
@@ -514,6 +538,42 @@ class MaskPainterWidget(QWidget):
         )
         banner_text.setStyleSheet("color: #a0d0a0; font-size: 16px;")
         banner_layout.addWidget(banner_text)
+
+        # ── Background-photo selector (right side of the green banner) ─────────
+        # Lets the user swap which photo they trace the skyline against — the
+        # first file isn't always the clearest. Switching changes only the
+        # background; the painted mask is shared by every frame.
+        banner_layout.addStretch()
+
+        self._nav_widget = QWidget()
+        nav_layout = QHBoxLayout(self._nav_widget)
+        nav_layout.setContentsMargins(0, 0, 0, 0)
+        nav_layout.setSpacing(6)
+
+        nav_lbl = QLabel("Skyline hard to see?")
+        nav_lbl.setStyleSheet("color: #a0d0a0; font-size: 14px;")
+        nav_layout.addWidget(nav_lbl)
+
+        self._prev_frame_btn = QPushButton("‹")
+        self._next_frame_btn = QPushButton("›")
+        for _b in (self._prev_frame_btn, self._next_frame_btn):
+            _b.setFixedSize(32, 32)
+            _b.setCursor(Qt.PointingHandCursor)
+            _b.setStyleSheet(
+                "QPushButton { color: #d0f0d0; background: #1e2e1e; "
+                "border: 1px solid #3a5a3a; border-radius: 4px; "
+                "font-size: 18px; font-weight: bold; }"
+                "QPushButton:hover { color: white; background: #2e4e2e; "
+                "border-color: #5a8a5a; }"
+                "QPushButton:disabled { color: #4a5a4a; background: #243424; "
+                "border-color: #2a3a2a; }")
+        self._prev_frame_btn.clicked.connect(self._prev_frame)
+        self._next_frame_btn.clicked.connect(self._next_frame)
+        nav_layout.addWidget(self._prev_frame_btn)
+        nav_layout.addWidget(self._next_frame_btn)
+
+        self._nav_widget.hide()  # shown once a multi-photo folder is loaded
+        banner_layout.addWidget(self._nav_widget)
 
         layout.addWidget(self._banner)
 
@@ -696,6 +756,47 @@ class MaskPainterWidget(QWidget):
         self._view.load_image(img_np)
         self._update_brush_label(self._view.brush_radius)
         self._banner.show()
+
+    def load_frames(self, paths, index=0):
+        """Give the editor the full list of photos in the folder and show the
+        one at `index` as the background to trace against. The arrows in the
+        banner step through the rest."""
+        self._frame_paths = list(paths)
+        if self._frame_paths:
+            self._frame_idx = max(0, min(index, len(self._frame_paths) - 1))
+            self.load_image(self._frame_paths[self._frame_idx])
+        else:
+            self._frame_idx = 0
+        self._update_frame_nav()
+
+    def _prev_frame(self):
+        if self._frame_idx > 0:
+            self._frame_idx -= 1
+            self._show_background(self._frame_idx)
+
+    def _next_frame(self):
+        if self._frame_idx < len(self._frame_paths) - 1:
+            self._frame_idx += 1
+            self._show_background(self._frame_idx)
+
+    def _show_background(self, idx):
+        """Swap the background to photo `idx`, keeping the painted mask."""
+        import cv2
+        from modules.io_safe import robust_imread
+        img = robust_imread(self._frame_paths[idx], cv2.IMREAD_COLOR)
+        if img is not None:
+            self._view.set_background_image(img)
+        self._update_frame_nav()
+
+    def _update_frame_nav(self):
+        """Show the arrows only for multi-photo folders; grey out the ends."""
+        n = len(self._frame_paths)
+        if n <= 1:
+            self._nav_widget.hide()
+            return
+        self._nav_widget.show()
+        self._prev_frame_btn.setEnabled(self._frame_idx > 0)
+        self._next_frame_btn.setEnabled(self._frame_idx < n - 1)
 
     def load_existing_mask(self, mask_path: str):
         """Load a previously saved mask."""
