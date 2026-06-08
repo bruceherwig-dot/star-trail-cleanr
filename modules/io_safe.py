@@ -42,7 +42,10 @@ def _restore_cv2_logs(prev):
 
 def _try_cv2(path: str, flags: int) -> Tuple[Optional[np.ndarray], Optional[str]]:
     try:
-        img = cv2.imread(path, flags)
+        # IMREAD_IGNORE_ORIENTATION: never let cv2 silently rotate by EXIF.
+        # Orientation is applied once, centrally, in robust_imread_diag so every
+        # backend (cv2/tifffile/PIL) and every flag behave identically.
+        img = cv2.imread(path, flags | cv2.IMREAD_IGNORE_ORIENTATION)
         if img is None:
             return None, "returned no image (unsupported format or unreadable bytes)"
         return img, None
@@ -80,15 +83,13 @@ def _try_pil(path: str, flags: int) -> Tuple[Optional[np.ndarray], Optional[str]
     handle Unicode correctly on every platform. Returns BGR layout to
     match OpenCV's convention.
 
-    For IMREAD_COLOR specifically, applies EXIF rotation to match cv2's
-    behavior on JPEGs (cv2.imread with IMREAD_COLOR honors EXIF Orientation;
-    IMREAD_UNCHANGED does not).
+    EXIF orientation is NOT applied here; it is applied once, centrally, in
+    robust_imread_diag, so every backend and every flag return identically
+    (un-)oriented pixels.
     """
     try:
-        from PIL import Image, ImageOps
+        from PIL import Image
         with Image.open(path) as im:
-            if flags == cv2.IMREAD_COLOR:
-                im = ImageOps.exif_transpose(im)
             arr = np.asarray(im)
     except Exception as e:
         return None, f"raised {type(e).__name__}: {e}"
@@ -189,7 +190,7 @@ def _try_tifffile(path: str, flags: int) -> Tuple[Optional[np.ndarray], Optional
     return cv2.cvtColor(arr, code), None
 
 
-def robust_imread_diag(
+def _imread_diag_inner(
     path: Union[str, Path],
     flags: int = cv2.IMREAD_UNCHANGED,
     *,
@@ -287,6 +288,54 @@ def robust_imread_diag(
         return None, diag
     finally:
         _restore_cv2_logs(prev)
+
+
+# EXIF Orientation tag -> numpy transform that turns stored pixels upright.
+# Verified to match PIL.ImageOps.exif_transpose. Applied once, centrally, so the
+# whole app (worker, mask painter, previews) always works on upright pixels and
+# the cleaned output gets a "normal" orientation tag (no double-rotation).
+_ORIENT_OPS = {
+    2: lambda a: np.fliplr(a),
+    3: lambda a: np.rot90(a, 2),
+    4: lambda a: np.flipud(a),
+    5: lambda a: np.swapaxes(a, 0, 1),                 # transpose (main diagonal)
+    6: lambda a: np.rot90(a, 3),                       # rotate 90 clockwise
+    7: lambda a: np.rot90(np.swapaxes(a, 0, 1), 2),    # transverse (anti-diagonal)
+    8: lambda a: np.rot90(a, 1),                       # rotate 90 counter-clockwise
+}
+
+
+def exif_orientation(path: Union[str, Path]) -> int:
+    """Return the EXIF Orientation tag (1-8), or 1 if absent/unreadable."""
+    try:
+        from PIL import Image
+        with Image.open(str(path)) as im:
+            ex = im.getexif()
+            return int(ex.get(0x0112, 1)) if ex else 1
+    except Exception:
+        return 1
+
+
+def _apply_orientation(path: Union[str, Path], img: np.ndarray) -> np.ndarray:
+    """Turn stored pixels upright per the file's EXIF Orientation, preserving
+    bit depth (operates on the array). No-op for orientation 1 / no tag."""
+    op = _ORIENT_OPS.get(exif_orientation(path))
+    return np.ascontiguousarray(op(img)) if op is not None else img
+
+
+def robust_imread_diag(
+    path: Union[str, Path],
+    flags: int = cv2.IMREAD_UNCHANGED,
+    *,
+    _retry_delays: Tuple[float, ...] = (1.0, 3.0),
+) -> Tuple[Optional[np.ndarray], Optional[str]]:
+    """Read with fallbacks, then apply EXIF orientation centrally so every
+    backend/flag returns upright pixels. RAW files are oriented by rawpy already,
+    so they are left untouched here."""
+    img, diag = _imread_diag_inner(path, flags, _retry_delays=_retry_delays)
+    if img is not None and Path(str(path)).suffix.lower() not in RAW_EXTS:
+        img = _apply_orientation(path, img)
+    return img, diag
 
 
 def robust_imread(

@@ -846,6 +846,9 @@ def main():
             if source_bytes:
                 ex.load(source_bytes)
             ex[0x0131] = _stamp  # Software tag — shown in Lightroom, Photoshop, and EXIF viewers
+            ex[0x0112] = 1       # Orientation = normal. Pixels are turned upright on read,
+                                 # so the source's rotate tag must NOT ride along, or the
+                                 # viewer would rotate already-upright pixels (double rotation).
             return ex.tobytes()
         except Exception:
             return source_bytes
@@ -976,13 +979,11 @@ def main():
             skipped.append((fp, diag))
             continue
 
-        # JPEGs may have EXIF rotation tags. IMREAD_UNCHANGED ignores them,
-        # but SAHI applies them → mask/frame orientation mismatch.
-        # Re-read with IMREAD_COLOR to get EXIF rotation, if it changes shape.
-        if fp.suffix.lower() in {'.jpg', '.jpeg'}:
-            img_exif = robust_imread(fp, cv2.IMREAD_COLOR)
-            if img_exif is not None and img_exif.shape[:2] != img.shape[:2]:
-                img = img_exif
+        # EXIF orientation (sideways / portrait shots) is now applied centrally
+        # in robust_imread for every format and flag, so `img` is already upright
+        # here. The cleaned file's orientation tag is reset to normal at save time
+        # (see _stamp_exif), so viewers never re-rotate — fixes the double-rotation
+        # that turned portrait-shot output 90 degrees off.
 
         # Some TIFFs carry an embedded alpha channel. IMREAD_UNCHANGED preserves
         # it, producing (H,W,4) arrays that crash Star Bridge repair when mixed
