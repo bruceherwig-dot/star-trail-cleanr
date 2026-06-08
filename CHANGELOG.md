@@ -2,6 +2,10 @@
 
 ---
 
+## v2.46-beta
+- **Photos shot in portrait (or with the camera turned) no longer come out rotated.** If your camera recorded an orientation tag, the cleaned files were being rotated an extra 90 degrees, so a portrait shot came out sideways. The app now turns every frame upright internally and saves the cleaned files in the same orientation as your originals, for every format. Landscape photos on a tripod were never affected. If you already cleaned a portrait set, just re-run it to get correctly-oriented files.
+- **Smoke tests:** 148 passing.
+
 ## v2.45-beta
 - **You can now pick a clearer photo to trace your foreground mask against.** The mask painter used to always show the first photo in the folder, which sometimes isn't the easiest one to see the skyline in (clouds, headlights, or a bright glow right along the horizon). A new "Skyline hard to see?" control with left/right arrows sits in the green banner at the top, letting you step through your photos and trace against whichever one shows the ground most clearly. It only changes the background picture you're looking at; the mask you paint is shared by every frame, and your painting, zoom, and pan are kept as you switch. (Single-photo folders don't show the arrows.)
 - **Smoke tests:** 148 passing.
