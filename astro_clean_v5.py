@@ -795,24 +795,18 @@ def main():
         print(f"ERROR: need >= 3 frames (got {n})")
         sys.exit(1)
 
-    # Grab ICC profile + EXIF from the first core frame so output inherits color
-    # profile (Adobe RGB, ProPhoto, etc.) and camera metadata instead of being
-    # tagged as raw sRGB.
+    # Grab ICC profile + DPI from the first core frame so output inherits the color
+    # profile (Adobe RGB, ProPhoto, etc.) instead of being tagged as raw sRGB. These
+    # are constant across a sequence. EXIF (capture date/time, exposure, lens, GPS) is
+    # read PER FRAME at write time from each frame's own file — never shared across the
+    # batch — so every cleaned frame keeps its own original capture metadata.
     icc_profile = None
-    exif_bytes = None
     dpi = None
     try:
         from PIL import Image as _PILImage
         with _PILImage.open(str(frame_files_all[core_start])) as _meta_im:
             icc_profile = _meta_im.info.get("icc_profile")
             dpi = _meta_im.info.get("dpi")
-            # info.get("exif") works for JPEGs but returns None for TIFFs.
-            # getexif().tobytes() works for both formats.
-            try:
-                _exif_obj = _meta_im.getexif()
-                exif_bytes = _exif_obj.tobytes() if _exif_obj else None
-            except Exception:
-                exif_bytes = _meta_im.info.get("exif")
     except Exception as _e:
         print(f"  WARN: could not read color profile ({_e})")
 
@@ -852,6 +846,25 @@ def main():
             return ex.tobytes()
         except Exception:
             return source_bytes
+
+    def _frame_exif_bytes(path):
+        """Read a single frame's OWN EXIF bytes from its source file. Returns None when the
+        format carries no PIL-readable EXIF (e.g. RAW). Called once per output frame so each
+        cleaned file inherits ITS OWN capture date/time, exposure, lens, and GPS — never the
+        batch leader's. EXIF is the camera's record of the shot and is preserved verbatim;
+        only the Software comment and orientation tag are added (see _stamp_exif)."""
+        try:
+            from PIL import Image as _PILImage
+            with _PILImage.open(str(path)) as _im:
+                # info.get("exif") works for JPEGs but returns None for TIFFs.
+                # getexif().tobytes() works for both formats.
+                try:
+                    _e = _im.getexif()
+                    return _e.tobytes() if _e else None
+                except Exception:
+                    return _im.info.get("exif")
+        except Exception:
+            return None
 
     def _write_finder_comment(out_path: str) -> None:
         """Write _stamp to macOS Finder Comments field via Finder AppleScript. No-op if not macOS."""
@@ -925,8 +938,6 @@ def main():
             return ex.tobytes()
         except Exception:
             return exif_bytes
-
-    exif_bytes = _stamp_exif(exif_bytes)
 
     print(f"Loading {n} frames...")
     frames_all = []
@@ -1518,6 +1529,10 @@ def main():
         skip = (sb > 0) and (i < sb or i >= n - sb)
 
         if not skip:
+            # Read THIS frame's own EXIF (capture date/time, exposure, lens, GPS) from its
+            # source file and add only our Software comment + orientation tag. Per frame —
+            # so cleaned frames never inherit a neighbor's capture time.
+            frame_exif = _stamp_exif(_frame_exif_bytes(fp))
             if trail_px > 0:
                 repair_dbg = {} if logger is not None else None
                 _t0 = time.perf_counter()
@@ -1529,7 +1544,7 @@ def main():
                 _rep_s = time.perf_counter() - _t0
                 _tacc("repair_s", _rep_s)
                 _tw = time.perf_counter()
-                _write_output(fp.stem, cleaned, icc_profile=icc_profile, exif_bytes=exif_bytes, dpi=dpi)
+                _write_output(fp.stem, cleaned, icc_profile=icc_profile, exif_bytes=frame_exif, dpi=dpi)
                 _tacc("write_s", time.perf_counter() - _tw)
                 n_repaired += 1
                 if logger is not None:
@@ -1541,7 +1556,7 @@ def main():
                     logger.log(repair_dbg)
             else:
                 _tw = time.perf_counter()
-                _write_output(fp.stem, img, icc_profile=icc_profile, exif_bytes=exif_bytes, dpi=dpi)
+                _write_output(fp.stem, img, icc_profile=icc_profile, exif_bytes=frame_exif, dpi=dpi)
                 _tacc("write_s", time.perf_counter() - _tw)
                 if logger is not None:
                     logger.log({"type": "repair", "frame": fp.stem,
