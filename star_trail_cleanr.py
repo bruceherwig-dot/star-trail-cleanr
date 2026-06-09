@@ -3250,7 +3250,7 @@ class MainWindow(QMainWindow):
         # A flat QPushButton styled to look like a link. QLabel's <a> link did
         # not reliably fire linkActivated in this layout; a button's clicked
         # signal always fires.
-        self._view_log_link = QPushButton("View Star Log")
+        self._view_log_link = QPushButton("View Star Log (with run detail)")
         self._view_log_link.setFlat(True)
         self._view_log_link.setCursor(Qt.PointingHandCursor)
         _vlf = self._view_log_link.font()
