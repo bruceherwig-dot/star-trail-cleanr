@@ -108,6 +108,87 @@ def _shift_image(img: np.ndarray, dx: float, dy: float) -> np.ndarray:
                           borderMode=cv2.BORDER_REFLECT)
 
 
+# ── Sky-color fallback fill (replaces the old black fill) ──────────────────────
+# Star Bridge still borrows real sky and stars from neighbor frames wherever a clean
+# neighbor exists -- that path is unchanged. These helpers only handle the give-up
+# pixels that used to be set to pure black (no clean neighbor at a crossing, tracking
+# failed, or a borrowed pixel that still looked like trail). Black is invisible in a
+# deep lighten-max stack but shows as a hole in a single frame and in short stacks --
+# bad for timelapse. Instead we paint the local sky color + matching grain.
+
+def _sky_sample(region, comp_mask):
+    """Median sky color and per-channel grain from the window's background, with the
+    brightest ~30% of background pixels (stars) dropped so they don't tint the fill.
+    Returns (median[C], std[C]) or (None, None) when there isn't enough sky to sample."""
+    bg = region[~comp_mask]
+    if bg.shape[0] < 20:
+        return None, None
+    lum = bg.max(axis=1).astype(np.int32)
+    thr = np.percentile(lum, 70)            # drop the brightest ~30% (stars); scale-free
+    sky = bg[lum <= thr]
+    if sky.shape[0] < 20:
+        sky = bg
+    return np.median(sky, axis=0), sky.std(axis=0)
+
+
+SKY_FILL_FEATHER = 3.0  # seam softening (px) applied ONLY to the sky-fill patches.
+                        # The Star Bridge borrow is real, motion-aligned neighbor sky and
+                        # is not feathered (would needlessly soften borrowed stars).
+
+
+def _sky_fill(region, target_mask, comp_mask, feather=SKY_FILL_FEATHER):
+    """Paint target_mask pixels of region with local sky color + matched grain, in
+    place, then feather the seam so the patch fades into the surrounding sky with no
+    hard edge. region is the working window (a view into result). Returns pixels filled;
+    falls back to black only if there is too little surrounding sky to sample."""
+    k = int(target_mask.sum())
+    if k == 0:
+        return 0
+    med, std = _sky_sample(region, comp_mask)
+    if med is None:
+        region[target_mask] = 0             # no sky to sample -> old black behavior
+        return 0
+    maxv = 65535 if region.dtype == np.uint16 else 255
+    noise = np.random.normal(0.0, 1.0, (k, region.shape[2])) * (std + 1.0)
+    region[target_mask] = np.clip(med + noise, 0, maxv).astype(region.dtype)
+    # Feather only the seam: softly blend a thin band straddling the fill boundary
+    # toward a blurred copy, so the patch edge fades into the sky instead of a hard
+    # cut. The interior is already sky and the outside is real sky, so nothing but the
+    # boundary band changes and no trail can bleed back in.
+    if feather and feather > 0:
+        t = target_mask.astype(np.uint8)
+        ksz = max(3, int(round(feather)) * 2 + 1)
+        ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksz, ksz))
+        ring = (cv2.dilate(t, ker) > 0) & ~(cv2.erode(t, ker) > 0)
+        if ring.any():
+            blurred = cv2.GaussianBlur(region, (0, 0), feather).astype(np.float32)
+            a = np.clip(cv2.GaussianBlur(ring.astype(np.float32), (0, 0), feather), 0.0, 1.0)[..., None]
+            region[:] = np.clip(a * blurred + (1.0 - a) * region.astype(np.float32),
+                                0, maxv).astype(region.dtype)
+    return k
+
+
+def _trail_streak(region, comp_mask):
+    """Within comp_mask, return just the actual bright trail streak -- the large or
+    elongated bright components -- leaving compact star blobs out, so stars sitting in
+    the fat part of the mask can be kept. Used when there is no neighbor to borrow."""
+    lum = region.max(axis=2).astype(np.int32)
+    bg = lum[~comp_mask]
+    if bg.size < 20:
+        return comp_mask.copy()
+    sky_l = float(np.median(bg)); sky_s = float(bg.std()) + 1.0
+    bright = (comp_mask & (lum > sky_l + 2.0 * sky_s)).astype(np.uint8)
+    if not bright.any():
+        return np.zeros_like(comp_mask)
+    n, lab, st, _ = cv2.connectedComponentsWithStats(bright, 8)
+    streak = np.zeros_like(comp_mask)
+    for i in range(1, n):
+        a = st[i, cv2.CC_STAT_AREA]; w = st[i, cv2.CC_STAT_WIDTH]; h = st[i, cv2.CC_STAT_HEIGHT]
+        if a >= 40 or max(w, h) / max(1, min(w, h)) >= 3.0:
+            streak |= (lab == i)
+    return streak
+
+
 # ── Star feature tracking (Lucas-Kanade sparse optical flow) ──────────────────
 # Finds bright corners in the prev patch (masking trail pixels), tracks them to
 # the next patch with LK pyramidal optical flow, and returns the median shift.
@@ -349,12 +430,19 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
             use_next = has_next
 
             if not use_prev and not use_next:
-                result[y0:y1, x0:x1][comp_mask] = 0
+                # No neighbor to borrow from. Keep every original pixel (so stars in the
+                # fat part of the mask survive) and replace ONLY the actual bright streak
+                # with local sky color instead of blacking the whole box. If the streak
+                # can't be isolated, fall back to filling the whole component.
+                _win = result[y0:y1, x0:x1]
+                _streak = _trail_streak(frame[y0:y1, x0:x1], comp_mask)
+                _target = _streak if _streak.any() else comp_mask
+                _filled = _sky_fill(_win, _target, comp_mask)
                 if seg_info is not None:
-                    seg_info.update({"method": "black_fill_no_neighbors",
+                    seg_info.update({"method": "sky_fill_no_neighbors",
                                      "tracking_ok": False, "dx": 0.0, "dy": 0.0,
                                      "n_stars": 0, "still_trail_px": 0,
-                                     "union_zeroed_px": 0})
+                                     "union_zeroed_px": 0, "sky_filled_px": int(_filled)})
                     comp_dbg["segments"].append(seg_info)
                 continue
 
@@ -419,8 +507,12 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                             synth[use_prev_only] = warped_prev[use_prev_only]
                         _method = "blend"
                 else:
-                    synth = np.zeros_like(frame[y0:y1, x0:x1])
-                    _method = "black_fill"
+                    # Tracking failed: can't borrow. Keep original pixels (stars) and
+                    # replace only the bright streak with local sky instead of black.
+                    synth = frame[y0:y1, x0:x1].copy()
+                    _streak = _trail_streak(frame[y0:y1, x0:x1], comp_mask)
+                    _sky_fill(synth, _streak if _streak.any() else comp_mask, comp_mask)
+                    _method = "sky_fill_track_failed"
 
             elif use_prev:
                 synth = neighbor_frames[prev_idx][y0:y1, x0:x1].copy()
@@ -445,12 +537,16 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
             still_trail = (comp_mask &
                            (filled[..., 2] - filled[..., 0] > warm_thresh) &
                            (filled[..., 2] > TRAIL_BRIGHT_THRESH))
-            result[y0:y1, x0:x1][still_trail] = 0
+            # Borrowed pixel still looks like trail -> can't trust it. These sit on the
+            # trail (no star to keep), so paint local sky instead of black.
+            if still_trail.any():
+                _sky_fill(result[y0:y1, x0:x1], still_trail, comp_mask)
             _still_trail_px = int(still_trail.sum())
 
-            # ── AND union mask: zero pixels contaminated in BOTH neighbors ────
-            # Pixels in only one neighbor's trail are already repaired above.
-            # Black is transparent in lighten-max stacks so the cost is zero.
+            # ── AND union mask: BOTH neighbors have the trail here (the crossing) ──
+            # Pixels in only one neighbor's trail are already repaired above. Where both
+            # neighbors are dirty there is nothing clean to borrow; these are trail
+            # pixels (no star to keep), so paint local sky instead of black.
             _union_zeroed_px = 0
             if neighbor_masks is not None:
                 prev_c = (neighbor_masks[prev_idx][y0:y1, x0:x1] > 0
@@ -460,7 +556,8 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                           if has_next and neighbor_masks[next_idx] is not None
                           else np.zeros(comp_mask.shape, dtype=bool))
                 union_both = comp_mask & prev_c & next_c
-                result[y0:y1, x0:x1][union_both] = 0
+                if union_both.any():
+                    _sky_fill(result[y0:y1, x0:x1], union_both, comp_mask)
                 _union_zeroed_px = int(union_both.sum())
             _addt("paste_s", time.perf_counter() - _tp)
 
