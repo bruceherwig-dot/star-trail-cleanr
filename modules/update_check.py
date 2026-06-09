@@ -28,27 +28,39 @@ LINUX_ASSET = "StarTrailCleanR-Linux-x86_64.tar.gz"
 MAC_ASSET = MAC_AS_ASSET
 
 
-def parse_tag(tag) -> Optional[float]:
-    """Convert a release tag like 'v1.4-beta' to 1.4. Returns None on parse failure."""
-    if not tag or not isinstance(tag, str):
+def _version_tuple(s) -> Optional[tuple]:
+    """Parse 'v2.47-beta', '2.47', or '1.406' into a comparable tuple of ints
+    like (2, 47). Splits on '.', reads the leading number of each component,
+    and stops at the first non-numeric tail (e.g. the '-beta' suffix).
+    Returns None if there is no leading numeric component.
+
+    Component-wise integer comparison is used instead of float() so the banner
+    agrees with Sparkle's own version comparator: 2.10 is NEWER than 2.9, and
+    2.100 is NEWER than 2.99 — both of which a plain float comparison gets
+    backwards (float('2.10') == 2.1 < 2.9). Our versions are major.build-counter
+    (e.g. 2.46, 2.47, 2.48 ...), so the counter crossing 9->10 or 99->100 must
+    not flip the ordering."""
+    if not s or not isinstance(s, str):
         return None
-    m = re.match(r"^v(\d+(?:\.\d+)?)", tag)
-    if not m:
-        return None
-    try:
-        return float(m.group(1))
-    except ValueError:
-        return None
+    parts = []
+    for chunk in s.strip().lstrip("vV").split("."):
+        m = re.match(r"\d+", chunk)
+        if not m:
+            break
+        parts.append(int(m.group(0)))
+    return tuple(parts) if parts else None
 
 
-def parse_local(version_str) -> Optional[float]:
-    """Convert a local version.txt string like '1.406' to 1.406. None on failure."""
-    if not version_str or not isinstance(version_str, str):
-        return None
-    try:
-        return float(version_str.strip())
-    except (ValueError, AttributeError):
-        return None
+def parse_tag(tag) -> Optional[tuple]:
+    """Convert a release tag like 'v2.47-beta' to a comparable version tuple
+    like (2, 47). Returns None on parse failure."""
+    return _version_tuple(tag)
+
+
+def parse_local(version_str) -> Optional[tuple]:
+    """Convert a local version.txt string like '2.47' to a comparable version
+    tuple like (2, 47). Returns None on failure."""
+    return _version_tuple(version_str)
 
 
 def _detect_asset() -> str:

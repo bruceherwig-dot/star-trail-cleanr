@@ -236,3 +236,66 @@ jobs:
 
             **Linux** (x86_64, Ubuntu 22.04+ / Debian 12+ / Fedora 36+ or newer)
             - StarTrailCleanR-Linux-x86_64.tar.gz. Extract anywhere (`tar -xzf StarTrailCleanR-Linux-x86_64.tar.gz`), then run `./StarTrailCleanR/StarTrailCleanR` from the extracted folder. First Linux release; please report any issues.
+
+  publish-appcast:
+    # Auto-publish the Sparkle/WinSparkle auto-update feeds after the release
+    # is cut. THIS is the step that actually reaches already-installed apps.
+    # It used to be a manual local command (scripts/release_signer.py) that got
+    # skipped after v2.04-beta, silently freezing every auto-update user 43
+    # versions behind while the website download kept advancing. Now it runs
+    # automatically on a macOS runner (needed for the vendored sign_update
+    # tool), signs each installer with the SPARKLE_ED_PRIVATE_KEY secret,
+    # prepends the new version to all three appcasts on gh-pages, and then
+    # HARD-FAILS the build if the live feeds don't advertise the new version.
+    # "Build green" now means "users will actually get this update."
+    needs: [release]
+    runs-on: macos-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Download built installers
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Check out gh-pages feed branch
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: gh-pages-pub
+      - name: Write signing key from secret
+        # The ed25519 key is a GitHub encrypted secret; it is masked in logs
+        # and written to a runner-temp file that is destroyed with the runner.
+        env:
+          KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        run: |
+          printf '%s' "$KEY" > "$RUNNER_TEMP/sparkle_key"
+          chmod 600 "$RUNNER_TEMP/sparkle_key"
+      - name: Sign installers and update feeds
+        run: |
+          chmod +x vendored/sparkle-bin/sign_update
+          python3 scripts/publish_appcast.py "${GITHUB_REF_NAME}" \
+            --artifacts-dir artifacts \
+            --key-file "$RUNNER_TEMP/sparkle_key" \
+            --gh-pages-dir gh-pages-pub
+      - name: Commit and push updated feeds
+        run: |
+          cd gh-pages-pub
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Feeds already current — nothing to publish."
+          else
+            git commit -m "Publish ${GITHUB_REF_NAME} to auto-update feeds"
+            git push origin gh-pages
+          fi
+      - name: Verify feeds are live (hard gate)
+        # Polls all three live feeds; fails the build if any does not advertise
+        # the new version within the timeout. This is the alarm that makes a
+        # skipped or partial publish impossible to miss.
+        run: python3 scripts/publish_appcast.py "${GITHUB_REF_NAME}" --verify

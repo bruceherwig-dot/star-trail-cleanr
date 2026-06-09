@@ -16,10 +16,12 @@ def test_update_check_imports():
 
 def test_parse_tag_basic():
     from modules.update_check import parse_tag
-    assert parse_tag("v1.4-beta") == 1.4
-    assert parse_tag("v1.5-beta") == 1.5
-    assert parse_tag("v2.0") == 2.0
-    assert parse_tag("v10.0-beta") == 10.0
+    # Versions parse to component-wise integer tuples, not floats, so the
+    # banner agrees with Sparkle (2.10 newer than 2.9, 2.100 newer than 2.99).
+    assert parse_tag("v1.4-beta") == (1, 4)
+    assert parse_tag("v2.47-beta") == (2, 47)
+    assert parse_tag("v2.0") == (2, 0)
+    assert parse_tag("v10.0-beta") == (10, 0)
 
 
 def test_parse_tag_failures():
@@ -32,9 +34,9 @@ def test_parse_tag_failures():
 
 def test_parse_local_basic():
     from modules.update_check import parse_local
-    assert parse_local("1.406") == 1.406
-    assert parse_local("1.400") == 1.4
-    assert parse_local("  1.5  ") == 1.5
+    assert parse_local("2.47") == (2, 47)
+    assert parse_local("2.5") == (2, 5)
+    assert parse_local("  2.9  ") == (2, 9)
 
 
 def test_parse_local_failures():
@@ -45,21 +47,26 @@ def test_parse_local_failures():
 
 
 def test_version_comparison_logic():
-    """User on 1.400 installer, remote v1.5-beta -> update available."""
+    """User on 2.46, remote v2.47-beta -> update available. Also lock the
+    component-wise boundaries a float comparison gets backwards."""
     from modules.update_check import parse_tag, parse_local
-    assert parse_local("1.400") < parse_tag("v1.5-beta")
+    assert parse_local("2.46") < parse_tag("v2.47-beta")
+    # 2.10 is NEWER than 2.9 (float('2.10') == 2.1 would wrongly say older).
+    assert parse_local("2.9") < parse_tag("v2.10-beta")
+    # 2.100 is NEWER than 2.99.
+    assert parse_local("2.99") < parse_tag("v2.100-beta")
 
 
 def test_version_comparison_dev_ahead():
-    """Bruce's dev Mac at 1.406, latest tag still v1.4-beta -> NO update banner."""
+    """Bruce's dev Mac at 2.48, latest tag still v2.47-beta -> NO update banner."""
     from modules.update_check import parse_tag, parse_local
-    assert parse_local("1.406") > parse_tag("v1.4-beta")
+    assert parse_local("2.48") > parse_tag("v2.47-beta")
 
 
 def test_version_comparison_equal():
-    """User on 1.400, latest tag v1.4-beta -> equal, no banner."""
+    """User on 2.47, latest tag v2.47-beta -> equal, no banner."""
     from modules.update_check import parse_tag, parse_local
-    assert parse_local("1.400") == parse_tag("v1.4-beta")
+    assert parse_local("2.47") == parse_tag("v2.47-beta")
 
 
 def test_download_url_per_platform():
