@@ -1,53 +1,57 @@
-<?xml version="1.0" encoding="utf-8"?>
-<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/">
-  <channel>
-    <title>Star Trail CleanR &#8212; Mac (Apple Silicon)</title>
-    <link>https://bruceherwig-dot.github.io/star-trail-cleanr/appcast-mac-apple-silicon.xml</link>
-    <description>Auto-update feed for Star Trail CleanR on Mac (Apple Silicon).</description>
-    <language>en</language>
-    <item>
-      <title>Version 2.04-beta</title>
-      <pubDate>Fri, 01 May 2026 23:49:03 +0000</pubDate>
-      <sparkle:version>2.04</sparkle:version>
-      <sparkle:shortVersionString>2.04-beta</sparkle:shortVersionString>
-      <enclosure
-        url="https://github.com/bruceherwig-dot/star-trail-cleanr/releases/download/v2.04-beta/StarTrailCleanR-Mac-AppleSilicon.dmg"
-        sparkle:edSignature="kI9akCmpEHSwjLr92FE1s1nwef6+cgw+pmIzKjYqmGeIZWWlkJdvQBgNDhwvjbKwwhcz7lpt7/xORZ7vDDFWAg=="
-        length="605977004"
-        type="application/octet-stream" />
-    </item>
-    <item>
-      <title>Version 2.03-beta</title>
-      <pubDate>Fri, 01 May 2026 21:55:36 +0000</pubDate>
-      <sparkle:version>2.03</sparkle:version>
-      <sparkle:shortVersionString>2.03-beta</sparkle:shortVersionString>
-      <enclosure
-        url="https://github.com/bruceherwig-dot/star-trail-cleanr/releases/download/v2.03-beta/StarTrailCleanR-Mac-AppleSilicon.dmg"
-        sparkle:edSignature="/pSgZKg9UqopS/bkTjsQYbzkC1OVEj9c4lYvkqi2NE5xyq3CD3oYKmte29A5zSE9COdmUkWe+OThcwA691yRBw=="
-        length="612981327"
-        type="application/octet-stream" />
-    </item>
-    <item>
-      <title>Version 2.01-beta</title>
-      <pubDate>Thu, 01 May 2026 19:07:54 +0000</pubDate>
-      <sparkle:version>2.01</sparkle:version>
-      <sparkle:shortVersionString>2.01-beta</sparkle:shortVersionString>
-      <enclosure
-        url="https://github.com/bruceherwig-dot/star-trail-cleanr/releases/download/v2.01-beta/StarTrailCleanR-Mac-AppleSilicon.zip"
-        sparkle:edSignature="luaTz9UMlhRz43aL/0BvDTrNY3NKBs7/BKBw3Un/QMBYMyyLEUDqPRz9YZsUN6rZc3Ju2q2VTbEAEUsJFJDPBA=="
-        length="1127084977"
-        type="application/octet-stream" />
-    </item>
-    <item>
-      <title>Version 2.0-beta</title>
-      <pubDate>Thu, 01 May 2026 16:19:14 +0000</pubDate>
-      <sparkle:version>2.0</sparkle:version>
-      <sparkle:shortVersionString>2.0-beta</sparkle:shortVersionString>
-      <enclosure
-        url="https://github.com/bruceherwig-dot/star-trail-cleanr/releases/download/v2.0-beta/StarTrailCleanR-Mac-AppleSilicon.zip"
-        sparkle:edSignature="85dnvZw5EsmJXvsJyaN0a9IPX48AAsfrRKo7qQvpLbFGXyFQU/lp5Ex8jVbPBiXyjobHYJuu+elQWFwlxTU1CA=="
-        length="1127108621"
-        type="application/octet-stream" />
-    </item>
-  </channel>
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/" version="2.0">
+    <channel>
+        <title>Star Trail CleanR — Mac (Apple Silicon)</title>
+        <link>https://bruceherwig-dot.github.io/star-trail-cleanr/appcast-mac-apple-silicon.xml</link>
+        <description>Auto-update feed for Star Trail CleanR on Mac (Apple Silicon).</description>
+        <language>en</language>
+        <item>
+            <title>2.47</title>
+            <pubDate>Tue, 09 Jun 2026 13:08:34 -0700</pubDate>
+            <sparkle:version>2.47</sparkle:version>
+            <sparkle:shortVersionString>2.47-beta</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>10.13</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/bruceherwig-dot/star-trail-cleanr/releases/download/v2.47-beta/StarTrailCleanR-Mac-AppleSilicon.dmg" length="649153604" type="application/octet-stream" sparkle:edSignature="0BYED36o7yp+3Amebz8dV+N7omYlMkqWk79d7jFzNxeoLQjpEZ5CSie3bkoh108vLa9TWlpmFWeMpA8fP3nmBQ=="/>
+        </item>
+        <item>
+            <title>2.05</title>
+            <pubDate>Fri, 01 May 2026 18:01:33 -0700</pubDate>
+            <sparkle:version>2.05</sparkle:version>
+            <sparkle:shortVersionString>2.05</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>10.13</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/bruceherwig-dot/star-trail-cleanr/releases/download/v2.47-beta/StarTrailCleanR-Mac-AppleSilicon.dmg" length="594487458" type="application/octet-stream" sparkle:edSignature="rM0/In0ld1gb5Ryi6NhzMs6BYVyHoToKvr3/UB+pL5maqxZvyzMBKknkdBqs6Vd9cT8bUtdnnU+WLTgT0zR4AA=="/>
+        </item>
+        <item>
+            <title>Version 2.04-beta</title>
+            <pubDate>Fri, 01 May 2026 23:49:03 +0000</pubDate>
+            <sparkle:version>2.04</sparkle:version>
+            <sparkle:shortVersionString>2.04</sparkle:shortVersionString>
+            <enclosure url="https://github.com/bruceherwig-dot/star-trail-cleanr/releases/download/v2.47-beta/StarTrailCleanR-Mac-AppleSilicon.dmg" length="605977004" type="application/octet-stream" sparkle:edSignature="kI9akCmpEHSwjLr92FE1s1nwef6+cgw+pmIzKjYqmGeIZWWlkJdvQBgNDhwvjbKwwhcz7lpt7/xORZ7vDDFWAg=="/>
+            <sparkle:minimumSystemVersion>10.13</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+        </item>
+        <item>
+            <title>Version 2.03-beta</title>
+            <pubDate>Fri, 01 May 2026 21:55:36 +0000</pubDate>
+            <sparkle:version>2.03</sparkle:version>
+            <sparkle:shortVersionString>2.03-beta</sparkle:shortVersionString>
+            <enclosure url="https://github.com/bruceherwig-dot/star-trail-cleanr/releases/download/v2.03-beta/StarTrailCleanR-Mac-AppleSilicon.dmg" sparkle:edSignature="/pSgZKg9UqopS/bkTjsQYbzkC1OVEj9c4lYvkqi2NE5xyq3CD3oYKmte29A5zSE9COdmUkWe+OThcwA691yRBw==" length="612981327" type="application/octet-stream"/>
+        </item>
+        <item>
+            <title>Version 2.01-beta</title>
+            <pubDate>Thu, 01 May 2026 19:07:54 +0000</pubDate>
+            <sparkle:version>2.01</sparkle:version>
+            <sparkle:shortVersionString>2.01-beta</sparkle:shortVersionString>
+            <enclosure url="https://github.com/bruceherwig-dot/star-trail-cleanr/releases/download/v2.01-beta/StarTrailCleanR-Mac-AppleSilicon.zip" sparkle:edSignature="luaTz9UMlhRz43aL/0BvDTrNY3NKBs7/BKBw3Un/QMBYMyyLEUDqPRz9YZsUN6rZc3Ju2q2VTbEAEUsJFJDPBA==" length="1127084977" type="application/octet-stream"/>
+        </item>
+        <item>
+            <title>Version 2.0-beta</title>
+            <pubDate>Thu, 01 May 2026 16:19:14 +0000</pubDate>
+            <sparkle:version>2.0</sparkle:version>
+            <sparkle:shortVersionString>2.0-beta</sparkle:shortVersionString>
+            <enclosure url="https://github.com/bruceherwig-dot/star-trail-cleanr/releases/download/v2.0-beta/StarTrailCleanR-Mac-AppleSilicon.zip" sparkle:edSignature="85dnvZw5EsmJXvsJyaN0a9IPX48AAsfrRKo7qQvpLbFGXyFQU/lp5Ex8jVbPBiXyjobHYJuu+elQWFwlxTU1CA==" length="1127108621" type="application/octet-stream"/>
+        </item>
+    </channel>
 </rss>
