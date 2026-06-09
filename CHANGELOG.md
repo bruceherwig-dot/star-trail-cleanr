@@ -2,6 +2,12 @@
 
 ---
 
+## v2.47-beta
+- **Trail gaps are now filled with matching sky color instead of black.** When a trail is removed, the app rebuilds that spot using the real sky and stars from the frames just before and after. In the few places it can't borrow a clean view — most often where a slow satellite sits on almost the same pixels for three frames in a row — it used to drop in a small black patch. Black disappears in a finished star-trail stack, so you'd never see it there, but it showed up as a dark mark in the individual cleaned frames and flickered through any timelapse made from them. Those spots are now painted with the surrounding sky's own color and grain, the real stars around the gap are kept, and the edges are softly blended so the patch melts into the sky instead of punching a black hole. The main repair (borrowing real sky and stars from neighboring frames) is unchanged.
+- **Each cleaned frame now keeps its own capture date and time.** The capture timestamp was being copied from the first photo in each batch of 20 onto all 20 frames, so most cleaned files showed the wrong time and the times jumped every 20 frames. Now every cleaned frame carries its own original date, time, exposure, lens, and GPS exactly as the camera recorded them. (Your filenames were always correct — this only affected the time stored inside the file. Applies to RAW, JPEG, and TIFF.)
+- **The run-log link now reads "View Star Log (with run detail)"** so it's clearer what it opens.
+- **Smoke tests:** 148 passing.
+
 ## v2.46-beta
 - **Photos shot in portrait (or with the camera turned) no longer come out rotated.** If your camera recorded an orientation tag, the cleaned files were being rotated an extra 90 degrees, so a portrait shot came out sideways. The app now turns every frame upright internally and saves the cleaned files in the same orientation as your originals, for every format. Landscape photos on a tripod were never affected. If you already cleaned a portrait set, just re-run it to get correctly-oriented files.
 - **Smoke tests:** 148 passing.
