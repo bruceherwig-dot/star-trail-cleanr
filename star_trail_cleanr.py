@@ -837,6 +837,26 @@ class CleanerWorker(QThread):
             self._skipped_unreadable_count = len(unreadable_sorted)
             self._dominant_size_str = f"{dominant[0]} × {dominant[1]}"
 
+            # Bit-depth scan (header-only). A folder can hold a mix of 8-bit and
+            # 16-bit frames -- e.g. most frames have a 16-bit TIFF twin we keep,
+            # but a few tail frames are JPG-only (8-bit). Rather than fail on a
+            # late batch, the worker evens every batch out to one depth; here we
+            # pick that target (the majority across the whole sequence) and count
+            # how many frames it will touch, for an honest one-line note.
+            from modules.io_safe import image_bitdepth as _img_depth
+            _depths = [d for d in (_img_depth(f) for f in frames) if d is not None]
+            if _depths:
+                _n16 = sum(1 for d in _depths if d == 16)
+                _n8 = len(_depths) - _n16
+                # Majority wins; a tie favors 16-bit so the higher-precision
+                # frames are never the ones degraded.
+                self._dominant_bitdepth = 16 if _n16 >= _n8 else 8
+                self._normalized_depth_count = sum(
+                    1 for d in _depths if d != self._dominant_bitdepth)
+            else:
+                self._dominant_bitdepth = None
+                self._normalized_depth_count = 0
+
             MAX_BATCH = self.max_batch  # memory-aware cap (20 unless RAM is tight)
             n_batches = (total + MAX_BATCH - 1) // MAX_BATCH
             batch_size = (total + n_batches - 1) // n_batches if n_batches else MAX_BATCH
@@ -860,6 +880,12 @@ class CleanerWorker(QThread):
             if _dups:
                 header += (f"\nMerged {_dups} duplicate JPG/TIFF pair"
                            f"{'s' if _dups != 1 else ''} (kept the TIFF)")
+            _normed = getattr(self, "_normalized_depth_count", 0)
+            if _normed:
+                _depth_label = "16-bit" if self._dominant_bitdepth == 16 else "8-bit"
+                header += (f"\nEvened out {_normed} frame"
+                           f"{'s' if _normed != 1 else ''} to {_depth_label} "
+                           f"(folder mixes 8-bit and 16-bit)")
             header += f"\n{n_batches} batch{'es' if n_batches > 1 else ''} to run"
             self.status.emit(header + "\nStarting\u2026")
 
@@ -1090,6 +1116,8 @@ class CleanerWorker(QThread):
                 cmd.extend(["--twin-prefer", self.twin_prefer])
                 cmd.extend(["--expected-width", str(dominant[0]),
                             "--expected-height", str(dominant[1])])
+                if getattr(self, "_dominant_bitdepth", None):
+                    cmd.extend(["--expected-bitdepth", str(self._dominant_bitdepth)])
                 if SETTINGS.value("second_scrub_enabled", False, type=bool):
                     cmd.append("--second-scrub")
 

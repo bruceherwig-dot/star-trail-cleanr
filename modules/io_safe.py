@@ -421,6 +421,54 @@ def image_size(path: Union[str, Path]) -> Optional[Tuple[int, int]]:
     return None
 
 
+# Pillow modes that carry more than 8 bits per sample. Everything else
+# ('L', 'P', 'RGB', 'RGBA', 'CMYK', 'YCbCr', '1', ...) is 8-bit. 'I' (32-bit
+# int) and 'F' (32-bit float) are bucketed as 16 because the pipeline only
+# distinguishes two storage depths: uint8 vs uint16.
+_PIL_16BIT_MODES = {"I", "I;16", "I;16B", "I;16L", "I;16N", "F"}
+
+
+def image_bitdepth(path: Union[str, Path]) -> Optional[int]:
+    """Return the storage bit depth bucket for an image: 8 or 16 (or None if it
+    can't be determined). Header-only where possible, so it stays cheap on a
+    folder of full-resolution frames.
+
+    The pipeline only cares about two buckets, because the worker loads frames
+    with IMREAD_UNCHANGED and gets either a uint8 or a uint16 array:
+      * RAW is always 16 (debayered to 16-bit by rawpy).
+      * TIFF is read from the file's sample depth via tifffile -- Pillow has no
+        16-bit RGB mode and mis-reports a 16-bit RGB TIFF as 8-bit, so it can't
+        be trusted for the format that matters most here.
+      * JPEG / PNG are decided by the Pillow mode (JPEG is always 8; a 16-bit
+        PNG reports an I-family mode).
+    Anything deeper than 8-bit reports 16. Mirrors the reader's format coverage
+    so the GUI's pre-flight scan and the worker agree on a frame's depth.
+    """
+    p = str(path)
+    ext = Path(p).suffix.lower()
+
+    if ext in RAW_EXTS:
+        return 16
+
+    if ext in _TIFF_EXTS:
+        try:
+            import tifffile
+            with tifffile.TiffFile(p) as tf:
+                dt = tf.pages[0].dtype
+            if dt is not None:
+                return 16 if dt.itemsize >= 2 else 8
+        except Exception:
+            pass  # fall through to Pillow as a last resort
+
+    try:
+        from PIL import Image
+        with Image.open(p) as im:
+            mode = im.mode
+        return 16 if mode in _PIL_16BIT_MODES else 8
+    except Exception:
+        return None
+
+
 def robust_imwrite(path: Union[str, Path], image: np.ndarray) -> bool:
     """Drop-in cv2.imwrite replacement that handles non-ASCII paths.
 

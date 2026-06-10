@@ -108,6 +108,14 @@ from modules.trail_grouper import detection_props
 from modules.repair import repair_frame
 from modules.run_logger import RunLogger
 
+# TEMPORARY TEST (2026-06-09): Star Bridge repair combine mode under evaluation.
+# "average" is the shipped default (blend both warped neighbors). "single_shift"
+# is the candidate Bruce is testing (use one shifted neighbor, no averaging, so
+# faint stars don't wash out). Overridable via the STC_REPAIR_COMBINE env var.
+# REVERT this default to "average" before any release until single+shift is
+# confirmed by Bruce's real-run review. Does NOT affect the Crayon give-up path.
+REPAIR_COMBINE = os.environ.get("STC_REPAIR_COMBINE", "single_shift")
+
 
 def _raw_labeled_from_state(state, h, w):
     """Build the raw-SAHI labeled mask (pixel value = prediction index 1..N) from
@@ -336,6 +344,46 @@ def load_with_neighbors(frame_dir: Path, start: int, batch: int,
     core_end = min(core_end, len(sliced))
 
     return sliced, core_start, core_end
+
+
+def _resolve_target_dtype(frames, expected_bitdepth):
+    """Pick the one dtype every frame in a batch should share.
+
+    A folder can legitimately hold both 8-bit and 16-bit frames (e.g. most
+    frames have a 16-bit TIFF/RAW twin we keep, but a few tail frames exist only
+    as an 8-bit JPG). The hot-pixel, sky-mask and Star Bridge steps all assume a
+    single dtype per batch, so the loader brings every frame to one target.
+
+    Prefers the sequence-wide majority the GUI computed and passed as
+    `expected_bitdepth` (8 or 16) so every batch normalizes to the same depth and
+    the output stays consistent. When that isn't given (worker run standalone),
+    falls back to this batch's own majority, with ties going to 16-bit so frames
+    are never needlessly down-converted.
+    """
+    if expected_bitdepth == 16:
+        return np.uint16
+    if expected_bitdepth == 8:
+        return np.uint8
+    n16 = sum(1 for f in frames if f.dtype == np.uint16)
+    n8 = sum(1 for f in frames if f.dtype == np.uint8)
+    return np.uint16 if n16 >= n8 else np.uint8
+
+
+def _match_bitdepth(img, target_dtype):
+    """Return `img` converted to `target_dtype` (np.uint8 or np.uint16), or the
+    same array unchanged when it already matches (the caller relies on identity
+    to count how many frames were actually converted).
+
+    8-bit -> 16-bit scales by 257 to fill the range (255 -> 65535); 16-bit ->
+    8-bit drops the low byte. These are the exact conversions the save path
+    already uses, so a normalized frame and a frame natively at that depth look
+    identical downstream.
+    """
+    if img.dtype == target_dtype:
+        return img
+    if target_dtype == np.uint16:
+        return img.astype(np.uint16) * 257
+    return (img >> 8).astype(np.uint8)
 
 
 _CENTROID_MOTION_PX = 20   # centroid offset above which a neighbor is a different object
@@ -667,8 +715,8 @@ def main():
       1. Parse args and set up output folders + (dev-only) the JSONL run logger.
       2. Define the nested output-writing / EXIF helpers (closures over args).
       3. Load the batch frames plus one neighbor on each side, reading EXIF/ICC,
-         stripping alpha, applying orientation, and bailing on mixed bit depth or
-         mixed portrait/landscape shapes.
+         stripping alpha, applying orientation, evening out any mixed bit depth
+         to one target, and bailing on mixed portrait/landscape shapes.
       4. Optional hot-pixel repair on the foreground (only when a mask is given).
       5. Step 1 — detect trails per frame via the SAHI pipeline, then run the
          second-scrub (1b), static-FP suppressor (1c), and edge rescue (1d).
@@ -716,6 +764,11 @@ def main():
                         help="Expected image width — when provided, skips per-batch resolution detection")
     parser.add_argument("--expected-height", type=int, default=None,
                         help="Expected image height")
+    parser.add_argument("--expected-bitdepth", type=int, choices=[8, 16], default=None,
+                        help="Target storage bit depth (8 or 16). Frames not at "
+                             "this depth are converted so each batch is uniform. "
+                             "The GUI passes the sequence-wide majority; when "
+                             "omitted the worker uses the batch's own majority.")
     parser.add_argument("--second-scrub", action="store_true",
                         help="Run detection a second time on each frame rotated 180°, merging any new trails found")
     args = parser.parse_args()
@@ -1144,13 +1197,30 @@ def main():
                 "avg_s": round(_raw_decode_s / _raw_decode_n, 3),
             })
 
-    dtypes = {str(f.dtype) for f in frames_all}
-    if len(dtypes) > 1:
-        print("\nERROR: this folder mixes 8-bit and 16-bit images "
-              "(for example, both .jpg and .tif copies of the same photos). "
-              "Move one set into a different folder so every frame is the "
-              "same format, then try again.")
-        sys.exit(1)
+    # Even out mixed bit depths instead of refusing the run. A folder can
+    # legitimately hold both 8-bit and 16-bit frames -- most often when most
+    # frames have a 16-bit TIFF/RAW twin we keep, but a few tail frames exist
+    # only as an 8-bit JPG. Every frame (core + neighbors) is brought to one
+    # target depth: the sequence-wide majority the GUI passes via
+    # --expected-bitdepth, or this batch's own majority when run standalone.
+    # This replaces an older hard stop that aborted the WHOLE run on the first
+    # mixed batch -- which was usually the last one, after every earlier batch
+    # had already been cleaned, leaving the user a half-finished job and a
+    # message that wrongly blamed them for keeping jpg+tif copies (the one case
+    # our up-front twin-merge already handles).
+    _target_dtype = _resolve_target_dtype(frames_all, args.expected_bitdepth)
+    _n_normalized = 0
+    for _i in range(len(frames_all)):
+        _conv = _match_bitdepth(frames_all[_i], _target_dtype)
+        if _conv is not frames_all[_i]:
+            frames_all[_i] = _conv
+            _n_normalized += 1
+    if _n_normalized:
+        _depth_label = "16-bit" if _target_dtype == np.uint16 else "8-bit"
+        print(f"  Evened out {_n_normalized} frame(s) to {_depth_label} so the "
+              f"whole batch is one format.", flush=True)
+    # Re-point the core view at the (possibly replaced) arrays.
+    frames = frames_all[core_start:core_end]
 
     # The foreground mask, hot-pixel step and Star Bridge repair all assume every
     # frame in the batch shares one shape. A mixed portrait/landscape batch (or a
@@ -1645,6 +1715,7 @@ def main():
                                        frames_all,
                                        neighbor_masks=neighbor_masks,
                                        polygon_segs=segs_all[i + core_start],
+                                       combine=REPAIR_COMBINE,
                                        debug_out=repair_dbg)
                 _rep_s = time.perf_counter() - _t0
                 _tacc("repair_s", _rep_s)

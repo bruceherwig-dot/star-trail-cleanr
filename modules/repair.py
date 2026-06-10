@@ -343,6 +343,7 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                  neighbor_frames: list,
                  neighbor_masks: list = None,
                  polygon_segs: list = None,
+                 combine: str = "average",
                  debug_out=None, _timing_acc=None, _single_component=False) -> np.ndarray:
     """Replace masked trail pixels using Star Bridge sparse-track morph repair.
 
@@ -363,6 +364,14 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
             with its own Star Bridge pass instead of merging all polygons into one
             connected-components analysis. Crossing-split arms are separate entries
             so each narrow arm is repaired independently.
+        combine: how to fill a gap where BOTH neighbor frames are clean. "average"
+            (default — the unchanged shipped behavior) blends the two warped
+            neighbors. "single_shift" uses only the previous neighbor, shifted into
+            position, with a per-pixel fall back to the next neighbor where the
+            previous one is itself covered by the trail. single_shift keeps the
+            borrowed stars at full brightness (no averaging dilution, so faint
+            stars don't drop out) at the cost of a small star-position offset. The
+            per-pixel handling for a dirty neighbor is identical under both modes.
         debug_out (dict, optional): filled with a "components" list. Each entry
             has id, area, bbox, split_into, and a "segments" list. Each segment
             has tracking_ok, dx, dy, n_stars, method, still_trail_px,
@@ -396,8 +405,8 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
             if not (seg_mask > 0).any():
                 continue
             result = repair_frame(result, seg_mask, frame_idx, neighbor_frames,
-                                  neighbor_masks=neighbor_masks, _timing_acc=_timing_acc,
-                                  _single_component=True)
+                                  neighbor_masks=neighbor_masks, combine=combine,
+                                  _timing_acc=_timing_acc, _single_component=True)
         if debug_out is not None:
             debug_out["timing"] = {k: round(v, 3) for k, v in _timing_acc.items()}
         return result
@@ -499,6 +508,35 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
             _ok = False
             _n_stars = 0
 
+            # ── Crayon v2: the cleaner RAW neighbor, for the give-up cases ───────
+            # When the bridge can't produce clean borrowed sky (tracking failed, a
+            # borrowed pixel still reads as trail, or both neighbors are dirty) we no
+            # longer synthesize a sky-color + grain patch (that speckled on smooth
+            # twilight skies). Instead we paste the CLEANER real neighbor frame raw
+            # (no shift, no brightness levelling). raw_clean = the per-pixel cleaner-
+            # neighbor image for this window. It is None only when there is genuinely no
+            # neighbor at all (degenerate single-frame run).
+            _rp = neighbor_frames[prev_idx][y0:y1, x0:x1] if has_prev else None
+            _rn = neighbor_frames[next_idx][y0:y1, x0:x1] if has_next else None
+            _pdirty = ((neighbor_masks[prev_idx][y0:y1, x0:x1] > 0)
+                       if (has_prev and neighbor_masks is not None and neighbor_masks[prev_idx] is not None)
+                       else np.zeros(comp_mask.shape, dtype=bool))
+            _ndirty = ((neighbor_masks[next_idx][y0:y1, x0:x1] > 0)
+                       if (has_next and neighbor_masks is not None and neighbor_masks[next_idx] is not None)
+                       else np.zeros(comp_mask.shape, dtype=bool))
+            if _rp is not None and _rn is not None:
+                raw_clean = _rp.copy()
+                raw_clean[_pdirty & ~_ndirty] = _rn[_pdirty & ~_ndirty]   # prev dirty -> next
+                _both = _pdirty & _ndirty                                  # both dirty -> less-dirty one
+                if _both.any() and int((_ndirty & comp_mask).sum()) < int((_pdirty & comp_mask).sum()):
+                    raw_clean[_both] = _rn[_both]
+            elif _rp is not None:
+                raw_clean = _rp.copy()
+            elif _rn is not None:
+                raw_clean = _rn.copy()
+            else:
+                raw_clean = None
+
             if use_prev and use_next:
                 # ── Star feature tracking (Lucas-Kanade sparse optical flow) ──
                 patch_prev = neighbor_frames[prev_idx][y0:y1, x0:x1]
@@ -534,9 +572,15 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                         cp = _contam(warped_prev)
                         cn = _contam(warped_next)
                         if cp <= _CONTAM_THRESH and cn <= _CONTAM_THRESH:
-                            synth = ((warped_prev.astype(np.float32) +
-                                      warped_next.astype(np.float32)) / 2.0).astype(frame.dtype)
-                            _method = "blend"
+                            if combine == "single_shift":
+                                # One neighbor, shifted into place. No averaging, so
+                                # borrowed stars keep full brightness.
+                                synth = warped_prev.copy()
+                                _method = "single_shift"
+                            else:
+                                synth = ((warped_prev.astype(np.float32) +
+                                          warped_next.astype(np.float32)) / 2.0).astype(frame.dtype)
+                                _method = "blend"
                         elif cp <= cn:
                             synth = warped_prev.copy()
                             _method = "prev_only"
@@ -553,36 +597,79 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                         next_c = (neighbor_masks[next_idx][y0:y1, x0:x1] > 0
                                   if has_next and neighbor_masks[next_idx] is not None
                                   else np.zeros(comp_mask.shape, dtype=bool))
-                        # Default to the averaged blend, then override the pixels where
-                        # exactly one neighbor is dirty: prev dirty & next clean -> take
-                        # next only, and vice versa. Pixels dirty in both are left as the
-                        # blend here and get sky-filled later (see the AND union block).
-                        synth = ((warped_prev.astype(np.float32) +
-                                  warped_next.astype(np.float32)) / 2.0).astype(frame.dtype)
+                        # Base fill where both neighbors are clean: averaged blend
+                        # (default) or the previous neighbor alone (single_shift).
+                        # Then override the pixels where exactly one neighbor is
+                        # dirty: prev dirty & next clean -> take next only, and vice
+                        # versa. Pixels dirty in both are left as-is here and get
+                        # sky-filled later (see the AND union block). The per-pixel
+                        # dirty handling is identical under both modes.
+                        if combine == "single_shift":
+                            synth = warped_prev.copy()
+                        else:
+                            synth = ((warped_prev.astype(np.float32) +
+                                      warped_next.astype(np.float32)) / 2.0).astype(frame.dtype)
                         use_next_only = comp_mask & prev_c & ~next_c
                         if use_next_only.any():
                             synth[use_next_only] = warped_next[use_next_only]
                         use_prev_only = comp_mask & next_c & ~prev_c
                         if use_prev_only.any():
                             synth[use_prev_only] = warped_prev[use_prev_only]
-                        _method = "blend"
+                        _method = "single_shift" if combine == "single_shift" else "blend"
                 else:
-                    # Tracking failed: can't borrow. Keep original pixels (stars) and
-                    # replace only the bright streak with local sky instead of black.
-                    synth = frame[y0:y1, x0:x1].copy()
-                    _streak = _trail_streak(frame[y0:y1, x0:x1], comp_mask)
-                    _sky_fill(synth, _streak if _streak.any() else comp_mask, comp_mask)
-                    _method = "sky_fill_track_failed"
+                    # Tracking failed (too few stars to measure the shift). Crayon v2:
+                    # paste the cleaner real neighbor raw (no shift) instead of a
+                    # synthetic sky-color fill. raw_clean is never None here (both
+                    # neighbors exist).
+                    synth = raw_clean.copy()
+                    _method = "raw_clean_track_failed"
 
             elif use_prev:
-                synth = neighbor_frames[prev_idx][y0:y1, x0:x1].copy()
-                _method = "prev_only"
+                # Only the previous frame is available (e.g. the LAST frame of a
+                # sequence has no next). Track the star motion between prev and THIS
+                # frame and shift prev onto this frame's star positions, instead of
+                # pasting it in flat. Falls back to a flat copy only if there are too
+                # few stars to track reliably, so it never makes a frame worse.
+                patch_prev = neighbor_frames[prev_idx][y0:y1, x0:x1]
+                _dx, _dy, _ok, _n_stars = _track_stars(
+                    patch_prev, frame[y0:y1, x0:x1], trail_mask=comp_mask)
+                if _ok:
+                    # prev's stars sit at p; in THIS frame they are at p+(dx,dy).
+                    # Shift prev forward by (dx,dy) to land them on this frame.
+                    synth = _shift_image(patch_prev, _dx, _dy)
+                    _method = "prev_shift"
+                else:
+                    synth = patch_prev.copy()
+                    _method = "prev_only"
 
             else:
-                synth = neighbor_frames[next_idx][y0:y1, x0:x1].copy()
-                _method = "next_only"
+                # Only the next frame is available (e.g. the FIRST frame of a sequence
+                # -- like 143A8732 -- has no prev). Track the star motion between THIS
+                # frame and next and shift next BACK onto this frame's positions.
+                # Falls back to a flat copy only if tracking is unreliable.
+                patch_next = neighbor_frames[next_idx][y0:y1, x0:x1]
+                _dx, _dy, _ok, _n_stars = _track_stars(
+                    frame[y0:y1, x0:x1], patch_next, trail_mask=comp_mask)
+                if _ok:
+                    # next's stars sit at p+(dx,dy) relative to THIS frame's p.
+                    # Shift next back by (-dx,-dy) to land them on this frame.
+                    synth = _shift_image(patch_next, -_dx, -_dy)
+                    _method = "next_shift"
+                else:
+                    synth = patch_next.copy()
+                    _method = "next_only"
 
             _tp = time.perf_counter()
+            # ── Paste the borrowed neighbor sky at its native brightness ─────────
+            # We deliberately do NOT brightness-level the patch to the surrounding
+            # window. On a twilight gradient the window average spans the darker sky
+            # above the warm horizon glow, so levelling dragged warm fills toward gray
+            # (a visible gray rectangle: the neighbor sky there reads red ~200, but
+            # levelling shipped red ~138). The neighbor frames are near-identical to this
+            # one, so their sky already matches -- pasting it raw keeps the warm glow.
+            # Levelling only ever helped a faint lighten on the first frame or two of a
+            # run (sky brightness drifts most at the very start); that is 1-2 frames in
+            # an 800-frame run, not worth graying every twilight fill.
             result[y0:y1, x0:x1][comp_mask] = synth[comp_mask]
 
             # ── Warm-pixel cleanup (still-trail remnants after warp) ──────────
@@ -604,10 +691,14 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
             still_trail = (comp_mask &
                            (filled[..., 2] - filled[..., 0] > warm_thresh) &
                            (filled[..., 2] > TRAIL_BRIGHT_THRESH))
-            # Borrowed pixel still looks like trail -> can't trust it. These sit on the
-            # trail (no star to keep), so paint local sky instead of black.
+            # Borrowed pixel still looks like trail -> the neighbor we borrowed from
+            # had the trail here too. Crayon v2: paste the cleaner raw neighbor (native
+            # brightness) instead of a synthetic sky-color patch.
             if still_trail.any():
-                _sky_fill(result[y0:y1, x0:x1], still_trail, comp_mask)
+                if raw_clean is not None:
+                    result[y0:y1, x0:x1][still_trail] = raw_clean[still_trail]
+                else:
+                    _sky_fill(result[y0:y1, x0:x1], still_trail, comp_mask)
             _still_trail_px = int(still_trail.sum())
 
             # ── AND union mask: BOTH neighbors have the trail here (the crossing) ──
@@ -624,7 +715,12 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                           else np.zeros(comp_mask.shape, dtype=bool))
                 union_both = comp_mask & prev_c & next_c
                 if union_both.any():
-                    _sky_fill(result[y0:y1, x0:x1], union_both, comp_mask)
+                    # Crayon v2: both neighbors dirty here -> paste the less-dirty raw
+                    # neighbor (native brightness) instead of a synthetic fill.
+                    if raw_clean is not None:
+                        result[y0:y1, x0:x1][union_both] = raw_clean[union_both]
+                    else:
+                        _sky_fill(result[y0:y1, x0:x1], union_both, comp_mask)
                 _union_zeroed_px = int(union_both.sum())
             _addt("paste_s", time.perf_counter() - _tp)
 
