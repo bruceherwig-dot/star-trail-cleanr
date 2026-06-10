@@ -1,9 +1,57 @@
 #!/usr/bin/env python3
-"""mask_viewr.py — full-frame STC mask viewer.
+"""mask_viewr.py — full-frame Star Trail CleanR detection mask viewer (YOLO MaskViewR).
 
-Shows each source frame with colored, numbered outlines for every detected
-trail region from the mask Star Trail CleanR actually used.  Navigate frame
-by frame; scroll/pinch to zoom; drag to pan.
+What it is
+----------
+A maintained developer review app. It walks through a dataset frame by frame
+and overlays, on each source image, every trail region Star Trail CleanR
+detected on that frame. You see, in one place, what the detector found and how
+the pipeline turned those detections into the masks it actually repaired.
+
+What it shows on each frame
+---------------------------
+- Colored, numbered outlines, one per repaired trail. When per-polygon JSON is
+  present, each fitted polygon (including separately-split crossing arms) gets
+  its own numbered outline; otherwise it falls back to outlining each connected
+  blob in the saved mask PNG.
+- Thin yellow outlines for the raw SAHI/YOLO detections (the "_raw" mask),
+  drawn underneath so you can compare raw hits against the cleaned-up mask.
+- An optional tile grid matching the SAHI 640x640 slicing, with A/B/C row
+  letters down the left and 1/2/3 column numbers across the top, so a region
+  can be named by tile (e.g. "B3").
+- A clear "No detection" label on frames with nothing detected.
+
+How it reads a frame
+--------------------
+For each source image `IMG.jpg` it looks in `<image folder>/cleanr_workspace/masks/`
+for `IMG.png` (the final repaired mask), `IMG_raw.png` (raw YOLO/SAHI hits), and
+`IMG_polys.json` (per-polygon fit data). Missing files degrade gracefully.
+
+Interaction
+-----------
+- Arrow keys / Prev / Next / slider / type-a-frame to navigate.
+- Scroll or pinch to zoom, drag to pan, double-click to fit.
+- Click a trail or raw detection to select it and read its tile, centroid,
+  bounding box, and pixel area.
+- "Copy Frame" puts a one-line reference (frame, dataset, selected id, tile,
+  coords, image path, mask path, mask write time) on the clipboard.
+- "Add To WeirdR" appends the current frame to `weirdr_list.json` (a running
+  list of odd frames worth revisiting).
+- "Tiles" toggles the grid; "Relaunch" restarts the app; "O" reopens the
+  folder picker; "Q"/Escape quits.
+
+How to run
+----------
+`python3 tools/mask_viewr.py` — a setup dialog asks for the source images
+folder (the masks folder is found automatically beside it). The last folder and
+frame are remembered in `~/.star_trail_cleanr/mask_viewr_config.json`.
+
+Where it fits
+-------------
+One of Bruce's annotation/detection review tools. Unlike Mask CheckR (which
+pulls reviewed polygons from CVAT), MaskViewR reads the masks Star Trail CleanR
+itself wrote to disk, so it answers "what did the live pipeline actually
+detect and repair on this frame?"
 """
 import json
 import os
@@ -23,11 +71,13 @@ from PySide6.QtWidgets import (
     QLineEdit, QMainWindow, QPushButton, QSlider, QVBoxLayout, QWidget,
 )
 
-STATE_DIR    = Path.home() / ".star_trail_cleanr"
-CONFIG_FILE  = STATE_DIR / "mask_viewr_config.json"
-WEIRDR_PATH  = Path(__file__).parent.parent / "weirdr_list.json"
-IMAGE_EXTS   = {".jpg", ".jpeg", ".tif", ".tiff", ".png"}
-MAX_W, MAX_H = 1800, 1080
+# Where the app remembers its last folder/frame, the flagged-frames list it
+# appends to, the image types it will open, and the on-screen display cap.
+STATE_DIR    = Path.home() / ".star_trail_cleanr"          # hidden per-user state folder
+CONFIG_FILE  = STATE_DIR / "mask_viewr_config.json"        # remembers last folder + frame
+WEIRDR_PATH  = Path(__file__).parent.parent / "weirdr_list.json"  # running "odd frame" list
+IMAGE_EXTS   = {".jpg", ".jpeg", ".tif", ".tiff", ".png"}  # source image types it will load
+MAX_W, MAX_H = 1800, 1080                                  # largest on-screen render before downscaling
 
 # One color per detected trail (BGR, same palette as TileFixR)
 TRAIL_COLORS = [
@@ -47,6 +97,7 @@ TRAIL_COLORS = [
 # ── Config ────────────────────────────────────────────────────────────────────
 
 def load_config():
+    """Return the saved settings dict (last folder, last frame), or {} if none/unreadable."""
     if CONFIG_FILE.exists():
         try:
             return json.loads(CONFIG_FILE.read_text())
@@ -56,6 +107,7 @@ def load_config():
 
 
 def save_config(data):
+    """Write the settings dict back to disk, creating the state folder if needed."""
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     CONFIG_FILE.write_text(json.dumps(data, indent=2))
 
@@ -63,10 +115,21 @@ def save_config(data):
 # ── Zoomable image view (adapted from TileFixR) ───────────────────────────────
 
 class ZoomableImageView(QGraphicsView):
-    """Scroll/wheel/pinch to zoom; drag to pan."""
+    """The image canvas: shows the rendered frame and handles zoom/pan/click.
+
+    Scroll wheel or pinch zooms, drag pans, double-click fits the image. A plain
+    click (mouse barely moved) fires the `clicked` signal with the scene
+    coordinate, which the main window uses to select a trail. It also paints the
+    tile-grid row/column labels pinned to the viewport edges so they stay put
+    while you zoom and pan. Adapted from the matching view in TileFixR.
+    """
     clicked = Signal(QPointF)
 
     def __init__(self, parent=None):
+        # Build a single-image graphics scene set up for hand-drag panning and
+        # pinch-zoom, on a dark background. _tile_bboxes holds the grid cells (in
+        # scene coords) used to draw the edge labels; _mouse_press_pos tracks
+        # where a press began so we can tell a click from a drag.
         super().__init__(parent)
         self._scene = QGraphicsScene(self)
         self.setScene(self._scene)
@@ -82,11 +145,13 @@ class ZoomableImageView(QGraphicsView):
         self._mouse_press_pos = None
 
     def mousePressEvent(self, event):
+        """Remember where a left-button press started (to distinguish click from drag)."""
         if event.button() == Qt.LeftButton:
             self._mouse_press_pos = event.pos()
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event):
+        """On left release, if the mouse barely moved (<5px) treat it as a click and emit it."""
         if event.button() == Qt.LeftButton and self._mouse_press_pos is not None:
             delta = event.pos() - self._mouse_press_pos
             if (delta.x() ** 2 + delta.y() ** 2) ** 0.5 < 5:
@@ -100,6 +165,11 @@ class ZoomableImageView(QGraphicsView):
         self.viewport().update()
 
     def _fit_with_strips(self):
+        """Zoom-to-fit the image while reserving a 40px strip on the top and left edges.
+
+        The reserved strip is where the tile row/column labels live, so this keeps
+        the whole image visible without the labels covering its edges.
+        """
         BOX_SIZE = 40
         sr = self._scene.sceneRect()
         if not sr.isValid() or sr.isEmpty():
@@ -125,7 +195,14 @@ class ZoomableImageView(QGraphicsView):
         self.centerOn(cx, cy)
 
     def drawForeground(self, painter, rect):
-        """Draw tile row letters and column numbers pinned to the viewport edges."""
+        """Draw tile row letters and column numbers pinned to the viewport edges.
+
+        Runs on every repaint. It maps each stored tile box into current viewport
+        pixels, paints a white label strip down the left edge (row letters A, B,
+        C...) and across the top edge (column numbers 1, 2, 3...) with blue
+        borders, so any region can be named by its tile while the image is zoomed
+        or panned. Does nothing if there are no tile boxes or none are on screen.
+        """
         super().drawForeground(painter, rect)
         if not self._tile_bboxes:
             return
@@ -226,6 +303,13 @@ class ZoomableImageView(QGraphicsView):
         painter.restore()
 
     def set_pixmap(self, pixmap, keep_zoom=False):
+        """Show a new rendered frame.
+
+        With keep_zoom=False (a fresh dataset/first frame) it fits the image to
+        the window. With keep_zoom=True (stepping to the next frame) it preserves
+        the current zoom level and center so you can scan the same spot across
+        many frames without re-zooming each time.
+        """
         if keep_zoom:
             old_transform = self.transform()
             center_in_scene = self.mapToScene(self.viewport().rect().center())
@@ -246,6 +330,7 @@ class ZoomableImageView(QGraphicsView):
             self._fit_with_strips()
 
     def event(self, ev):
+        """Handle trackpad pinch gestures as zoom; pass everything else through."""
         if ev.type() == QEvent.Gesture:
             pinch = ev.gesture(Qt.PinchGesture)
             if pinch and pinch.scaleFactor() != 1.0:
@@ -254,14 +339,17 @@ class ZoomableImageView(QGraphicsView):
         return super().event(ev)
 
     def wheelEvent(self, ev):
+        """Zoom in a little on scroll-up, out a little on scroll-down."""
         factor = 1.12 if ev.angleDelta().y() > 0 else 0.89
         self.scale(factor, factor)
 
     def mouseDoubleClickEvent(self, event):
+        """Double-click resets zoom and re-fits the whole frame to the window."""
         self._scene.setSceneRect(QRectF(self._item.pixmap().rect()))
         self._fit_with_strips()
 
     def keyPressEvent(self, event):
+        """Forward Left/Right arrows to the main window (frame nav); handle the rest normally."""
         key = event.key()
         if key in (Qt.Key.Key_Left, Qt.Key.Key_Right):
             p = self.parent()
@@ -274,6 +362,14 @@ class ZoomableImageView(QGraphicsView):
 # ── Setup dialog ──────────────────────────────────────────────────────────────
 
 class SetupDialog(QDialog):
+    """The opening folder picker.
+
+    Asks for the source-images folder and confirms that Star Trail CleanR has
+    been run on it (by checking for the `cleanr_workspace/masks` subfolder
+    beside the images). Pre-fills the last-used folder from saved config. On
+    "Open" it either accepts (handing back the image and masks folders) or warns
+    that the masks folder is missing.
+    """
     def __init__(self, parent=None, img_dir=None, mask_dir=None):
         super().__init__(parent)
         self.setWindowTitle("YOLO MaskViewR — Setup")
@@ -343,11 +439,13 @@ class SetupDialog(QDialog):
         self.adjustSize()
 
     def _section_label(self, text):
+        """Build a small bold section header label (e.g. "Source images folder")."""
         lbl = QLabel(text)
         lbl.setStyleSheet("font-size: 15px; font-weight: bold; color: #a8c0e0;")
         return lbl
 
     def _lbl_style(self, filled):
+        """Return the path-label stylesheet: brighter text when a folder is chosen, dim when not."""
         color = "#e6e6e6" if filled else "#4a6a8a"
         return (
             f"font-size: 14px; color: {color}; background: #0d1e3a; "
@@ -355,6 +453,7 @@ class SetupDialog(QDialog):
         )
 
     def _make_row(self):
+        """Build one path row: a label showing the folder plus a "Choose..." button. Returns both."""
         lbl = QLabel()
         lbl.setWordWrap(False)
         btn = QPushButton("Choose…")
@@ -368,6 +467,7 @@ class SetupDialog(QDialog):
         return lbl, btn
 
     def _pick(self):
+        """Open a native folder chooser for the source images and record the pick."""
         start = str(self._img_dir or Path.home())
         path  = QFileDialog.getExistingDirectory(self, "Select source images folder", start)
         if not path:
@@ -378,6 +478,12 @@ class SetupDialog(QDialog):
         self._open_btn.setEnabled(True)
 
     def _try_accept(self):
+        """Confirm the masks folder exists beside the images, then accept; else warn.
+
+        Star Trail CleanR writes masks to `<images>/cleanr_workspace/masks`. If
+        that folder is there, store it and close successfully. If not, show a
+        "run STC first" message offering Try Again or Quit.
+        """
         if not (self._img_dir and self._img_dir.is_dir()):
             return
         candidate = self._img_dir / "cleanr_workspace" / "masks"
@@ -405,15 +511,21 @@ class SetupDialog(QDialog):
             QApplication.quit()
 
     def result_dirs(self):
+        """Return the chosen (images folder, masks folder) pair after the dialog closes."""
         return self._img_dir, self._mask_dir
 
 
 # ── Image rendering ───────────────────────────────────────────────────────────
 
 def compute_tile_bboxes(img_h, img_w, tile_size=640, overlap=0.2):
-    """SAHI tile positions matching get_sliced_prediction's slicing logic.
+    """Recreate the 640x640 overlapping tile grid SAHI uses to slice the frame.
 
-    Returns list of (xmin, ymin, xmax, ymax, row_idx, col_idx).
+    Mirrors the detector's slicing: 640px tiles stepping by 80% of that (20%
+    overlap), with the last tile in each row/column pulled back to sit flush
+    against the image edge. Used to draw the tile grid and to name a region by
+    its tile (e.g. "B3"). Returns a list of
+    (xmin, ymin, xmax, ymax, row_index, col_index) tuples in full-resolution
+    image coordinates.
     """
     step = int(tile_size * (1 - overlap))
     bboxes = []
@@ -446,6 +558,12 @@ def compute_tile_bboxes(img_h, img_w, tile_size=640, overlap=0.2):
 
 
 def load_image(path: Path) -> Optional[np.ndarray]:
+    """Load any supported source image as an 8-bit BGR array, or None if unreadable.
+
+    Handles the formats this tool opens: 16-bit images are scaled down to 8-bit,
+    grayscale is expanded to color, and 4-channel (with alpha) is reduced to BGR,
+    so the rest of the renderer always gets a plain 3-channel image.
+    """
     img = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
     if img is None:
         return None
@@ -465,7 +583,24 @@ def render_frame(img: np.ndarray, mask: Optional[np.ndarray],
                  selected_mask: Optional[np.ndarray] = None,
                  selected_color: tuple = (255, 255, 255),
                  poly_data: Optional[dict] = None) -> np.ndarray:
-    """Line widths scaled to ~2px / ~1px on screen. orig_h/orig_w = full-res dims for tile grid."""
+    """Paint all the overlays onto a copy of the frame and return the result.
+
+    This is the heart of the display. In layered order it draws:
+      1. the optional tile grid (gray boxes, when show_tiles is on);
+      2. the raw SAHI/YOLO detections as thin yellow outlines (from raw_mask),
+         underneath so they show through;
+      3. the repaired trails as colored, numbered outlines — one per fitted
+         polygon when poly_data is present (so split crossing arms read as
+         separate trails), otherwise one per connected blob in `mask`;
+      4. a big centered "No detection" label when nothing was found;
+      5. a translucent highlight + thick outline on the currently-selected trail
+         (selected_mask), tinted white for a final mask or yellow for a raw hit.
+
+    Line widths and font sizes are scaled so outlines land at roughly 1-2px on
+    screen regardless of how far the image was downscaled. orig_h/orig_w are the
+    full-resolution dimensions, needed to place the tile grid and polygon points
+    correctly on the (typically half-size) display image.
+    """
     h, w = img.shape[:2]
     disp = img.copy()
 
@@ -583,6 +718,7 @@ def render_frame(img: np.ndarray, mask: Optional[np.ndarray],
 
 
 def np_to_pixmap(arr: np.ndarray) -> QPixmap:
+    """Convert a rendered BGR image array into a Qt pixmap for display."""
     rgb = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
     h, w, ch = rgb.shape
     qi = QImage(rgb.data, w, h, w * ch, QImage.Format.Format_RGB888)
@@ -592,6 +728,14 @@ def np_to_pixmap(arr: np.ndarray) -> QPixmap:
 # ── Main window ───────────────────────────────────────────────────────────────
 
 class MaskViewR(QMainWindow):
+    """The application window: nav bar, image canvas, and all the per-frame state.
+
+    Owns the list of frames, the current index, the loaded image/mask/raw/polygon
+    data for the frame on screen, and the click-to-select state. It wires the
+    toolbar buttons and slider to navigation, loads each frame's masks from
+    `cleanr_workspace/masks`, hands everything to `render_frame`, and handles
+    clicks to select and report individual trails.
+    """
     def __init__(self):
         super().__init__()
         self.setWindowTitle("YOLO MaskViewR")
@@ -638,6 +782,12 @@ class MaskViewR(QMainWindow):
         self.resize(MAX_W, MAX_H + 90)
 
     def _build_nav_bar(self):
+        """Build the two-row top bar: title/status/close banner, plus the button-and-slider toolbar.
+
+        The toolbar holds Prev/Next, Copy Frame, the Tiles toggle, Add To WeirdR,
+        a keyboard-hint line, and the frame scrubber slider with a type-a-frame
+        box. Returns the assembled widget.
+        """
         bar = QWidget()
         outer = QVBoxLayout(bar)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -783,6 +933,10 @@ class MaskViewR(QMainWindow):
     # ── Setup flow ────────────────────────────────────────────────────────────
 
     def run_setup(self):
+        """Show the folder picker and load the chosen dataset (or close if cancelled at startup).
+
+        Also reachable mid-session via the "O" key to switch datasets.
+        """
         cfg = load_config()
         dlg = SetupDialog(
             self,
@@ -796,6 +950,12 @@ class MaskViewR(QMainWindow):
         self._load_dataset(img_dir, mask_dir, cfg.get("frame_index", 0))
 
     def _load_dataset(self, img_dir: Path, mask_dir, start_idx: int):
+        """Take a folder pair, build the sorted frame list, jump to start_idx, and show it.
+
+        Records the chosen folders and frame in config so the next launch reopens
+        where you left off. Does nothing useful (just a status note) if the folder
+        holds no supported images.
+        """
         frames = sorted(p for p in img_dir.iterdir() if p.suffix.lower() in IMAGE_EXTS)
         if not frames:
             self._status_lbl.setText(f"No images found in {img_dir.name}")
@@ -816,6 +976,16 @@ class MaskViewR(QMainWindow):
     # ── Display ───────────────────────────────────────────────────────────────
 
     def _show_current(self, keep_zoom=False):
+        """Load the current frame and all its mask data, render it, and update the bar.
+
+        For the frame at self.idx it loads the source image and, from the masks
+        folder, the final mask PNG, the raw YOLO/SAHI mask, and the per-polygon
+        JSON (any of which may be absent). It builds a half-resolution image for
+        fast display, stashes everything in the `_current_*` fields for click
+        handling, counts the detected trails for the status line, then re-renders
+        and syncs the slider, frame box, and Prev/Next buttons. keep_zoom carries
+        the current zoom across a frame step.
+        """
         if not self.frames:
             return
         fp = self.frames[self.idx]
@@ -901,6 +1071,13 @@ class MaskViewR(QMainWindow):
         save_config(cfg)
 
     def _rerender(self, keep_zoom=False):
+        """Repaint the on-screen image from the already-loaded frame state.
+
+        Cheaper than _show_current: it reuses the cached half-size image and
+        masks (no disk reload) and just re-runs render_frame. Called whenever
+        only the overlay changes — toggling tiles, selecting/clearing a trail —
+        and also pushes the current tile boxes to the view for its edge labels.
+        """
         if self._current_img_half is None:
             return
         orig_h  = self._current_orig_h
@@ -940,6 +1117,15 @@ class MaskViewR(QMainWindow):
             self._view.set_tile_bboxes([])
 
     def _on_image_click(self, scene_pos):
+        """Select the trail under a click and report its details in the status line.
+
+        Maps the click from the half-size display back to full-resolution pixels,
+        then checks first the final mask (selects the connected blob hit) and, if
+        that misses, the raw YOLO/SAHI mask (selects the raw detection hit). For
+        the selection it records the tile, centroid, bounding box, and pixel area
+        (used by Copy Frame), highlights it, and writes a one-line summary.
+        Clicking empty background clears any current selection.
+        """
         if self._current_mask_full is None and self._current_raw_mask_full is None:
             return
         orig_h = self._current_orig_h
@@ -1026,6 +1212,7 @@ class MaskViewR(QMainWindow):
         )
 
     def _tile_for(self, cx, cy, orig_h, orig_w):
+        """Return the tile name (e.g. "B3") containing point (cx, cy), or "?" if none."""
         for (tx1, ty1, tx2, ty2, row, col) in compute_tile_bboxes(orig_h, orig_w):
             if tx1 <= cx < tx2 and ty1 <= cy < ty2:
                 return chr(ord('A') + row) + str(col + 1)
@@ -1034,16 +1221,19 @@ class MaskViewR(QMainWindow):
     # ── Navigation ────────────────────────────────────────────────────────────
 
     def go_prev(self):
+        """Step to the previous frame (keeping zoom), if not already at the first."""
         if self.idx > 0:
             self.idx -= 1
             self._show_current(keep_zoom=True)
 
     def go_next(self):
+        """Step to the next frame (keeping zoom), if not already at the last."""
         if self.idx < len(self.frames) - 1:
             self.idx += 1
             self._show_current(keep_zoom=True)
 
     def eventFilter(self, obj, event):
+        """Make Left/Right arrows navigate frames even while the type-a-frame box has focus."""
         if obj is self._frame_input and event.type() == QEvent.KeyPress:
             if event.key() == Qt.Key.Key_Left:
                 self.go_prev()
@@ -1054,6 +1244,7 @@ class MaskViewR(QMainWindow):
         return super().eventFilter(obj, event)
 
     def keyPressEvent(self, event):
+        """Window-level keys: Right/Left navigate, O reopens folders, Q/Escape quits."""
         key = event.key()
         if key == Qt.Key.Key_Right:
             self.go_next()
@@ -1069,6 +1260,15 @@ class MaskViewR(QMainWindow):
     # ── Copy Frame ────────────────────────────────────────────────────────────
 
     def _copy_frame(self):
+        """Copy a one-line reference for the current frame (or selected trail) to the clipboard.
+
+        With a trail selected it builds the full reference — frame number and
+        name, dataset, the selected mask/raw id, tile, centroid, bounding box,
+        pixel area, the image path, the mask path, and when the mask file was
+        written (so you can tell whether it predates the latest pipeline run).
+        With nothing selected it copies a short frame-only line. Flashes the
+        button to "Copied!" briefly.
+        """
         if not self.frames:
             return
         fp      = self.frames[self.idx]
@@ -1111,6 +1311,7 @@ class MaskViewR(QMainWindow):
     # ── Tile grid toggle ───────────────────────────────────────────────────────
 
     def _toggle_tiles(self):
+        """Turn the tile-grid overlay on or off, update the button label, and repaint."""
         self._show_tiles = not self._show_tiles
         self._tiles_btn.setText("Tiles: On" if self._show_tiles else "Tiles: Off")
         self._rerender(keep_zoom=True)
@@ -1118,6 +1319,7 @@ class MaskViewR(QMainWindow):
     # ── Scrubber ──────────────────────────────────────────────────────────────
 
     def _on_slider_changed(self, value):
+        """Jump to the frame the scrubber slider was dragged to (keeping zoom)."""
         if not self.frames:
             return
         new_idx = value - 1
@@ -1126,6 +1328,7 @@ class MaskViewR(QMainWindow):
             self._show_current(keep_zoom=True)
 
     def _on_frame_input_entered(self):
+        """Jump to the frame number typed into the box, clamped to the valid range."""
         if not self.frames:
             return
         try:
@@ -1139,6 +1342,7 @@ class MaskViewR(QMainWindow):
     # ── Relaunch ──────────────────────────────────────────────────────────────
 
     def _relaunch(self):
+        """Save the current frame and restart the app as a fresh process (useful after edits)."""
         cfg = load_config()
         cfg["frame_index"] = self.idx
         save_config(cfg)
@@ -1149,6 +1353,12 @@ class MaskViewR(QMainWindow):
     # ── WeirdR ────────────────────────────────────────────────────────────────
 
     def _add_to_weirdr(self):
+        """Append the current frame to the shared `weirdr_list.json` of odd frames to revisit.
+
+        Writes the frame's tag, filename, and dataset (skipping duplicates). If
+        it was already listed, says so; otherwise plays a short "Adding..."
+        animation on the button.
+        """
         if not self.frames:
             return
         fp  = self.frames[self.idx]
@@ -1182,6 +1392,7 @@ class MaskViewR(QMainWindow):
             self._tick_weirdr_anim()
 
     def _tick_weirdr_anim(self):
+        """Advance the "Adding." -> "Added!" button animation one step per timer tick."""
         labels = ["Adding.", "Adding..", "Adding...", "Added!"]
         step = self._weirdr_anim_step
         self._weirdr_btn.setText(labels[min(step, len(labels) - 1)])
@@ -1194,6 +1405,7 @@ class MaskViewR(QMainWindow):
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():
+    """Start the Qt app, open the window, and trigger the setup dialog shortly after launch."""
     app = QApplication(sys.argv)
     win = MaskViewR()
     win.show()

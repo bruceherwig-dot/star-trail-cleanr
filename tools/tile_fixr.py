@@ -1,17 +1,57 @@
 #!/usr/bin/env python3
 """
-TileFixR — Per-tile CVAT polygon editor.
+TileFixR — Per-tile CVAT polygon editor (maintained developer tool).
 
-Sister tool of TileScreenR. Same per-tile view (walks 640x640 windows in
-each frame), but pulls polygons from CVAT instead of from inference masks
-and lets you click an individual polygon to mark it for deletion. Then
-push deletions back to CVAT in one batch.
+WHAT IT IS
+    A desktop annotation-cleanup app for the Star Trail CleanR training data.
+    It walks the same 640x640 tile windows the YOLO detector sees, one tile at
+    a time, and shows the trail polygons that Bruce has reviewed in CVAT. From
+    inside a single tile you can:
+      - click a polygon to select it, then mark it for deletion,
+      - drag a vertex to reshape a polygon,
+      - drag the green/blue "extend" diamonds at each end to lengthen/widen it,
+      - draw a brand-new polygon with the Add tool,
+      - undo any of the above,
+    and then push every change (adds / edits / deletes) back to CVAT in one
+    batch with the Send button. It is the per-tile editing counterpart to the
+    review-only tools (Tile ScreenR, Mask CheckR, MaskViewR).
 
-Phase 1 (this build): mark-for-delete + push.
-Phase 2 (later):      drag-to-move vertices, push edits via PATCH.
+HOW IT FITS
+    Sister tool of Tile ScreenR — same per-tile view, but the polygons come
+    from CVAT (Bruce's reviewed annotations) rather than from inference masks,
+    and here you can edit them, not just look. It is one stop in Bruce's
+    annotation-quality loop: Trail ScreenR -> TileFixR -> Mask CheckR -> fix ->
+    repeat. Mask CheckR and the WeirdR list can be launched straight from the
+    toolbar.
 
-Hardcoded for now: CVAT task 15 (Greg Meyer Arizona Brightened), first 20
-frames. Future: task pulldown + frame-count picker.
+HOW TO RUN IT
+    python3 tools/tile_fixr.py
+    On launch a picker dialog lists every CVAT task; you choose a task and a
+    frame range. Two image-source modes:
+      - "Source + CVAT polygons" — the editable mode (original frames + the
+        reviewed CVAT polygons).
+      - "Cleaned + STC masks (view only)" — loads the already-cleaned frames and
+        the STC detection mask PNGs purely for inspection; editing is disabled.
+    Single-instance locked (a QLockFile prevents two copies running at once).
+
+KEY DATA MODEL
+    - load_cvat_polygons() pulls every reviewed polygon for the chosen frames.
+    - build_tile_entries() walks each frame's tile grid and, for every tile,
+      geometrically clips each polygon to the tile so it can be drawn in
+      tile-local pixel coords. Each tile becomes one "entry" the user pages
+      through.
+    - self.polygons_by_id is the single source of truth: it stores each
+      polygon in FULL-FRAME coords plus a status of "original" / "edited" /
+      "added". Edits mutate the full-frame points; the tile-local copies are
+      re-clipped from them on every change (_reclip_polygon_in_tiles).
+    - Deletions are tracked separately as a set of marked server ids.
+
+NOTE ON THE DOCSTRING HISTORY
+    The original header described a "Phase 1: mark-for-delete only" build
+    hardcoded to one task. The shipped code has moved well past that: vertex
+    drag, extend handles, add-polygon, undo, a task picker, and full
+    add/edit/delete push to CVAT are all present. This docstring describes what
+    the code actually does today.
 """
 import json
 import os
@@ -44,6 +84,10 @@ CVAT_URL = "http://localhost:8080"
 CVAT_USER = "bherwig2"
 TRAILS_ROOT = Path("/Volumes/T7 Shield/AI Projects/Star Trail CleanR/star trail images")
 GKYLE_STAGING = Path("/Volumes/T7 Shield/AI Projects/Star Trail CleanR/external_datasets/gkyle_startrails/cvat_staging")
+BRIDGE_STAGING = Path("/Volumes/T7 Shield/AI Projects/Star Trail CleanR/bridge_review_107")
+AUG_BRIDGE_STAGING = Path("/Volumes/T7 Shield/AI Projects/Star Trail CleanR/bridge_fix_tiles_2026_06/aug_bridge_review")
+CROSSING_STAGING = Path("/Volumes/T7 Shield/AI Projects/Star Trail CleanR/bridge_fix_tiles_2026_06/crossing_review")
+CROSSING_AUG_STAGING = Path("/Volumes/T7 Shield/AI Projects/Star Trail CleanR/bridge_fix_tiles_2026_06/crossing_aug_review")
 TILE_SIZE = 640
 OVERLAP = 0.2
 
@@ -87,6 +131,18 @@ def resolve_image_dir(task_name):
     # Special case: gkyle tiles live outside TRAILS_ROOT
     if "gkyle" in task_name.lower() and GKYLE_STAGING.exists():
         return GKYLE_STAGING
+    # Special case: crossing AUGMENTATION review (checked before plain "crossing"/"augmentation")
+    if "crossing" in task_name.lower() and "augmentation" in task_name.lower() and CROSSING_AUG_STAGING.exists():
+        return CROSSING_AUG_STAGING
+    # Special case: crossing review tiles live in their own staging folder
+    if "crossing" in task_name.lower() and CROSSING_STAGING.exists():
+        return CROSSING_STAGING
+    # Special case: bridge AUGMENTATION review tiles (checked before plain "bridge")
+    if "augmentation" in task_name.lower() and AUG_BRIDGE_STAGING.exists():
+        return AUG_BRIDGE_STAGING
+    # Special case: bridge-miss review tiles live in their own flat staging folder
+    if "bridge" in task_name.lower() and BRIDGE_STAGING.exists():
+        return BRIDGE_STAGING
     if task_name in TASK_FOLDER_ALIASES:
         p = TRAILS_ROOT / TASK_FOLDER_ALIASES[task_name]
         if p.exists():
@@ -135,6 +191,9 @@ INFO_TEXT = "#000"
 
 
 def _apply_theme():
+    """Switch the module-level color constants to a dark palette when macOS is
+    in dark mode, otherwise leave the light defaults in place. Called once at
+    startup before any widgets are built."""
     global MUTED_TEXT, HINT_TEXT, PANEL_BG, IMAGE_BG, INFO_BG, INFO_TEXT
     try:
         scheme = QApplication.styleHints().colorScheme()
@@ -151,6 +210,9 @@ def _apply_theme():
 
 
 def read_cvat_password():
+    """Read the CVAT password from the credentials file in the user's home
+    (~/.star_trail_cleanr/cvat_credentials). Kept out of the repo so the
+    password is never hardcoded."""
     return (Path.home() / ".star_trail_cleanr" / "cvat_credentials").read_text().strip()
 
 
@@ -260,6 +322,13 @@ def clip_polygon_to_tile(ff_pts: np.ndarray, tx: int, ty: int,
 
 
 def _tile_origins(extent: int, tile: int, stride: int) -> list:
+    """List the top-left start positions for tiling one axis of an image.
+
+    Steps from 0 across the axis by `stride`, then always appends a final
+    flush-to-edge origin (extent - tile) so the last tile reaches the image
+    border even when the stride doesn't divide evenly. Returns the sorted,
+    de-duplicated origins.
+    """
     o = list(range(0, max(extent - tile, 0) + 1, stride))
     last = max(extent - tile, 0)
     if not o or o[-1] != last:
@@ -368,7 +437,8 @@ def build_tile_entries(by_frame, frame_names, progress_cb=None):
     """Walk every 640x640 tile in each frame in [FRAME_START, FRAME_END).
     For each tile, list the polygons that intersect it (with tile-local
     coords). Also assign a stable color per polygon by its server_id."""
-    img_files = sorted(IMG_DIR.glob("*.jpg")) or sorted(IMG_DIR.glob("*.JPG"))
+    img_files = (sorted(IMG_DIR.glob("*.jpg")) or sorted(IMG_DIR.glob("*.JPG"))
+                 or sorted(IMG_DIR.glob("*.png")) or sorted(IMG_DIR.glob("*.PNG")))
     if not img_files:
         sub = IMG_DIR / "JPGs"
         img_files = sorted(sub.glob("*.jpg")) or sorted(sub.glob("*.JPG"))
@@ -493,6 +563,10 @@ class ZoomableImageView(QGraphicsView):
     zoom_changed = Signal()    # emitted whenever the view's scale changes
 
     def __init__(self, parent=None):
+        """Build the graphics scene that holds the tile image, wire up the
+        signals listed in the class docstring, and configure zoom/pan defaults
+        (left-drag pans, pinch and wheel zoom, mouse-tracking on for hover
+        cursor changes)."""
         super().__init__(parent)
         self._scene = QGraphicsScene(self)
         self.setScene(self._scene)
@@ -535,11 +609,15 @@ class ZoomableImageView(QGraphicsView):
         self._pixmap_item.setPixmap(pixmap)
 
     def event(self, event):
+        """Qt event hook. Routes trackpad pinch gestures to _handle_gesture;
+        everything else goes to the base class."""
         if event.type() == QEvent.Gesture:
             return self._handle_gesture(event)
         return super().event(event)
 
     def _handle_gesture(self, event):
+        """Handle a trackpad pinch by scaling the view in or out by the
+        pinch's reported factor, keeping a running zoom-level counter."""
         pinch = event.gesture(Qt.PinchGesture)
         if pinch is None:
             return False
@@ -550,6 +628,9 @@ class ZoomableImageView(QGraphicsView):
         return True
 
     def wheelEvent(self, event):
+        """Scroll wheel / two-finger scroll zooms: up zooms in ~10%, down zooms
+        out, and zoom_changed fires so the parent can redraw handles at a
+        constant on-screen size."""
         delta = event.angleDelta().y()
         factor = 1.10 if delta > 0 else 0.91
         self._zoom_level += 1 if delta > 0 else -1
@@ -561,10 +642,15 @@ class ZoomableImageView(QGraphicsView):
         return float(self.transform().m11()) or 1.0
 
     def _to_scene_xy(self, qpoint):
+        """Map a widget-pixel point to scene coords (which include the gray
+        padding around the tile). Used in draw mode where clicks beyond the
+        tile edge are still meaningful."""
         scene_pt = self.mapToScene(qpoint)
         return int(scene_pt.x()), int(scene_pt.y())
 
     def _to_image_xy(self, qpoint):
+        """Map a widget-pixel point to image-pixel coords, or None if it falls
+        outside the tile bitmap. This is the normal hit-test path."""
         scene_pt = self.mapToScene(qpoint)
         ix = int(scene_pt.x())
         iy = int(scene_pt.y())
@@ -574,6 +660,9 @@ class ZoomableImageView(QGraphicsView):
         return ix, iy
 
     def set_rubber_band(self, x1, y1, x2, y2):
+        """Draw or move the lime rubber-band line used during add-polygon mode
+        (from the last placed vertex to the cursor). Drawn as a scene line so
+        it can extend past the tile edge into the gray margin."""
         pen = QPen(QColor(50, 255, 50), 1, Qt.SolidLine)
         pen.setCosmetic(True)
         if self._rb_line is None:
@@ -583,11 +672,18 @@ class ZoomableImageView(QGraphicsView):
             self._rb_line.setPen(pen)
 
     def clear_rubber_band(self):
+        """Remove the add-mode rubber-band line from the scene, if present."""
         if self._rb_line is not None:
             self._scene.removeItem(self._rb_line)
             self._rb_line = None
 
     def mousePressEvent(self, event):
+        """Translate a raw mouse press into one of the view's image-coord
+        signals: left button -> pressed_at_image_xy (and starts press tracking),
+        right button -> right_clicked_at_image_xy. event.accept() keeps Qt
+        feeding us move/release events without invoking the built-in drag-mode
+        machinery, so the parent's manual pan / vertex-grab logic stays in
+        control."""
         pos = event.position().toPoint()
         xy = self._to_image_xy(pos)
         if xy is None and self.draw_mode:
@@ -609,6 +705,12 @@ class ZoomableImageView(QGraphicsView):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        """Handle mouse movement two ways. While the left button is held: emit
+        moved_to_image_xy (so the parent can drag a vertex), flag the gesture as
+        a drag once it passes a small threshold, and if the parent hasn't
+        claimed the gesture, manually scroll the view to pan. With no button
+        down: emit hovered_at_image_xy so the parent can change the cursor over
+        a handle."""
         if self._press_button == Qt.LeftButton and self._press_pos is not None:
             pos = event.position().toPoint()
             xy = self._to_image_xy(pos)
@@ -641,6 +743,11 @@ class ZoomableImageView(QGraphicsView):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        """On left-button release: always emit released_at_image_xy, and if the
+        pointer barely moved since press (within ~10px, generous enough that a
+        Mac trackpad tap still counts as a click) also emit clicked_at_image_xy.
+        The 10px slop is deliberate — a soft tap drifts a few pixels and the old
+        4px threshold wrongly read those as drags."""
         if event.button() == Qt.LeftButton and self._press_pos is not None:
             release_pos = event.position().toPoint()
             xy = self._to_image_xy(release_pos)
@@ -663,6 +770,9 @@ class ZoomableImageView(QGraphicsView):
         super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event):
+        """Left double-click does two things: emit double_clicked_at_image_xy
+        (the parent uses it to close an in-progress add-polygon) and reset the
+        view back to fit-to-window (zoom level 0)."""
         if event.button() == Qt.LeftButton:
             xy = self._to_image_xy(event.position().toPoint())
             if xy is not None:
@@ -673,6 +783,8 @@ class ZoomableImageView(QGraphicsView):
         self.zoom_changed.emit()
 
     def resizeEvent(self, event):
+        """Re-fit the tile to the window on resize, but only while at the
+        default zoom (level 0) so a deliberate zoom/pan isn't disturbed."""
         super().resizeEvent(event)
         if self._zoom_level == 0 and self._pixmap_item.pixmap() and not self._pixmap_item.pixmap().isNull():
             self.fitInView(self._scene.sceneRect(), Qt.KeepAspectRatio)
@@ -702,6 +814,10 @@ def fetch_cvat_tasks(auth):
 
 
 def load_last_pick():
+    """Return the last task + frame range the user picked, so the picker dialog
+    reopens where they left off. Handles back-compat with an older saved format
+    that stored a frame count instead of first/last. Falls back to task 16,
+    frames 0-19 if nothing is saved."""
     if LAST_PICK_PATH.exists():
         try:
             data = json.loads(LAST_PICK_PATH.read_text())
@@ -716,6 +832,8 @@ def load_last_pick():
 
 
 def save_last_pick(task_id, first_frame, last_frame, source_mode="cvat"):
+    """Persist the just-chosen task, frame range, and image-source mode so the
+    next launch defaults to them."""
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     LAST_PICK_PATH.write_text(json.dumps({
         "task_id": task_id,
@@ -730,6 +848,11 @@ class TaskPickerDialog(QDialog):
 
     def __init__(self, tasks, last_task_id, last_first, last_last,
                  auth=None, last_source_mode="cvat"):
+        """Build the launch dialog: a task dropdown, first/last frame spinboxes,
+        a resolved-image-folder readout, and the two image-source radio buttons.
+        Pre-selects the last task/range the user used. `auth` is the CVAT login
+        tuple, needed to query each task's deleted-frame count for an accurate
+        frame total."""
         super().__init__()
         self.tasks        = tasks
         self.auth         = auth
@@ -820,6 +943,11 @@ class TaskPickerDialog(QDialog):
         self._on_task_changed(self.task_combo.currentIndex())
 
     def _on_task_changed(self, idx):
+        """When a different task is picked: correct its frame count for deleted
+        frames, reset (or restore) the first/last spin range, resolve the local
+        image folder, and update the green/red folder readout. Disables Load if
+        no image folder can be found, and enables the cleaned/masks radio only
+        when that task actually has a cleanr_workspace/masks folder."""
         task = self.tasks[idx] if 0 <= idx < len(self.tasks) else None
         if task is None:
             return
@@ -878,21 +1006,28 @@ class TaskPickerDialog(QDialog):
             self.btns.button(QDialogButtonBox.Ok).setEnabled(True)
 
     def selected_task(self):
+        """Return the currently highlighted task dict, or None."""
         idx = self.task_combo.currentIndex()
         if 0 <= idx < len(self.tasks):
             return self.tasks[idx]
         return None
 
     def selected_mode(self):
+        """Return the chosen image-source mode: 'cleaned' (view-only cleaned
+        frames + STC masks) or 'cvat' (editable source + CVAT polygons)."""
         return "cleaned" if self._rb_cleaned.isChecked() else "cvat"
 
     def selected_first_frame(self):
+        """Return the chosen first frame (1-based, as shown in the spinbox)."""
         return int(self.first_spin.value())
 
     def selected_last_frame(self):
+        """Return the chosen last frame (1-based, inclusive)."""
         return int(self.last_spin.value())
 
     def _on_range_changed(self):
+        """Keep last >= first and update the live '-> loading N frames' label as
+        the spinboxes change."""
         if (self.last_spin.value() < self.first_spin.value()
                 and not self.last_spin.hasFocus()):
             self.last_spin.blockSignals(True)
@@ -907,10 +1042,22 @@ class TaskPickerDialog(QDialog):
 # ── CVAT background send worker ─────────────────────────────────────────────
 
 class CvatSendWorker(QThread):
+    """Background thread that pushes a batch of changes to CVAT so the UI never
+    freezes during the network round-trips.
+
+    Given the marked-for-delete ids, the added polygons, and the edited
+    polygons, it issues the three PATCH calls (create / update / delete) against
+    the job's annotations endpoint and reports back via signals:
+      finished(dict) — counts of added/edited/deleted plus a list of per-shape
+                        error strings.
+      error(str)     — a fatal exception aborted the whole send.
+    """
     finished = Signal(dict)
     error = Signal(str)
 
     def __init__(self, task_id, job_id, marked_ids, adds, edits, auth):
+        """Stash the task/job ids, the work to send (delete ids, add list, edit
+        list), and the CVAT auth tuple for use on the worker thread."""
         super().__init__()
         self.task_id = task_id
         self.job_id = job_id
@@ -920,6 +1067,15 @@ class CvatSendWorker(QThread):
         self.auth = auth
 
     def run(self):
+        """Thread body. First resolves the numeric id of the 'trail' label (the
+        project's single label), then applies the three operations in order:
+          - adds: one batched 'create' PATCH with all new polygons,
+          - edits: a per-polygon 'update' PATCH that re-fetches the live shape
+            and swaps in the new points (so the server version stays current),
+          - deletes: one batched 'delete' PATCH for the marked ids.
+        Re-fetching annotations before each step keeps CVAT's optimistic-locking
+        version number fresh. Emits finished() with the tallies and any
+        per-shape errors, or error() on a fatal exception."""
         try:
             added_ok = edited_ok = deleted_ok = 0
             errors = []
@@ -1019,6 +1175,8 @@ class CvatSendWorker(QThread):
 
 
 def _play_end_sound():
+    """Play a quiet macOS Tink sound — used as an audible 'end of list' cue when
+    Prev/Next can't move any further."""
     subprocess.Popen(["afplay", "-v", "0.1",
                       "/System/Library/Sounds/Tink.aiff"],
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -1027,7 +1185,32 @@ def _play_end_sound():
 # ── Main window ─────────────────────────────────────────────────────────────
 
 class TileFixR(QMainWindow):
+    """The main editor window.
+
+    Pages through the pre-built tile `entries` one at a time, draws the polygons
+    that fall in the current tile, and lets the user select / mark-for-delete /
+    reshape / extend / add polygons, then send the whole batch to CVAT.
+
+    State worth knowing:
+      - self.polygons_by_id: the single source of truth, keyed by server id,
+        each holding full-frame points + a status of original/edited/added.
+        (self.poly_by_id is a back-compat alias for the same dict.)
+      - self.marked_ids: server ids flagged for deletion.
+      - self.undo_stack: bounded list of reversible operations (vertex move,
+        mark/unmark, add).
+      - Tile-local polygon copies inside each entry are always re-derived from
+        the full-frame points by _reclip_polygon_in_tiles after any edit.
+      - view_only=True (the "cleaned + masks" launch mode) disables all editing.
+    """
+
     def __init__(self, entries, all_polys, frame_names, job_id, view_only=False):
+        """Set up the whole editor: seed the central polygon registry from the
+        loaded polygons, run a reconciliation pass that re-clips every polygon
+        through the same code path as a fresh CVAT pull (healing any startup
+        discrepancy), restore saved view state (position, zoom, brightness,
+        filters, marks, flags), build all the UI bars, and bind keyboard
+        shortcuts. In view-only mode the Add / Send / Pull buttons are
+        disabled."""
         super().__init__()
         self.view_only = view_only
         self.entries = entries
@@ -1180,6 +1363,8 @@ class TileFixR(QMainWindow):
             self.setWindowTitle("TileFixR  —  View Only")
 
         def _guarded(fn):
+            """Wrap a shortcut handler so it is suppressed while any text box has
+            focus (so typing in a field doesn't trigger editing shortcuts)."""
             def wrapper():
                 if isinstance(QApplication.focusWidget(), QLineEdit):
                     return
@@ -1187,6 +1372,8 @@ class TileFixR(QMainWindow):
             return wrapper
 
         def _nav_guarded(fn):
+            """Like _guarded, but still allows the handler while the Tile input
+            box is focused (so arrow-key navigation works from that box)."""
             def wrapper():
                 focused = QApplication.focusWidget()
                 if isinstance(focused, QLineEdit) and focused is not self.tile_input:
@@ -1233,6 +1420,9 @@ class TileFixR(QMainWindow):
     # ── Banner ──────────────────────────────────────────────────────────────
 
     def _build_banner(self):
+        """Build the dark title bar: the TileFixR name, a summary line (task,
+        folder, frame range, tile-grid extent, polygon/tile counts), and the
+        right-side Send-to-CVAT, Relaunch, and close buttons."""
         banner = QWidget()
         banner.setFixedHeight(48)
         banner.setStyleSheet("background-color: #0a1e3f;")
@@ -1305,6 +1495,11 @@ class TileFixR(QMainWindow):
     # ── Toolbar (filter + brightness + scrubber) ────────────────────────────
 
     def _build_toolbar(self):
+        """Build the two-row toolbar. Row 1: the filter pills (All / Has
+        polygons / No polygons / Has marked, plus View Flagged), the Tile
+        jump-box (e.g. 'E5') with Go/Clear, and Scan Tile. Row 2: brightness and
+        contrast sliders on the left, and the position scrubber + jump-to-number
+        box on the right."""
         toolbar = QWidget()
         toolbar.setStyleSheet(f"background: {PANEL_BG};")
         layout = QVBoxLayout(toolbar)
@@ -1450,6 +1645,9 @@ class TileFixR(QMainWindow):
     # ── Info strip ──────────────────────────────────────────────────────────
 
     def _build_info_strip(self):
+        """Build the thin status strip under the image: a bold info label (frame,
+        polygon count, tile reference, position), a detail label, and a red
+        selection label showing the currently selected polygon's id."""
         strip = QWidget()
         strip.setFixedHeight(28)
         strip.setStyleSheet(f"background: {INFO_BG};")
@@ -1480,6 +1678,9 @@ class TileFixR(QMainWindow):
         return strip
 
     def _build_debug_bar(self):
+        """Build the tiny monospace debug line at the very bottom. The various
+        press/click/move handlers write live diagnostics here (and the three
+        debug_*_label names are aliased to this one label)."""
         bar = QWidget()
         bar.setFixedHeight(18)
         bar.setStyleSheet(f"background: {INFO_BG};")
@@ -1580,6 +1781,10 @@ class TileFixR(QMainWindow):
     # ── Action bar (Mark, Send) ─────────────────────────────────────────────
 
     def _build_action_bar(self):
+        """Build the row of edit-action buttons: Mark for delete, Add polygon, a
+        live 'Pending: N add / N edit / N delete' label, Copy reference, Undo,
+        Mask CheckR (launches the sister tool), and Add To WeirdR. The Send
+        button itself lives in the banner, not here."""
         bar = QWidget()
         bar.setStyleSheet(f"background: {PANEL_BG};")
         layout = QHBoxLayout(bar)
@@ -1697,6 +1902,10 @@ class TileFixR(QMainWindow):
         return bar
 
     def _add_to_weirdr(self):
+        """Append the current tile to the shared WeirdR list (weirdr_list.json)
+        — a running collection of odd/interesting tiles to revisit. Records the
+        tile id, filename, dataset, tile origin, job id, and date; skips if the
+        tile is already listed, and animates the button to confirm."""
         if not self.entries or self.current_idx >= len(self.entries):
             return
         entry = self.entries[self.current_idx]
@@ -1732,6 +1941,8 @@ class TileFixR(QMainWindow):
             self._tick_weirdr_animation()
 
     def _tick_weirdr_animation(self):
+        """Timer tick that steps the Add To WeirdR button through its
+        Adding.../Added! caption, then re-enables it."""
         labels = ["Adding.", "Adding..", "Adding...", "Added!"]
         step = self._weirdr_anim_step
         self.weirdr_btn.setText(labels[min(step, len(labels) - 1)])
@@ -1744,6 +1955,9 @@ class TileFixR(QMainWindow):
     # ── Nav bar ─────────────────────────────────────────────────────────────
 
     def _build_nav_bar(self):
+        """Build the bottom navigation bar: Prev, a keyboard-shortcut hint, Pull
+        from CVAT (re-fetch nearby frames' polygons), Open in CVAT (deep link in
+        the browser), and Next."""
         bar = QWidget()
         bar.setStyleSheet(f"background: {PANEL_BG};")
         layout = QHBoxLayout(bar)
@@ -1796,6 +2010,10 @@ class TileFixR(QMainWindow):
     # ── Filter / navigation ─────────────────────────────────────────────────
 
     def _parse_tile_ref(self, text):
+        """Parse a spreadsheet-style tile reference like 'E5' into a
+        (row_idx, col_idx) zero-based pair. Letter = row (A=0), number = column
+        (1-based in the UI). Returns None if the text isn't a single letter
+        followed by a positive number."""
         text = text.strip().upper()
         if not text:
             return None
@@ -1818,6 +2036,9 @@ class TileFixR(QMainWindow):
         return (row_idx, col_idx)
 
     def _on_tile_filter_apply(self):
+        """Apply the tile reference typed in the Tile box: restrict the view to
+        that one grid cell across all frames. Warns and clears if the reference
+        is out of range, then reloads any saved scan flags for that cell."""
         parsed = self._parse_tile_ref(self.tile_input.text())
         if parsed is not None:
             self.tile_filter = parsed
@@ -1843,6 +2064,8 @@ class TileFixR(QMainWindow):
         self.refresh_view()
 
     def _on_tile_filter_clear(self):
+        """Clear the single-tile filter and any flagged-view state, returning to
+        the full set of tiles."""
         self.tile_filter = None
         self.tile_input.clear()
         self.show_flagged = False
@@ -1853,6 +2076,9 @@ class TileFixR(QMainWindow):
         self.refresh_view()
 
     def _flags_path(self):
+        """Path of the per-tile scan-flags JSON for the currently filtered tile
+        (e.g. screener_flags_E5.json inside cleanr_workspace). None when no
+        single tile is selected."""
         if self.tile_filter is None:
             return None
         row_letter = chr(ord('A') + self.tile_filter[0])
@@ -1860,6 +2086,8 @@ class TileFixR(QMainWindow):
         return IMG_DIR / "cleanr_workspace" / f"screener_flags_{row_letter}{col_num}.json"
 
     def _load_flags(self):
+        """Load the set of flagged frame indices saved by a previous Scan Tile
+        run on the current tile (empty if none)."""
         self.flagged_frame_indices = set()
         path = self._flags_path()
         if path and path.exists():
@@ -1870,6 +2098,9 @@ class TileFixR(QMainWindow):
                 pass
 
     def _update_scan_controls(self):
+        """Enable/disable and re-label the Scan Tile button and the View Flagged
+        pill based on whether a single tile is selected and whether any flagged
+        frames exist for it."""
         tile_set = self.tile_filter is not None
         flags_exist = bool(self.flagged_frame_indices)
         n = len(self.flagged_frame_indices)
@@ -1881,6 +2112,8 @@ class TileFixR(QMainWindow):
             self.flagged_pill.setChecked(False)
 
     def _on_view_flagged_toggled(self, checked):
+        """Toggle whether the view is restricted to just the frames flagged by
+        the last tile scan."""
         self.show_flagged = checked
         idx = self.filtered_indices()
         if idx and self.current_idx not in idx:
@@ -1888,6 +2121,10 @@ class TileFixR(QMainWindow):
         self.refresh_view()
 
     def _on_scan_tile(self):
+        """Kick off a background ScanWorker on the currently selected tile. The
+        worker looks across all frames for transient bright blobs in that tile
+        that don't appear in a neighbor frame (candidate missed trails) and
+        returns their frame indices to flag."""
         if self.tile_filter is None:
             return
         tile_entries = [e for e in self.entries
@@ -1907,9 +2144,12 @@ class TileFixR(QMainWindow):
         self._scan_worker.start()
 
     def _on_scan_progress(self, current, total):
+        """Update the Scan Tile button caption with the worker's progress."""
         self.scan_btn.setText(f"Scanning... {current}/{total}")
 
     def _on_scan_finished(self, flagged_indices):
+        """Scan finished: write the flagged frame indices to the tile's flags
+        JSON, reload them, and refresh the controls/view."""
         path = self._flags_path()
         if path:
             row_letter = chr(ord('A') + self.tile_filter[0])
@@ -1927,11 +2167,18 @@ class TileFixR(QMainWindow):
         self.refresh_view()
 
     def _on_scan_failed(self, msg):
+        """Scan failed (e.g. no foreground mask): reset the button and show the
+        error."""
         self.scan_btn.setText("Scan Tile")
         self._update_scan_controls()
         QMessageBox.warning(self, "Scan failed", msg)
 
     def filtered_indices(self):
+        """Return the list of entry indices currently visible, after applying
+        the active filter pill (all / has polygons / no polygons / has marked),
+        the single-tile filter, and the flagged-frames filter. This is the
+        master list that Prev/Next, the scrubber, and the position counter all
+        page through."""
         if self.filter_mode == "all":
             base = list(range(len(self.entries)))
         elif self.filter_mode == "has_polygons":
@@ -1953,6 +2200,8 @@ class TileFixR(QMainWindow):
         return base
 
     def set_filter(self, mode):
+        """Switch the active filter pill, keep the current position valid within
+        the new list, and redraw."""
         self.filter_mode = mode
         idx = self.filtered_indices()
         if idx and self.current_idx not in idx:
@@ -1961,6 +2210,8 @@ class TileFixR(QMainWindow):
         self.refresh_view()
 
     def go_prev(self):
+        """Step to the previous tile in the filtered list, or play the end sound
+        if already at the start."""
         idx = self.filtered_indices()
         if not idx:
             return
@@ -1977,6 +2228,8 @@ class TileFixR(QMainWindow):
             _play_end_sound()
 
     def go_next(self):
+        """Step to the next tile in the filtered list, or play the end sound if
+        already at the end."""
         idx = self.filtered_indices()
         if not idx:
             return
@@ -2034,6 +2287,7 @@ class TileFixR(QMainWindow):
             e = self.entries[self.current_idx]
             tr, tc = e["tile_row"], e["tile_col"]
         def has_tile(r, c):
+            """True if any entry exists at grid row r, column c."""
             return any(e["tile_row"] == r and e["tile_col"] == c
                        for e in self.entries)
         self.adj_up.setEnabled(has_tile(tr - 1, tc))
@@ -2042,6 +2296,8 @@ class TileFixR(QMainWindow):
         self.adj_right.setEnabled(has_tile(tr, tc + 1))
 
     def eventFilter(self, obj, event):
+        """Let Left/Right arrows navigate tiles even while the cursor is in the
+        Tile input box (so you can type a tile and still page with arrows)."""
         if obj is self.tile_input and event.type() == QEvent.KeyPress:
             if event.key() == Qt.Key_Left:
                 self.go_prev()
@@ -2052,6 +2308,8 @@ class TileFixR(QMainWindow):
         return super().eventFilter(obj, event)
 
     def _on_scrubber_changed(self, value):
+        """Jump to the Nth tile in the filtered list when the scrubber slider
+        moves."""
         idx = self.filtered_indices()
         if not idx:
             return
@@ -2062,6 +2320,8 @@ class TileFixR(QMainWindow):
         self.refresh_view()
 
     def _on_jump_entered(self):
+        """Jump to a position number typed in the small jump box (clamped to the
+        filtered list's range)."""
         text = self.jump_input.text().strip()
         try:
             target = int(text)
@@ -2080,16 +2340,38 @@ class TileFixR(QMainWindow):
     # ── Display ─────────────────────────────────────────────────────────────
 
     def _on_brightness(self, value):
+        """Brightness slider moved: store the multiplier (slider value / 10) and
+        redraw."""
         self.brightness = value / 10.0
         self.bright_value_label.setText(f"{self.brightness:.1f}x")
         self.refresh_view()
 
     def _on_contrast(self, value):
+        """Contrast slider moved: store the multiplier (slider value / 10) and
+        redraw."""
         self.contrast = value / 10.0
         self.contrast_value_label.setText(f"{self.contrast:.1f}x")
         self.refresh_view()
 
     def build_display_crop(self, entry):
+        """Render the fully-annotated bitmap for one tile entry, ready to show.
+
+        Starting from the raw tile crop it applies brightness/contrast, then
+        draws, in layers:
+          - orange edge bars on any side of the tile that has no neighbor (so
+            you can tell a polygon truly ends vs. is just clipped by the tile),
+          - every polygon in its stable color with small vertex dots,
+          - a red outline + faint red fill on marked-for-delete polygons,
+          - yellow (edited) / green (added) outlines for changed polygons,
+          - the selected polygon with a thick white outline and round vertex
+            handles,
+          - the green (length) and blue (width) extend diamonds at each end of
+            the selected polygon,
+          - the in-progress add-mode polygon (lime line + dots, with the first
+            vertex enlarged as a snap-close target).
+        All handle/line sizes are scaled by inverse zoom so they stay a constant
+        size on screen regardless of how far you've zoomed in.
+        """
         crop = entry["crop_raw"].copy()
         if self.brightness != 1.0 or self.contrast != 1.0:
             img = crop.astype(np.float32)
@@ -2121,6 +2403,7 @@ class TileFixR(QMainWindow):
         if self.tile_filter is not None and self.entries:
             tr, tc = self.tile_filter
             def _has_tile(r, c):
+                """True if a neighboring tile exists at grid row r, column c."""
                 return any(e["tile_row"] == r and e["tile_col"] == c
                            for e in self.entries)
             if not _has_tile(tr, tc - 1):  # nothing to the left
@@ -2246,12 +2529,19 @@ class TileFixR(QMainWindow):
         return crop
 
     def crop_to_pixmap(self, cv_img):
+        """Convert an OpenCV BGR image into a Qt QPixmap for display."""
         rgb = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb.shape
         qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
         return QPixmap.fromImage(qimg)
 
     def refresh_view(self):
+        """The central redraw method. Recomputes the filtered list, renders the
+        current tile (preserving zoom/pan after the first load), and updates
+        every status widget: the info/detail/selection labels, scrubber,
+        Prev/Next enablement, the Send button, filter counts, and the
+        adjacent-tile arrows. Shows an empty placeholder when the current
+        filter leaves no tiles. Called after essentially every state change."""
         idx = self.filtered_indices()
         if not idx:
             self.image_view.set_pixmap(QPixmap())
@@ -2328,6 +2618,8 @@ class TileFixR(QMainWindow):
         self._refresh_adjacent_arrows()
 
     def _refresh_send_button(self):
+        """Recount pending deletes/adds/edits and update the Send button caption,
+        its enabled state, and the 'Pending: N add / N edit / N delete' label."""
         n_del = len(self.marked_ids)
         n_add = sum(1 for p in self.polygons_by_id.values()
                      if p["status"] == "added")
@@ -2342,6 +2634,8 @@ class TileFixR(QMainWindow):
                 f"Pending: {n_add} add / {n_edit} edit / {n_del} delete")
 
     def _refresh_filter_counts(self):
+        """Recompute and relabel the counts shown on each filter pill (how many
+        tiles have polygons, have none, or contain a marked polygon)."""
         n_with_polys = sum(1 for e in self.entries if e["polys"])
         n_no_polys = len(self.entries) - n_with_polys
         n_marked_tiles = sum(1 for e in self.entries
@@ -2355,6 +2649,13 @@ class TileFixR(QMainWindow):
     # ── Click / mark / unmark ───────────────────────────────────────────────
 
     def _on_image_clicked(self, ix, iy):
+        """Handle a plain click (no drag) at tile-local (ix, iy).
+
+        In add mode each click drops a new vertex — or closes the polygon if the
+        click lands near the first vertex, or auto-closes after the 4th vertex
+        (the common trail-rectangle case). Otherwise it's selection: pick the
+        smallest polygon whose outline contains the click and select it (smallest
+        wins so an overlapping small polygon stays reachable)."""
         if not self.entries:
             return
         entry = self.entries[self.current_idx]
@@ -2446,6 +2747,9 @@ class TileFixR(QMainWindow):
         secondary = secondary / n2
 
         def _make_handles(axis_vec, kind):
+            """Build the two extend handles for one PCA axis: split the vertices
+            by which side of the center they project onto, and place a handle at
+            each side's mean position."""
             proj = centered @ axis_vec
             neg_idx = [i for i, p in enumerate(proj) if p < 0]
             pos_idx = [i for i, p in enumerate(proj) if p >= 0]
@@ -2528,6 +2832,15 @@ class TileFixR(QMainWindow):
         return (sid, vi, best_dist2 ** 0.5)
 
     def _on_image_pressed(self, ix, iy):
+        """Handle the start of a left-press and decide what gesture it begins.
+
+        Closest-wins rule: measure distance to the nearest extend handle and the
+        nearest polygon vertex; if either is within its hit radius, grab the
+        closer one (ties go to the extend handle) and arm the corresponding drag,
+        snapshotting the polygon first so the move can be undone. If neither is in
+        range, leave the view in pan mode so the press scrolls the tile. A vertex
+        grab also auto-selects its polygon in the same motion (so the user only
+        clicks once instead of select-then-grab). No-ops in view-only mode."""
         if self.view_only:
             return
         if self.add_mode:
@@ -2612,6 +2925,14 @@ class TileFixR(QMainWindow):
         self.refresh_view()
 
     def _on_image_moved(self, ix, iy):
+        """Apply the armed drag as the cursor moves.
+
+        Extend-handle drag: the grabbed end's vertices follow the cursor in free
+        2D; for a width handle the opposite side moves the opposite way (so the
+        polygon widens/narrows symmetrically), for a length handle only the
+        grabbed end moves. Vertex drag: once past the small deadzone, move that
+        one full-frame vertex to the cursor. Either way the polygon is marked
+        'edited' and re-clipped into all its tiles, then the view redraws."""
         # Extend-handle drag: the grabbed side's vertices follow the cursor
         # freely in 2D. Opposite side stays anchored. So grabbing the right
         # tip and dragging up moves the two right-side vertices up together;
@@ -2690,6 +3011,10 @@ class TileFixR(QMainWindow):
         self.refresh_view()
 
     def _on_image_released(self, ix, iy):
+        """Finish a drag on left-release. Clears the extend/vertex drag state and,
+        if the polygon actually moved, pushes the pre-drag snapshot onto the undo
+        stack so the whole gesture is one undo step. Restores pan mode and the
+        default cursor unless still in add mode."""
         # Extend-handle drag finishing
         if self._extend_active:
             sid = self._extend_polygon_id
@@ -2741,16 +3066,25 @@ class TileFixR(QMainWindow):
         return getattr(self, "_drag_full_idx", None) is not None
 
     def _on_image_double_clicked(self, ix, iy):
+        """In add mode, a double-click closes the in-progress polygon."""
         if self.add_mode:
             self._close_add_polygon()
 
     def _on_image_right_clicked(self, ix, iy):
+        """In add mode, a right-click removes the last placed vertex (a quick
+        'oops' undo while drawing)."""
         # In add mode: cancel the in-progress polygon
         if self.add_mode and self.add_pts_local:
             self.add_pts_local.pop()  # pop last vertex
             self.refresh_view()
 
     def _on_image_hovered(self, ix, iy):
+        """Handle plain hover (no button down). In add mode it updates the
+        rubber-band preview line from the last vertex to the cursor. Otherwise it
+        runs the same closest-wins test as press to decide whether a vertex or an
+        extend handle is under the cursor, sets the matching resize/move cursor,
+        and records which handle is hovered so build_display_crop can draw it
+        slightly larger."""
         # In add mode, draw a scene rubber-band from the last vertex to the cursor.
         # Using a QGraphicsLineItem means the line extends into the gray area beyond
         # the tile boundary, not just within the 640px cv2 image.
@@ -2796,6 +3130,8 @@ class TileFixR(QMainWindow):
             self.refresh_view()
 
     def leaveEvent(self, event):
+        """When the cursor leaves the window, clear the hovered-handle highlight
+        so no handle stays drawn enlarged."""
         # Cursor left the window — clear hover so handles don't stay highlighted
         if self.hovered_handle is not None:
             self.hovered_handle = None
@@ -2805,6 +3141,10 @@ class TileFixR(QMainWindow):
     # ── Add mode ────────────────────────────────────────────────────────────
 
     def _toggle_add_mode(self):
+        """Turn the draw-a-new-polygon mode on or off. Entering it switches to a
+        cross cursor, allows clicks beyond the tile edge, and clears the
+        selection; leaving it discards any half-drawn polygon and the rubber-band.
+        No-op in view-only mode."""
         if self.view_only:
             return
         self.add_mode = not self.add_mode
@@ -2823,6 +3163,11 @@ class TileFixR(QMainWindow):
         self.refresh_view()
 
     def _close_add_polygon(self):
+        """Finish the in-progress add-polygon. Requires at least 3 vertices,
+        converts them from tile-local to full-frame coords, registers a new
+        polygon with a temporary negative id and status 'added', clips it into
+        its tiles, pushes an undo entry, selects it, and exits add mode. The
+        temporary id becomes a real CVAT id only after a successful Send."""
         if not self.add_mode or not self.entries:
             return
         if len(self.add_pts_local) < 3:
@@ -2858,6 +3203,9 @@ class TileFixR(QMainWindow):
         self._toggle_add_mode()  # switches off add_mode + restores cursor
 
     def _on_escape(self):
+        """Escape key. While drawing, first press discards the half-drawn
+        polygon; a second press leaves add mode entirely. Otherwise it just
+        clears the current selection."""
         if self.add_mode and self.add_pts_local:
             self.add_pts_local = []
             self.refresh_view()
@@ -2870,6 +3218,11 @@ class TileFixR(QMainWindow):
     # ── Reclip a polygon into all relevant tile entries ─────────────────────
 
     def _reclip_polygon_in_tiles(self, server_id):
+        """Re-derive a polygon's tile-local copies from its full-frame points.
+        Strips every existing copy of this polygon from all of the frame's tile
+        entries, then geometrically clips the current full-frame shape back into
+        each tile it touches. Called after any edit so the on-screen tile view
+        always matches the source-of-truth full-frame points."""
         poly = self.polygons_by_id.get(server_id)
         if poly is None:
             return
@@ -2904,18 +3257,26 @@ class TileFixR(QMainWindow):
     # ── Undo ────────────────────────────────────────────────────────────────
 
     def _push_undo(self, op):
-        """op is a tuple: (kind, ...payload). Pushed to a bounded stack."""
+        """Record one reversible operation. op is a tuple: (kind, ...payload).
+        Pushed to a bounded stack (oldest entries drop past UNDO_MAX) and the
+        Undo button caption is refreshed."""
         self.undo_stack.append(op)
         if len(self.undo_stack) > self.UNDO_MAX:
             self.undo_stack = self.undo_stack[-self.UNDO_MAX:]
         self._refresh_undo_button()
 
     def _refresh_undo_button(self):
+        """Update the Undo button's count label and enable it only when there is
+        at least one operation on the stack."""
         n = len(self.undo_stack)
         self.undo_btn.setText(f"Undo ({n})")
         self.undo_btn.setEnabled(n > 0)
 
     def _undo(self):
+        """Reverse the most recent operation. Handles all four kinds: 'vertex'
+        restores a polygon's pre-drag points and status, 'mark'/'unmark' flip a
+        deletion flag back, and 'add' removes a just-added polygon. Then
+        refreshes the undo/send buttons, filter counts, and view."""
         if not self.undo_stack:
             return
         op = self.undo_stack.pop()
@@ -2950,6 +3311,9 @@ class TileFixR(QMainWindow):
         self.debug_label.setText(f"undo: {kind} (stack now {len(self.undo_stack)})")
 
     def _toggle_selected_mark(self):
+        """Flip the currently selected polygon's mark-for-delete flag, push the
+        matching undo entry, persist the marks, and redraw. No-op in view-only
+        mode or when nothing is selected."""
         if self.view_only:
             return
         if self.selected_id is None:
@@ -2967,10 +3331,14 @@ class TileFixR(QMainWindow):
         self.refresh_view()
 
     def _clear_selection(self):
+        """Deselect the current polygon and redraw."""
         self.selected_id = None
         self.refresh_view()
 
     def _launch_mask_checkr(self):
+        """Open the sister Mask CheckR tool in a separate process, pre-seeding
+        its last-pick file with the current CVAT task so it opens on the same
+        dataset, and run a short 'Opening...' button animation."""
         last_pick = Path.home() / ".star_trail_cleanr" / "mask_checkr_last.json"
         last_pick.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -2989,6 +3357,8 @@ class TileFixR(QMainWindow):
         self._tick_maskcheckr_animation()
 
     def _tick_maskcheckr_animation(self):
+        """Timer tick that cycles the Mask CheckR button through 'Opening...'
+        then resets its caption."""
         labels = ["Opening", "Opening.", "Opening..", "Opening..."]
         self.mask_checkr_btn.setText(labels[self._maskcheckr_anim_step % len(labels)])
         self._maskcheckr_anim_step += 1
@@ -3000,6 +3370,11 @@ class TileFixR(QMainWindow):
     # ── Send to CVAT ────────────────────────────────────────────────────────
 
     def _send_to_cvat(self):
+        """Push all pending changes (added / edited / marked-for-delete polygons)
+        to CVAT on a background worker so the UI stays responsive. Snapshots the
+        adds/edits/deletes, records which frames are affected for a post-send
+        refresh, starts the worker, and runs the 'Sending...' button animation.
+        Ignored if a send is already in flight or there are no changes."""
         if self._send_worker is not None and self._send_worker.isRunning():
             return
         adds = [p for p in self.polygons_by_id.values() if p["status"] == "added"]
@@ -3044,16 +3419,23 @@ class TileFixR(QMainWindow):
         self._send_worker.start()
 
     def _tick_send_animation(self):
+        """Timer tick that cycles the Send button caption through 'Sending...'
+        while the background push runs."""
         labels = ["Sending", "Sending.", "Sending..", "Sending..."]
         self.send_btn.setText(labels[self._send_anim_step % len(labels)])
         self._send_anim_step += 1
 
     def _stop_send_animation(self):
+        """Stop and clear the Send-button animation timer."""
         if self._send_anim_timer is not None:
             self._send_anim_timer.stop()
             self._send_anim_timer = None
 
     def _on_send_finished(self, result):
+        """Handle a successful CVAT send. Shows any per-shape errors the worker
+        reported, clears the marks and resets edited/added polygons back to
+        'original', empties the undo stack, then re-pulls the affected frames
+        fresh from CVAT (so temporary ids become real server ids) and redraws."""
         self._stop_send_animation()
         errors = result.get("errors", [])
         if errors:
@@ -3081,6 +3463,9 @@ class TileFixR(QMainWindow):
         self._send_worker = None
 
     def _on_send_error(self, msg):
+        """Handle a fatal CVAT send failure: stop the animation, show the error,
+        and restore the buttons/view (local changes are kept so the user can
+        retry)."""
         self._stop_send_animation()
         QMessageBox.critical(self, "CVAT error", f"CVAT update failed:\n{msg}")
         self._refresh_send_button()
@@ -3088,6 +3473,10 @@ class TileFixR(QMainWindow):
         self._send_worker = None
 
     def _pull_from_cvat(self):
+        """Re-fetch the freshest polygons from CVAT for the current frame and its
+        neighbors (within 10 frames) and rebuild their tile copies, so the editor
+        reflects review work done elsewhere. Runs synchronously with a 'Pulling...'
+        button state."""
         if not self.entries:
             return
         self.pull_btn.setEnabled(False)
@@ -3111,6 +3500,11 @@ class TileFixR(QMainWindow):
         self.refresh_view()
 
     def _refresh_frame_from_cvat(self, frame_idx, auth, ann_resp=None):
+        """Replace one frame's polygons with CVAT's current version. Drops the
+        old registry entries and tile copies for that frame, then re-adds every
+        fresh shape (with its real server id, stable color, and 'original'
+        status) and re-clips it into the tiles. Reuses a passed-in annotations
+        response when given, otherwise fetches one."""
         try:
             if ann_resp is None:
                 ann_resp = requests.get(
@@ -3153,6 +3547,10 @@ class TileFixR(QMainWindow):
     # ── Copy reference ──────────────────────────────────────────────────────
 
     def _copy_reference(self):
+        """Copy a one-line text reference for the current tile to the clipboard
+        (tool name, task id, dataset, frame number + filename, tile grid cell,
+        and tile origin) so it can be pasted back to Claude, then briefly flash
+        'Copied' on the button."""
         if not self.entries:
             return
         entry = self.entries[self.current_idx]
@@ -3173,6 +3571,8 @@ class TileFixR(QMainWindow):
     # ── CVAT deep link ──────────────────────────────────────────────────────
 
     def _open_in_cvat(self):
+        """Open the current frame directly in the CVAT web UI in a new browser
+        tab (a cache-busting timestamp is appended so CVAT always reloads)."""
         if not self.entries:
             return
         entry = self.entries[self.current_idx]
@@ -3183,6 +3583,9 @@ class TileFixR(QMainWindow):
     # ── Persistence ─────────────────────────────────────────────────────────
 
     def _restore_position(self):
+        """Return the entry index to open on at launch: the saved tile id if it
+        still exists, else the saved numeric index, else 0. Lets the editor
+        reopen on the exact tile the user last viewed."""
         if not self.entries:
             return 0
         state = self._load_saved_state()
@@ -3197,6 +3600,8 @@ class TileFixR(QMainWindow):
         return 0
 
     def _load_saved_state(self):
+        """Read the per-task saved view state (position, zoom, filters,
+        brightness/contrast) from disk, or return an empty dict if none/unreadable."""
         try:
             if STATE_PATH.exists():
                 return json.loads(STATE_PATH.read_text())
@@ -3205,6 +3610,10 @@ class TileFixR(QMainWindow):
         return {}
 
     def _save_state(self):
+        """Persist the current view state for this task to disk: the tile id and
+        index, active filter and tile filter, the full zoom transform + scroll
+        offsets, and the brightness/contrast slider values. Best-effort (any
+        error is swallowed)."""
         if not self.entries or self.current_idx >= len(self.entries):
             return
         try:
@@ -3228,6 +3637,9 @@ class TileFixR(QMainWindow):
             pass
 
     def _restore_zoom(self):
+        """Re-apply the saved zoom transform and scroll position after launch, so
+        the editor reopens at the same magnification and pan. Skipped when the
+        saved zoom level is 0 (fit-to-window)."""
         state = self._load_saved_state()
         t_vals = state.get("zoom_transform")
         if t_vals and len(t_vals) == 9 and state.get("zoom_level", 0) != 0:
@@ -3242,6 +3654,9 @@ class TileFixR(QMainWindow):
             self.image_view.verticalScrollBar().setValue(sy)
 
     def _load_marks(self):
+        """Load the set of server ids previously marked for deletion (per task)
+        from disk, so unfinished delete work survives a restart. Empty set if
+        none/unreadable."""
         try:
             if MARKS_PATH.exists():
                 data = json.loads(MARKS_PATH.read_text())
@@ -3250,6 +3665,8 @@ class TileFixR(QMainWindow):
             self.marked_ids = set()
 
     def _save_marks(self):
+        """Write the current marked-for-delete server ids to disk for this task.
+        Best-effort (errors swallowed)."""
         try:
             STATE_DIR.mkdir(parents=True, exist_ok=True)
             MARKS_PATH.write_text(json.dumps({
@@ -3260,10 +3677,13 @@ class TileFixR(QMainWindow):
             pass
 
     def closeEvent(self, event):
+        """Save the view state on window close so the next launch resumes here."""
         self._save_state()
         super().closeEvent(event)
 
     def _relaunch(self):
+        """Save state, start a fresh copy of TileFixR in a new process (picking up
+        code edits and a fresh CVAT pull via the launch picker), and quit this one."""
         self._save_state()
         subprocess.Popen([sys.executable, os.path.abspath(__file__)])
         self.close()
@@ -3288,11 +3708,24 @@ PILL_STYLE = """
 
 
 class ScanWorker(QThread):
+    """Background worker behind the 'Scan Tile' button. For one fixed tile
+    window, it scans every frame for transient bright blobs (candidate missed
+    trails) — sky-vs-foreground-aware brightening over a per-tile median, with a
+    minimum blob size — and flags any blob that does NOT also appear in an
+    adjacent frame (a real trail moves, so a one-frame-only blob is suspicious).
+    Reports progress and emits the list of flagged frame indices when done.
+
+    Signals:
+      progress(current, total) — per-frame progress.
+      finished(list)           — flagged frame indices.
+      failed(str)              — an error aborted the scan.
+    """
     progress = Signal(int, int)   # current, total
     finished = Signal(list)       # list of flagged frame indices
     failed   = Signal(str)
 
     def __init__(self, img_dir, tile_x, tile_y, tile_size=640):
+        """Stash the image folder and the tile window (origin + size) to scan."""
         super().__init__()
         self.img_dir   = Path(img_dir)
         self.tile_x    = tile_x
@@ -3300,6 +3733,12 @@ class ScanWorker(QThread):
         self.tile_size = tile_size
 
     def run(self):
+        """Thread body: load the foreground mask for sky/foreground thresholds,
+        build a per-tile median from a random frame sample, then for every frame
+        difference the tile against the median, threshold it, label connected
+        components, and flag the frame if a large-enough component has no
+        counterpart in either neighbor frame. Emits failed() on any error (e.g.
+        no frames or no foreground mask)."""
         try:
             from PIL import Image
             from scipy import ndimage
@@ -3329,6 +3768,8 @@ class ScanWorker(QThread):
             THRESH_SKY, THRESH_FG, MIN_PX, SAMPLE_N = 18, 28, 8, 75
 
             def crop_tile(fpath):
+                """Load one frame, crop out the scan tile, and zero-pad it to the
+                full tile size; returns a float32 array."""
                 arr = np.array(Image.open(fpath).crop((ox, oy, ox+ts, oy+ts))).astype(np.float32)
                 if arr.shape[:2] != (ts, ts):
                     pad = np.zeros((ts, ts, 3), dtype=np.float32)
@@ -3342,6 +3783,9 @@ class ScanWorker(QThread):
             cache = {}
 
             def get_binary(idx):
+                """Return the cached boolean bright-blob map for frame idx,
+                computing it (difference vs median, sky/foreground thresholds) on
+                first use and pruning entries older than two frames back."""
                 if idx not in cache:
                     diff = (crop_tile(frames[idx]) - median).mean(axis=2)
                     cache[idx] = ((diff > THRESH_SKY) & is_sky) | ((diff > THRESH_FG) & is_fg)
@@ -3376,6 +3820,8 @@ class ScanWorker(QThread):
 
 
 def make_pill(text, color_key="blue"):
+    """Build a checkable pill-style QPushButton in one of the named color
+    themes (blue/green/red/amber/purple). Used for the toolbar filter pills."""
     colors = {
         "blue":   {"bg": "#e8f0fe", "fg": "#1a5276", "border": "#b0c4de",
                     "checked_bg": "#1a6fc4", "checked_border": "#145da0", "hover_bg": "#d0e0f0"},
@@ -3396,7 +3842,14 @@ def make_pill(text, color_key="blue"):
 
 
 class SplashWindow(QWidget):
+    """The frameless loading splash shown while CVAT polygons are fetched and the
+    tile grid is built. Displays a status line and an (indeterminate or
+    determinate) progress bar, plus a Cancel button that sets a flag the loaders
+    poll to abort early."""
+
     def __init__(self):
+        """Build the splash UI: title, status line, progress bar, and Cancel
+        button (which flips self.cancelled)."""
         super().__init__()
         self.cancelled = False
         self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
@@ -3450,6 +3903,10 @@ class SplashWindow(QWidget):
         self.setStyleSheet("background-color: #0a1e3f; border-radius: 12px;")
 
     def update_progress(self, text, current=0, total=0):
+        """Progress callback passed to the loaders. Updates the status text and
+        the progress bar (determinate when total > 0, otherwise a busy
+        indicator), pumps the event loop, and returns whether Cancel was pressed
+        so the caller can stop."""
         self.status_label.setText(text)
         if total > 0:
             self.progress.setRange(0, total)
@@ -3461,6 +3918,12 @@ class SplashWindow(QWidget):
 
 
 def main():
+    """Program entry point. Takes the single-instance lock, applies the theme,
+    fetches the CVAT task list, and shows the launch picker. From the picked task
+    + frame range + source mode it resolves the local image folder, sets the
+    module-level globals, then (behind a splash) pulls CVAT polygons and builds
+    the tile entries — either editable CVAT polygons or view-only cleaned frames
+    + STC masks. Finally constructs and shows the main TileFixR editor window."""
     global CVAT_TASK_ID, FRAME_START, FRAME_END, IMG_DIR, TASK_NAME
     print("TileFixR")
     print("=" * 60, flush=True)

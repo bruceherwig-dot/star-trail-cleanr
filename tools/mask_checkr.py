@@ -1,9 +1,47 @@
 #!/usr/bin/env python3
-"""mask_checkr.py — validate annotation coverage.
+"""mask_checkr.py — Mask CheckR: a developer tool to spot trails that slipped through.
 
-Two modes:
-  CVAT: fetch reviewed polygons, black-fill, stack. Visible trail = missed annotation.
-  Last STC run: load saved masks, black-fill, stack. Visible trail = missed detection.
+WHAT IT IS
+  A small PySide6 desktop app that answers one question visually: "Did we miss a
+  trail?" It does that the same way StarStaX builds a final star-trail image —
+  by lighten-max stacking a sequence of frames (each output pixel is the
+  brightest value seen across all frames). If a trail was correctly removed from
+  every frame, it cannot show up in the stack. So any trail still visible in the
+  stacked result is a trail that escaped — either a missed CVAT annotation or a
+  missed detection in the actual cleaned run.
+
+TWO MODES (chosen with a radio button in the picker dialog)
+  1. "CVAT annotations" — Pull Bruce's reviewed polygons for a chosen CVAT task
+     and frame range straight from the CVAT API (never from the stale local
+     labelme JSON files). Black-fill every polygon on its source frame, then
+     lighten-max stack the frames. Black is the darkest possible value, so a
+     correctly-annotated trail is erased from the stack; anything still visible
+     means a polygon was missing in CVAT. This audits annotation coverage
+     BEFORE training.
+  2. "Last STC run" — Point at a dataset folder that contains a cleaned/
+     subfolder (the real Star Trail CleanR output). Lighten-max stack those
+     already-cleaned JPEGs exactly as StarStaX would. Any trail still visible is
+     a real problem in the shipped/cleaned result — a missed or under-cleaned
+     detection. (Note: this mode stacks the real cleaned frames; it does NOT
+     re-derive masks. The older "load saved masks and black-fill" behavior was
+     replaced by stacking the actual cleaned output.)
+
+OUTPUT (both modes, written to a mask_checkr_output/ folder and opened in Finder)
+  - a plain lighten-max stack JPEG, and
+  - a second JPEG with the 640x640 detection tile grid drawn on top and each
+    tile labeled A1/B2-style, so a trail can be reported by its tile address
+    and jumped to in TileFixR.
+
+HOW TO RUN
+  python3 tools/mask_checkr.py
+  Requires CVAT running at http://localhost:8080 for the CVAT mode (the app
+  still launches without CVAT and falls back to "Last STC run" mode). Single
+  instance only — a lock file prevents a second copy from running.
+
+WHERE IT FITS
+  Part of Bruce's annotation-quality loop (Trail ScreenR -> TileFixR ->
+  Mask CheckR -> fix -> repeat). It is a diagnostic/review tool, not part of the
+  shipped Star Trail CleanR pipeline.
 """
 
 import atexit
@@ -44,6 +82,13 @@ LOCK_FILE = STATE_DIR / "mask_checkr.lock"
 # ── Lock ──────────────────────────────────────────────────────────────────────
 
 def acquire_lock():
+    """Enforce single-instance: claim the lock file or refuse to start.
+
+    Returns True if this process now owns the lock, False if another live
+    Mask CheckR process already holds it. A stale lock (the recorded PID is no
+    longer running) is treated as free and overwritten. The lock is removed
+    automatically at process exit via atexit.
+    """
     if LOCK_FILE.exists():
         try:
             pid = int(LOCK_FILE.read_text().strip())
@@ -61,6 +106,12 @@ def acquire_lock():
 MUTED_TEXT = "#666"
 
 def _apply_theme():
+    """Adjust the muted-text color for dark mode.
+
+    Detects the OS color scheme via Qt and, if dark, lightens the gray used for
+    secondary labels so it stays legible. Silently leaves the light-mode default
+    if the scheme can't be read.
+    """
     global MUTED_TEXT
     try:
         is_dark = (QApplication.styleHints().colorScheme() == Qt.ColorScheme.Dark)
@@ -72,9 +123,21 @@ def _apply_theme():
 # ── CVAT helpers ──────────────────────────────────────────────────────────────
 
 def read_cvat_password():
+    """Read the CVAT password from the credentials file in the home directory.
+
+    The password lives at ~/.star_trail_cleanr/cvat_credentials (outside the
+    repo, never hardcoded). Returns the trimmed contents.
+    """
     return (Path.home() / ".star_trail_cleanr" / "cvat_credentials").read_text().strip()
 
 def fetch_cvat_tasks(auth):
+    """Fetch all CVAT tasks via the API, following pagination.
+
+    Walks every page of GET /api/tasks and returns a list of small dicts
+    {id, name, size} (size = frame count), sorted case-insensitively by name.
+    On any request error it prints the error and returns whatever was gathered
+    so far (possibly empty), so the app can still launch in STC-only mode.
+    """
     out = []
     url = f"{CVAT_URL}/api/tasks"
     while url:
@@ -90,6 +153,14 @@ def fetch_cvat_tasks(auth):
     return out
 
 def resolve_image_dir(task_name):
+    """Map a CVAT task name to the on-disk folder of its source images.
+
+    Tries, in order: the special gkyle staging folder; an explicit alias from
+    TASK_FOLDER_ALIASES; a folder under TRAILS_ROOT named exactly like the task
+    (also trying the part before a " - v..." version suffix); and finally a
+    case-insensitive substring match against the children of TRAILS_ROOT.
+    Returns the matching Path, or None if nothing is found.
+    """
     if "gkyle" in task_name.lower() and GKYLE_STAGING.exists():
         return GKYLE_STAGING
     if task_name in TASK_FOLDER_ALIASES:
@@ -113,6 +184,12 @@ def resolve_image_dir(task_name):
 # ── Persistence ───────────────────────────────────────────────────────────────
 
 def load_last_pick():
+    """Load the user's previous picker selections so the dialog reopens pre-filled.
+
+    Reads the saved JSON (task id, frame range, source mode, last STC dataset
+    folder) and returns it as a dict with safe defaults for any missing key. On
+    any error (file missing or corrupt) returns a fully-defaulted dict.
+    """
     try:
         d = json.loads(LAST_PICK.read_text())
         return {
@@ -128,6 +205,7 @@ def load_last_pick():
                 "source_mode": "cvat", "stc_images_dir": "", "stc_masks_dir": ""}
 
 def save_last_pick(data: dict):
+    """Persist the current picker selections to the state JSON for next launch."""
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     LAST_PICK.write_text(json.dumps(data, indent=2))
 
@@ -136,7 +214,25 @@ def save_last_pick(data: dict):
 SELECTABLE = Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard
 
 class TaskPickerDialog(QDialog):
+    """The startup dialog where the user chooses what to stack.
+
+    Presents two mutually-exclusive sources via radio buttons:
+      - "CVAT annotations": pick a CVAT task and a 1-based frame range.
+      - "Last STC run": browse to a dataset folder that has a cleaned/
+        subfolder, with its own frame range.
+    Only one source section is visible at a time. The Run button enables only
+    when the active source has a valid selection (a resolvable CVAT task, or a
+    dataset folder whose cleaned/ subfolder exists). Selections are remembered
+    between launches via load_last_pick / save_last_pick.
+    """
     def __init__(self, tasks, last_pick: dict, auth=None):
+        """Build the dialog from the loaded CVAT task list and saved selections.
+
+        tasks: list of {id, name, size} task dicts (empty if CVAT is offline).
+        last_pick: previously saved choices used to pre-select the task, frame
+        range, source mode, and last STC folder. auth: CVAT (user, password)
+        tuple, used to query per-task metadata (deleted-frame counts).
+        """
         super().__init__()
         self.tasks = tasks
         self.auth  = auth
@@ -313,12 +409,19 @@ class TaskPickerDialog(QDialog):
     # ── Source switching ──
 
     def _on_source_changed(self):
+        """Show the CVAT or STC section depending on the selected radio button."""
         is_cvat = self._radio_cvat.isChecked()
         self._cvat_widget.setVisible(is_cvat)
         self._stc_widget.setVisible(not is_cvat)
         self._update_run_button()
 
     def _detect_cleaned(self, img_dir: Path):
+        """Locate the cleaned/ output folder for an STC dataset selection.
+
+        Returns img_dir itself if the user pointed straight at a folder named
+        cleaned/, otherwise its cleaned/ subfolder if that exists, otherwise
+        None.
+        """
         # The cleaned output normally lives in a cleaned/ subfolder of the
         # dataset. If the user pointed straight at a cleaned/ folder, accept it.
         if img_dir.name == "cleaned" and img_dir.is_dir():
@@ -327,6 +430,12 @@ class TaskPickerDialog(QDialog):
         return candidate if candidate.is_dir() else None
 
     def _update_run_button(self):
+        """Enable or disable the Run button based on the active source's validity.
+
+        CVAT mode requires a selected task whose image folder resolves on disk.
+        STC mode requires both the dataset folder and its cleaned/ subfolder to
+        exist, and also refreshes the STC status line.
+        """
         if self._radio_cvat.isChecked():
             task = self.selected_task()
             ok = task is not None and resolve_image_dir(task["name"]) is not None
@@ -338,6 +447,12 @@ class TaskPickerDialog(QDialog):
             self._refresh_stc_status(images_ok, cleaned_ok)
 
     def _refresh_stc_status(self, images_ok, cleaned_ok):
+        """Update the STC status line with a colored hint about the current folder.
+
+        Gray prompt if no dataset folder is chosen, red warning if no cleaned/
+        subfolder is found, green confirmation with the cleaned-frame count when
+        everything is ready.
+        """
         if not images_ok:
             self._stc_status_lbl.setText("Select the dataset folder (the one containing the cleaned/ output).")
             self._stc_status_lbl.setStyleSheet(f"color: {MUTED_TEXT}; font-size: 11px;")
@@ -353,6 +468,12 @@ class TaskPickerDialog(QDialog):
             self._stc_status_lbl.setStyleSheet("color: #2a7a2a; font-size: 11px;")
 
     def _browse_stc_images(self):
+        """Open a folder picker for the STC dataset and update state from the choice.
+
+        On selection, records the dataset folder, re-detects its cleaned/
+        subfolder, resets the STC frame range to the full batch, and re-evaluates
+        the Run button.
+        """
         start = str(self._stc_images_dir) if self._stc_images_dir else str(TRAILS_ROOT)
         chosen = QFileDialog.getExistingDirectory(self, "Select dataset folder (with cleaned/ output)", start)
         if chosen:
@@ -378,6 +499,12 @@ class TaskPickerDialog(QDialog):
         self._on_stc_range_changed()
 
     def _on_stc_range_changed(self):
+        """Keep the STC last-frame >= first-frame and refresh the count label.
+
+        If "last" drops below "first" (and isn't the field being actively
+        edited), it snaps back up to "first". Then updates the "N frames (a - b)"
+        summary label.
+        """
         if (self.stc_last_spin.value() < self.stc_first_spin.value()
                 and not self.stc_last_spin.hasFocus()):
             self.stc_last_spin.blockSignals(True)
@@ -391,6 +518,13 @@ class TaskPickerDialog(QDialog):
     # ── CVAT section handlers ──
 
     def _on_task_changed(self, idx):
+        """React to a new CVAT task selection in the combo box.
+
+        Queries the task's data metadata to subtract deleted frames from the
+        reported size (the "effective" frame count), updates the combo label and
+        the frame-range spin maxima/defaults, and shows the resolved source-image
+        folder in green or a red "NOT FOUND" if it can't be located.
+        """
         task = self.selected_task()
         if not task:
             return
@@ -423,6 +557,11 @@ class TaskPickerDialog(QDialog):
         self._update_run_button()
 
     def _on_range_changed(self):
+        """Keep the CVAT last-frame >= first-frame and refresh the count label.
+
+        Same snap-back behavior as the STC range handler, applied to the CVAT
+        frame-range spin boxes and their "N frames (a - b)" summary label.
+        """
         if (self.last_spin.value() < self.first_spin.value()
                 and not self.last_spin.hasFocus()):
             self.last_spin.blockSignals(True)
@@ -436,30 +575,38 @@ class TaskPickerDialog(QDialog):
     # ── Accessors ──
 
     def source_mode(self):
+        """Return "cvat" or "stc" for the currently selected source."""
         return "cvat" if self._radio_cvat.isChecked() else "stc"
 
     def selected_task(self):
+        """Return the chosen {id, name, size} task dict, or None if none valid."""
         idx = self.combo.currentData()
         if idx is not None and 0 <= idx < len(self.tasks):
             return self.tasks[idx]
         return None
 
     def selected_first_frame(self):
+        """Return the CVAT-mode first frame (1-based) as an int."""
         return int(self.first_spin.value())
 
     def selected_last_frame(self):
+        """Return the CVAT-mode last frame (1-based, inclusive) as an int."""
         return int(self.last_spin.value())
 
     def selected_stc_images_dir(self):
+        """Return the chosen STC dataset folder Path, or None."""
         return self._stc_images_dir
 
     def selected_stc_cleaned_dir(self):
+        """Return the auto-detected cleaned/ folder Path for STC mode, or None."""
         return self._stc_cleaned_dir  # auto-detected in _browse_stc_images
 
     def selected_stc_first_frame(self):
+        """Return the STC-mode first frame (1-based) as an int."""
         return int(self.stc_first_spin.value())
 
     def selected_stc_last_frame(self):
+        """Return the STC-mode last frame (1-based, inclusive) as an int."""
         return int(self.stc_last_spin.value())
 
 
@@ -469,9 +616,18 @@ TILE_SIZE = 640
 TILE_OVERLAP = 0.2
 
 def compute_tile_positions(img_w, img_h, tile_size=TILE_SIZE, overlap=TILE_OVERLAP):
+    """Compute the top-left x and y offsets of the 640x640 detection tiles.
+
+    Mirrors the overlapping SAHI tiling used by the detector: tiles step by
+    stride = tile_size * (1 - overlap), and the final tile in each axis is
+    snapped flush to the right/bottom edge so the whole image is covered.
+    Returns (xs, ys) lists of pixel offsets. A dimension smaller than one tile
+    yields a single offset of 0.
+    """
     stride = max(1, int(tile_size * (1 - overlap)))
 
     def positions(dim):
+        """Return the tile start offsets along one axis of length `dim`."""
         if dim <= tile_size:
             return [0]
         pos = []
@@ -486,6 +642,14 @@ def compute_tile_positions(img_w, img_h, tile_size=TILE_SIZE, overlap=TILE_OVERL
 
 
 def draw_tile_grid(img_arr, xs, ys, tile_size=TILE_SIZE):
+    """Draw the labeled tile grid over a stacked image and return the overlaid copy.
+
+    Each tile gets a faint white rectangle (blended at 35% so the image stays
+    readable) and a centered A1/B2-style label (rows = letters A, B, C...;
+    columns = 1, 2, 3...) on a black background chip. The label address lets a
+    trail spotted in the stack be reported by tile and opened in TileFixR. Does
+    not modify the input array.
+    """
     out = img_arr.copy()
     h, w = out.shape[:2]
 
@@ -518,7 +682,14 @@ def draw_tile_grid(img_arr, xs, ys, tile_size=TILE_SIZE):
 # ── Splash window ─────────────────────────────────────────────────────────────
 
 class SplashWindow(QWidget):
+    """A frameless progress splash shown while a stack worker runs.
+
+    Displays the tool name, a status line, an indeterminate-or-determinate
+    progress bar, and a Cancel button that quits the whole app. Driven by the
+    worker's progress signal via update_progress.
+    """
     def __init__(self):
+        """Build the splash window layout and styling."""
         super().__init__()
         self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground, False)
@@ -571,6 +742,12 @@ class SplashWindow(QWidget):
         self.setStyleSheet("background-color: #0a1e3f; border-radius: 12px;")
 
     def update_progress(self, text, current=0, total=0):
+        """Update the status line and progress bar, then pump the event loop.
+
+        With total > 0 the bar shows determinate current/total progress;
+        otherwise it shows an indeterminate "busy" animation. Calls
+        processEvents so the splash repaints while the worker thread runs.
+        """
         self.status_label.setText(text)
         if total > 0:
             self.progress_bar.setRange(0, total)
@@ -582,11 +759,20 @@ class SplashWindow(QWidget):
 # ── CVAT stack worker ─────────────────────────────────────────────────────────
 
 class StackWorker(QThread):
+    """Background thread for CVAT mode: black-fill annotations, then lighten-max stack.
+
+    Fetches the task's reviewed polygons from CVAT for the chosen frame range,
+    paints each polygon black on its source JPEG, lighten-max stacks the frames,
+    and writes both a plain stack and a tile-grid-labeled stack. Communicates
+    with the UI via Qt signals (progress / finished / error) so the GUI stays
+    responsive.
+    """
     progress = Signal(str, int, int)
     finished = Signal(str, str, int, int, int)  # out_path, tiled_path, total, annotated, polys
     error    = Signal(str)
 
     def __init__(self, task, first_frame, last_frame, auth, img_dir):
+        """Store the task, 1-based frame range, CVAT auth, and source image folder."""
         super().__init__()
         self.task        = task
         self.first_frame = first_frame
@@ -595,6 +781,16 @@ class StackWorker(QThread):
         self.img_dir     = img_dir
 
     def run(self):
+        """Do the CVAT-mode work on the worker thread.
+
+        Steps: find the task's job and its frame-name list; pull all polygon/mask
+        shapes within the requested frame range and group them by image stem;
+        for each source JPEG, fill its polygons black and lighten-max accumulate;
+        write the plain and tile-grid stacks into
+        <img_dir>/cleanr_workspace/masks/mask_checkr_output/; emit finished with
+        counts (frames stacked, frames annotated, polygons filled). Emits error
+        on any failure or if the expected masks folder is missing.
+        """
         try:
             self.progress.emit("Fetching CVAT annotations...", 0, 0)
             task_id    = self.task["id"]
@@ -703,17 +899,35 @@ class StackWorker(QThread):
 # ── STC run stack worker ──────────────────────────────────────────────────────
 
 class STCRunWorker(QThread):
+    """Background thread for "Last STC run" mode: lighten-max stack the cleaned frames.
+
+    Stacks the actual cleaned/ JPEGs (exactly what StarStaX would produce) over
+    the chosen frame range, and writes both a plain stack and a tile-grid-labeled
+    stack. Unlike StackWorker it applies no masks: any trail still visible is a
+    real defect in the cleaned output. Communicates via Qt signals.
+    """
     progress = Signal(str, int, int)
     finished = Signal(str, str, int, int)  # out_path, tiled_path, total, masked_count
     error    = Signal(str)
 
     def __init__(self, cleaned_dir: Path, first_frame=1, last_frame=None):
+        """Store the cleaned/ folder and the 1-based inclusive frame range.
+
+        last_frame=None means stack through the final frame.
+        """
         super().__init__()
         self.cleaned_dir = cleaned_dir
         self.first_frame = int(first_frame)
         self.last_frame  = last_frame  # None = to the end
 
     def run(self):
+        """Do the STC-mode work on the worker thread.
+
+        Sorts the cleaned JPEGs, slices to the selected 1-based inclusive range,
+        lighten-max accumulates them, and writes the plain and tile-grid stacks
+        into a mask_checkr_output/ folder beside cleaned/. Emits finished with the
+        frame count, or error if no cleaned files or no frames in range.
+        """
         try:
             # Stack the ACTUAL cleaned frames -- exactly what StarStaX would
             # output -- not source-with-masks-blackfilled. A trail visible here
@@ -772,6 +986,15 @@ class STCRunWorker(QThread):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
+    """App entry point: lock, connect to CVAT, show the picker, run the chosen mode.
+
+    Acquires the single-instance lock, tries to load CVAT tasks (continuing in
+    STC-only mode if CVAT is offline), shows the picker dialog, and on "Run"
+    launches the matching worker (StackWorker for CVAT, STCRunWorker for STC)
+    behind a splash. When the worker finishes it shows a summary message box,
+    opens the output folder in Finder, and quits. Saves the selection for next
+    launch.
+    """
     print("Mask CheckR")
     print("=" * 60, flush=True)
 
@@ -806,6 +1029,7 @@ def main():
     mode = picker.source_mode()
 
     def on_error(msg):
+        """Worker error handler: close the splash, show the message, quit the app."""
         splash.close()
         mb = QMessageBox(QMessageBox.Critical, "Mask CheckR — Error", msg)
         mb.setTextInteractionFlags(SELECTABLE)
@@ -845,6 +1069,7 @@ def main():
         worker.progress.connect(lambda msg, cur, tot: splash.update_progress(msg, cur, tot))
 
         def on_cvat_finished(out_path, tiled_path, total, annotated, polys):
+            """CVAT worker done: show the coverage summary, open output, quit."""
             splash.close()
             mb = QMessageBox(QMessageBox.Information, "Mask CheckR",
                 f"Done.\n\n"
@@ -888,6 +1113,7 @@ def main():
         worker.progress.connect(lambda msg, cur, tot: splash.update_progress(msg, cur, tot))
 
         def on_stc_finished(out_path, tiled_path, total, _unused):
+            """STC worker done: show the cleaned-stack summary, open output, quit."""
             splash.close()
             mb = QMessageBox(QMessageBox.Information, "Mask CheckR",
                 f"Done.\n\n"
