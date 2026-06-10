@@ -52,7 +52,7 @@ import numpy as np
 from skimage.measure import label as sklabel, regionprops as skregionprops
 
 from .io_safe import robust_imread
-from .crossing_splitter import split_crossing
+from .crossing_splitter import split_crossing, has_crossing_evidence
 from .trail_grouper import (
     group_detections, fit_polygon, fit_curved_group, _group_angle_spread,
     _try_split_parallel, _pred_to_mask,
@@ -747,6 +747,8 @@ def stage_fit_polygons(state: PipelineState, cfg: StageConfig,
     frame_px = h * w
     t_premask = t_scan = t_split = t_par = t_props = 0.0
     n_split_fired = 0
+    n_kept_whole = 0
+    rescued_blobs = []   # (crop_mask, row0, col0) of kept-whole crossing tangles
     for pred in preds:
         _t = time.perf_counter()
         m = _pred_to_mask(pred, h, w)
@@ -780,6 +782,30 @@ def stage_fit_polygons(state: PipelineState, cfg: StageConfig,
         is_confirmed_crossing = len(crossing_pieces) > 1
         if is_confirmed_crossing:
             n_split_fired += 1
+        else:
+            # Crossing rescue: multi-touch tangles (3+ trails through one blob)
+            # defeat the spine+tips split, so split_crossing returns the blob
+            # whole -- and a squat unsplit tangle then dies at the aspect gate,
+            # deleting every real trail the model found inside it (143A8819:
+            # all four trails masked at 0.81 confidence, all dropped). If the
+            # blob still shows the splitter's own crossing evidence (2+ line
+            # directions at a real angle, thin-trail fill that a flood can't
+            # have), keep the model's mask EXACTLY as-is: the blob's own pixels
+            # are painted into the final mask after polygon fitting (a tangle
+            # has no faithful simple polygon -- a fitted quad both over-covers
+            # and trims arms). The repair cleans a whole tangle fine -- it
+            # borrows sky by star tracking and needs no per-trail separation.
+            _t = time.perf_counter()
+            if has_crossing_evidence(mc, frame_px=frame_px):
+                n_kept_whole += 1
+                log.count("crossings_kept_whole")
+                log.event("crossing_kept_whole",
+                          area=int((mc > 0).sum()),
+                          bbox=[int(c0), int(r0), int(c1), int(r1)])
+                rescued_blobs.append(((mc > 0).astype(np.uint8), r0, c0))
+                t_split += time.perf_counter() - _t
+                continue
+            t_split += time.perf_counter() - _t
         for cm in crossing_pieces:
             _t = time.perf_counter()
             parallel_pieces = _try_split_parallel(cm, frame_px=frame_px)
@@ -803,14 +829,14 @@ def stage_fit_polygons(state: PipelineState, cfg: StageConfig,
               bbox_scan_s=round(t_scan, 3),
               split_crossing_s=round(t_split, 3),
               parallel_split_s=round(t_par, 3), props_s=round(t_props, 3))
-    if not det_list:
+    if not det_list and not rescued_blobs:
         state.det_list = det_list
         state.final_mask = final
         return state
 
     # Group collinear, touching fragments into trails.
     _t = time.perf_counter()
-    groups = group_detections(det_list)
+    groups = group_detections(det_list) if det_list else []
     t_group = time.perf_counter() - _t
     log.count("groups", len(groups))
 
@@ -819,6 +845,22 @@ def stage_fit_polygons(state: PipelineState, cfg: StageConfig,
     final, polygons = _fit_groups(det_list, groups, h, w)
     t_fit = time.perf_counter() - _t
     log.event("fit_timing", group_s=round(t_group, 3), poly_fit_s=round(t_fit, 3))
+
+    # Rescued crossing tangles enter the final mask as their EXACT model
+    # pixels, with the blob's (lightly simplified) contour standing in as the
+    # polygon so repair and the viewers treat it like any other region. This
+    # keeps every arm the model masked (the fitted-quad path trimmed the 8819
+    # vertical stub) without the quad's fat over-coverage.
+    for _mb, _rb, _cb in rescued_blobs:
+        final[_rb:_rb + _mb.shape[0], _cb:_cb + _mb.shape[1]][_mb > 0] = 255
+        _cnts, _ = cv2.findContours(_mb, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for _cn in _cnts:
+            if cv2.contourArea(_cn) < 50:
+                continue
+            _cn = cv2.approxPolyDP(_cn, 2.0, True).reshape(-1, 2)
+            if len(_cn) < 3:
+                continue
+            polygons.append((_cn + np.array([_cb, _rb])).tolist())
 
     log.count("polygons", len(polygons))
     log.count("mask_components",

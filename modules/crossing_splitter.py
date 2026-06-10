@@ -469,3 +469,66 @@ def split_crossing(mask, frame_px=None):
         spine_mask = cv2.bitwise_or(spine_mask, uncovered)
 
     return [spine_mask] + tips
+
+
+# Crossing-evidence rescue: maximum fill fraction for a believable tangle. Real
+# crossing trails are thin lines through a mostly-empty box (the 143A8819 tangle
+# filled 20% of its box); flooding false positives are solid (50%+). Keeps the
+# rescue from ever protecting a flood.
+_EVIDENCE_MAX_FILL = 0.45
+
+
+def has_crossing_evidence(mask, frame_px=None):
+    """Is this blob a believable multi-trail crossing, even if it can't be split?
+
+    Used as a RESCUE check by the detection pipeline: when split_crossing()
+    gives up on a blob (multi-touch tangles defeat the spine+tips construction),
+    the blob used to fall through to the aspect gate, which deletes squat shapes
+    as flood false positives -- killing every real trail inside the tangle (the
+    143A8819 case: the model masked all four trails at 0.81 confidence and the
+    pipeline dropped the lot). This function re-runs the splitter's own ENTRY
+    evidence -- enough area, 2+ coherent Hough line directions separated by a
+    real crossing angle -- plus a fill-fraction cap that floods can't pass
+    (trails are thin lines in a mostly-empty box; floods are solid). A True
+    result means "keep this blob whole and let the repair handle it": the Star
+    Bridge repair borrows sky by tracking stars, so it cleans a multi-trail
+    tangle from the union mask without needing the trails separated.
+
+    Returns True when the blob shows genuine crossing evidence.
+    """
+    area = int((mask > 0).sum())
+    h, w = mask.shape[:2]
+    area_scale = (frame_px if frame_px else (h * w)) / _REF_FRAME_PX
+    if area < _SPLIT_AREA_MIN * area_scale:
+        return False                    # too small to be a multi-trail tangle
+    ys, xs = np.where(mask > 0)
+    pts = np.column_stack([xs, ys]).astype(np.float32)
+    rect = cv2.minAreaRect(pts.reshape(-1, 1, 2))
+    major_len = max(rect[1])
+    minor_len = max(1e-6, min(rect[1]))
+    fill = area / max(1.0, major_len * minor_len)
+    if fill > _EVIDENCE_MAX_FILL:
+        return False                    # solid blob = flood-like, not thin trails
+    blob_u8 = (mask > 0).astype(np.uint8) * 255
+    crop = blob_u8[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
+    local_threshold = 10 if area < 20000 else _HOUGH_THRESHOLD
+    lines = cv2.HoughLinesP(crop, 1, np.pi / 180,
+                            threshold=local_threshold,
+                            minLineLength=_HOUGH_MIN_LINE,
+                            maxLineGap=_HOUGH_MAX_GAP)
+    if lines is None or len(lines) < 2:
+        return False                    # no coherent line structure at all
+    angles = [_line_angle_deg(L[0]) for L in lines]
+    labels, _ = _dbscan_angles(angles, _DBSCAN_EPS, _DBSCAN_MIN_SAMPLES)
+    unique = sorted(set(l for l in labels if l >= 0))
+    if len(unique) < 2:
+        return False                    # one direction = a single trail, not a crossing
+    means = {cid: _circular_mean_angle(
+        [angles[i] for i, l in enumerate(labels) if l == cid]) for cid in unique}
+    widest = 0.0
+    for ci in range(len(unique)):
+        for cj in range(ci + 1, len(unique)):
+            d = _angle_dist(means[unique[ci]], means[unique[cj]])
+            if d > widest:
+                widest = d
+    return widest >= _MIN_SPLIT_ANGLE   # genuinely different directions = crossing
