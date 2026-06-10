@@ -1,10 +1,19 @@
 """
 Sparkle updater integration for macOS.
 
-Loads Sparkle.framework via PyObjC at runtime and exposes a single function
-check_for_updates() to be wired to a "Check for Updates..." menu item or
-button. Sparkle's native dialogs handle the entire UI — we don't draw any
-update UI ourselves.
+Loads Sparkle.framework via PyObjC at runtime. Sparkle's native dialogs
+handle the entire UI — we don't draw any update UI ourselves.
+
+HOW UPDATES REACH THE USER (plain English):
+- check_for_updates_in_background() runs on EVERY app launch. It quietly asks
+  the update server "is there a newer version?" If yes, Sparkle pops its own
+  "A new version is available — Install" window and does the download +
+  install-in-place + relaunch. If the user is already current, nothing shows.
+  This is the seamless, one-click experience — no website, no manual download.
+- check_for_updates() is the same one-click install path, but user-initiated
+  (the Settings "Check for Updates" button and the in-app update banner). It
+  may show a "you're up to date" message because the user explicitly asked.
+- Manual website download is the LINUX-only fallback (no Sparkle on Linux).
 
 References used to write this module:
 - fman blog post: https://fman.io/blog/codesigning-and-automatic-updates-for-pyqt-apps/
@@ -146,3 +155,34 @@ def check_for_updates():
         _log("check_for_updates: returned")
     except Exception:
         _log(f"check_for_updates: EXCEPTION\n{traceback.format_exc()}")
+
+
+def check_for_updates_in_background():
+    """Silently check for an update RIGHT NOW. Called on EVERY app launch.
+
+    Plain English: when the user opens Star Trail CleanR, this asks the update
+    server "is there a newer version?" If yes, Sparkle shows its own native
+    "A new version is available — Install" window and handles the download,
+    in-place install, and relaunch. If the user is already current, NOTHING
+    appears — no popup, no "you're up to date" box. This is what makes a new
+    release reach people the moment they open the app, instead of waiting on
+    Sparkle's once-a-day timer.
+
+    Verified against Sparkle's SPUUpdater.h (2.x):
+    - The correct silent-when-current call is updater.checkForUpdatesInBackground.
+    - It must run on the main thread, right after the updater is started and
+      before the run loop spins. init_sparkle() starts the updater, and the GUI
+      calls this immediately afterward, before the Qt event loop, so the timing
+      is correct.
+    - It only checks when automatic checks are enabled; build_helper.py sets
+      SUEnableAutomaticChecks=true in the bundle's Info.plist, which satisfies
+      that and also suppresses Sparkle's first-run permission prompt."""
+    if _updater_controller is None:
+        _log("check_for_updates_in_background: no controller, no-op")
+        return
+    _log("check_for_updates_in_background: invoking updater().checkForUpdatesInBackground()")
+    try:
+        _updater_controller.updater().checkForUpdatesInBackground()
+        _log("check_for_updates_in_background: returned")
+    except Exception:
+        _log(f"check_for_updates_in_background: EXCEPTION\n{traceback.format_exc()}")

@@ -2,6 +2,12 @@
 
 ---
 
+## v2.48-beta
+- **Updates now install themselves with one click, the way they're meant to.** When a new version is available, the in-app update notice downloads it, installs it in place, and restarts Star Trail CleanR for you, on Mac and Windows. It no longer sends you to the website to download and reinstall by hand. (Linux still uses the download page, since it has no built-in installer.)
+- **The app now checks for a new version the moment you open it, every time.** Previously the built-in installer only checked on a once-a-day schedule, so a new release could take up to a day to show up. Now it checks on launch and offers the update right away when there's something new.
+- **Auto-updates are reliable again.** The behind-the-scenes step that publishes updates to people who already have the app had stopped running, so recent versions weren't reaching existing installs automatically. Publishing now happens automatically on every release, and the release fails loudly if it doesn't go through, so updates can't silently stall again.
+- **Smoke tests:** 148 passing.
+
 ## v2.47-beta
 - **Trail gaps are now filled with matching sky color instead of black.** When a trail is removed, the app rebuilds that spot using the real sky and stars from the frames just before and after. In the few places it can't borrow a clean view — most often where a slow satellite sits on almost the same pixels for three frames in a row — it used to drop in a small black patch. Black disappears in a finished star-trail stack, so you'd never see it there, but it showed up as a dark mark in the individual cleaned frames and flickered through any timelapse made from them. Those spots are now painted with the surrounding sky's own color and grain, the real stars around the gap are kept, and the edges are softly blended so the patch melts into the sky instead of punching a black hole. The main repair (borrowing real sky and stars from neighboring frames) is unchanged.
 - **Each cleaned frame now keeps its own capture date and time.** The capture timestamp was being copied from the first photo in each batch of 20 onto all 20 frames, so most cleaned files showed the wrong time and the times jumped every 20 frames. Now every cleaned frame carries its own original date, time, exposure, lens, and GPS exactly as the camera recorded them. (Your filenames were always correct — this only affected the time stored inside the file. Applies to RAW, JPEG, and TIFF.)

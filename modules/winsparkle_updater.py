@@ -15,6 +15,16 @@ itself is active (v0.9.2 was released 2025-10-13). The C API is small
 enough that a 30-line shim is the cleaner long-term option.
 
 This module is a no-op on Mac, Linux, and dev (live-source) launches.
+
+HOW UPDATES REACH THE USER ON WINDOWS (plain English):
+- check_for_updates_in_background() runs on EVERY app launch. It quietly asks
+  the update server "is there a newer version?" If yes, WinSparkle pops its
+  native "update available" window and does the download + install-in-place +
+  relaunch. If the user is already current, nothing appears. Seamless, one
+  click — no website, no manual download.
+- check_for_updates() is the same install path but user-initiated (the
+  Settings "Check for Updates" button and the in-app update banner).
+- Manual website download is the LINUX-only fallback (no WinSparkle on Linux).
 """
 import ctypes
 import os
@@ -62,12 +72,20 @@ def init_winsparkle(appcast_url, app_name, app_version, company_name="Star Trail
         _dll.win_sparkle_set_app_details.argtypes = [
             ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_wchar_p,
         ]
+        _dll.win_sparkle_set_automatic_check_for_updates.argtypes = [ctypes.c_int]
         _dll.win_sparkle_init.argtypes = []
         _dll.win_sparkle_check_update_with_ui.argtypes = []
+        _dll.win_sparkle_check_update_without_ui.argtypes = []
         _dll.win_sparkle_cleanup.argtypes = []
 
+        # WinSparkle requires ALL configuration before win_sparkle_init().
+        # (Verified against winsparkle.h: config calls must precede init.)
+        # Turning automatic checks on enables WinSparkle's own periodic timer
+        # as a backstop and persists the setting; the explicit per-launch
+        # check below is what actually surfaces updates on open.
         _dll.win_sparkle_set_appcast_url(appcast_url)
         _dll.win_sparkle_set_app_details(company_name, app_name, app_version)
+        _dll.win_sparkle_set_automatic_check_for_updates(1)
         _dll.win_sparkle_init()
     except Exception:
         import traceback
@@ -76,11 +94,30 @@ def init_winsparkle(appcast_url, app_name, app_version, company_name="Star Trail
 
 
 def check_for_updates():
-    """Trigger a foreground update check (shows native UI). Background
-    checks happen automatically once init has been called."""
+    """Trigger a foreground update check (shows native UI). User-initiated:
+    the Settings 'Check for Updates' button and the in-app update banner."""
     if _dll is None:
         return
     _dll.win_sparkle_check_update_with_ui()
+
+
+def check_for_updates_in_background():
+    """Silently check for an update RIGHT NOW. Called on EVERY app launch.
+
+    Plain English: when the user opens Star Trail CleanR on Windows, this
+    asks the update server "is there a newer version?" If yes, WinSparkle
+    shows its native "update available" window and handles the download,
+    in-place install, and relaunch. If the user is already current, nothing
+    appears. This is what makes a new release reach people the moment they
+    open the app, not on WinSparkle's periodic timer.
+
+    Verified against winsparkle.h: win_sparkle_check_update_without_ui shows
+    no progress UI and no "you're up to date" box — it surfaces the update
+    window only when a newer version exists. Safe to call right after
+    win_sparkle_init(); it returns immediately and runs on its own thread."""
+    if _dll is None:
+        return
+    _dll.win_sparkle_check_update_without_ui()
 
 
 def cleanup():

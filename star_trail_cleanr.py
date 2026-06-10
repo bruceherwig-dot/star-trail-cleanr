@@ -2268,7 +2268,21 @@ class MainWindow(QMainWindow):
             SETTINGS.setValue("dismissed_update_tag", self._update_banner_tag)
 
     def _on_update_download(self):
-        if self._update_download_url:
+        """The orange update banner's Update button.
+
+        Plain English: on Mac and Windows this runs the built-in one-click
+        installer (Sparkle / WinSparkle). It downloads the new version,
+        installs it in place, and restarts the app for the user. No website,
+        no manual download, no reinstall. Only on Linux, which has no built-in
+        in-place updater, does this fall back to opening the GitHub download
+        page in the browser."""
+        if sys.platform == "darwin":
+            from modules.sparkle_updater import check_for_updates
+            check_for_updates()
+        elif sys.platform == "win32":
+            from modules.winsparkle_updater import check_for_updates
+            check_for_updates()
+        elif self._update_download_url:
             from PySide6.QtCore import QUrl
             from PySide6.QtGui import QDesktopServices
             QDesktopServices.openUrl(QUrl(self._update_download_url))
@@ -5151,14 +5165,27 @@ if __name__ == '__main__':
                 pass
 
         init_sparkle(on_update_found=_dismiss_splash_for_update)
+        # Check for an update on EVERY launch. Sparkle shows its one-click
+        # "install now" popup ONLY if a newer version exists; if the user is
+        # current, nothing appears. So a new release reaches people the moment
+        # they open the app, not on the once-a-day timer. (Must be called here,
+        # right after the updater starts and before the Qt event loop spins.)
+        from modules.sparkle_updater import check_for_updates_in_background
+        check_for_updates_in_background()
     elif sys.platform == "win32":
-        from modules.winsparkle_updater import init_winsparkle
+        from modules.winsparkle_updater import (
+            init_winsparkle,
+            check_for_updates_in_background as _winsparkle_check_on_launch,
+        )
         init_winsparkle(
             appcast_url="https://bruceherwig-dot.github.io/star-trail-cleanr/appcast-windows.xml",
             app_name="Star Trail CleanR",
             app_version=VERSION,
             company_name="Star Trail CleanR",
         )
+        # Same on Windows: check on every launch via WinSparkle. The native
+        # "update available" window appears only if there's a newer version.
+        _winsparkle_check_on_launch()
     _splash_status.setText("Warming up the trail detector…")
     app.processEvents()
     try:
