@@ -17,6 +17,9 @@ Design goals:
 Stage order:
   1. tiled_inference   SAHI tiled detection, skipping tiles fully covered by the
                        foreground mask.
+  1b. prune_phantoms   Remove thin, dotted phantom detections that sit on empty
+                       sky. OFF by default in StageConfig, but the live worker
+                       turns it on. Runs between tiled_inference and fit_polygons.
   2. fit_polygons      Strip-based curved-trail polygon fit, one per detection
                        group.
   3. fallback_polys    Single-detection polygon for any group whose primary fit
@@ -29,8 +32,10 @@ Stage order:
   6. suppress_fp       Drop static false positives by comparing against the same
                        region in neighbour frames.
 
-The live app still calls detect_trails.detect_frame_polygon. This module is NOT
-wired into the app until it passes the known_problems.jsonl regression suite.
+The live app (astro_clean_v5.py) now uses this module as its detector, calling
+detect_frame() per frame. The older detect_trails.detect_frame_polygon path is
+retained only for the known_problems.jsonl regression tests and is no longer on
+the shipping path.
 """
 
 from __future__ import annotations
@@ -179,12 +184,17 @@ class PipelineState:
 #     detection output matches the shipped app exactly) ---------------------- #
 
 class _PredMaskWrap:
+    """Tiny holder that exposes a boolean mask as `.bool_mask`, matching the
+    attribute a real SAHI prediction's `.mask` has. Lets our home-grown
+    detections be read by the same code paths that read SAHI output."""
     __slots__ = ("bool_mask",)
     def __init__(self, bm):
         self.bool_mask = bm
 
 
 class _PredScoreWrap:
+    """Tiny holder that exposes a confidence number as `.value`, matching the
+    attribute a real SAHI prediction's `.score` has."""
     __slots__ = ("value",)
     def __init__(self, v):
         self.value = v
@@ -261,8 +271,29 @@ def _sahi_predict(model, img, tile_size, overlap):
 
 
 def _sahi_predict_skip(model, img_rgb, tile_size, overlap, fg_mask):
-    """Tiled YOLO inference that skips 100%-foreground tiles. Returns
-    (predictions, n_skipped). Predictions are _SyntheticPred objects."""
+    """Tiled YOLO inference that skips tiles fully covered by the foreground
+    (sky) mask and blacks out the foreground inside any partially-covered tile
+    before the model sees it.
+
+    Inputs:
+      model     -- the SAHI detection-model wrapper (its `.model` is the raw
+                   ultralytics YOLO).
+      img_rgb   -- the full frame as RGB uint8.
+      tile_size -- side length of each square inference tile (px).
+      overlap   -- fractional tile overlap (e.g. 0.2 = 20%); sets the stride.
+      fg_mask   -- foreground/sky mask; non-zero marks ground/foreground to
+                   ignore. Resized to the frame if it does not already match.
+
+    Returns (predictions, n_skipped):
+      predictions -- list of _SyntheticPred objects (one per kept mask segment),
+                     each carrying a full-frame boolean mask and a confidence.
+      n_skipped   -- count of tiles skipped because they were 100% foreground.
+
+    Why it exists: this is the per-frame detection front door used by Stage 1
+    when a foreground mask is present. Skipping all-foreground tiles saves
+    inference time, and zeroing the foreground in mixed tiles stops YOLO from
+    detecting "trails" on the ground (buildings, trees, telescope mounts).
+    Ported to match the shipped detect_trails path exactly."""
     h, w = img_rgb.shape[:2]
     stride = int(tile_size * (1 - overlap))
     xs = _tile_starts(w, tile_size, stride)
@@ -281,6 +312,9 @@ def _sahi_predict_skip(model, img_rgb, tile_size, overlap, fg_mask):
             if (fm[ty:ty2, tx:tx2] > 0).all():
                 n_skipped += 1
                 continue
+            # ::-1 on the channel axis flips RGB -> BGR, the order ultralytics
+            # YOLO expects; ascontiguousarray makes the reversed view a real
+            # buffer the model can read.
             crop_bgr = np.ascontiguousarray(img_rgb[ty:ty2, tx:tx2, ::-1])
             # Black out the foreground BEFORE the model sees it -- the whole
             # point of the mask. Tile-skip only handles 100%-foreground tiles;
@@ -297,6 +331,8 @@ def _sahi_predict_skip(model, img_rgb, tile_size, overlap, fg_mask):
     if not kept:
         return [], n_skipped
 
+    # One batched YOLO call over every kept crop (the 5th tuple element is the
+    # padded BGR tile). Order of `results` matches the order of `kept`.
     yolo = model.model
     conf_thresh = getattr(model, "confidence_threshold", 0.25)
     results = yolo.predict(
@@ -309,8 +345,11 @@ def _sahi_predict_skip(model, img_rgb, tile_size, overlap, fg_mask):
         if r.masks is None:
             continue
         confs = r.boxes.conf.tolist() if r.boxes is not None else []
+        # Each detected segment is a polygon in TILE-local coords. Rasterise it
+        # into a tile-sized mask, then paste it into a full-frame mask at this
+        # tile's (tx, ty) origin so every detection lives in one shared space.
         for seg_idx, seg_xy in enumerate(r.masks.xy):
-            if len(seg_xy) < 3:
+            if len(seg_xy) < 3:   # need >=3 points to form a polygon
                 continue
             seg_conf = float(confs[seg_idx]) if seg_idx < len(confs) else 0.0
             local_u8 = np.zeros((tile_size, tile_size), dtype=np.uint8)
@@ -387,6 +426,11 @@ def _props_with_log(mask: np.ndarray, cfg: StageConfig, log: StageLog,
         log.event("drop", gate="aspect",
                   aspect=round(p.axis_major_length / minor, 2))
         return None
+    # "Fat blob" test: a detection is suspiciously fat when it is BOTH wide in
+    # absolute terms (minor axis > ~50px, scaled to the frame size) AND wider
+    # than ~1.6x its own pixel density (i.e. it does not thin out like a streak).
+    # pixel_density ~ area-per-unit-length; fill_frac ~ how solidly it fills its
+    # bounding ellipse. Real thin trails fail both conditions.
     pixel_density = p.area / max(p.axis_major_length, 1)
     fill_frac = p.area / (minor * max(p.axis_major_length, 1))
     is_fat = minor > 50 * math.sqrt(area_scale) and minor > 1.6 * pixel_density
@@ -418,6 +462,9 @@ _SEG_MERGE_ANGLE       = 20.0   # deg: only treat as the same trail if angles ag
 def _poly_angle(corners):
     """Orientation (degrees, 0-180) of a fitted polygon, from its longer edge."""
     c = np.asarray(corners, dtype=float)
+    # Take the first two edges of the quad and keep the LONGER one -- that edge
+    # runs along the trail, so its angle is the trail's orientation. mod 180
+    # because a trail and its 180-degree flip are the same line.
     e01 = c[0] - c[1]
     e12 = c[1] - c[2]
     le = e12 if (e12[0] ** 2 + e12[1] ** 2) >= (e01[0] ** 2 + e01[1] ** 2) else e01
@@ -466,6 +513,8 @@ def _polys_and_segs_deduped(polygons: list, h: int, w: int):
     areas = [int(b.sum()) for b in bmasks]
     angles = [_poly_angle(p) for p in polygons]
     # Per-polygon bbox (cheap axis reductions) to skip non-overlapping pairs.
+    # len(bboxes) is the index of the polygon currently being processed (one
+    # bbox is appended per iteration); an empty mask gets a None bbox.
     bboxes = []
     for b in bmasks:
         if areas[len(bboxes)] == 0:
@@ -474,6 +523,10 @@ def _polys_and_segs_deduped(polygons: list, h: int, w: int):
         cc = np.where(b.any(axis=0))[0]
         bboxes.append((int(rr[0]), int(rr[-1]), int(cc[0]), int(cc[-1])))
 
+    # Union-find: parent[x] points toward the representative of x's group.
+    # _find walks to the representative, compressing the path as it goes so
+    # later lookups are fast. Polygons that turn out to be the same trail get
+    # unioned into one group below.
     parent = list(range(n))
     def _find(x):
         while parent[x] != x:
@@ -481,6 +534,9 @@ def _polys_and_segs_deduped(polygons: list, h: int, w: int):
             x = parent[x]
         return x
 
+    # For every ordered pair (i, j) where j is the BIGGER polygon and the two
+    # share an angle, measure how much of i sits inside j. If >=90% of i is
+    # contained in j, i is a redundant fragment of j's trail -> union them.
     for i in range(n):
         if bboxes[i] is None:
             continue
@@ -490,6 +546,8 @@ def _polys_and_segs_deduped(polygons: list, h: int, w: int):
                 continue
             if _angle_diff(angles[i], angles[j]) > _SEG_MERGE_ANGLE:
                 continue
+            # Intersect the two bounding boxes first; only count overlapping
+            # pixels inside that shared rectangle (cheap), never the whole frame.
             rj1, rj2, cj1, cj2 = bboxes[j]
             r1 = max(ri1, rj1); r2 = min(ri2, rj2)
             c1 = max(ci1, cj1); c2 = min(ci2, cj2)
@@ -501,6 +559,7 @@ def _polys_and_segs_deduped(polygons: list, h: int, w: int):
                 parent[_find(i)] = _find(j)
                 break
 
+    # Collect the final groups: members sharing a representative are one trail.
     comps = {}
     for i in range(n):
         comps.setdefault(_find(i), []).append(i)
@@ -508,6 +567,7 @@ def _polys_and_segs_deduped(polygons: list, h: int, w: int):
     for members in comps.values():
         if len(members) == 1:
             continue
+        # Keep the largest polygon of the group; fold the rest into its mask.
         keep = max(members, key=lambda k: areas[k])
         for k in members:
             if k != keep:
@@ -803,14 +863,33 @@ _BRIDGE_CLIP_TOL  = 3       # px: facing edge must be within this of the seam li
 
 
 def _group_tips(grp, det_list):
-    """Return (tip_min_rc, tip_max_rc, u_avg) for a group as row-col arrays."""
+    """Find the two end points (tips) of a grouped trail and its overall
+    direction.
+
+    Inputs:
+      grp      -- list of indices into det_list belonging to one trail group.
+      det_list -- the full detection list; each entry has pixel `coords`, a
+                  unit direction `u`, and an `area`.
+
+    Returns (tip_min_rc, tip_max_rc, u_avg) as (row, col) arrays:
+      tip_min / tip_max -- the two ends of the trail along its main axis.
+      u_avg             -- area-weighted average unit direction of the group.
+
+    Why it exists: Stage 5's seam bridge needs each fragment's two ends so it
+    can measure tip-to-tip gaps between fragments. Used by _find_gap_bridge_tiles."""
     all_dets = [det_list[i] for i in grp]
     all_coords = np.vstack([d["coords"] for d in all_dets])
+    # Average the per-detection directions, weighted by area, but flip any that
+    # point the opposite way first (u and -u describe the same line) so they
+    # reinforce instead of cancelling.
     u_sum = np.zeros(2)
     for d in all_dets:
         u = d["u"] if u_sum.dot(d["u"]) >= 0 else -d["u"]
         u_sum += u * d["area"]
     u_avg = u_sum / np.linalg.norm(u_sum)
+    # Project every pixel onto the trail axis; the min and max projections mark
+    # the two tips. t_c centres the projection on the centroid so the tips are
+    # returned as actual row-col points back on the trail line.
     centroid = all_coords.mean(axis=0)
     t_c = float(centroid @ u_avg)
     t = all_coords @ u_avg
@@ -845,6 +924,10 @@ def _find_gap_bridge_tiles(groups, det_list, h, w, tile_size):
     _stride = int(tile_size * 0.8)
 
     def _tile_bounds_1d(size):
+        """Collect every tile START and END coordinate along one dimension.
+        These are the lines where the tile grid has a SEAM -- the spots where
+        the model is most likely to have missed a trail. A candidate gap only
+        bridges if a seam falls inside it (see x_seam / y_seam below)."""
         bounds = set()
         k = 0
         while True:
@@ -866,6 +949,9 @@ def _find_gap_bridge_tiles(groups, det_list, h, w, tile_size):
             di_list = [det_list[k] for k in groups[gi]]
             dj_list = [det_list[k] for k in groups[gj]]
 
+            # Gate 1 (angle): the two fragments must point the same way. abs()
+            # treats u and -u as equal; the min() picks the smaller of the angle
+            # and its 180-complement so flipped directions still read as aligned.
             u_i = di_list[0]["u"]
             u_j = dj_list[0]["u"]
             cos_sim = min(abs(float(np.dot(u_i, u_j))), 1.0)
@@ -874,6 +960,9 @@ def _find_gap_bridge_tiles(groups, det_list, h, w, tile_size):
             if adiff > _BRIDGE_MAX_ANGLE:
                 continue
 
+            # Gate 2 (width): the two fragments must be of similar thickness. A
+            # real trail keeps a consistent width; a 3x mismatch means different
+            # objects. Median minor-axis is the per-fragment thickness.
             minor_i = float(np.median([d["minor"] for d in di_list]))
             minor_j = float(np.median([d["minor"] for d in dj_list]))
             if max(minor_i, minor_j) / max(min(minor_i, minor_j), 1) > _BRIDGE_MAX_WIDTH:
@@ -889,6 +978,9 @@ def _find_gap_bridge_tiles(groups, det_list, h, w, tile_size):
                 (tip_i_min, tip_j_min), (tip_i_min, tip_j_max),
                 (tip_i_max, tip_j_min), (tip_i_max, tip_j_max),
             ]
+            # Gate 3 (gap length): of the four tip-pair combinations, take the
+            # closest pair (best_a, best_b). If even that closest gap is wider
+            # than _BRIDGE_MAX_GAP, the fragments are too far apart to bridge.
             best_dist, best_a, best_b = float("inf"), None, None
             for ta, tb in combos:
                 d = float(np.linalg.norm(ta - tb))
@@ -909,6 +1001,11 @@ def _find_gap_bridge_tiles(groups, det_list, h, w, tile_size):
             if perp > 0.9 * max(minor_i, minor_j):
                 continue
 
+            # Gate 4 (seam present): only bridge a gap that straddles a tile-grid
+            # seam, because that is where the model's blind spot is. Build the
+            # empty span between the two fragments' bounding boxes (x_lo..x_hi
+            # horizontally, y_lo..y_hi vertically) and require a grid seam to fall
+            # inside that span, within _BRIDGE_CLIP_TOL px of a fragment edge.
             min_c_i = float(all_i[:, 1].min()); max_c_i = float(all_i[:, 1].max())
             min_c_j = float(all_j[:, 1].min()); max_c_j = float(all_j[:, 1].max())
             min_r_i = float(all_i[:, 0].min()); max_r_i = float(all_i[:, 0].max())
@@ -926,6 +1023,12 @@ def _find_gap_bridge_tiles(groups, det_list, h, w, tile_size):
             if not (x_seam or y_seam):
                 continue
 
+            # Gate 5 (tip vector aligned): the line connecting the two facing
+            # tips must point along the trail's direction, not sideways. This
+            # rejects two parallel-but-offset trails (their tips line up across,
+            # not along). u_avg is the combined trail direction (u_j flipped to
+            # agree with u_i first); the tip-to-tip vector must be within
+            # _BRIDGE_TIP_ANGLE degrees of it.
             tip_vec = best_b - best_a
             tip_len = float(np.linalg.norm(tip_vec))
             if tip_len < 1.0:
@@ -941,6 +1044,8 @@ def _find_gap_bridge_tiles(groups, det_list, h, w, tile_size):
             if float(np.degrees(np.arccos(tip_cos))) > _BRIDGE_TIP_ANGLE:
                 continue
 
+            # Place one re-inference tile centred on the gap midpoint, clamped so
+            # the tile stays fully inside the frame.
             mid_rc = (best_a + best_b) / 2.0
             mid_y = int(round(float(mid_rc[0]))); mid_x = int(round(float(mid_rc[1])))
             new_tx = max(0, min(w - tile_size, mid_x - tile_size // 2))
@@ -978,6 +1083,9 @@ def _targeted_tile_dets(model, img_rgb, tile_x, tile_y, tile_size, h, w,
     crop_h, crop_w = ty2 - ty1, tx2 - tx1
     crop = img_rgb[ty1:ty2, tx1:tx2, ::-1].copy()   # RGB -> BGR for yolo
     if rot90:
+        # Rotate the crop a quarter turn so a trail the model misses at its true
+        # orientation gets a second chance at the rotated orientation. Width and
+        # height swap after the rotation, hence pad_h/pad_w are swapped too.
         crop = np.ascontiguousarray(np.rot90(crop, 1))
         pad_h, pad_w = crop_w, crop_h
     else:
@@ -1003,6 +1111,8 @@ def _targeted_tile_dets(model, img_rgb, tile_x, tile_y, tile_size, h, w,
             local = np.zeros((tile_size, tile_size), dtype=np.uint8)
             cv2.fillPoly(local, [np.array(seg_xy, dtype=np.int32)], 255)
             if rot90:
+                # Undo the quarter turn (rot90 by 3 = -1) so the mask lines up
+                # with the original, unrotated frame before pasting it back.
                 local = np.ascontiguousarray(np.rot90(local[:pad_h, :pad_w], 3))
             global_mask = np.zeros((h, w), dtype=np.uint8)
             global_mask[ty1:ty2, tx1:tx2] = local[:crop_h, :crop_w]
@@ -1109,7 +1219,11 @@ _SFP_BRIGHT_RATIO      = 2.5   # 90th-pct inside / median surround; above = real
 
 
 def _tile_coord(cx, cy, stride):
-    """Convert pixel centroid to tile coordinate like 'B10'."""
+    """Convert a pixel position (cx, cy) to a human-readable tile label like
+    'B10' for the logs. Row becomes a letter (A, B, C, ...), column becomes a
+    1-based number, both derived by dividing the pixel position by the tile
+    stride. Used so log entries name the same grid cell Bruce sees in the
+    MaskViewR / Mask CheckR overlays."""
     col = int(cx) // stride
     row = int(cy) // stride
     return f"{chr(ord('A') + row)}{col + 1}"

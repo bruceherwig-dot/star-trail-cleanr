@@ -63,26 +63,66 @@ LOG_LEGEND = {
 
 
 class RunLogger:
+    """Writes the run log: one open file, one JSON record per line.
+
+    A RunLogger owns a single .jsonl file for one batch run. Each call to
+    ``log()`` appends one record (one line of JSON) and flushes to disk right
+    away, so even if the process crashes partway through a batch the file on
+    disk is still complete up to the last event written.
+
+    Usable as a context manager (``with RunLogger(path) as logger:``) so the
+    file is always closed when the block exits, even on error.
+
+    Only created when running from live Python source (not the frozen/shipped
+    app), so this logging is a developer aid, not something testers ever see.
+    """
+
     def __init__(self, log_path: str):
+        """Open the log file for appending and write the legend as line one.
+
+        ``log_path`` is the full path to the .jsonl file to write (typically
+        under ``{input_dir}/cleanr_workspace/``). Any missing parent folders
+        are created first. The file is opened in append mode, so re-running
+        against the same path adds to it rather than wiping it. The very first
+        thing written is LOG_LEGEND, so every log file explains its own format
+        without needing this source code on hand.
+        """
+        # Make sure the workspace folder exists before opening the file for write.
         Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+        # Append mode ("a"): never truncate an existing log; add to its end.
         self._f = open(log_path, "a", encoding="utf-8")
         self.path = log_path
         # Self-documenting header so the file is interpretable on its own.
         self.log(LOG_LEGEND)
 
     def log(self, record: dict) -> None:
-        """Append one JSON record and flush immediately."""
+        """Append one record to the log and flush it to disk immediately.
+
+        ``record`` is any JSON-serializable dict (e.g. a detect/repair/summary
+        event). It is written as a single line of JSON followed by a newline,
+        which is what makes the file a valid .jsonl stream. The flush after
+        every write is deliberate: it guarantees the record survives a crash,
+        at the cost of some speed. Returns nothing.
+        """
         self._f.write(json.dumps(record) + "\n")
         self._f.flush()
 
     def close(self) -> None:
+        """Close the underlying log file, swallowing any error.
+
+        Called automatically at the end of a ``with`` block. The exception is
+        intentionally ignored so that shutting down the logger can never itself
+        crash the run (e.g. if the file was already closed).
+        """
         try:
             self._f.close()
         except Exception:
             pass
 
     def __enter__(self):
+        """Context-manager entry: return self so ``with RunLogger(...) as x`` works."""
         return self
 
     def __exit__(self, *args):
+        """Context-manager exit: always close the file when the block ends."""
         self.close()

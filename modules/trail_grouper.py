@@ -17,8 +17,10 @@ Sometimes a tile contains two trails that cross at an angle, and the model retur
 them as one merged blob. split_crossing() in modules/crossing_splitter.py finds the
 junction point where the two trails meet, excludes a disc of pixels around it to
 isolate clean arms, then dilates the arms back to fill the gap. Handles X crossings,
-T intersections, and V shapes. The old try_split() function is kept below but is
-no longer called -- swap the import to revert.
+T intersections, and V shapes. The main SAHI filter path (filter_masks /
+filter_masks_with_props) uses split_crossing(). The older try_split() function below
+is still called by detect_trails.py's targeted single-tile re-inference pass
+(_run_targeted_tile / _run_targeted_tile_rot90).
 
 STEP 1b — PARALLEL TRAIL SPLITTER (_try_split_parallel)
 ---------------------------------------------------------
@@ -40,11 +42,11 @@ STEP 3 — GROUPER (group_detections)
 Union-find algorithm with a 4-gate check. Two detections are merged into the same
 trail if they pass all four tests:
   - Angle gate: their principal axes point in the same direction (within MAX_ANGLE_DEG).
-  - Width-ratio gate: their widths are within a factor of 2x (same physical object).
+  - Width-ratio gate: their widths are within a factor of 3x (same physical object).
   - Perpendicular gate: they are close in the direction perpendicular to the trail
     axis (not two parallel but separate trails).
-  - Tip-to-tip gate: the tip of one detection is close to the tip of the other
-    (they are spatially adjacent, not just parallel at a distance).
+  - Contact gate: the two pixel sets must touch — their nearest-neighbor distance is
+    exactly 0 (they overlap or abut, not just parallel at a distance).
 
 STEP 4 — POLYGON FITTING (fit_polygon / fit_curved_group)
 ----------------------------------------------------------
@@ -65,17 +67,19 @@ filter_masks(preds, h, w)
     Used by detect_trails.detect_frame to build the combined mask.
 
 filter_masks_with_props(preds, h, w, sky_mask=None)
-    Like filter_masks but returns (masks, det_list) in one pass.
-    masks[i] and det_list[i] correspond to the same detection.
+    Returns (masks, det_list, edge_candidates) in one pass.
+    masks[i] and det_list[i] correspond to the same detection. edge_candidates is
+    currently always an empty list (see the function docstring).
     Used by polymakr.py for full-chain detection → polygon fitting.
 
 thicken_mask(mask, h, w)
-    Convert a combined binary pixel mask into fit_polygon rectangles.
-    Returns (polygon_list, thick_mask). Used by STC repair to replace the
-    tight pixel mask with wider rectangles consistent with CVAT annotations.
+    Convert a combined binary pixel mask into fit_polygon rectangles by grouping
+    blobs by trail axis and fitting one rectangle per group.
+    Returns (polygon_list, thick_mask). Currently used only by diagnostic tools
+    (tools/diag_*.py), not by the live repair path.
 
 group_detections(det_list)
-    Union-find grouper with 4-gate check (angle, width-ratio, perp, tip-to-tip).
+    Union-find grouper with 4-gate check (angle, width-ratio, perp, contact).
     Returns list-of-lists of detection indices.
 
 fit_polygon(group_indices, det_list)
@@ -137,6 +141,16 @@ _CURVED_TIP_PAD           = 120    # px added beyond pixel extent on outer trail
 # None of these write to the log — they are pure computation.
 
 def _pred_to_mask(pred, h, w):
+    """Turn one SAHI prediction object into a full-frame uint8 mask.
+
+    pred is a single SAHI/YOLO prediction. h, w are the target frame height
+    and width. Returns a (h, w) uint8 array where trail pixels are 255 and the
+    rest are 0, or None if the prediction carries no usable segmentation.
+
+    SAHI stores the mask at the tile's own resolution, so if it does not already
+    match the requested frame size it is nearest-neighbor resized up to (h, w).
+    Nearest-neighbor keeps the mask strictly binary (no interpolated gray edges).
+    """
     if pred.mask is None:
         return None
     seg = pred.mask.bool_mask
@@ -149,6 +163,18 @@ def _pred_to_mask(pred, h, w):
 
 
 def _pca_aspect(mask):
+    """Return the elongation (aspect ratio) of a blob via principal component analysis.
+
+    mask is a binary image. Returns the ratio of the long axis to the short axis
+    of the pixel cloud (a long thin trail gives a big number, a round blob gives
+    near 1.0). Returns 0.0 if fewer than 5 lit pixels (too few to measure).
+
+    Computes the covariance of the pixel coordinates, takes its eigenvalues
+    (the squared spread along each principal axis), and returns sqrt(long)/sqrt(short).
+    The 0.5 floor on the denominator avoids divide-by-zero on single-row blobs.
+
+    Note: not referenced elsewhere in the project's current code path.
+    """
     ys, xs = np.where(mask > 0)
     if len(xs) < 5:
         return 0.0
@@ -159,27 +185,56 @@ def _pca_aspect(mask):
 
 
 def _line_angle_deg(L):
+    """Return the orientation of a line segment in degrees, folded into [0, 180).
+
+    L is (x1, y1, x2, y2). The result is an undirected angle: a line and the
+    same line pointing the other way give the same value (that is the purpose of
+    the % 180). Used to cluster Hough lines by direction in the crossing splitter.
+    """
     x1, y1, x2, y2 = L
     return float(np.degrees(np.arctan2(y2 - y1, x2 - x1)) % 180)
 
 
 def _circular_mean_angle(angle_list):
-    """Circular mean for undirected angles in [0, 180) degrees."""
+    """Circular mean for undirected angles in [0, 180) degrees.
+
+    angle_list is a list of orientations in degrees. Returns their average,
+    handling the wrap-around at the 0/180 boundary (a plain numeric average of
+    1 deg and 179 deg would give 90 deg, which is wrong; this returns ~0 deg).
+
+    Trick: doubling each angle maps the [0,180) half-circle onto a full [0,360)
+    circle, so the standard sin/cos vector-mean works, then the result is halved
+    back. Used to get one representative direction per Hough angle cluster.
+    """
     rads = np.radians([2.0 * a for a in angle_list])
     mean_rad = np.arctan2(np.mean(np.sin(rads)), np.mean(np.cos(rads)))
     return float(np.degrees(mean_rad / 2.0) % 180.0)
 
 
 def _angle_dist(a, b):
+    """Smallest angular difference between two undirected angles in [0, 180).
+
+    a, b are orientations in degrees. Returns a value in [0, 90]: because the
+    angles are undirected, 10 deg and 170 deg are only 20 deg apart, not 160.
+    """
     d = abs(a - b)
     return min(d, 180.0 - d)
 
 
 def _perp_dist(px, py, L):
+    """Perpendicular distance from point (px, py) to the infinite line through L.
+
+    L is (x1, y1, x2, y2) defining the line. Returns the shortest (perpendicular)
+    distance from the point to that line, or infinity if L is a degenerate
+    zero-length segment. Used in try_split to assign each blob pixel to whichever
+    of the two crossing arms it sits closest to.
+    """
     x1, y1, x2, y2 = L
     dx, dy = x2 - x1, y2 - y1
     if dx == 0 and dy == 0:
         return float("inf")
+    # Standard point-to-line formula: |cross product of direction and offset|
+    # divided by the line length.
     return abs(dy * px - dx * py + x2 * y1 - y2 * x1) / np.sqrt(dx * dx + dy * dy)
 
 
@@ -200,6 +255,13 @@ def _is_red_trail(mask, img):
 
 
 def _line_intersect(L1, L2):
+    """Return the (x, y) intersection point of two infinite lines, or None if parallel.
+
+    L1 and L2 are each (x1, y1, x2, y2). Returns the crossing point of the two
+    lines extended infinitely, or None when they are parallel (denominator near
+    zero). Note: this is a pure-geometry helper and is not referenced elsewhere
+    in this module's current code path.
+    """
     x1, y1, x2, y2 = L1
     x3, y3, x4, y4 = L2
     denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
@@ -210,12 +272,26 @@ def _line_intersect(L1, L2):
 
 
 def _dbscan_angles(angles, eps, min_samples):
+    """Cluster a list of angles by direction using a 1-D DBSCAN over angular distance.
+
+    angles is a list of orientations in degrees. eps is the maximum angular
+    distance (degrees) for two angles to be considered neighbors. min_samples is
+    the minimum neighborhood size for a point to seed a cluster. Returns
+    (labels, n_clusters): labels[i] is the cluster id of angles[i], or -1 for an
+    unclustered/noise angle.
+
+    This is a hand-rolled DBSCAN (no sklearn dependency) that uses _angle_dist as
+    the metric, so it correctly treats angles near the 0/180 wrap as close. The
+    crossing splitter uses it to discover how many distinct trail directions the
+    Hough lines fall into (two directions = a crossing).
+    """
     n = len(angles)
     labels  = [-1] * n
     visited = [False] * n
     cluster_id = 0
 
     def nbrs(i):
+        """Indices of all angles within eps degrees of angle i (its neighborhood)."""
         return [j for j in range(n) if _angle_dist(angles[i], angles[j]) <= eps]
 
     for i in range(n):
@@ -224,8 +300,11 @@ def _dbscan_angles(angles, eps, min_samples):
         visited[i] = True
         hood = nbrs(i)
         if len(hood) < min_samples:
+            # Too few neighbors to be a core point; leave as noise (label stays -1).
             continue
         labels[i] = cluster_id
+        # Grow the cluster outward from this seed, absorbing any density-reachable
+        # angle. seed acts as a work queue of points still to expand from.
         seed = list(hood)
         while seed:
             q = seed.pop()
@@ -233,6 +312,7 @@ def _dbscan_angles(angles, eps, min_samples):
                 visited[q] = True
                 q_hood = nbrs(q)
                 if len(q_hood) >= min_samples:
+                    # q is itself a core point, so its neighbors join the frontier.
                     seed.extend(q_hood)
             if labels[q] == -1:
                 labels[q] = cluster_id
@@ -264,6 +344,9 @@ def _try_bimodal_split(mask):
     if len(xs) < 200:
         return [mask]
 
+    # Find the blob's major axis u via PCA, then u_perp is the across-trail axis.
+    # Projecting every pixel onto u_perp collapses the blob to a 1-D distribution;
+    # two parallel trails show up as two humps along that axis.
     coords = np.stack([ys, xs], axis=1).astype(float)
     cov = np.cov(coords.T)
     vals, vecs = np.linalg.eigh(cov)
@@ -272,6 +355,10 @@ def _try_bimodal_split(mask):
     centroid = coords.mean(axis=0)
     perp_proj = np.dot(coords - centroid, u_perp)
 
+    # 1-D k-means with k=2 (Lloyd iterations) on the perpendicular projection.
+    # Centers start at the 1/3 and 2/3 points of the spread; loop reassigns each
+    # pixel to its nearer center, recomputes centers, and stops once they settle
+    # (movement < 0.1px) or after 30 iterations.
     p_min, p_max = perp_proj.min(), perp_proj.max()
     c1 = p_min + (p_max - p_min) / 3.0
     c2 = p_min + 2.0 * (p_max - p_min) / 3.0
@@ -283,6 +370,8 @@ def _try_bimodal_split(mask):
             break
         c1, c2 = c1_n, c2_n
 
+    # Accept the split only if the two clusters are clearly separated: the gap
+    # between centers must exceed both 1.5x their average spread and 20px.
     sep = abs(c2 - c1)
     std1 = perp_proj[labels == 0].std() if (labels == 0).sum() > 5 else 999.0
     std2 = perp_proj[labels == 1].std() if (labels == 1).sum() > 5 else 999.0
@@ -359,12 +448,20 @@ def try_split(mask):
         return _try_bimodal_split(mask)
 
     def _longest(cid):
+        """Return the longest Hough line segment belonging to angle cluster cid.
+
+        That longest segment is used as the representative direction for the arm,
+        since a longer line is a more reliable estimate of the trail's axis.
+        """
         clines = [lines[i][0] for i, l in enumerate(labels) if l == cid]
         return max(clines, key=lambda L: (L[2] - L[0]) ** 2 + (L[3] - L[1]) ** 2)
 
     rep1 = _longest(best_c1)
     rep2 = _longest(best_c2)
 
+    # Assign each blob pixel to the closer of the two representative arm lines.
+    # Pixels almost equidistant from both lines (within SEAM_MARGIN px of the
+    # seam) are dropped, leaving a thin gap that keeps the two arms cleanly apart.
     ys, xs = np.where(mask > 0)
     mask_a = np.zeros_like(mask)
     mask_b = np.zeros_like(mask)
@@ -382,9 +479,12 @@ def try_split(mask):
         return [mask]
 
     def _arm_minor(m):
+        """Largest minor-axis (across-trail width) among the blobs in mask m."""
         rp = skregionprops(sklabel(m))
         return max(p.axis_minor_length for p in rp) if rp else 0
 
+    # A real crossing arm is thin. If either half is wider than 50px the "split"
+    # actually carved the fat overlap of two parallel trails, so reject it.
     if _arm_minor(mask_a) > 50 or _arm_minor(mask_b) > 50:
         return [mask]
 
@@ -430,13 +530,21 @@ def detection_props(mask, min_aspect=None, min_area=None):
         return None
     p = max(props, key=lambda x: x.area)
     minor = p.axis_minor_length
+    # Area gate: drop blobs that are too tiny to be a real trail.
     if minor < 1 or p.area < min_area:
         return None
+    # Aspect gate: drop blobs that are too round (not elongated like a trail).
     if p.axis_major_length / minor < min_aspect:
         return None
+    # Fat-blob gate: a true trail's pixels pack tightly along its length, so its
+    # area-per-length (pixel_density) is close to its width. A blob that is both
+    # absolutely wide (minor > 50px, scaled by resolution) AND much wider than its
+    # density implies is a fat clump, not a trail. Reject it.
     pixel_density = p.area / max(p.axis_major_length, 1)
     if minor > 50 * math.sqrt(area_scale) and minor > 1.6 * pixel_density:
         return None
+    # Trail direction u from the inertia tensor's smallest-eigenvalue eigenvector
+    # (the axis of least spread is along the trail's length).
     _, vecs = np.linalg.eigh(p.inertia_tensor)
     u = vecs[:, 0]
     return {
@@ -489,11 +597,16 @@ def _try_split_parallel(mask, frame_px=None):
     cy_full = float(p.centroid[0]) + row_lo
     cx_full = float(p.centroid[1]) + col_lo
 
+    # half_span = how far to look on each side when sampling across the trail.
+    # sample_ts = 10 sampling positions along the central 40% of the blob length
+    # (from -20% to +20% of major); the ends are skipped where trails taper.
     half_span = int(minor) + 8
     sample_ts = np.linspace(-major * 0.20, major * 0.20, 10)
 
     gap_positions = []
     for t in sample_ts:
+        # Walk a line perpendicular to the trail at this position along its length
+        # and record a 0/1 profile of which cross-section samples land on the blob.
         row_c = cy_full + u[0] * t
         col_c = cx_full + u[1] * t
         profile = []
@@ -504,10 +617,11 @@ def _try_split_parallel(mask, frame_px=None):
                 profile.append(int(crop[r, c] > 0))
             else:
                 profile.append(0)
+        # Collapse the 0/1 profile into runs of consecutive lit samples ("spans").
         spans = []
         in_s = False
         for j, v in enumerate(profile):
-            sc = j - half_span
+            sc = j - half_span   # signed offset from the trail center
             if v and not in_s:
                 s_start = sc
                 in_s = True
@@ -516,6 +630,9 @@ def _try_split_parallel(mask, frame_px=None):
                 in_s = False
         if in_s:
             spans.append((s_start, half_span))
+        # Exactly two lit spans with a clear empty gap between them (gap >= 3px,
+        # each span >= 10px) means two parallel trails here. Record the gap's
+        # midpoint as a candidate split position.
         if len(spans) == 2:
             s0_w = spans[0][1] - spans[0][0] + 1
             s1_w = spans[1][1] - spans[1][0] + 1
@@ -523,9 +640,12 @@ def _try_split_parallel(mask, frame_px=None):
             if g_w >= 3 and s0_w >= 10 and s1_w >= 10:
                 gap_positions.append((spans[0][1] + spans[1][0]) / 2.0)
 
+    # Need the gap to show up in at least 2 of the 10 slices to trust it.
     if len(gap_positions) < 2:
         return [mask]
 
+    # Split every blob pixel at the median gap offset, measured perpendicular to
+    # the trail. perp_off is each pixel's signed across-trail distance from center.
     split_off = float(np.median(gap_positions))
     drow = ys.astype(float) - cy_full
     dcol = xs.astype(float) - cx_full
@@ -592,10 +712,11 @@ def filter_masks_with_props(preds, h, w, sky_mask=None, img=None, debug_out=None
     provided. Keys: raw_pred_count, no_mask, sky_zeroed, try_split_fired,
     failed_elongation, kept_as_nav_light, passed, edge_candidate_count.
 
-    edge_candidates: list of dicts {"mask", "u", "bbox"} for components that
-    failed elongation but whose bounding box touches any image edge (within 20px).
-    These are rescued by the pipeline if 2+ neighboring frames contain a mask
-    component with matching slope.
+    edge_candidates: currently always returned as an empty list (kept for
+    signature/caller compatibility). Edge-touching components that fail the normal
+    elongation filter are instead rescued in-line right here: re-tested with the
+    aspect and area gates disabled (min_aspect=0.0, min_area=0) and, on pass, added
+    directly to masks and det_list as ordinary detections.
     """
     masks           = []
     det_list        = []
@@ -683,53 +804,72 @@ def filter_masks_with_props(preds, h, w, sky_mask=None, img=None, debug_out=None
 
 # ── Union-find grouper ────────────────────────────────────────────────────────
 # Connects detections that belong to the same physical trail using union-find.
-# Five gates must ALL pass to merge a pair: angle, width-ratio, perp distance,
-# tip-to-tip gap, and tip alignment. Returns list-of-lists of detection indices
-# (one per trail). Log field: detect record group_count = number of groups.
+# Four gates must ALL pass to merge a pair: angle, width-ratio, perpendicular
+# offset, and contact (the two pixel sets must touch — nearest-neighbor distance
+# of 0). Returns list-of-lists of detection indices (one per trail). Log field:
+# detect record group_count = number of groups.
 
 def group_detections(det_list):
     """
     Group detections belonging to the same trail using union-find.
 
-    All five gates must pass to connect a pair:
-      1. Angle between major axes < MAX_ANGLE_DEG
-      2. Width ratio < 3x (prevents grouping thin with fat)
-      3. Perpendicular centroid distance < 0.9x max minor
-      4. Two-stage gap: if masks overlap → always merge;
-         otherwise tip-to-tip distance < 2.5x min minor
-      5. Tip alignment: the tip-to-tip vector must be mostly along-trail
-         (perpendicular component < 0.5x max minor); prevents staggered
-         parallel trails from merging via nearby tips.
+    det_list is the list of detection-property dicts produced by detection_props
+    (each has "u" direction, "centroid", "minor" width, and "coords" pixels).
+    Returns a list-of-lists of detection indices, one inner list per trail group.
 
-    Returns list-of-lists of detection indices (one list per trail group).
+    WHAT THE CODE ACTUALLY CHECKS (read from the loop below). Two detections are
+    merged only if they clear all FOUR gates in order:
+      1. Angle: the angle between the two trail axes < MAX_ANGLE_DEG.
+      2. Width ratio: wider minor / narrower minor <= 3x (keeps a thin trail from
+         merging with a fat unrelated blob).
+      3. Perpendicular offset: the across-trail component of the centroid-to-
+         centroid vector <= 0.5x the larger minor (rejects parallel-but-separate
+         trails sitting side by side).
+      4. Contact: the two pixel sets must touch — nearest-neighbor distance must
+         be exactly 0. Any positive gap rejects the merge.
+
+    NOTE: the older five-gate description above the function (two-stage tip-to-tip
+    gap + tip alignment, and the 0.9x figure) is stale; the four gates listed here
+    are what the current code enforces.
     """
     from scipy.spatial import KDTree
 
     n = len(det_list)
-    parent = list(range(n))
+    parent = list(range(n))   # union-find: parent[i] points toward i's group root
 
     def find(x):
+        """Return the group-root index for detection x, with path compression."""
         while parent[x] != x:
             parent[x] = parent[parent[x]]
             x = parent[x]
         return x
 
     def union(a, b):
+        """Merge the groups containing detections a and b into one."""
         parent[find(a)] = find(b)
 
+    # Test every unordered pair (i, j). A pair must clear ALL gates below to merge;
+    # the first failing gate `continue`s and the pair is left in separate groups.
     for i in range(n):
         for j in range(i + 1, n):
             di, dj = det_list[i], det_list[j]
 
+            # Gate 1 — angle: the two trail axes must point the same way. abs()
+            # makes the comparison direction-agnostic; clamp to 1.0 guards arccos.
             cos_sim = min(abs(float(np.dot(di["u"], dj["u"]))), 1.0)
             adiff = min(np.degrees(np.arccos(cos_sim)),
                         180.0 - np.degrees(np.arccos(cos_sim)))
             if adiff > MAX_ANGLE_DEG:
                 continue
 
+            # Gate 2 — width ratio: widths within 3x, so a thin trail is not
+            # merged with a fat unrelated blob.
             if max(di["minor"], dj["minor"]) / max(min(di["minor"], dj["minor"]), 1) > 3.0:
                 continue
 
+            # Gate 3 — perpendicular offset: decompose the centroid-to-centroid
+            # vector into along-trail and across-trail parts; reject if the two
+            # detections are offset sideways (parallel but separate trails).
             u_ref = di["u"] if np.dot(di["u"], dj["u"]) > 0 else -di["u"]
             diff = dj["centroid"] - di["centroid"]
             along = float(np.dot(diff, u_ref))
@@ -737,6 +877,8 @@ def group_detections(det_list):
             if perp > 0.5 * max(di["minor"], dj["minor"]):
                 continue
 
+            # Gate 4 — contact: the two pixel sets must actually touch. Nearest
+            # neighbor distance of 0 means they overlap/abut; any gap rejects.
             tree_i = KDTree(di["coords"])
             dists, _ = tree_i.query(dj["coords"], k=1)
             nearest_gap = float(np.min(dists))
@@ -745,6 +887,7 @@ def group_detections(det_list):
 
             union(i, j)
 
+    # Collect detections sharing a root into one list per group.
     groups = {}
     for i in range(n):
         root = find(i)
@@ -768,7 +911,12 @@ def thicken_mask(mask, h, w):
     (polygon_list, thick_mask).
 
     Blobs that fail the elongation filter or coverage check are kept as
-    raw pixels in thick_mask so no detected trail is dropped from repair.
+    raw pixels in thick_mask so no detected trail is dropped.
+
+    NOTE: not called by the live pipeline (the active detection path
+    detect_frame_polygon goes filter_masks_with_props → group_detections →
+    fit_polygon/fit_curved_group directly). This function is referenced only by
+    the diagnostic scripts under tools/diag_*.py.
     """
     if mask is None or mask.max() == 0:
         return [], np.zeros((h, w), dtype=np.uint8)
@@ -794,11 +942,13 @@ def thicken_mask(mask, h, w):
     thick    = fallback.copy()
     polys    = []
 
+    # union_det = all detection pixels combined, used to measure how much of each
+    # fitted rectangle actually sits over real detected pixels.
     union_det = np.zeros((h, w), dtype=np.uint8)
     for det in det_list:
         union_det[det["coords"][:, 0], det["coords"][:, 1]] = 255
 
-    _MIN_COV = 0.30
+    _MIN_COV = 0.30   # rectangle must overlap detected pixels by at least 30%
     for grp in groups:
         corners, _, _ = fit_polygon(grp, det_list)
         pts    = np.array(corners, dtype=np.int32).reshape(-1, 1, 2)
@@ -807,9 +957,12 @@ def thicken_mask(mask, h, w):
         area   = max(int(poly_m.sum()) // 255, 1)
         olap   = int(cv2.bitwise_and(poly_m, union_det).sum()) // 255
         if olap / area >= _MIN_COV:
+            # Rectangle is a good fit: use the clean polygon.
             thick = np.maximum(thick, poly_m)
             polys.append(corners)
         else:
+            # Rectangle is mostly empty (e.g. a sharply curved trail the straight
+            # fit ballooned over): fall back to painting the raw detected pixels.
             for idx in grp:
                 d = det_list[idx]
                 thick[d["coords"][:, 0], d["coords"][:, 1]] = 255
@@ -821,11 +974,22 @@ def fit_polygon(group_indices, det_list):
     """
     Fit one 4-corner rectangle to a group of detections.
 
-    Returns (corners_xy, width, u_avg) where corners_xy is a list of
-    (x, y) integer tuples suitable for cv2.polylines / cv2.fillPoly.
+    group_indices are the indices (into det_list) of the fragments that
+    group_detections decided belong to the same trail. det_list is the full
+    detection-property list. Returns (corners_xy, width, u_avg):
+      - corners_xy: four (x, y) integer tuples for cv2.polylines / cv2.fillPoly
+      - width: the rectangle's thickness in pixels
+      - u_avg: the averaged trail-direction unit vector (row, col)
+
+    The rectangle is aligned to the trail's averaged principal axis, spans the
+    full pixel extent along that axis (minus a small tip trim), and is sized
+    across the trail by the measured thickness times the MASK_THICKNESS_MULT knob.
     """
     all_dets = [det_list[i] for i in group_indices]
 
+    # Drop unusually fat fragments (minor > 2x the group median) when averaging
+    # the direction and thickness, so one blobby member cannot bias the fit.
+    # The full set (all_dets) is still used for the along-trail extent below.
     median_minor = float(np.median([d["minor"] for d in all_dets]))
     pruned = [d for d in all_dets if d["minor"] <= 2.0 * median_minor]
     dets = pruned if pruned else all_dets
@@ -833,6 +997,8 @@ def fit_polygon(group_indices, det_list):
     all_coords_combined = np.vstack([d["coords"] for d in all_dets])
     centroid = all_coords_combined.mean(axis=0)
 
+    # Area-weighted average direction. Flip each member's u to point the same way
+    # as the running sum first (axes are undirected, so +u and -u are equivalent).
     u_sum = np.zeros(2)
     for d in dets:
         u = d["u"]
@@ -841,6 +1007,8 @@ def fit_polygon(group_indices, det_list):
         u_sum += u * d["area"]
     u_avg = u_sum / np.linalg.norm(u_sum)
 
+    # Along-trail extent: project all pixels onto u_avg and take the min/max,
+    # so the rectangle reaches the true tips of the longest fragment in the group.
     t_centroid = centroid @ u_avg
     raw_min = min(float((d["coords"] @ u_avg).min()) for d in all_dets)
     raw_max = max(float((d["coords"] @ u_avg).max()) for d in all_dets)
@@ -865,6 +1033,9 @@ def fit_polygon(group_indices, det_list):
     p_min = centroid + (t_min - t_centroid) * u_avg
     p_max = centroid + (t_max - t_centroid) * u_avg
 
+    # Build the four corners: from each trimmed tip (p_min, p_max) step half the
+    # width out to each side along u_perp (the across-trail axis). corners are in
+    # (row, col); swap to (x, y) = (col, row) for OpenCV at the end.
     u_perp   = np.array([-u_avg[1], u_avg[0]])
     half_w   = width / 2.0
     corners_rc = [
@@ -942,6 +1113,9 @@ def fit_curved_group(group_indices, det_list):
     Called when a group's x-span exceeds _CURVED_MIN_XSPAN AND its angle
     spread exceeds _CURVED_MIN_ANGLE_SPREAD degrees.
     """
+    # Split along the x (column) axis into ~_CURVED_STRIP_PX-wide strips, at least 2.
+    # The trail tips are padded out by _CURVED_TIP_PAD so the end rectangles fully
+    # cover the trail ends rather than stopping at the last detected pixel.
     all_coords = np.vstack([det_list[i]["coords"] for i in group_indices])
     x_min = int(all_coords[:,1].min())
     x_max = int(all_coords[:,1].max())
@@ -954,6 +1128,8 @@ def fit_curved_group(group_indices, det_list):
     overlap = strip_w * _CURVED_STRIP_OVERLAP
     result = []
     for s in range(n_strips):
+        # Each strip is widened by `overlap` into its neighbors (except at the two
+        # outer ends) so adjacent rectangles overlap and leave no gap on the curve.
         sx1 = x_lo + s * strip_w - (overlap if s > 0 else 0)
         sx2 = x_lo + (s + 1) * strip_w + (overlap if s < n_strips - 1 else 0)
         strip = all_coords[(all_coords[:,1] >= sx1) & (all_coords[:,1] < sx2)]

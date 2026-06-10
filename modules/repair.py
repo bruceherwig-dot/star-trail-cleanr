@@ -31,14 +31,18 @@ region of the frame using sparse Lucas-Kanade optical flow:
 4. Average the two shifted neighbors. Paste the averaged pixels into frame N at the
    trail mask locations only. The rest of frame N is untouched.
 
-WHY BLACK FILL IS SAFE
------------------------
-When star tracking fails (too few stars, implausible displacements, first/last frame
-with only one neighbor), the trail pixels are filled with pure black — zero in all
-channels. This is safe because the final output is a lighten-max composite: each
-pixel in the stack takes the brightest value across all frames. A zero pixel loses
-to any real star pixel in any other frame. The hole becomes invisible in the final
-image, even if the repair was imperfect.
+WHY THE GIVE-UP FILL IS SAFE
+----------------------------
+When there is no clean neighbor sky to borrow — star tracking fails, a crossing
+where both neighbors carry the trail, or a borrowed pixel that still looks like
+trail — the give-up pixels are painted with the local sky color plus matching grain
+and a feathered seam (the "crayon" sky-fill, see _sky_fill below). Pure black is used
+only as a last resort, when there is too little surrounding sky to sample. This is a
+deliberate change from the old behavior, which always filled give-up pixels with pure
+black. Black would be invisible in a deep lighten-max composite (each stacked pixel
+takes the brightest value across all frames, so a zero loses to any real star), but it
+shows as a visible hole in a single frame or a short stack — bad for timelapse — which
+is why the sky-color fill replaced it.
 
 LONG TRAIL SEGMENTATION
 ------------------------
@@ -51,10 +55,16 @@ estimate for the whole trail.
 
 FALLBACKS IN ORDER
 ------------------
-1. Star Bridge (two neighbors, LK tracking succeeds)      -> best quality
-2. Single-neighbor copy (first or last frame of batch)    -> good quality
-3. Single-neighbor LK (tracking fails, one neighbor)      -> shifted neighbor, no average
-4. Black fill (tracking fails, no usable neighbors)       -> invisible in lighten-max
+1. Star Bridge (two neighbors, LK tracking succeeds)  -> shift both neighbors to
+   frame N's moment and blend / per-pixel-select (best quality).
+2. Two neighbors, LK tracking fails                   -> keep the original pixels
+   (so stars in the fat part of the mask survive) and sky-color-fill just the
+   bright streak.
+3. Single neighbor (first or last frame of batch)     -> plain copy of that
+   neighbor's patch, no tracking and no shift.
+4. No usable neighbor / crossing where both neighbors are dirty / a borrowed pixel
+   that still looks like trail -> sky-color give-up fill (local sky + grain),
+   falling back to pure black only when there is too little sky to sample.
 """
 import math
 import time
@@ -96,12 +106,34 @@ _LK_PARAMS = dict(
 #   border padding so stars near the trail edge are not blacked out by the warp.
 
 def _to_8bit(img: np.ndarray) -> np.ndarray:
+    """Down-convert a 16-bit image to 8-bit, pass an 8-bit image through unchanged.
+
+    Lucas-Kanade tracking (OpenCV) only accepts 8-bit grayscale, so 16-bit frames
+    must be scaled down before they go to the tracker. 257 is the exact divisor that
+    maps the full 16-bit range (0..65535) onto the full 8-bit range (0..255), since
+    65535 / 255 = 257. This is used only for the tracking math, not for the final
+    repaired pixels, which stay at the frame's original bit depth.
+
+    img: an image array of any dtype.
+    Returns: the same array if already 8-bit, otherwise a freshly scaled uint8 copy.
+    """
     if img.dtype == np.uint16:
         return (img / 257).astype(np.uint8)
     return img
 
 
 def _shift_image(img: np.ndarray, dx: float, dy: float) -> np.ndarray:
+    """Translate an image by a fractional (sub-pixel) amount and return the result.
+
+    Used by Star Bridge to nudge a neighbor frame so its stars line up with where
+    they would sit in frame N. dx/dy may be fractional, so warpAffine with linear
+    interpolation is used rather than a plain array roll. BORDER_REFLECT mirrors the
+    image at the edges instead of filling with black, so stars sitting right at the
+    edge of the search window are not wiped out by the shift.
+
+    img: the image to move. dx, dy: pixels to shift right / down (may be negative).
+    Returns: a new shifted image the same size and dtype as the input.
+    """
     M = np.float32([[1, 0, dx], [0, 1, dy]])
     return cv2.warpAffine(img, M, (img.shape[1], img.shape[0]),
                           flags=cv2.INTER_LINEAR,
@@ -184,6 +216,9 @@ def _trail_streak(region, comp_mask):
     streak = np.zeros_like(comp_mask)
     for i in range(1, n):
         a = st[i, cv2.CC_STAT_AREA]; w = st[i, cv2.CC_STAT_WIDTH]; h = st[i, cv2.CC_STAT_HEIGHT]
+        # Treat a bright blob as trail if it is large (area >= 40 px) OR elongated
+        # (longer side at least 3x the shorter). Compact, roughly-round blobs fail both
+        # tests and are left out, so real stars caught inside a fat mask are preserved.
         if a >= 40 or max(w, h) / max(1, min(w, h)) >= 3.0:
             streak |= (lab == i)
     return streak
@@ -213,6 +248,9 @@ def _track_stars(prev: np.ndarray, nxt: np.ndarray, trail_mask=None):
     else:
         g_search = g_prev
 
+    # Find up to 500 bright corner features (stars). qualityLevel 0.005 is deliberately
+    # low so faint stars still qualify; minDistance 5 keeps picks from clustering on one
+    # bright star. Fewer than MIN_STARS features = not enough to trust a motion estimate.
     pts = cv2.goodFeaturesToTrack(
         g_search, maxCorners=500, qualityLevel=0.005,
         minDistance=5, blockSize=7
@@ -220,17 +258,22 @@ def _track_stars(prev: np.ndarray, nxt: np.ndarray, trail_mask=None):
     if pts is None or len(pts) < MIN_STARS:
         return 0.0, 0.0, False, 0
 
+    # Track each feature from prev to next. status==1 marks the points LK could follow.
     pts1, status, _ = cv2.calcOpticalFlowPyrLK(g_prev, g_next, pts, None, **_LK_PARAMS)
     good = (status.ravel() == 1)
     if good.sum() < MIN_STARS:
         return 0.0, 0.0, False, int(good.sum())
 
+    # Keep only displacements in the plausible star-motion band. Too small = a point
+    # that did not really move (noise, hot pixel); too large = a mistracked feature.
     disp = (pts1[good] - pts[good]).reshape(-1, 2)
     mag  = np.linalg.norm(disp, axis=1)
     valid = (mag >= MIN_DISP) & (mag <= MAX_DISP)
     if valid.sum() < MIN_STARS:
         return 0.0, 0.0, False, int(valid.sum())
 
+    # Median (not mean) of the surviving displacements -> robust to any stray outlier
+    # that slipped through the band. This is the local prev->next star motion vector.
     return (float(np.median(disp[valid, 0])),
             float(np.median(disp[valid, 1])),
             True,
@@ -309,9 +352,12 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
         frame_idx: index of this frame in neighbor_frames
         neighbor_frames: full list of frames (same dtype as frame)
         neighbor_masks: optional list of mask arrays aligned with neighbor_frames
-            (None entries = no mask / assume clean). When provided, a neighbor
-            is skipped for any component where its mask overlaps that component,
-            since its pixels there are trail, not sky.
+            (None entries = no mask / assume clean). When provided, the choice of
+            which neighbor to trust is made per pixel: where exactly one neighbor's
+            mask marks trail, the other (clean) neighbor's pixel is used; where both
+            neighbors mark trail there is nothing clean to borrow, so those pixels
+            are sky-color-filled. Both neighbors are still used wherever they are
+            clean.
         polygon_segs: optional list of per-polygon binary masks (one per trail
             arm or polygon). When provided, each segment is repaired independently
             with its own Star Bridge pass instead of merging all polygons into one
@@ -424,8 +470,9 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
             comp_mask = sub_mask[y0:y1, x0:x1] > 0
 
             # Always repair from all available neighbors.
-            # The union mask below blacks out any pixel where a neighbor has trail,
-            # so overlap areas are handled pixel-by-pixel after repair.
+            # The AND union block below sky-color-fills any pixel where BOTH neighbors
+            # have the trail (nothing clean to borrow), so overlap areas are handled
+            # pixel-by-pixel after repair.
             use_prev = has_prev
             use_next = has_next
 
@@ -464,12 +511,19 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
 
                 if ok:
                     # ── Warp synthesis ────────────────────────────────────────
+                    # Meet in the middle: push prev forward by half the prev->next
+                    # motion and pull next backward by half. Both neighbors now have
+                    # their stars aligned to frame N's moment in time.
                     _ts = time.perf_counter()
                     warped_prev = _shift_image(patch_prev,  dx / 2.0,  dy / 2.0)
                     warped_next = _shift_image(patch_next, -dx / 2.0, -dy / 2.0)
                     _addt("warp_s", time.perf_counter() - _ts)
                     if neighbor_masks is None:
-                        # No masks provided — fall back to color-based contamination check
+                        # No masks provided — fall back to color-based contamination check.
+                        # A neighbor is "contaminated" if >20% of its trail-region pixels
+                        # still look warm and bright (i.e. the trail also crosses here in
+                        # that neighbor). Blend only when BOTH neighbors are clean;
+                        # otherwise take whichever single neighbor is cleaner.
                         _CONTAM_THRESH = 0.20
                         def _contam(patch):
                             px = patch[comp_mask].astype(np.int32)
@@ -490,13 +544,19 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                             synth = warped_next.copy()
                             _method = "next_only"
                     else:
-                        # Per-pixel: use only the clean neighbor where one side has trail.
+                        # Masks provided: decide per pixel which neighbor to trust.
+                        # prev_c / next_c mark where each neighbor's own mask says
+                        # "trail here" (so that neighbor's pixels are dirty there).
                         prev_c = (neighbor_masks[prev_idx][y0:y1, x0:x1] > 0
                                   if has_prev and neighbor_masks[prev_idx] is not None
                                   else np.zeros(comp_mask.shape, dtype=bool))
                         next_c = (neighbor_masks[next_idx][y0:y1, x0:x1] > 0
                                   if has_next and neighbor_masks[next_idx] is not None
                                   else np.zeros(comp_mask.shape, dtype=bool))
+                        # Default to the averaged blend, then override the pixels where
+                        # exactly one neighbor is dirty: prev dirty & next clean -> take
+                        # next only, and vice versa. Pixels dirty in both are left as the
+                        # blend here and get sky-filled later (see the AND union block).
                         synth = ((warped_prev.astype(np.float32) +
                                   warped_next.astype(np.float32)) / 2.0).astype(frame.dtype)
                         use_next_only = comp_mask & prev_c & ~next_c
@@ -526,6 +586,10 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
             result[y0:y1, x0:x1][comp_mask] = synth[comp_mask]
 
             # ── Warm-pixel cleanup (still-trail remnants after warp) ──────────
+            # Airplane/satellite trails read warm: red channel noticeably above blue.
+            # Measure this region's own sky baseline (median red-minus-blue of the
+            # surrounding background) so the gate adapts to warm-toned skies and
+            # twilight gradients instead of using one fixed colour everywhere.
             bg_pixels = frame[y0:y1, x0:x1][~comp_mask].astype(np.int32)
             if len(bg_pixels) >= 10:
                 bg_rb = float(np.median(bg_pixels[:, 2] - bg_pixels[:, 0]))
@@ -533,6 +597,9 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                 bg_rb = 0.0
             warm_thresh = bg_rb + TRAIL_WARM_MARGIN
 
+            # A repaired pixel is still trail if it is both warmer than the local sky
+            # baseline (by TRAIL_WARM_MARGIN) AND bright enough in red. Channel index 2
+            # is red, index 0 is blue (OpenCV stores images as BGR).
             filled = result[y0:y1, x0:x1].astype(np.int32)
             still_trail = (comp_mask &
                            (filled[..., 2] - filled[..., 0] > warm_thresh) &

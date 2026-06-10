@@ -36,7 +36,9 @@ The GUI monitors stdout for progress updates while this worker runs.
 
 THE TWO STEPS
 -------------
-Step 1 — DETECT (modules/detect_trails.py + modules/trail_grouper.py)
+Step 1 — DETECT (modules/detect_pipeline.py, which internally uses
+         modules/trail_grouper.py for grouping/polygon fitting; a few helpers
+         come from modules/detect_trails.py)
   The YOLO model (Trail DetectoR) was trained to recognize the pixel shape of a trail
   in a single astrophotography frame. Because our frames are large (often 6000x4000+)
   and the model works on 640x640 tiles, we use SAHI (Slicing Aided Hyper Inference)
@@ -44,10 +46,11 @@ Step 1 — DETECT (modules/detect_trails.py + modules/trail_grouper.py)
   all results back to full-frame coordinates. The grouper fuses tile-boundary fragments
   that belong to the same physical trail into one clean detection polygon.
 
-  The foreground/sky mask is computed once per batch: any pixel that is bright across
-  the majority of frames is foreground (landscape, buildings) rather than sky. The
-  mask is applied to each detection mask so that foreground false positives are
-  discarded before they reach the repair step.
+  The foreground/sky mask is supplied to the worker as a file (--foreground-mask):
+  white = foreground to exclude. The worker loads it and inverts it to a sky mask,
+  which is then applied to each detection mask so that foreground false positives are
+  discarded before they reach the repair step. (The mask itself is built upstream in
+  the GUI, not in this file.)
 
   The static FP suppressor runs after detection. It looks at each detected region and
   checks whether the same pixel region is detected in neighboring frames too. If a
@@ -68,9 +71,11 @@ Step 2 — REPAIR (modules/repair.py)
   used directly (no blending).
 
   Tracking failure fallback: if too few stars are found or their displacements are
-  implausible, the trail is filled with pure black (zero in all channels). Black is
-  invisible in a lighten-max composite because the real star pixel in any other frame
-  always wins.
+  implausible, the trail pixels are painted with the local sky color plus matched
+  grain (the "crayon" fill), sampled from the surrounding sky. Only when there is too
+  little nearby sky to sample does it fall back to pure black. Either way the fill is
+  invisible-or-near-invisible in a lighten-max composite because the real star pixel
+  from another frame wins.
 
 KEY ASSUMPTIONS
 ---------------
@@ -276,6 +281,21 @@ def load_frame_files(frame_dir: Path, start: int, batch: int,
                      expected_width: int = None,
                      expected_height: int = None,
                      prefer_raw: bool = True) -> List[Path]:
+    """Return the sorted list of image file paths for one batch (no neighbors).
+
+    Lists every image in `frame_dir`, drops twin copies of the same frame (a
+    JPG/TIFF/RAW pair of one shot) using the same RAW-vs-JPG/TIFF preference the
+    GUI uses, THEN slices `[start : start+batch]`. Deduping before slicing is what
+    keeps the worker's frame numbering aligned with the GUI's batch plan. Finally
+    drops any frame whose resolution doesn't match the rest. `batch <= 0` means
+    "take everything from start to the end". Inputs: `start`/`batch` are frame
+    indices into the deduped, sorted list; `expected_width`/`expected_height`
+    pin the target resolution (skips auto-detection); `prefer_raw` picks RAW over
+    JPG/TIFF when both exist for the same shot.
+
+    Note: this helper is the no-neighbor variant; the actual run uses
+    load_with_neighbors so repair can see one frame on each side.
+    """
     files = sorted(p for p in frame_dir.iterdir() if p.suffix.lower() in IMAGE_EXTS)
     # Drop twins (JPG/TIFF/RAW of the same frame) on the FULL list before
     # slicing, so frame indices match the GUI's (which dedups the same way,
@@ -360,8 +380,11 @@ def _suppress_static_fps(masks_all, core_start, core_end,
     PURPOSE: The AI sometimes detects fixed foreground objects (building edges,
     rooflines, fence posts) as airplane trails because they are long, thin, and
     high-contrast against the sky. These false positives appear at the SAME pixel
-    position in every frame. Real airplane trails appear in at most 1-2 frames
-    and move significantly between frames.
+    position in every frame. Real trails MOVE between frames, so even a trail that
+    spans many frames never sits at the same pixel position twice; a static
+    foreground object sits at exactly the same position in every frame. Suppression
+    keys on same-position recurrence (high IoU at a near-identical centroid), not on
+    how many frames a detection spans.
 
     HOW IT WORKS: For each detected component in a core frame N, we check the 8
     surrounding frames {N-4, N-3, N-2, N-1, N+1, N+2, N+3, N+4}. This covers any
@@ -630,6 +653,32 @@ def _suppress_static_fps(masks_all, core_start, core_end,
 
 
 def main():
+    """Entry point for one batch. Parses command-line arguments, runs the full
+    detect-then-repair pipeline on the requested frame range, and writes cleaned
+    frames to the output folder.
+
+    This is the whole job the worker subprocess does. The GUI launches one of
+    these per 20-frame batch with the input/output folders, the model path, and
+    the batch window (--start / --batch). There are no return values: progress and
+    results are printed to stdout (the GUI parses lines like FRAME_TRAIL_COUNT and
+    BATCH_TRAIL_COUNT), and the process exits non-zero on fatal errors.
+
+    The flow, top to bottom:
+      1. Parse args and set up output folders + (dev-only) the JSONL run logger.
+      2. Define the nested output-writing / EXIF helpers (closures over args).
+      3. Load the batch frames plus one neighbor on each side, reading EXIF/ICC,
+         stripping alpha, applying orientation, and bailing on mixed bit depth or
+         mixed portrait/landscape shapes.
+      4. Optional hot-pixel repair on the foreground (only when a mask is given).
+      5. Step 1 — detect trails per frame via the SAHI pipeline, then run the
+         second-scrub (1b), static-FP suppressor (1c), and edge rescue (1d).
+      6. Step 2 — Star Bridge repair each detected trail and write each frame.
+      7. Print timing + summary and close the logger.
+
+    Many helpers below are defined INSIDE main() on purpose: they close over
+    `args`, `output_dir`, `cleaned_dir`, and the per-run `_stamp` string, so they
+    can't be module-level functions without threading all of that through.
+    """
     parser = argparse.ArgumentParser(
         description="astro_clean_v5 — YOLO-based airplane trail removal")
     parser.add_argument("input_dir")
@@ -691,6 +740,14 @@ def main():
         logger = None
 
     def _write_output(stem: str, img: np.ndarray, icc_profile=None, exif_bytes=None, dpi=None):
+        """Save one cleaned frame, turning a write failure into a clear user message.
+
+        Wraps _write_output_inner so that the common "can't write here" failures
+        (read-only drive, OneDrive sync lock, file open in another app) print a
+        plain-English instruction and exit cleanly with code 2 instead of dumping a
+        raw traceback. `stem` is the output filename without extension; `img` is the
+        BGR image array; `icc_profile`/`exif_bytes`/`dpi` are metadata to embed.
+        """
         from PIL import Image
         try:
             return _write_output_inner(stem, img, icc_profile=icc_profile,
@@ -707,6 +764,19 @@ def main():
             sys.exit(2)
 
     def _write_output_inner(stem: str, img: np.ndarray, icc_profile=None, exif_bytes=None, dpi=None):
+        """Encode and write one cleaned frame in the chosen output format.
+
+        Branches on args.output_format:
+          - "jpg": down-shift 16-bit to 8-bit if needed, convert BGR->RGB, save via
+            PIL with no chroma subsampling and the (size-fitted) EXIF.
+          - "tif8": same 8-bit path but written as TIFF; retries without EXIF if
+            libtiff rejects the EXIF block.
+          - "tif16": full 16-bit RGB written via tifffile, because PIL has no native
+            16-bit RGB save mode. 8-bit inputs are scaled up by *257 to fill 16 bits.
+        ICC profile and DPI are embedded when supplied. After writing, stamps the
+        Software string into the macOS Finder comment. `img` is a BGR array;
+        OpenCV/PIL color order conversions happen here.
+        """
         from PIL import Image
         if args.output_format == "jpg":
             out = img if img.dtype == np.uint8 else (img >> 8).astype(np.uint8)
@@ -813,6 +883,12 @@ def main():
     # Build the Software-tag stamp that goes into every cleaned file's EXIF.
     # Format: "Star Trail CleanR v<app> / Trail Detector v<model> / www.startrailcleanr.com"
     def _resolve_app_version():
+        """Read the app version string from version.txt for the EXIF Software stamp.
+
+        Looks beside the executable in the frozen bundle (sys._MEIPASS) or beside
+        this source file when running live. Returns "?" if the file is missing or
+        unreadable so the stamp still builds.
+        """
         try:
             base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
             with open(os.path.join(base, "version.txt")) as vf:
@@ -821,6 +897,12 @@ def main():
             return "?"
 
     def _resolve_model_version():
+        """Return the trained detector version (e.g. "v4") for the EXIF Software stamp.
+
+        Asks model_update.local_model_version() for the installed model release tag
+        (like "model-v4") and extracts the numeric part as "vN". Falls back to the
+        raw tag, then "?", on any failure.
+        """
         try:
             from modules.model_update import local_model_version
             import re
@@ -1144,7 +1226,12 @@ def main():
                 frames_8bit_all[idx] = frames_8bit[j]
     _hotpix_s = time.perf_counter() - _thot
 
-    # Resolution scaling for min_area filter
+    # Resolution scaling for min_area filter.
+    # The min-area threshold (smallest detection kept) is calibrated for a
+    # reference sensor (5472x3648, a common ~20MP body). On a larger sensor a real
+    # trail covers proportionally more pixels, so scale the threshold up by the
+    # frame's pixel count relative to that reference. max(args.min_area, ...) means
+    # smaller sensors keep the unscaled floor rather than dropping below it.
     REF_PIXELS = 5472 * 3648
     sc_area = (w * h) / REF_PIXELS
     min_area_scaled = max(args.min_area, int(args.min_area * sc_area))
@@ -1169,6 +1256,12 @@ def main():
     _timing = {}
 
     def _tacc(key, elapsed):
+        """Accumulate timing for one named step into the _timing dict.
+
+        Each entry is [call_count, total_seconds]; this adds one call and the given
+        `elapsed` seconds. Used throughout the batch so the end-of-run timing table
+        can show calls / total / average per pipeline step.
+        """
         if key in _timing:
             _timing[key][0] += 1
             _timing[key][1] += elapsed
@@ -1282,6 +1375,12 @@ def main():
         detect_infos.append(dbg)
 
     if args.second_scrub:
+        # Optional second detection pass on each frame rotated 180 degrees. The
+        # detector's tile grid and learned orientation biases differ once the
+        # image is flipped, so a trail the first pass missed can surface this time.
+        # The image AND the foreground mask are both rotated so they stay aligned;
+        # the resulting mask is rotated back and OR'd (np.maximum) into the
+        # first-pass mask, so the scrub can only ADD trails, never remove them.
         print("\nStep 1b - second scrub (180-degree rotation)", flush=True)
         try:
             for i, fp in enumerate(frame_files_all):
@@ -1419,8 +1518,14 @@ def main():
         _veto_by_frame = (static_fp_dbg or {}).get("kept_by_veto_by_frame", {})
 
         def _fp_in_sky(cx, cy):
-            # True if this point is over open sky (foreground mask is 0 there).
-            # With no mask we can't tell, so default to True (treat as sky).
+            """Is the point (cx, cy) over open sky rather than foreground?
+
+            Used to tag each suppressed false positive in the run log: a FP over sky
+            is a genuine miss worth harvesting as a hard-negative training example,
+            while a FP on the foreground (wall, tree, building) is expected and not
+            training material. Returns True when the foreground mask is 0 at that
+            pixel. With no mask we can't tell, so default to True (treat as sky).
+            """
             if fg_mask is None or cx is None or cy is None:
                 return True
             yy = min(fg_mask.shape[0] - 1, max(0, int(cy)))
@@ -1568,6 +1673,11 @@ def main():
         print(f"FRAME_TRAIL_COUNT: {running_trail_total}", flush=True)
 
     def _fmt_s(s):
+        """Format a duration in seconds as a short human string for the timing table.
+
+        Picks the most readable unit: "Nm SSs" for a minute or more, "N.Ns" for one
+        second or more, and "Nms" for sub-second times.
+        """
         m, sec = divmod(int(s), 60)
         if m:
             return f"{m}m {sec:02d}s"

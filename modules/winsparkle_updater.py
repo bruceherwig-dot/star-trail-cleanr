@@ -30,6 +30,11 @@ import ctypes
 import os
 import sys
 
+# Module-level handle to the loaded WinSparkle.dll (a ctypes CDLL object).
+# Stays None until init_winsparkle() successfully loads the DLL, and is reset
+# to None if loading fails. Every public function below treats `_dll is None`
+# as "WinSparkle is not available here" and quietly does nothing — this is how
+# the whole module becomes a harmless no-op on Mac, Linux, and dev launches.
 _dll = None
 
 
@@ -41,6 +46,9 @@ def _find_winsparkle_dll():
     fallback for compatibility with older PyInstaller layouts."""
     if sys.platform != "win32":
         return None
+    # `sys._MEIPASS` only exists inside a PyInstaller-frozen bundle. Its absence
+    # means we're running live Python source (a dev launch), where there is no
+    # bundled DLL to find — so updates are intentionally disabled.
     if not hasattr(sys, "_MEIPASS"):
         return None
     candidates = [

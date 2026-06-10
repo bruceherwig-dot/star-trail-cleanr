@@ -132,7 +132,17 @@ def load_model(model_path: str, confidence: float = 0.25,
 #   used by MaskViewR to show the unfiltered SAHI output in yellow.
 
 def _build_combined_mask(predictions, h, w):
-    """Convert SAHI predictions into one full-frame uint8 mask."""
+    """Union every SAHI prediction mask into one full-frame binary mask.
+
+    predictions: list of SAHI predictions (each has .mask.bool_mask).
+    h, w:        target full-frame height and width.
+
+    Returns an H x W uint8 mask where 255 = "some prediction marked this pixel as
+    trail" and 0 = background. Predictions are combined with a pixel-wise maximum
+    (logical OR), so overlapping detections simply merge. A prediction whose mask
+    is already full-frame is used as-is; one at a different size is nearest-resized
+    up to full frame first. Skips predictions with no mask.
+    """
     out = np.zeros((h, w), dtype=np.uint8)
     for pred in predictions:
         if pred.mask is None:
@@ -144,6 +154,7 @@ def _build_combined_mask(predictions, h, w):
         if seg.shape == (h, w):
             m[seg.astype(bool)] = 255
         else:
+            # Mask is not full-frame (e.g. tile-local); scale it up to fit.
             m = cv2.resize(seg.astype(np.uint8) * 255, (w, h),
                            interpolation=cv2.INTER_NEAREST)
         if m.any():
@@ -152,7 +163,17 @@ def _build_combined_mask(predictions, h, w):
 
 
 def _load_as_rgb(image):
-    """Load image from path or array and return (rgb_uint8, h, w), or None on failure."""
+    """Normalize any input image to 8-bit RGB and report its size.
+
+    image: either a file path (read from disk) or an already-loaded numpy array.
+
+    Returns (rgb_uint8, h, w), or None if the file could not be read. Handles all
+    the messy input variations so the rest of the pipeline only ever sees clean
+    3-channel 8-bit RGB: 16-bit is down-shifted to 8-bit, float/other dtypes are
+    clipped to 0-255, grayscale and BGRA are converted to RGB, and plain BGR is
+    swapped to RGB. (Astrophotography sources are commonly 16-bit TIFFs, so the
+    16-bit path matters in practice.)
+    """
     if isinstance(image, np.ndarray):
         img = image
     else:
@@ -213,17 +234,36 @@ def _sahi_predict(model, img, tile_size, overlap):
 # .score.value interface as SAHI ObjectPredictions.
 
 class _PredMaskWrap:
+    """Holds one boolean mask under the attribute name SAHI uses (.bool_mask).
+
+    Exists so a _SyntheticPred can expose pred.mask.bool_mask exactly like a real
+    SAHI prediction, letting the rest of the pipeline read it without caring
+    whether it came from SAHI or from our fast skip-path inference.
+    """
     __slots__ = ("bool_mask",)
     def __init__(self, bm):
         self.bool_mask = bm
 
 class _PredScoreWrap:
+    """Holds one confidence score under the attribute name SAHI uses (.value).
+
+    Mirror of _PredMaskWrap for the score side, so pred.score.value works the
+    same on our synthetic predictions as on real SAHI ones.
+    """
     __slots__ = ("value",)
     def __init__(self, v):
         self.value = v
 
 class _SyntheticPred:
-    """Duck-type replacement for SAHI ObjectPrediction."""
+    """A stand-in that looks exactly like a SAHI ObjectPrediction to our code.
+
+    The fast foreground-skip path (_sahi_predict_skip) runs YOLO directly instead
+    of through SAHI, so it gets raw YOLO masks, not SAHI prediction objects. We
+    wrap each one in a _SyntheticPred so it exposes the same .mask.bool_mask and
+    .score.value attributes the rest of the pipeline expects. That way the two
+    inference paths are interchangeable downstream and nothing else needs to know
+    which one produced a given detection.
+    """
     __slots__ = ("mask", "score")
     def __init__(self, bool_mask, conf):
         self.mask  = _PredMaskWrap(bool_mask)
@@ -231,12 +271,25 @@ class _SyntheticPred:
 
 
 def _tile_starts(size, tile_size, stride):
-    """Return list of tile start positions for one dimension."""
+    """Compute the left/top start coordinates of every tile along one axis.
+
+    size:      length of the image along this axis (width for x, height for y).
+    tile_size: tile length (e.g. 640).
+    stride:    step between consecutive tile starts (tile_size minus the overlap).
+
+    Returns a list of start positions. Tiles are stepped by `stride` so they
+    overlap, matching how SAHI lays out its grid. The final guard appends one
+    last tile flush against the far edge (start = size - tile_size) whenever the
+    stepped tiles don't already reach the edge, so no strip of pixels at the
+    bottom/right is ever left uncovered.
+    """
     starts = []
     x = 0
     while x + tile_size <= size:
         starts.append(x)
         x += stride
+    # If the stepped tiles stop short of the far edge (or there are none at all
+    # because the image is smaller than one tile), add a final edge-aligned tile.
     if not starts or starts[-1] + tile_size < size:
         starts.append(size - tile_size)
     return starts
@@ -337,7 +390,17 @@ def detect_frame(model, image, tile_size: int = 640,
 
 
 def _build_raw_labeled_mask(predictions, h, w):
-    """Label each SAHI prediction by index (1..N) before any filtering."""
+    """Paint each raw SAHI prediction onto one mask with a distinct id (1..N).
+
+    predictions: list of SAHI predictions, in order.
+    h, w:        full-frame size.
+
+    Returns an H x W uint8 mask where each pixel holds the 1-based index of the
+    prediction covering it (0 = background). Unlike _build_combined_mask (which
+    flattens everything to 255), this keeps detections individually identifiable
+    so MaskViewR can show the unfiltered SAHI output as separate numbered shapes.
+    Indices above 255 cannot fit in uint8 and are dropped (rare in practice).
+    """
     out = np.zeros((h, w), dtype=np.uint8)
     for idx, pred in enumerate(predictions, start=1):
         if pred.mask is None or pred.mask.bool_mask is None:
@@ -376,15 +439,34 @@ _BRIDGE_CLIP_TOL       = 3     # px: facing edge must be within this many px of 
 
 
 def _group_tips(grp, det_list):
-    """Return (tip_min_rc, tip_max_rc) for a group as row-col arrays."""
+    """Find the two endpoints ("tips") of a grouped trail and its direction.
+
+    grp:      list of indices into det_list naming the detections in this group.
+    det_list: full list of detection-property dicts (each has "coords", a unit
+              direction "u", and an "area").
+
+    Returns (tip_min_rc, tip_max_rc, u_avg):
+      - tip_min_rc / tip_max_rc: the two far ends of the trail as (row, col)
+        points, found by projecting every pixel onto the trail's axis and taking
+        the lowest and highest projections.
+      - u_avg: the group's average direction as a (row, col) unit vector.
+
+    Used by the gap-bridge pass to decide whether two groups are two ends of one
+    physical trail. Each detection's direction is flipped to point the same way
+    before averaging (a line's direction is ambiguous by 180 degrees), and the
+    average is area-weighted so larger fragments dominate the direction estimate.
+    """
     all_dets = [det_list[i] for i in grp]
     all_coords = np.vstack([d["coords"] for d in all_dets])
+    # Sum direction vectors, flipping any that point the opposite way so they
+    # reinforce instead of cancel; weight by area so big fragments count more.
     u_sum = np.zeros(2)
     for d in all_dets:
         u = d["u"] if u_sum.dot(d["u"]) >= 0 else -d["u"]
         u_sum += u * d["area"]
     u_avg = u_sum / np.linalg.norm(u_sum)
     centroid = all_coords.mean(axis=0)
+    # Project all pixels onto the trail axis; the min/max projections are the tips.
     t_c = float(centroid @ u_avg)
     t = all_coords @ u_avg
     tip_min = centroid + (float(t.min()) - t_c) * u_avg
@@ -455,6 +537,10 @@ def _find_gap_bridge_tiles(groups, det_list, h, w, tile_size):
     _stride = int(tile_size * 0.8)
 
     def _tile_bounds_1d(size):
+        """Return the set of every tile-edge coordinate (left and right) along
+        one axis, including the flush-to-edge last tile. These are the lines
+        where SAHI's NMS can clip a trail, so Gate 4 below only fires a bridge
+        when the gap straddles one of them."""
         bounds = set()
         k = 0
         while True:
@@ -685,14 +771,24 @@ def _run_targeted_tile_rot90(model, img_rgb, tile_x, tile_y, tile_size, h, w):
 # ── Public: detect_frame_polygon (fitted polygon mask) ────────────────────────
 # Active detection entry point for STC v5. Pipeline:
 def _poly_angle(fill):
-    """Principal axis angle of a filled polygon mask, in degrees [0, 180)."""
+    """Measure which way a filled shape points, as an angle in degrees [0, 180).
+
+    fill: an H x W mask, nonzero where the shape is.
+
+    Computes the shape's long ("principal") axis via the eigenvectors of its
+    pixel covariance matrix (the standard PCA-on-a-blob trick) and returns that
+    axis's angle. Used by _clip_overlapping_polygons to tell a genuine crossing
+    (two trails at clearly different angles) from a same-trail seam overlap (two
+    fragments at nearly the same angle). Returns 0.0 for shapes too small to fit.
+    """
     ys, xs = np.where(fill > 0)
     if len(xs) < 4:
         return 0.0
+    # Second moments of the pixel cloud about its centroid → 2x2 covariance.
     dr = ys - ys.mean(); dc = xs - xs.mean()
     Irr = float((dr * dr).mean()); Icc = float((dc * dc).mean()); Irc = float((dr * dc).mean())
     _, evecs = np.linalg.eigh(np.array([[Irr, Irc], [Irc, Icc]]))
-    u = evecs[:, 1]
+    u = evecs[:, 1]  # eigenvector of the largest eigenvalue = the long axis
     return float(np.degrees(np.arctan2(u[1], u[0])) % 180)
 
 
@@ -801,12 +897,27 @@ def _clip_overlapping_polygons(poly_fills, poly_lengths, min_fragment):
 
 
 def _fill_tips(fill_mask):
-    """Return (tip_min_rc, tip_max_rc, u_rc, width_px) for a polygon fill, or None if too small."""
+    """Measure a fitted polygon's two endpoints, direction, and width.
+
+    fill_mask: an H x W mask, nonzero where the fitted polygon is.
+
+    Returns (tip_min_rc, tip_max_rc, u, width_px), or None if the polygon is too
+    small to fit (fewer than 4 pixels):
+      - tip_min_rc / tip_max_rc: the polygon's two far ends as (row, col) points.
+      - u: the long-axis direction as a (row, col) unit vector.
+      - width_px: how wide the polygon is across its short axis.
+
+    Same PCA-on-a-blob approach as _group_tips, but it works from the rendered
+    polygon fill instead of raw detection coordinates. _link_polygon_gaps uses it
+    so its geometry is computed from the final polygons and is therefore stable
+    run-to-run, unlike the raw-group version which varies with MPS noise.
+    """
     ys, xs = np.where(fill_mask > 0)
     if len(xs) < 4:
         return None
     coords = np.stack([ys, xs], axis=1).astype(float)
     centroid = coords.mean(axis=0)
+    # Covariance of the pixel cloud → eigh gives the long and short axes.
     dr = coords[:, 0] - centroid[0]
     dc = coords[:, 1] - centroid[1]
     Irr = float((dr * dr).mean())
@@ -814,10 +925,12 @@ def _fill_tips(fill_mask):
     Irc = float((dr * dc).mean())
     _, evecs = np.linalg.eigh(np.array([[Irr, Irc], [Irc, Icc]]))
     u = evecs[:, 1]  # major axis in (row, col) space
+    # Project pixels onto the long axis: min/max projections mark the two tips.
     t = coords @ u
     t_c = float(centroid @ u)
     tip_min = centroid + (float(t.min()) - t_c) * u
     tip_max = centroid + (float(t.max()) - t_c) * u
+    # Project onto the perpendicular axis to measure the polygon's width.
     perp = np.array([-u[1], u[0]])
     p = coords @ perp
     width_px = float(p.max() - p.min())
@@ -1032,9 +1145,12 @@ def detect_frame_polygon(model, image, tile_size: int = 640,
         bridge_merges = 0
         bridge_rot90_merges = 0
         if gap_pairs:
+            # Union-find: merge every group pair the gap-bridge pass approved into
+            # a single combined group. gp[x] is x's parent; _gf walks to the root.
             gp = list(range(len(groups)))
 
             def _gf(x):
+                # Find the root of x, flattening the chain as we go (path halving).
                 while gp[x] != x:
                     gp[x] = gp[gp[x]]
                     x = gp[x]
@@ -1046,6 +1162,7 @@ def detect_frame_polygon(model, image, tile_size: int = 640,
                 gp[_gf(gi)] = _gf(gj)
                 bridge_merges += 1
 
+            # Collect each set of detection indices under its root into one group.
             merged = {}
             for gi, grp in enumerate(groups):
                 merged.setdefault(_gf(gi), []).extend(grp)
@@ -1069,6 +1186,9 @@ def detect_frame_polygon(model, image, tile_size: int = 640,
         for grp in groups:
             all_coords = np.vstack([det_list[i]["coords"] for i in grp])
             x_span = int(all_coords[:,1].max() - all_coords[:,1].min())
+            # A trail that is both wide enough and bends enough is treated as
+            # curved and fitted with a chain of short rectangles; everything else
+            # gets a single straight rectangle. Thresholds come from trail_grouper.
             if (x_span >= _CURVED_MIN_XSPAN
                     and _group_angle_spread(grp, det_list) >= _CURVED_MIN_ANGLE_SPREAD):
                 corner_sets = fit_curved_group(grp, det_list)
@@ -1091,6 +1211,9 @@ def detect_frame_polygon(model, image, tile_size: int = 640,
             poly_lengths.append(math.sqrt(row_span ** 2 + col_span ** 2))
             poly_corner_sets.append(corner_sets)
             poly_count += len(corner_sets)
+        # Scale the minimum-fragment size by frame area relative to a reference
+        # frame, so the "keep a clipped stub?" threshold means the same physical
+        # size on a small frame as on a 24MP one.
         area_scale = (h * w) / _REF_FRAME_PX
         poly_fills = _clip_overlapping_polygons(
             poly_fills, poly_lengths,

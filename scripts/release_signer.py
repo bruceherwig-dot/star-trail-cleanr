@@ -80,6 +80,18 @@ PLATFORMS = [
 
 
 def run(cmd, **kwargs):
+    """Run an external command, echoing it first, and abort the whole script if
+    it fails.
+
+    `cmd` is a list of command parts (program name plus arguments). Any extra
+    keyword arguments are passed straight through to subprocess.run. The command
+    line is printed with a leading "$ " so the console log reads like a shell
+    transcript. If the command returns a non-zero exit code, the entire release
+    process stops immediately (sys.exit) rather than continuing in a half-done
+    state. Returns the completed-process object on success. This is the
+    fail-fast wrapper used for every "must succeed" step (gh, git, curl,
+    sign/appcast tools).
+    """
     print(f"$ {' '.join(str(c) for c in cmd)}")
     result = subprocess.run(cmd, **kwargs)
     if result.returncode != 0:
@@ -96,6 +108,16 @@ def parse_version(tag):
 
 
 def download_artifacts(tag, dest):
+    """Download the release's installer files from GitHub into a local folder.
+
+    `tag` is the release tag (e.g. "v2.05-beta") and `dest` is the folder to
+    download into (created if needed). If all three expected installers (Apple
+    Silicon DMG, Intel DMG, Windows zip) are already present in `dest`, the
+    download is skipped so re-runs are fast. Otherwise it shells out to the
+    GitHub CLI ("gh release download") to fetch every asset from the release,
+    overwriting any partial copies (--clobber). Returns nothing; its job is to
+    leave the artifacts on disk for the rest of the flow to sign and archive.
+    """
     dest.mkdir(parents=True, exist_ok=True)
     have_all = all((dest / p["release_filename"]).exists() for p in PLATFORMS)
     if have_all:
@@ -144,6 +166,13 @@ def sync_appcast_from_gh_pages(platform, archive_dir):
 
 
 def list_existing_deltas(archive_dir):
+    """Return the set of *.delta filenames currently sitting in `archive_dir`.
+
+    Used to take a "before" and "after" snapshot around the generate_appcast
+    run: whatever delta files appear that weren't there before are this
+    release's freshly-generated deltas. Returns a set of bare filenames (not
+    full paths) so the two snapshots can be diffed with simple set subtraction.
+    """
     return set(p.name for p in archive_dir.glob("*.delta"))
 
 
@@ -152,7 +181,8 @@ def rename_deltas_with_platform_prefix(archive_dir, platform, new_delta_names):
     "StarTrailCleanR" for both Mac architectures. That collides on the GitHub
     release (same filename, different content). Rename the new deltas to embed
     the platform key so they upload cleanly. Returns a list of (old_name,
-    new_path) so the caller can rewrite the appcast XML."""
+    new_name, new_path) so the caller can rewrite the appcast XML and upload
+    the renamed files."""
     pairs = []
     for old_name in new_delta_names:
         new_name = f"{platform['archive_stem']}-{old_name.removeprefix('StarTrailCleanR')}"
@@ -179,6 +209,21 @@ def update_xml_delta_filenames(xml_text, renames):
 
 
 def run_generate_appcast(archive_dir):
+    """Invoke Sparkle's vendored generate_appcast tool on one platform folder.
+
+    `archive_dir` holds the parked installers (this version plus past ones) and
+    the synced appcast XML. generate_appcast signs the new archive with the
+    Sparkle private key, computes binary deltas against the older versions, and
+    rewrites the appcast XML in place with enclosure entries (full + delta).
+
+    The download-url-prefix is deliberately set to URL_PLACEHOLDER (a sentinel
+    "PLACEHOLDER" path) because the real per-version GitHub URL isn't known to
+    this tool — post_process_appcast_xml swaps the placeholder out afterward.
+    The --maximum-versions and --maximum-deltas flags (both set to 5) cap how
+    many past versions and how many deltas the appcast keeps, so the file and
+    the archive folder don't grow forever.
+    Aborts the script (via run) if generate_appcast fails.
+    """
     run([
         str(GENERATE_APPCAST),
         "--ed-key-file", str(KEY_FILE),
@@ -201,11 +246,13 @@ def post_process_appcast_xml(xml_text, tag, short):
        stay as-is — they're uploaded under those names to the new release.
 
     2. Beta-suffix restore: build_helper.py sets CFBundleShortVersionString
-       to the bare numeric (e.g. "2.05") because Sparkle's version comparison
-       is happier with numeric strings. generate_appcast reads that into
-       sparkle:shortVersionString. We rewrite the new release's entry so the
-       displayed version reads "2.05-beta" instead of "2.05" — the brand
-       wants the -beta tag visible to the user."""
+       from version.txt, which holds the bare numeric (e.g. "2.05") per the
+       project's version scheme. generate_appcast reads that into
+       sparkle:shortVersionString, the human-readable display string (the
+       numeric field Sparkle actually uses for comparison is sparkle:version,
+       not this one). We rewrite the new release's entry so the displayed
+       version reads "2.05-beta" instead of "2.05" — the brand wants the
+       -beta tag visible to the user."""
     # 1a. Strip version suffix from full-bundle filenames.
     # Pattern: PLACEHOLDER/<stem>-vX.YY[-suffix].<ext> -> PLACEHOLDER/<stem>.<ext>
     def strip_full_bundle_suffix(m):
@@ -243,6 +290,20 @@ def sign_one(path):
 
 
 def build_windows_item_xml(tag, numeric, short, sig, length, pub_date):
+    """Build the appcast <item> XML block for a Windows release by hand.
+
+    Windows gets no deltas (WinSparkle has no delta support and generate_appcast
+    only deltas Mac .app bundles), so instead of letting the tool write the XML
+    we assemble the single update entry ourselves. Inputs:
+      tag      - release tag, used to build the download URL ("v2.05-beta")
+      numeric  - bare numeric version for sparkle:version comparison ("2.05")
+      short    - branded version string shown to users ("2.05-beta")
+      sig      - Ed25519 signature string from sign_one
+      length   - file size in bytes (used as the enclosure length)
+      pub_date - RFC-822 formatted publish date string
+    Returns the indented <item>...</item> XML text as a string, ready to splice
+    into the existing Windows appcast by insert_windows_item.
+    """
     url = f"{RELEASE_BASE}/{tag}/StarTrailCleanRSetup.zip"
     return (
         f"    <item>\n"
@@ -260,8 +321,20 @@ def build_windows_item_xml(tag, numeric, short, sig, length, pub_date):
 
 
 def insert_windows_item(xml_text, new_item, short):
+    """Splice a new Windows update <item> into the top of the existing appcast.
+
+    `xml_text` is the current Windows appcast fetched from gh-pages, `new_item`
+    is the block from build_windows_item_xml, and `short` is the branded version
+    used as a duplicate guard. If an item titled "Version <short>" already
+    exists, the script aborts rather than adding a second copy. The new item is
+    inserted immediately after the channel-level "<language>en</language>" line
+    so it lands at the top of the item list (newest first). Aborts if that
+    marker line can't be found. Returns the updated XML text.
+    """
+    # Duplicate guard: never publish the same version twice into one appcast.
     if f"<title>Version {short}</title>" in xml_text:
         sys.exit(f"Appcast already has Version {short} — refusing to duplicate.")
+    # Insert right after the channel <language> tag so the newest item is first.
     marker = "<language>en</language>\n"
     idx = xml_text.find(marker)
     if idx == -1:
@@ -296,7 +369,18 @@ def upload_delta_files_to_release(tag, delta_files):
 
 
 def update_gh_pages(tag, appcast_xmls):
+    """Commit the rewritten appcast XMLs to the gh-pages branch and push them.
+
+    `tag` is the release tag (used in the commit message and temp folder name)
+    and `appcast_xmls` maps each appcast filename to its final XML text. The
+    function checks out gh-pages into a throwaway git worktree under /tmp,
+    overwrites each appcast file there, then stages, commits, and pushes. The
+    worktree is always removed afterward (the try/finally guarantees cleanup
+    even if a git step fails mid-way). Once pushed, GitHub Pages serves the
+    updated appcasts so installed apps see the new version. Returns nothing.
+    """
     work = Path("/tmp") / f"gh-pages-{tag}"
+    # Remove any leftover worktree from a previous aborted run before re-adding.
     if work.exists():
         run(["git", "worktree", "remove", "--force", str(work)])
     run(["git", "fetch", "origin", "gh-pages"])
@@ -316,10 +400,20 @@ def update_gh_pages(tag, appcast_xmls):
 
 
 def wait_for_pages(tag, short):
+    """Poll GitHub Pages until the new version shows up in the live appcast.
+
+    After pushing to gh-pages there's a propagation delay before GitHub actually
+    serves the new file. This checks the first platform's appcast URL once every
+    5 seconds, looking for "Version <short>" in the served XML, and gives up
+    after 180 seconds (3 minutes). `tag` is currently unused in the body; the
+    check keys off `short`. Returns True if the new version went live within the
+    window, False on timeout. Purely a convenience confirmation — a False just
+    means "check the URL yourself in a moment," not that publishing failed.
+    """
     url = f"https://bruceherwig-dot.github.io/star-trail-cleanr/{PLATFORMS[0]['appcast']}"
     needle = f"Version {short}"
     print(f"Waiting for {url} to advertise {needle}...")
-    deadline = time.time() + 180
+    deadline = time.time() + 180  # 3-minute cap on Pages propagation wait
     while time.time() < deadline:
         result = subprocess.run(
             ["curl", "-fsSL", url],
@@ -334,6 +428,17 @@ def wait_for_pages(tag, short):
 
 
 def main():
+    """Entry point: run the full sign-and-publish flow for one release tag.
+
+    Parses command-line arguments (the release tag plus optional
+    --artifacts-dir and --skip-push), checks the signing tools and private key
+    exist, then for each platform: parks the installer, generates/signs the
+    appcast (Mac uses deltas via generate_appcast; Windows is signed and spliced
+    by hand), and post-processes the XML. With --skip-push it stops after
+    generating files locally for inspection; otherwise it uploads the delta
+    files to the GitHub release, pushes the rewritten appcasts to gh-pages, and
+    waits for them to go live. This is the one function the command line calls.
+    """
     parser = argparse.ArgumentParser()
     parser.add_argument("tag", help="Release tag, e.g. v2.05-beta")
     parser.add_argument("--artifacts-dir", default=None,

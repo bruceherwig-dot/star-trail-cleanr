@@ -1,5 +1,55 @@
 #!/usr/bin/env python3
 """
+build_helper.py — the Star Trail CleanR "make the shippable app" script.
+
+WHAT THIS FILE IS
+-----------------
+This is the build packager. It takes the plain Python source of Star Trail
+CleanR and turns it into a single self-contained desktop application that a
+user can download and double-click — no Python install, no pip, no setup.
+It is the script that GitHub's automated build (CI) runs to produce the
+Mac .app and the Windows folder that go into each release.
+
+It does its job in three big phases, top to bottom:
+
+  1. WORK OUT WHAT TO PACK IN.
+     PyInstaller (the freezing tool that actually builds the app) handles
+     code files on its own, but it routinely forgets non-code "data files"
+     (fonts, config, model assets, etc.) that a library needs at runtime —
+     and a forgotten data file means a crash on the user's machine. To avoid
+     hand-maintaining a list, this script scans every installed package and,
+     for any package that contains a data file, tells PyInstaller to bundle
+     that package's folder. It also keeps an explicit "never bundle this"
+     list (SKIP_PACKAGES) of libraries that are present on the dev machine
+     but are not actually part of the shipped app.
+
+  2. RUN PYINSTALLER.
+     It assembles a long command line (the right icon per OS, the heavy
+     libraries to fully collect, the data files to add, the bundled YOLO
+     model, the skip list) and runs PyInstaller to freeze the app into the
+     `dist/` folder.
+
+  3. SLIM AND FINISH THE BUNDLE.
+     A fresh PyInstaller bundle is bloated with things the app never uses
+     (unused Qt frameworks, GPU libraries for hardware we don't touch, Qt's
+     developer tools, a duplicate ffmpeg). This script walks the built folder
+     and deletes those, which is what keeps download size — and especially
+     the auto-update delta size — manageable. Finally it wires in the
+     auto-update framework (Sparkle on Mac, WinSparkle on Windows): copies it
+     in, writes the update-feed settings into the app's config, and re-signs
+     the Mac bundle so the update mechanism will trust it.
+
+HOW IT FITS THE APP
+-------------------
+Nothing here runs while a user is cleaning star trails. This file only runs
+at build/release time. Its output is the thing the user installs; the rest of
+the codebase (the GUI, the detection, the repair) is what runs inside that
+output. Most of the logic lives at module top level and runs once, in order,
+when the script is executed — there is only one helper function
+(`dir_size_mb`, defined below). The hard-won detail is in the inline comments:
+many of the skip/cleanup entries exist to undo a specific past crash or to
+shave a specific chunk of megabytes, and the comments record which.
+
 Auto-discovers all installed packages that contain data files and runs PyInstaller.
 Prevents missing-data-file crashes without requiring a manually maintained list.
 """
@@ -60,6 +110,11 @@ SKIP_PACKAGES = {
     'fontTools',                    # orphan from borb exclusion
 }
 
+# ── Phase 1: discover which installed packages carry data files ─────────
+# Find the folder(s) where pip-installed packages live (system site-packages
+# plus the per-user site-packages). Both lookups are wrapped in try/except
+# because either can be unavailable depending on how Python was installed;
+# a failure on one path just means we look in the others.
 site_dirs = []
 try:
     site_dirs += site.getsitepackages()
@@ -72,11 +127,18 @@ try:
 except Exception:
     pass
 
-# Always include the algorithm script and version file
+# Always include the algorithm script, the version file, and the
+# modules/ and assets/ folders.
 add_data = [f'astro_clean_v5.py{sep}.', f'version.txt{sep}.',
             f'modules{sep}modules', f'assets{sep}assets']
 seen = set()
 
+# For every installed package, decide whether it needs its folder bundled.
+# A package qualifies if it contains at least one non-code file (a "data
+# file"); the moment one is found we add the whole package folder to the
+# add-data list and stop scanning that package. `seen` both deduplicates
+# (a package can appear in more than one site-dir) and acts as the
+# "already-handled, skip the rest of its walk" flag.
 for site_dir in site_dirs:
     if not os.path.isdir(site_dir):
         continue
@@ -85,12 +147,15 @@ for site_dir in site_dirs:
             continue
         if pkg_name in SKIP_PACKAGES:
             continue
+        # Skip pip metadata folders, not real importable packages.
         if pkg_name.endswith(('.dist-info', '.egg-info', '.egg-link', '__pycache__')):
             continue
         pkg_dir = os.path.join(site_dir, pkg_name)
         if not os.path.isdir(pkg_dir):
             continue
-        # Walk package directory looking for any data file
+        # Walk package directory looking for any data file. First non-code
+        # file found (extension not in SKIP_EXT) qualifies the package; we
+        # record it and break out of both loops to avoid re-walking.
         for root, dirs, files in os.walk(pkg_dir):
             for f in files:
                 if os.path.splitext(f)[1] not in SKIP_EXT:
@@ -100,6 +165,8 @@ for site_dir in site_dirs:
             if pkg_name in seen:
                 break
 
+# ── Phase 2: build and run the PyInstaller command ─────────────────────
+# Each operating system wants the app icon in its own format.
 if sys.platform == 'win32':
     icon_ext = '.ico'
 elif sys.platform == 'darwin':
@@ -108,6 +175,13 @@ else:
     icon_ext = '.png'
 icon_path = os.path.join(os.path.dirname(__file__), 'assets', 'StarTrailCleanR' + icon_ext)
 
+# Assemble the PyInstaller command line. `star_trail_cleanr.py` is the app's
+# entry point. `--onedir`/`--windowed` produce a folder-style GUI app (no
+# console window); `--noupx` skips UPX compression. The `--collect-all`
+# entries force PyInstaller to fully pull in heavy libraries whose contents
+# its automatic analysis tends to under-collect (the ML/imaging stack). The
+# runtime hook is run once when the frozen app starts, before the app's own
+# code, to set up GPU overrides.
 cmd = [
     sys.executable, '-m', 'PyInstaller',
     '--onedir', '--windowed', '--noupx', 'star_trail_cleanr.py',
@@ -146,13 +220,30 @@ print(f'Bundling data from {len(seen)} packages:')
 for pkg in sorted(seen):
     print(f'  {pkg}')
 
+# Actually run PyInstaller. A non-zero exit means the freeze failed; abort
+# the whole build immediately with the same code so CI reports a failure.
 result = subprocess.run(cmd)
 if result.returncode != 0:
     sys.exit(result.returncode)
 
+# ── Phase 3: slim the freshly built bundle and wire in auto-update ──────
 import shutil
 
 def dir_size_mb(path):
+    """Return the total size of everything under `path`, in megabytes.
+
+    Walks the directory tree rooted at `path` and sums the byte size of every
+    file inside it (recursively), then converts to MB. Files that can't be
+    read (e.g. broken symlinks) are silently skipped rather than aborting the
+    whole count.
+
+    Used throughout the post-build cleanup purely for reporting/logging — it
+    tells the build log how big the bundle is before and after slimming, and
+    how many MB each cleanup step reclaimed. It does not change anything.
+
+    `path` is a folder path (the dist bundle, or a sub-folder about to be
+    deleted). Returns a float number of megabytes.
+    """
     total = 0
     for root, _, files in os.walk(path):
         for f in files:
@@ -163,6 +254,9 @@ def dir_size_mb(path):
                 pass
     return total / 1024 / 1024
 
+# `dist_root` is the root of the built app that every cleanup pass below
+# walks. On Mac PyInstaller produces a `.app` bundle; on Windows/Linux it is
+# a plain folder of the same name.
 if sys.platform == 'darwin':
     dist_root = os.path.join('dist', 'StarTrailCleanR.app')
 else:
@@ -249,6 +343,11 @@ CLEANUP_PATHS = [
     # Windows equivalents (DLLs, not frameworks). Handled by a separate pass below.
 ]
 
+# Walk the built bundle and delete any directory whose trailing path
+# components match an entry in CLEANUP_PATHS. Matching on the *tail* of the
+# path (not an absolute location) makes the patterns robust to where
+# PyInstaller happens to nest each package. When a directory is deleted it is
+# also removed from `dirs` so os.walk does not try to descend into it.
 removed = []
 for root, dirs, _ in os.walk(dist_root):
     for d in list(dirs):

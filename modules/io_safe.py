@@ -21,6 +21,16 @@ _TIFF_EXTS = {".tif", ".tiff"}
 
 
 def _silence_cv2_logs():
+    """Mute OpenCV's own console logging and return the previous level.
+
+    When OpenCV's libtiff fails to read a quirky TIFF it prints noisy
+    `TIFFReadRGBAStrip` warnings to the terminal even though we are about to
+    rescue the file with tifffile or Pillow. Those warnings would alarm the
+    user for no reason, so the reader silences OpenCV while it works the
+    fallback ladder and restores the prior level afterward via
+    `_restore_cv2_logs`. Returns the old log level (to hand back later), or
+    None if OpenCV's logging API isn't available on this build.
+    """
     try:
         from cv2.utils import logging as _cvlog
         prev = _cvlog.getLogLevel()
@@ -31,6 +41,12 @@ def _silence_cv2_logs():
 
 
 def _restore_cv2_logs(prev):
+    """Put OpenCV's console log level back to what `_silence_cv2_logs` returned.
+
+    `prev` is the value handed back by `_silence_cv2_logs`. If it's None
+    (logging API unavailable, or nothing was changed) this is a no-op. Always
+    called in a `finally` block so the level is restored even if a read raises.
+    """
     if prev is None:
         return
     try:
@@ -41,6 +57,15 @@ def _restore_cv2_logs(prev):
 
 
 def _try_cv2(path: str, flags: int) -> Tuple[Optional[np.ndarray], Optional[str]]:
+    """Attempt the fast path: read the file with OpenCV's `cv2.imread`.
+
+    This is the first reader tried for non-RAW files because it covers the vast
+    majority of inputs. `flags` is an OpenCV imread flag (e.g. IMREAD_UNCHANGED
+    to keep native bit depth, IMREAD_COLOR / IMREAD_GRAYSCALE for an 8-bit
+    result). Returns a `(image, error)` pair: on success `(array, None)`, on
+    failure `(None, reason_string)` describing why so callers can build a
+    multi-reader diagnosis. cv2 returns images in BGR layout.
+    """
     try:
         # IMREAD_IGNORE_ORIENTATION: never let cv2 silently rotate by EXIF.
         # Orientation is applied once, centrally, in robust_imread_diag so every
@@ -198,7 +223,11 @@ def _imread_diag_inner(
 ) -> Tuple[Optional[np.ndarray], Optional[str]]:
     """Read with fallbacks. Returns (img_or_None, diagnosis_or_None).
 
-    Order of attempts:
+    RAW files (extensions in RAW_EXTS) skip the ladder below entirely and go
+    straight to rawpy, with the same transient-IO retry; cv2/tifffile/Pillow
+    cannot decode a raw sensor file.
+
+    Order of attempts for non-RAW files:
       1. cv2.imread (fast path, covers ~95% of files)
       2. tifffile.imread for .tif / .tiff (BigTIFF, unusual compressions,
          camera-export variants OpenCV can't decode)
@@ -356,10 +385,11 @@ def robust_imread(
 def image_size(path: Union[str, Path]) -> Optional[Tuple[int, int]]:
     """Return (width, height) for an image without a full decode where possible.
 
-    Handles RAW via rawpy (.sizes), TIFF via tifffile, everything else via
-    Pillow. Mirrors the reader's format coverage so the GUI's pre-flight scan
-    never rejects a file the worker would actually be able to process. Returns
-    None if the size can't be determined.
+    Handles RAW via rawpy (.sizes). For everything else it tries Pillow first;
+    if Pillow fails on a TIFF it falls back to tifffile. Mirrors the reader's
+    format coverage so the GUI's pre-flight scan never rejects a file the worker
+    would actually be able to process. Returns None if the size can't be
+    determined.
     """
     p = str(path)
     ext = Path(p).suffix.lower()

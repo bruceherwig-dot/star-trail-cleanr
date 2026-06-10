@@ -44,16 +44,28 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
 
+# --- Fixed locations and identifiers used throughout this script ---
+# REPO_ROOT is the project's top folder (two levels up from this script).
 REPO_ROOT = Path(__file__).resolve().parent.parent
+# The Sparkle command-line signing tool shipped inside the repo. Used to sign
+# each installer so the app can verify the download is genuine before updating.
 SIGN_UPDATE = REPO_ROOT / "vendored" / "sparkle-bin" / "sign_update"
+# The GitHub repo that hosts both the release downloads and the gh-pages feeds.
 GH_REPO = "bruceherwig-dot/star-trail-cleanr"
+# Base URL where a tagged release's installer files live on GitHub.
 RELEASE_BASE = f"https://github.com/{GH_REPO}/releases/download"
+# Base URL where the live appcast feeds are served from (GitHub Pages).
 PAGES_BASE = "https://bruceherwig-dot.github.io/star-trail-cleanr"
+# XML namespace Sparkle uses for its custom tags (version, signature, etc.).
 SPARKLE_NS = "http://www.andymatuschak.org/xml-namespaces/sparkle"
 
-# Per-platform release/appcast wiring. `extra` holds the platform-specific
-# Sparkle item fields observed in the existing feeds (min OS, CPU requirement)
-# so new items match what older items advertise.
+# Per-platform release/appcast wiring. Each entry maps one platform to its
+# installer filename ("release_filename") and its feed filename ("appcast").
+# `extra` holds the platform-specific Sparkle item fields observed in the
+# existing feeds (minimum OS version, CPU requirement) so new items match what
+# older items advertise. The leading spaces inside these strings are
+# intentional: they pre-indent the raw XML lines to line up with the rest of the
+# generated <item> block in build_item_xml.
 PLATFORMS = [
     {
         "key": "mac-apple-silicon",
@@ -82,7 +94,17 @@ PLATFORMS = [
 
 
 def parse_version(tag):
-    """'v2.47-beta' -> ('2.47', '2.47-beta'). Exits on a malformed tag."""
+    """Split a release tag into the two version strings Sparkle needs.
+
+    Input: a git tag like 'v2.47-beta'.
+    Returns a pair: (numeric, short). For 'v2.47-beta' that's ('2.47',
+    '2.47-beta'). The numeric form is the bare number Sparkle compares to decide
+    "is this newer?"; the short form is the human-readable label shown in the
+    update dialog. Exits the whole program if the tag is malformed, because every
+    later step depends on a valid version.
+    """
+    # Capture the leading number (e.g. "2.47") right after the "v"; the optional
+    # group allows a single-component tag like "v3" as well as "v3.1".
     m = re.match(r"v(\d+(?:\.\d+)?)", tag)
     if not m:
         sys.exit(f"Could not parse version from tag '{tag}'. Expected like v2.47-beta.")
@@ -90,8 +112,16 @@ def parse_version(tag):
 
 
 def find_installer(artifacts_dir, filename):
-    """Locate a release installer under artifacts_dir (searched recursively,
-    because GitHub's download-artifact nests each artifact in its own folder)."""
+    """Find one platform's installer file inside the downloaded artifacts folder.
+
+    Inputs: artifacts_dir is the folder GitHub Actions downloaded the build
+    outputs into; filename is the installer to look for (e.g.
+    'StarTrailCleanR-Mac-AppleSilicon.dmg'). Returns the full path to the first
+    match. Searches every subfolder ('**', recursive) because GitHub's
+    download-artifact step drops each artifact into its own nested folder, so the
+    file is never at a fixed depth. Exits if the installer is missing, since
+    there's nothing to sign or publish without it.
+    """
     hits = glob.glob(os.path.join(artifacts_dir, "**", filename), recursive=True)
     if not hits:
         sys.exit(f"Installer '{filename}' not found anywhere under {artifacts_dir}")
@@ -99,7 +129,17 @@ def find_installer(artifacts_dir, filename):
 
 
 def sign_file(path, key_file):
-    """Sign one file, returning (ed_signature, byte_length)."""
+    """Cryptographically sign one installer with Sparkle's signing tool.
+
+    Inputs: path is the installer to sign; key_file is the private ed25519 key.
+    Runs the bundled `sign_update` tool, which prints the EdDSA signature to
+    standard output. Returns a pair: (ed_signature_string, file_size_in_bytes).
+    Both values go into the appcast <enclosure> so the user's copy of the app can
+    confirm the download is authentic and complete before installing. Exits if
+    the signing tool reports a failure.
+    """
+    # -p prints the signature to stdout instead of editing a file; -f points the
+    # tool at the private key.
     result = subprocess.run(
         [str(SIGN_UPDATE), "-p", "-f", str(key_file), str(path)],
         capture_output=True, text=True,
@@ -110,10 +150,18 @@ def sign_file(path, key_file):
 
 
 def top_item_version(xml_text):
-    """Return the <sparkle:version> of the first <item>, or None."""
+    """Read the version number of the newest entry in an appcast feed.
+
+    Input: the full text of an appcast XML document. Returns the numeric version
+    string (e.g. '2.47') from the FIRST <item> in the feed, which by convention
+    is the newest. Returns None if the XML won't parse, has no items, or the item
+    has no version tag. Used both to skip work when a feed already advertises this
+    release, and to confirm during verification that a feed is now live.
+    """
     try:
         root = ET.fromstring(xml_text)
     except ET.ParseError:
+        # Malformed or partially-fetched XML — treat as "no known version".
         return None
     item = root.find(".//item")
     if item is None:
@@ -122,7 +170,17 @@ def top_item_version(xml_text):
 
 
 def build_item_xml(platform, tag, numeric, short, sig, length, pub_date):
-    """One <item> block for this release, in a format consistent across feeds."""
+    """Assemble the appcast <item> XML block describing this release.
+
+    Inputs: platform is one entry from PLATFORMS (filenames + per-platform extra
+    tags); tag is the git tag (e.g. 'v2.47-beta') used to build the download URL;
+    numeric and short are the two version strings from parse_version; sig and
+    length are the signature and byte size from sign_file; pub_date is the
+    formatted publish timestamp. Returns the <item> block as a ready-to-insert
+    text string. This is the single entry Sparkle reads to offer the update: its
+    title, version, download URL, size, and signature. The download URL points at
+    THIS version's own GitHub release, so older items' URLs are never disturbed.
+    """
     url = f"{RELEASE_BASE}/{tag}/{platform['release_filename']}"
     return (
         "        <item>\n"
@@ -138,13 +196,25 @@ def build_item_xml(platform, tag, numeric, short, sig, length, pub_date):
 
 
 def insert_item(xml_text, item_xml):
-    """Insert a new <item> right after the channel's <language> line so it
-    becomes the newest entry. Falls back to before the first <item> if the
-    language tag is absent."""
+    """Splice a new <item> block into the feed so it lands as the newest entry.
+
+    Inputs: xml_text is the current feed; item_xml is the block from
+    build_item_xml. Returns the full feed text with the new item inserted.
+
+    The new item is placed right after the channel's <language> line, which sits
+    above every <item>, so the fresh release becomes the first (newest) item. If
+    there's no <language> tag, it falls back to inserting just before the first
+    existing <item>. This text-splice approach (rather than re-serializing the
+    XML) is deliberate: it leaves every older item byte-for-byte untouched, which
+    is the whole safety guarantee of this publisher. Exits if the feed has
+    neither a <language> tag nor any <item> to anchor against.
+    """
+    # Preferred anchor: insert immediately after the <language> line.
     m = re.search(r"<language>[^<]*</language>\s*\n", xml_text)
     if m:
         at = m.end()
     else:
+        # Fallback anchor: insert just before the first <item>.
         m2 = re.search(r"[ \t]*<item>", xml_text)
         if not m2:
             sys.exit("Appcast has no <language> tag and no <item> to anchor insertion.")
@@ -153,7 +223,17 @@ def insert_item(xml_text, item_xml):
 
 
 def fetch_live(appcast, timeout=20):
-    """Fetch a live appcast from GitHub Pages, defeating CDN caching."""
+    """Download the currently-published version of one feed from GitHub Pages.
+
+    Input: appcast is the feed's filename (e.g. 'appcast-windows.xml'); timeout
+    is the per-request network timeout in seconds. Returns the live feed's text.
+    This reads what users' apps would actually see, NOT the local file. The
+    '?cb=<timestamp>' on the URL plus the no-cache headers force a fresh copy past
+    GitHub's CDN, which otherwise keeps serving a stale cached feed for a while
+    after a push — important so verification doesn't pass or fail on old data.
+    """
+    # Unique query string each call busts the CDN cache so we always see the
+    # newest published feed.
     url = f"{PAGES_BASE}/{appcast}?cb={int(time.time())}"
     req = urllib.request.Request(
         url, headers={"Cache-Control": "no-cache", "Pragma": "no-cache",
@@ -163,11 +243,26 @@ def fetch_live(appcast, timeout=20):
 
 
 def do_publish(args):
+    """Publish mode: sign each installer and prepend its <item> to every feed.
+
+    Input: args is the parsed command line (needs tag, artifacts_dir, key_file,
+    gh_pages_dir). For each of the three platforms it updates the appcast file in
+    the local gh-pages working copy on disk; it does NOT commit or push (the
+    GitHub Actions workflow does that afterward). This is the half of the script
+    that actually changes feeds; do_verify is the read-only check.
+
+    Per platform the steps are: skip if the feed already tops out at this version
+    (idempotent, so re-runs are safe), otherwise find the installer, sign it,
+    build the new item, and splice it in as the newest entry.
+    """
     numeric, short = parse_version(args.tag)
+    # Fail fast if the signing tool or private key is missing — nothing can be
+    # signed without both.
     if not SIGN_UPDATE.exists():
         sys.exit(f"Missing signing tool: {SIGN_UPDATE}")
     if not Path(args.key_file).exists():
         sys.exit(f"Signing key not found: {args.key_file}")
+    # RFC-822 style date Sparkle expects in <pubDate>, always in UTC (+0000).
     pub_date = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S +0000")
     gh = Path(args.gh_pages_dir)
 
@@ -178,6 +273,8 @@ def do_publish(args):
             sys.exit(f"Appcast not found in gh-pages dir: {xml_path}")
         xml_text = xml_path.read_text()
 
+        # Idempotency guard: if this version is already on top, do nothing so a
+        # repeated run can't add a duplicate item.
         if top_item_version(xml_text) == numeric:
             print(f"  already advertises {numeric} at top — leaving untouched")
             continue
@@ -194,27 +291,38 @@ def do_publish(args):
 
 
 def do_verify(args):
-    """Poll all three LIVE feeds until each advertises this version at the top,
-    or fail loudly. This is the gate that turns a missed/partial publish into a
-    red build instead of silent breakage."""
+    """Verify mode: poll the three LIVE feeds until all advertise this version.
+
+    Input: args needs tag, timeout (max seconds to wait), and interval (seconds
+    between polls). Returns nothing on success; calls sys.exit(1) on failure.
+    This is the hard gate run as a separate CI step after the push: it keeps
+    re-checking the real published feeds until every one shows the new version at
+    the top, or it gives up and fails the build. Without it, a publish that
+    silently missed a feed would look green while users never get the update.
+    """
     numeric, _ = parse_version(args.tag)
     deadline = time.time() + args.timeout
+    # Start with all three feeds "pending"; each is removed once it goes live.
     pending = {p["appcast"] for p in PLATFORMS}
     print(f"Verifying all three live feeds advertise {numeric} (up to {args.timeout}s)...")
-    last = {}
+    last = {}  # remembers each feed's last-seen top version for the failure report
     while time.time() < deadline and pending:
         for appcast in list(pending):
             try:
                 top = top_item_version(fetch_live(appcast))
             except Exception as e:                       # noqa: BLE001 - transient net/CDN
+                # A network/CDN hiccup is expected while the push propagates;
+                # record it and keep retrying until the deadline.
                 last[appcast] = f"fetch error: {e}"
                 continue
             last[appcast] = top
             if top == numeric:
                 print(f"  OK  {appcast} -> {top}")
                 pending.discard(appcast)
+        # Wait before the next round only if some feeds still haven't caught up.
         if pending:
             time.sleep(args.interval)
+    # Any feed still pending after the deadline means propagation never finished.
     if pending:
         print("\nFAILED: these feeds did not advertise the new version in time:")
         for appcast in sorted(pending):
@@ -224,6 +332,13 @@ def do_verify(args):
 
 
 def main():
+    """Command-line entry point: parse arguments and run publish or verify.
+
+    Reads the command line, then dispatches to do_verify when --verify is given,
+    or to do_publish otherwise. In publish mode it first checks that the three
+    required options (--artifacts-dir, --key-file, --gh-pages-dir) are all
+    present and exits with a clear message if any are missing.
+    """
     parser = argparse.ArgumentParser(description="Publish/verify Star Trail CleanR appcasts.")
     parser.add_argument("tag", help="Release tag, e.g. v2.47-beta")
     parser.add_argument("--verify", action="store_true",

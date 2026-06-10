@@ -117,8 +117,23 @@ def init_sparkle(on_update_found=None):
         _log("init_sparkle: building delegate")
         from Foundation import NSObject
 
+        # An Objective-C delegate object that Sparkle calls back into when
+        # events happen. Subclassing NSObject (not a plain Python class) is
+        # required so PyObjC can hand it to Sparkle as a real Cocoa object.
+        # The only callback we implement is "a valid newer version was found";
+        # all other Sparkle events use its built-in default behavior.
         class _SparkleDelegate(NSObject):
             def updater_didFindValidUpdate_(self, updater, item):
+                """Sparkle delegate callback: fires when Sparkle confirms a
+                genuinely newer version is available (before its install popup
+                appears). The method name with trailing underscores is PyObjC's
+                spelling of the Objective-C selector updater:didFindValidUpdate:,
+                so Sparkle invokes it automatically. `updater` is the Sparkle
+                updater object and `item` describes the found release; we ignore
+                both and simply run the optional on-update-found callback, whose
+                job is to dismiss our startup splash so it doesn't sit on top of
+                Sparkle's native window. Any error in that callback is logged and
+                swallowed so it can't crash the update flow."""
                 _log("delegate: updater_didFindValidUpdate_ fired")
                 cb = _on_update_found_callback
                 if cb is not None:
@@ -130,6 +145,14 @@ def init_sparkle(on_update_found=None):
         _updater_delegate = _SparkleDelegate.alloc().init()
         _log(f"init_sparkle: delegate={_updater_delegate!r}")
 
+        # Build and START Sparkle's standard updater controller. Argument
+        # order matters and is the Sparkle 2 form (see module gotcha #1):
+        #   startingUpdater=True   -> start the updater immediately
+        #   updaterDelegate        -> our delegate above (gets the callback)
+        #   userDriverDelegate=None -> use Sparkle's default UI, no override
+        # The returned controller is stored in the module-scope strong
+        # reference so Python's garbage collector can't free it mid-check
+        # (gotcha #2).
         _log("init_sparkle: calling alloc().initWithStartingUpdater...")
         _updater_controller = (
             SPUStandardUpdaterController.alloc()

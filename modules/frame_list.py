@@ -54,6 +54,9 @@ RAW_EXTS = {
 }
 _TIF_EXTS = {".tif", ".tiff"}
 _JPG_EXTS = {".jpg", ".jpeg"}
+# Every extension the app accepts as a frame: JPG, PNG, TIFF, plus all RAW
+# formats above. Note PNG has no dedicated rank set of its own, so in twin
+# de-duplication it is treated as a generic non-RAW "other" format.
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff"} | RAW_EXTS
 
 # Minimum frame size for trail detection. The detector tiles each frame into
@@ -120,11 +123,18 @@ def dedupe_frames(paths, prefer_raw=True):
     strings, Paths stay Paths). Fully deterministic, so the same input always
     yields the same output, which is what lets the GUI and worker agree.
     """
+    # Pre-sort the inputs so that, when two files of the SAME format share a
+    # stem (e.g. two TIFFs), the first one in sorted order is the one kept --
+    # higher-ranked formats still override later, but equal ranks never do
+    # (the > comparison below is strict). This pre-sort is what makes the
+    # tie-break deterministic and identical on the GUI and worker sides.
     chosen = {}
     for fp in sorted(paths, key=lambda p: str(p)):
         stem, ext = _stem_and_ext(fp)
         if stem in chosen:
             _, prev_ext = _stem_and_ext(chosen[stem])
+            # Replace the already-chosen file only if this one ranks STRICTLY
+            # higher; equal-rank duplicates keep the earlier (sorted) one.
             if _format_rank(ext, prefer_raw) > _format_rank(prev_ext, prefer_raw):
                 chosen[stem] = fp
         else:
@@ -143,11 +153,16 @@ def count_raw_twins(paths):
     """Count frame stems that exist as BOTH a RAW and a non-RAW (JPG/TIFF/PNG)
     file. This is what the GUI uses to decide whether to ask the user which
     format to process. Returns 0 when there are no such pairs."""
+    # Build a map of frame stem -> set of extensions present for that frame.
+    # Only recognized image extensions are counted; any other file is ignored.
     by_stem = {}
     for fp in paths:
         stem, ext = _stem_and_ext(fp)
         if ext in IMAGE_EXTS:
             by_stem.setdefault(stem, set()).add(ext)
+    # A "twin" is a stem that has at least one RAW extension AND at least one
+    # non-RAW extension (JPG/TIFF/PNG). Two RAWs of the same stem, or two JPGs,
+    # do not count -- only mixed RAW/non-RAW pairs trigger the format prompt.
     n = 0
     for exts in by_stem.values():
         has_raw = any(e in RAW_EXTS for e in exts)

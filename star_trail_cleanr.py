@@ -58,9 +58,11 @@ THE TWO-STEP PIPELINE
 2. Repair: Star Bridge fills removed pixels by tracking star motion from the
    frame before and after, then blending those two neighbor frames together to
    synthesize what the frame would look like without the trail. Any trail pixel
-   that can't be repaired via star tracking gets filled with pure black — which
-   is invisible in a lighten-max stack because real star pixels in other frames
-   always win.
+   that can't be repaired via star tracking is filled with the local sky color
+   plus matching grain (a feathered patch that blends into the surrounding sky),
+   falling back to pure black only when there isn't enough nearby sky to sample.
+   Black fill is invisible in a lighten-max stack because real star pixels in
+   other frames always win.
 
 HOW THIS FILE WORKS
 -------------------
@@ -80,8 +82,10 @@ BATCH SIZE AND STAR ROTATION
 Frames are processed in batches of up to 20 at a time. This limit exists because
 star motion between frames accumulates over time — a batch that spans too many
 minutes of real time will have stars that have moved far enough to confuse the
-repair step. The GUI loads one extra frame before and after each batch boundary
-so the repair can stitch across batch edges.
+repair step. The GUI passes each batch's start index and frame count to the
+worker; the worker itself pulls in one extra frame before and after each batch
+(reading the neighboring files from the same folder) so the repair can stitch
+across batch edges.
 
 KEY FILES
 ---------
@@ -313,6 +317,10 @@ def _apply_theme():
 
 
 def _secondary_btn_css():
+    """Return the stylesheet string for the app's grey "secondary" buttons
+    (Browse, Open Folder, etc.). Pulls its colors from the current theme
+    globals, so it must be called at widget-creation time (after _apply_theme
+    has set the mode) for the button to match light/dark mode."""
     return (
         f"QPushButton {{ background-color: {SECONDARY_BTN_BG}; color: white; "
         f"font-size: 15px; border-radius: 6px; border: none; padding: 0 8px; }}"
@@ -522,6 +530,9 @@ def migrate_workspace(input_folder):
 
 
 def fmt_hms(seconds):
+    """Format a duration in seconds as "1h 07m 30s" (or "7m 30s" under an
+    hour), with zero-padded minutes and seconds. Used for elapsed/total times
+    in the run summary so columns line up. Negative inputs are clamped to 0."""
     seconds = max(0, int(seconds))
     h = seconds // 3600
     m = (seconds % 3600) // 60
@@ -532,6 +543,9 @@ def fmt_hms(seconds):
 
 
 def fmt_estimate(seconds):
+    """Format a duration like fmt_hms but WITHOUT zero-padding ("1h 7m 30s").
+    Used for the live "remaining" / "Estimated Time" labels where a compact,
+    non-padded look reads better. Negative inputs are clamped to 0."""
     seconds = max(0, int(seconds))
     h = seconds // 3600
     m = (seconds % 3600) // 60
@@ -559,6 +573,30 @@ def _windows_release_label():
 
 
 class CleanerWorker(QThread):
+    """Background thread that drives an entire cleaning run, end to end.
+
+    Why it exists: the actual detection + repair work runs in separate
+    subprocesses (one per batch of frames), and reading their output would
+    freeze the GUI if done on the main thread. This QThread does all the
+    orchestration off the main thread and talks back to the window only
+    through Qt signals (the GUI thread can safely react to those).
+
+    What it does, in order:
+      1. Globs the input folder, removes RAW/JPG/TIFF duplicate "twins",
+         applies any frame-range/limit, and checks every frame's resolution.
+      2. If frames would be skipped (wrong size, unreadable), it pauses and
+         asks the main thread to show a modal before continuing.
+      3. Splits the surviving frames into batches (size capped by available
+         memory) and launches the worker subprocess once per batch.
+      4. Parses each subprocess's stdout line-by-line to drive the progress
+         bars, the time estimate, the running trail counter, and the log.
+      5. Handles a worker asking what to do about an unreadable file
+         (the bad-file prompt) and crash reporting on non-zero exit.
+      6. Persists timing so the next run can seed its estimate.
+
+    The signals below are the ONLY way it communicates with the GUI; each
+    one is wired to a MainWindow handler in MainWindow._run.
+    """
     progress = Signal(int, int, str)   # pct, total, remaining_str
     status = Signal(str)               # log line
     batch_info = Signal(int, int)      # batch_num (1-based), n_batches
@@ -586,6 +624,26 @@ class CleanerWorker(QThread):
     def __init__(self, folder, output_folder, frame_limit, mask_path=None,
                  output_format="jpg", jpeg_quality=85, frame_start=0, frame_end=0,
                  max_batch=20, mem_note="", twin_prefer="raw"):
+        """Capture the run's settings; the actual work happens in run().
+
+        Inputs:
+          folder         - input folder of source frames
+          output_folder  - where cleaned frames are written
+          frame_limit    - how many frames to process ("All Frames", "" or a
+                           number-as-string from the Step 4 dropdown)
+          mask_path      - optional foreground-mask PNG to keep the AI off the
+                           ground/buildings (None = no mask)
+          output_format  - "jpg" / "tif8" / "tif16"
+          jpeg_quality   - 60-100, only used for JPG output
+          frame_start/frame_end - dev-only sub-range into the sorted frame list
+                           (0/0 = whole list)
+          max_batch      - largest batch the machine's RAM can hold (5-20),
+                           chosen by the GUI's memory check
+          mem_note       - human-readable record of how max_batch was decided,
+                           logged at run start
+          twin_prefer    - "raw" or "nonraw": which to keep when a frame exists
+                           as both a RAW and a JPG/TIFF
+        """
         super().__init__()
         self.folder = folder
         self.output_folder = output_folder
@@ -653,6 +711,15 @@ class CleanerWorker(QThread):
         self._graceful_stop_requested = True
 
     def run(self):
+        """The thread body — runs the whole job and emits signals as it goes.
+
+        This is QThread's entry point: it executes on the worker thread when
+        the GUI calls .start(). It builds the frame list, runs the pre-flight
+        resolution check, loops over batches launching one subprocess each,
+        parses their stdout to drive progress/estimates/counters, and emits
+        done() (or error()) at the end. Any uncaught exception is funneled to
+        the error signal so the GUI always learns the run ended.
+        """
         folder = self.folder
         output_folder = self.output_folder
 
@@ -850,6 +917,11 @@ class CleanerWorker(QThread):
 
             def _log_est(phase, batch_idx, frame_in_batch, batch_sz,
                          overall_pct, remaining, force=False, note=""):
+                """Append one row to the per-machine estimator CSV
+                (~/.star_trail_cleanr/estimator_log.csv). Used only to tune the
+                time-estimate model offline; never shown to the user. Throttled
+                to once every _LOG_INTERVAL seconds unless force=True. `phase`
+                is a stage tag ("detect"/"repair"/"batch_start"/etc.)."""
                 now = time.time()
                 if not force and (now - _last_log_t[0]) < _LOG_INTERVAL:
                     return
@@ -876,6 +948,9 @@ class CleanerWorker(QThread):
             hot_map_file = workspace_path(folder, "hot_pixel_map.png")
 
             def _cleanup_hot_map():
+                """Delete the cached hot-pixel map file if present (ignored if
+                it can't be removed). Used to clear a stale cache before batch 1
+                and to tidy up after the run."""
                 try:
                     if os.path.isfile(hot_map_file):
                         os.remove(hot_map_file)
@@ -887,6 +962,7 @@ class CleanerWorker(QThread):
                 _cleanup_hot_map()
 
             def _add_log(line):
+                """Emit one line to the GUI's Star Log via the status signal."""
                 self.status.emit(line)
 
             # ── Cumulative-rate estimator state ──
@@ -932,6 +1008,12 @@ class CleanerWorker(QThread):
             est_completed_batch_dts = []
 
             def _estimate_remaining(now, this_batch_size, phase, frame_num, frame_total):
+                """Estimate seconds left in the whole run using a cumulative
+                work-rate model. Each frame is 1 work unit split DETECT_FRAC /
+                REPAIR_FRAC across the two phases, so the rate stays steady
+                across batch boundaries (no lurching). Returns
+                (remaining_seconds_or_None, measured); see the comment below for
+                why `measured` matters."""
                 # Returns (remaining_seconds_or_None, measured) where `measured`
                 # is True only when the number comes from the rate we've actually
                 # timed this run -- False while we're still falling back to the
@@ -1284,6 +1366,8 @@ class UpdateCheckThread(QThread):
     result_ready = Signal(dict)
 
     def run(self):
+        """Query GitHub for a newer app release; emit the result dict if one
+        exists. Any failure is swallowed silently."""
         from modules.update_check import check_for_update
         result = check_for_update(VERSION)
         if result:
@@ -1295,6 +1379,8 @@ class ModelUpdateCheckThread(QThread):
     result_ready = Signal(dict)
 
     def run(self):
+        """Query GitHub for a newer trail-detector model release; emit the
+        result dict if one exists. Any failure is swallowed silently."""
         from modules.model_update import check_for_model_update
         result = check_for_model_update()
         if result:
@@ -1306,6 +1392,8 @@ class NvidiaDetectThread(QThread):
     result_ready = Signal(str, str)
 
     def run(self):
+        """Probe for an NVIDIA GPU and emit (outcome, detail) — outcome is
+        "yes"/"no"/etc., detail is a human-readable note."""
         from modules.nvidia_detect import detect_nvidia
         outcome, detail = detect_nvidia()
         self.result_ready.emit(outcome, detail)
@@ -1316,6 +1404,8 @@ class BestDeviceThread(QThread):
     result_ready = Signal(str)
 
     def run(self):
+        """Determine the torch compute device and emit it ("cuda"/"mps"/"cpu"),
+        defaulting to "cpu" on any failure."""
         try:
             from modules.detect_trails import best_device
             self.result_ready.emit(best_device())
@@ -1334,12 +1424,17 @@ class ModelDownloadThread(QThread):
     failed = Signal(str)          # short error string; not user-visible
 
     def __init__(self, url, target_path, version_tag, parent=None):
+        """Store the download `url`, the final `target_path` for the weights,
+        and the `version_tag` to record once the install succeeds."""
         super().__init__(parent)
         self.url = url
         self.target_path = target_path
         self.version_tag = version_tag
 
     def run(self):
+        """Stream the model file to a .tmp path emitting progress, then
+        atomically rename it into place and save the version tag. On any
+        failure, delete the partial .tmp and emit failed()."""
         import os as _os
         import urllib.request
         tmp_path = self.target_path + ".tmp"
@@ -1416,6 +1511,12 @@ class GpuPackInstallThread(QThread):
         ) from last_403
 
     def run(self):
+        """Download and install the CUDA torch + torchvision wheels into the
+        GPU override folder. Clears any stale prior install first, downloads
+        each wheel (trying mirrors on 403), extracts it, fixes file
+        permissions, then writes the version tag. Emits finished_ok() on
+        success or failed() with a user-friendly message (permission, 403, or
+        connection errors get tailored text)."""
         import zipfile
         from modules.gpu_pack import (get_all_download_url_sets, get_override_dir,
                                        write_version_tag, clear_gpu_files,
@@ -1522,6 +1623,9 @@ class _XCloseButton(QPushButton):
     platforms. Background color and hover state come from the stylesheet."""
 
     def paintEvent(self, event):
+        """Draw the button's background (via the base class) then paint the two
+        white diagonal strokes of the X by hand, with a margin scaled to the
+        button size so the glyph stays centered at any size."""
         from PySide6.QtGui import QPainter, QPen
         super().paintEvent(event)
         painter = QPainter(self)
@@ -1536,7 +1640,25 @@ class _XCloseButton(QPushButton):
 
 
 class MainWindow(QMainWindow):
+    """The app's single main window — everything the user sees and clicks.
+
+    It hosts a banner across the top and a four-tab area below it
+    (Main / FAQ / About / Settings). The "Main" tab is itself a two-page
+    stack: page 0 is the Setup form (pick folders, mask, format, then
+    "Clean My Stars!") and page 1 is the live processing view (progress bars,
+    Star Log, run-complete dialog). It owns the CleanerWorker thread for a
+    run and the separate MaskEditorWindow, and it runs three small background
+    threads at startup (app-update check, model-update check, GPU detection)
+    whose results populate the orange notice banners.
+
+    The bulk of this class is _build_* methods that construct each piece of
+    UI and _on_* methods that handle button clicks and worker signals.
+    """
     def __init__(self):
+        """Build the whole window: restore saved geometry (or open at a
+        sensible first-launch size), assemble the banner + tabs + setup and
+        process pages, make every QLabel text-selectable for easy copy, and
+        kick off the three startup background checks."""
         super().__init__()
         self.setWindowTitle(f"Star Trail CleanR (Beta v{VERSION})")
         self.setMinimumWidth(720)
@@ -1681,6 +1803,9 @@ class MainWindow(QMainWindow):
     # ── FAQ tab ──────────────────────────────────────────────────────────────
 
     def _build_faq_tab(self):
+        """Build the FAQ tab: a single read-only HTML browser explaining what
+        the app does, the Detect/Repair pipeline, the workflow, and the known
+        limitations. Returns the wrapper widget added to the tab bar."""
         wrap = QWidget()
         wrap_layout = QVBoxLayout(wrap)
         wrap_layout.setContentsMargins(16, 16, 16, 16)
@@ -1758,6 +1883,12 @@ class MainWindow(QMainWindow):
     # ── Settings tab ─────────────────────────────────────────────────────────
 
     def _build_settings_tab(self):
+        """Build the Settings tab. Four sections, top to bottom: Updates
+        (manual check button), GPU Acceleration (status line + the Windows-only
+        NVIDIA GPU-pack install/clear/help controls and progress bar), Second
+        ScrubbeR (a 180-degree second detection pass toggle), and Crash
+        Reporting (anonymous Sentry opt-in). Stashes the widgets it later
+        toggles on self. Returns the wrapper widget for the tab bar."""
         wrap = QWidget()
         layout = QVBoxLayout(wrap)
         layout.setContentsMargins(16, 16, 16, 16)
@@ -1983,6 +2114,10 @@ class MainWindow(QMainWindow):
         crash_chk.setChecked(SETTINGS.value("crash_reporting_enabled", False, type=bool))
 
         def _on_crash_chk_toggled(v):
+            """Settings crash-reporting checkbox handler. `v` is the new
+            checked state."""
+            # Persist the choice and, if newly enabled, initialize Sentry right
+            # away so reporting starts this session without a restart.
             SETTINGS.setValue("crash_reporting_enabled", v)
             if v:
                 _maybe_init_sentry()
@@ -2000,6 +2135,10 @@ class MainWindow(QMainWindow):
         return wrap
 
     def _set_updates_run_state(self, running):
+        """Enable or disable the Settings controls that must not change mid-run.
+        `running` True = a cleaning run is active, so grey out the "Check for
+        Updates" button and the Second ScrubbeR checkbox and show their "locked
+        until it finishes" hints; False restores them."""
         if hasattr(self, '_check_updates_btn'):
             self._check_updates_btn.setEnabled(not running)
             self._check_updates_run_hint.setVisible(running)
@@ -2008,6 +2147,9 @@ class MainWindow(QMainWindow):
             self._scrub_run_hint.setVisible(running)
 
     def _on_check_for_updates(self):
+        """Settings tab "Check for Updates" button. In a frozen build, trigger
+        the platform's in-app updater (Sparkle on Mac, WinSparkle on Windows);
+        on Linux or when running from source, just open the project website."""
         if getattr(sys, 'frozen', False):
             if sys.platform == "darwin":
                 from modules.sparkle_updater import check_for_updates
@@ -2025,6 +2167,9 @@ class MainWindow(QMainWindow):
     # ── About tab ────────────────────────────────────────────────────────────
 
     def _build_about_tab(self):
+        """Build the About tab: Bruce's silhouette photo on the left and an
+        HTML bio + links + acknowledgments on the right. Returns the wrapper
+        widget for the tab bar."""
         wrap = QWidget()
         layout = QHBoxLayout(wrap)
         layout.setContentsMargins(24, 24, 24, 24)
@@ -2095,6 +2240,11 @@ class MainWindow(QMainWindow):
     # ── Banner ───────────────────────────────────────────────────────────────
 
     def _build_banner(self):
+        """Build the fixed navy header bar at the very top of the window:
+        app icon, the title + a selectable "Beta vN / Trail DetectoR vN"
+        subline, a heart-shaped Support (tip jar) button, and the red close X.
+        Includes an invisible relaunch button used during development. Returns
+        the banner widget."""
         banner = QWidget()
         banner.setFixedHeight(80)
         banner.setStyleSheet(f"background-color: {BRAND_HEADER_BG};")
@@ -2202,6 +2352,10 @@ class MainWindow(QMainWindow):
     # ── Update banner (hidden until a newer release is found on GitHub) ──────
 
     def _build_update_banner(self):
+        """Build the orange "new app version available" banner. Hidden until
+        the background UpdateCheckThread finds a newer release on GitHub
+        (_on_update_result reveals it). Has a Download button and a dismiss X.
+        Returns the banner widget."""
         banner = QFrame()
         banner.setFixedHeight(44)
         banner.setStyleSheet(f"QFrame {{ background-color: {BRAND_NOTICE_ORANGE}; }}")
@@ -2244,11 +2398,17 @@ class MainWindow(QMainWindow):
         return banner
 
     def _start_update_check(self):
+        """Launch the background app-update check. Its result_ready signal is
+        wired to _on_update_result, which shows the orange banner if needed."""
         self._update_thread = UpdateCheckThread(self)
         self._update_thread.result_ready.connect(self._on_update_result)
         self._update_thread.start()
 
     def _on_update_result(self, result):
+        """Handle the background update check's result. `result` carries the
+        release "tag" and "download_url". Shows the orange update banner unless
+        the user already dismissed this exact tag (via banner or pre-window
+        popup)."""
         tag = result.get("tag", "")
         # Stay quiet if the user has already dismissed this release tag
         # (either via the pre-window popup or a previous banner click).
@@ -2268,7 +2428,7 @@ class MainWindow(QMainWindow):
             SETTINGS.setValue("dismissed_update_tag", self._update_banner_tag)
 
     def _on_update_download(self):
-        """The orange update banner's Update button.
+        """The orange update banner's Download button.
 
         Plain English: on Mac and Windows this runs the built-in one-click
         installer (Sparkle / WinSparkle). It downloads the new version,
@@ -2290,6 +2450,12 @@ class MainWindow(QMainWindow):
     # ── Model update card (shows when GitHub has a newer trail detector) ─────
 
     def _build_model_update_card(self):
+        """Build the orange "new Trail DetectoR available" card. Hidden until
+        ModelUpdateCheckThread finds a newer model release. Carries a title,
+        summary, optional credits, a Download-now button (which swaps to an
+        inline progress bar then a "Got it"), and a "Not right now" button.
+        Unlike an app update, the model file downloads in-place into the user
+        folder. Returns the card widget."""
         card = QFrame()
         card.setVisible(False)
         card.setStyleSheet(f"QFrame {{ background-color: {BRAND_NOTICE_ORANGE}; }}")
@@ -2393,11 +2559,15 @@ class MainWindow(QMainWindow):
             return ""
 
     def _start_model_update_check(self):
+        """Launch the background trail-detector model-update check. Its result
+        feeds _on_model_update_result, which reveals the orange model card."""
         self._model_update_thread = ModelUpdateCheckThread(self)
         self._model_update_thread.result_ready.connect(self._on_model_update_result)
         self._model_update_thread.start()
 
     def _on_model_update_result(self, result):
+        """Populate and show the model-update card from the check's result
+        dict ("tag", "download_url", optional "summary"/"credits")."""
         self._model_download_tag = result.get("tag", "")
         self._model_download_url = result.get("download_url")
         display = self._model_display_name(self._model_download_tag)
@@ -2418,6 +2588,9 @@ class MainWindow(QMainWindow):
         self._model_card.setVisible(True)
 
     def _on_model_download_clicked(self):
+        """Model card "Download now" button. Swap the buttons for a progress
+        bar and start a ModelDownloadThread streaming the new weights into the
+        user model folder. No-op if no download URL was set."""
         if not self._model_download_url:
             return
         self._model_download_btn.setVisible(False)
@@ -2437,9 +2610,14 @@ class MainWindow(QMainWindow):
         self._model_download_thread.start()
 
     def _on_model_notnow_clicked(self):
+        """Model card "Not right now" button — just hide the card for now;
+        the check runs again on the next launch."""
         self._model_card.setVisible(False)
 
     def _on_model_download_progress(self, done, total):
+        """Update the model card's progress bar from the download thread.
+        `done`/`total` are bytes; total==0 means the server gave no
+        Content-Length, so switch the bar to an indeterminate pulse."""
         if total > 0:
             pct = int(done * 100 / total)
             self._model_progress.setValue(pct)
@@ -2449,6 +2627,9 @@ class MainWindow(QMainWindow):
                 self._model_progress.setRange(0, 0)
 
     def _on_model_download_finished(self, version):
+        """Model download succeeded. Show "<model> installed" with a Got it
+        button and refresh the header subline to the newly active detector.
+        `version` is the installed release tag."""
         self._model_progress.setVisible(False)
         display = self._model_display_name(version)
         self._model_title.setText(f"{display} installed")
@@ -2458,12 +2639,20 @@ class MainWindow(QMainWindow):
         self._header_subline.setText(f"Beta v{VERSION}\n{display}")
 
     def _on_model_download_failed(self, err):
+        """Model download failed. Stay quiet (the existing model still works):
+        hide the card and let the check retry on the next launch. `err` is a
+        short error string, not shown to the user."""
         # Silent fallback: hide the card, try again next launch.
         self._model_card.setVisible(False)
 
     # ── NVIDIA "coming soon" banner ──────────────────────────────────────────
 
     def _build_nvidia_banner(self):
+        """Build the orange "NVIDIA GPU detected — install GPU support" banner
+        (Windows only). Hidden until NvidiaDetectThread reports a usable card
+        and the GPU pack isn't already installed. Has Install / Later buttons
+        and an inline progress bar shared with the Settings-tab installer.
+        Returns the banner widget."""
         banner = QFrame()
         banner.setFixedHeight(44)
         banner.setStyleSheet(f"QFrame {{ background-color: {BRAND_NOTICE_ORANGE}; }}")
@@ -2529,6 +2718,10 @@ class MainWindow(QMainWindow):
         return banner
 
     def _start_nvidia_detect(self):
+        """Launch two background probes at startup: NvidiaDetectThread (is
+        there an NVIDIA card?) and BestDeviceThread (which torch device will
+        actually be used: cuda/mps/cpu). Both feed the Settings GPU status
+        line and the NVIDIA banner."""
         self._nvidia_thread = NvidiaDetectThread(self)
         self._nvidia_thread.result_ready.connect(self._on_nvidia_detect_result)
         self._nvidia_thread.start()
@@ -2537,6 +2730,10 @@ class MainWindow(QMainWindow):
         self._best_device_thread.start()
 
     def _on_nvidia_detect_result(self, outcome, detail):
+        """Handle the NVIDIA-detection result. `outcome` is "yes"/"no"/etc.
+        Show the install banner when a card is present, the GPU pack isn't
+        installed, and the user hasn't dismissed the banner before. Then
+        refresh the Settings compute-status section."""
         print(f"[nvidia-detect] outcome={outcome} detail={detail}", flush=True)
         self._nvidia_outcome = outcome
         from modules.gpu_pack import is_installed as _gpu_installed
@@ -2547,10 +2744,16 @@ class MainWindow(QMainWindow):
         self._refresh_compute_section()
 
     def _on_best_device_result(self, device):
+        """Record which compute device torch will use ("cuda"/"mps"/"cpu")
+        and refresh the Settings compute-status line accordingly."""
         self._compute_device = device
         self._refresh_compute_section()
 
     def _on_nvidia_download_clicked(self):
+        """Install GPU Support button (fired from either the banner or the
+        Settings tab). Confirms the ~3-4 GB download with the user, then starts
+        a GpuPackInstallThread and wires the UI (banner or Settings progress
+        bar) to its progress/finished/failed signals."""
         from PySide6.QtWidgets import QMessageBox
         msg = QMessageBox(self)
         msg.setWindowTitle("Install GPU Support")
@@ -2591,6 +2794,10 @@ class MainWindow(QMainWindow):
         self._gpu_install_thread.start()
 
     def _on_gpu_install_progress(self, label, done, total):
+        """Update the GPU-install progress bar(s) from the install thread.
+        `label` is the current step text; `done`/`total` are bytes (total==0 =
+        indeterminate phase). Mirrors progress to the banner bar too when the
+        install was launched from the banner."""
         if total > 0:
             pct = int(done * 100 / total)
             self._gpu_progress.setRange(0, 100)
@@ -2607,6 +2814,9 @@ class MainWindow(QMainWindow):
             self._nvidia_banner_label.setText(label)
 
     def _on_gpu_install_finished(self):
+        """GPU pack installed. Hide progress UI and reveal the "Restart Now to
+        Activate GPU Support" button (the new torch wheels only take effect on
+        a fresh process)."""
         if self._gpu_install_via_banner:
             self._nvidia_banner.setVisible(False)
             self._nvidia_label.setVisible(True)
@@ -2620,6 +2830,9 @@ class MainWindow(QMainWindow):
         self._compute_status_label.setText("GPU support installed. Restart to activate.")
 
     def _on_gpu_install_failed(self, err):
+        """GPU install failed. Restore the install controls and show an error
+        dialog with the message `err` (already user-friendly from the install
+        thread) plus a "More Info" link to the setup guide."""
         from PySide6.QtWidgets import QMessageBox
         if self._gpu_install_via_banner:
             self._nvidia_banner_progress.setVisible(False)
@@ -2644,11 +2857,16 @@ class MainWindow(QMainWindow):
             QDesktopServices.openUrl(QUrl(_GPU_BUILD_URL))
 
     def _on_gpu_help_clicked(self):
+        """Open the NVIDIA GPU-setup troubleshooting guide in the browser."""
         from PySide6.QtCore import QUrl
         from PySide6.QtGui import QDesktopServices
         QDesktopServices.openUrl(QUrl(_GPU_BUILD_URL))
 
     def _on_gpu_clear_clicked(self):
+        """Settings "Clear GPU Support Files" link. After confirming, delete
+        the installed GPU pack so the user can start a clean reinstall; report
+        success or, if files are locked, point them at the folder to delete
+        manually."""
         from PySide6.QtWidgets import QMessageBox
         from modules.gpu_pack import clear_gpu_files, get_override_dir
         confirm = QMessageBox.question(
@@ -2679,10 +2897,18 @@ class MainWindow(QMainWindow):
             )
 
     def _on_nvidia_later_clicked(self):
+        """NVIDIA banner "Later" button. Remember the dismissal so the banner
+        stays hidden on future launches, and hide it now."""
         SETTINGS.setValue("nvidia_banner_dismissed", True)
         self._nvidia_banner.setVisible(False)
 
     def _refresh_compute_section(self):
+        """Rebuild the Settings tab's GPU-status line from the latest device
+        and NVIDIA-detection results. Picks one of several status strings
+        (Apple MPS active, NVIDIA CUDA active, CPU with various GPU-pack
+        hints) and shows the Windows GPU-install controls only when an NVIDIA
+        card is present but running on CPU. Safe to call before the Settings
+        widgets exist (returns early)."""
         if not hasattr(self, "_compute_status_label"):
             return
         import platform as _pl
@@ -2745,6 +2971,14 @@ class MainWindow(QMainWindow):
     # ── Setup page ───────────────────────────────────────────────────────────
 
     def _build_setup_page(self):
+        """Build page 0 of the Main tab: the six-step setup form the user fills
+        in before a run. Step 1 input folder + live frame count, Step 2 output
+        folder (auto-filled to a "cleaned" subfolder), Step 3 optional
+        foreground mask, Step 4 number of frames (plus dev-only start/end), Step
+        5 output format + JPEG quality (plus dev-only model picker), Step 6 the
+        big "Clean My Stars!" button. Wraps it all in a scroll area, restores
+        persisted choices from QSettings, and wires change handlers. Added to
+        the page stack as index 0."""
         page = QWidget()
         # Hold onto the inner widget so the window can lock its minimum
         # height to whatever the layout actually needs. See _lock_min_height.
@@ -3088,6 +3322,13 @@ class MainWindow(QMainWindow):
     # ── Process page ─────────────────────────────────────────────────────────
 
     def _build_process_page(self):
+        """Build page 1 of the Main tab: the live processing view shown during
+        a run. Holds the running trail counter and per-frame stats, the fat
+        overall progress bar with time estimate/elapsed, the batch label, the
+        two per-step (Detecting / Repairing) bars, and a 50/50 split of the
+        scrolling Star Log on the left and a community/error-contact panel on
+        the right. Bottom row has Cancel and Open-Cleaned-Folder buttons.
+        Added to the page stack as index 1."""
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setSpacing(12)
@@ -3324,6 +3565,10 @@ class MainWindow(QMainWindow):
         self._stack.addWidget(page)
 
     def _build_run_community_panel(self):
+        """Build the right-hand panel of the processing page: a "tag
+        @bruceherwig #StarTrailCleanR" social nudge and an error-report email
+        link that pre-fills app version + OS. Stashes the support email and a
+        pre-built mailto URL on self. Returns the panel widget."""
         import platform as _plat
         import urllib.parse as _urlp
         import html as _html
@@ -3472,6 +3717,9 @@ class MainWindow(QMainWindow):
     # ── Browse / validation ──────────────────────────────────────────────────
 
     def _browse_input(self):
+        """Step 1 Browse button. Open a folder picker (starting at the last
+        used input dir), set the chosen path, remember it, and refresh the mask
+        status and frame count."""
         last_dir = SETTINGS.value("last_input_dir", "")
         folder = QFileDialog.getExistingDirectory(self, "Select Input Folder", last_dir)
         if folder:
@@ -3481,27 +3729,40 @@ class MainWindow(QMainWindow):
             self._update_frame_count()
 
     def _on_input_edited(self):
+        """Fired when the user finishes typing in the input-folder field;
+        refresh the live frame count for the typed path."""
         self._update_frame_count()
 
     def _update_input_open_btn_state(self):
+        """Enable the Step 1 "Open Folder" button only when the input field
+        holds a real existing directory."""
         path = self._folder_input.text().strip()
         self._input_open_btn.setEnabled(bool(path) and os.path.isdir(path))
 
     def _update_output_open_btn_state(self):
+        """Enable the Step 2 "Open Folder" button only when the output field
+        holds a real existing directory."""
         path = self._output_input.text().strip()
         self._output_open_btn.setEnabled(bool(path) and os.path.isdir(path))
 
     def _open_setup_input_folder(self):
+        """Open the Step 1 input folder in the OS file manager (if it exists)."""
         path = self._folder_input.text().strip()
         if path and os.path.isdir(path):
             _open_folder_in_file_manager(path)
 
     def _open_setup_output_folder(self):
+        """Open the Step 2 output folder in the OS file manager (if it exists)."""
         path = self._output_input.text().strip()
         if path and os.path.isdir(path):
             _open_folder_in_file_manager(path)
 
     def _update_frame_count(self):
+        """Refresh the blue "N frames found (WxH)" label under Step 1 for the
+        current input folder, and grey out frame-limit dropdown choices that
+        exceed the available count. Counts files by image extension and reads
+        the first frame's dimensions for the size hint. Handles empty / missing
+        / no-image folders with their own messages."""
         folder = self._folder_input.text().strip()
         from modules.frame_list import IMAGE_EXTS as exts
         count = None
@@ -3554,6 +3815,8 @@ class MainWindow(QMainWindow):
             self._frame_limit.view().setRowHidden(i, not enabled)
 
     def _browse_output(self):
+        """Step 2 Browse button. Open a folder picker (starting at the last
+        used output dir), set and remember the chosen path."""
         last_dir = SETTINGS.value("last_output_dir", "")
         folder = QFileDialog.getExistingDirectory(self, "Select Output Folder", last_dir)
         if folder:
@@ -3561,6 +3824,10 @@ class MainWindow(QMainWindow):
             SETTINGS.setValue("last_output_dir", folder)
 
     def _auto_output(self, text):
+        """Auto-fill the output field as the user sets the input folder:
+        default to a "cleaned" subfolder inside the input. `text` is the new
+        input path. Normalizes to forward slashes so Windows doesn't show a
+        mixed-slash path."""
         if text and text.strip():
             # Normalize to forward slashes for display: Qt's QFileDialog
             # returns forward slashes on every platform, but os.path.join
@@ -3594,6 +3861,11 @@ class MainWindow(QMainWindow):
     # ── Mask editor ──────────────────────────────────────────────────────────
 
     def _open_mask_editor(self):
+        """Step 3 Create/Edit Mask button. Open the separate MaskEditorWindow
+        on the first frame of the input folder so the user can paint over the
+        foreground (ground, buildings) the AI should ignore. Loads any existing
+        saved mask to edit. Shows an inline error if no input folder/images are
+        set yet."""
         folder = self._folder_input.text().strip()
         if not folder or not os.path.isdir(folder):
             self._error_label.setText("Select an input folder first (Step 1).")
@@ -3628,6 +3900,10 @@ class MainWindow(QMainWindow):
         self._mask_window.activateWindow()
 
     def _on_mask_saved(self, mask_np):
+        """Receive the painted mask from the mask editor. `mask_np` is the
+        mask image array. If it has any painted pixels, save it as the
+        foreground mask PNG in the workspace; if it's blank, delete any
+        existing mask. Then refresh the Step 3 status label."""
         folder = self._folder_input.text().strip()
         if folder:
             if mask_np.any():
@@ -3645,6 +3921,18 @@ class MainWindow(QMainWindow):
     # ── Run ──────────────────────────────────────────────────────────────────
 
     def _validate(self):
+        """Run every pre-flight check before a job starts and gather a few
+        run parameters as side effects. Returns (input_folder, output_folder)
+        if the run may proceed, or None if any check failed or the user
+        cancelled at a prompt.
+
+        Checks, in order: input/output folders are set and the input exists;
+        the output folder is writable (probe write); enough disk space and at
+        least 3 frames; a memory-aware batch cap (stored on self._max_batch /
+        self._mem_note); a saved mask is still readable; and, if any frame has
+        both a RAW and a JPG/TIFF, a one-time prompt for which to use (stored on
+        self._twin_prefer). The resource checks are best-effort and never block
+        a run on their own failure."""
         folder = self._folder_input.text().strip()
         if not folder:
             self._error_label.setText("Please select an input folder (Step 1).")
@@ -3734,6 +4022,7 @@ class MainWindow(QMainWindow):
                 _estimated_bytes = int(_w * _h * _bpp * _total_frames)
 
                 def _fmt_gb(b):
+                    """Format a byte count as a one-decimal "N.N GB" string."""
                     return f"{b / 1_073_741_824:.1f} GB"
 
                 _free_bytes = _shutil.disk_usage(output).free
@@ -3884,6 +4173,14 @@ class MainWindow(QMainWindow):
         return folder, output
 
     def _run(self):
+        """"Clean My Stars!" button handler — start a cleaning run.
+
+        Validates via _validate (bails on failure), resets all the
+        processing-page widgets, switches to that page, starts the spinner and
+        AI-warmup heartbeat timers, then constructs the CleanerWorker with the
+        chosen settings, wires every worker signal to its handler, and starts
+        the thread. Also seeds the run-summary fields that the stats/timing
+        handlers fill in for the end-of-run log."""
         result = self._validate()
         if not result:
             return
@@ -4015,6 +4312,10 @@ class MainWindow(QMainWindow):
         self._set_updates_run_state(True)
 
     def _cancel_run(self):
+        """Cancel Cleaning button. Tell the worker to stop (which kills its
+        current subprocess), freeze the progress bar at "Cancelled", stop the
+        timers, wait briefly for the thread to exit (force-terminate if it
+        won't), then turn the button into "Back to Setup"."""
         if self.worker and self.worker.isRunning():
             self._run_cancelled = True
             self.worker.cancel()
@@ -4039,6 +4340,9 @@ class MainWindow(QMainWindow):
             self._status_out.append("\nCleaning cancelled.")
 
     def _stop_elapsed_timer(self):
+        """Stop the spinner/elapsed and AI-warmup timers and drop the spinner
+        glyph from the "Star Log" heading. Called whenever a run ends (finish,
+        cancel, or error)."""
         if hasattr(self, '_spinner_timer') and self._spinner_timer.isActive():
             self._spinner_timer.stop()
         if hasattr(self, '_warmup_timer') and self._warmup_timer.isActive():
@@ -4047,10 +4351,15 @@ class MainWindow(QMainWindow):
             self._star_log_title.setText("Star Log")
 
     def _go_to_setup(self):
+        """Stop the timers and switch the Main tab back to the Setup page
+        (page 0). Wired to the "Back to Setup" button after a run ends."""
         self._stop_elapsed_timer()
         self._stack.setCurrentIndex(0)
 
     def _update_spinner(self):
+        """Fired every 250 ms during a run: advance the |/-\\ spinner glyph,
+        update the "Elapsed: ..." label and the spinner in the Star Log title,
+        and pulse "Estimating..." until the first real time estimate arrives."""
         self._spinner_idx += 1
         ch = self._spinner_chars[self._spinner_idx % len(self._spinner_chars)]
         start = getattr(self, '_run_start_time', None)
@@ -4066,6 +4375,9 @@ class MainWindow(QMainWindow):
             self._time_label.setText(f"Estimating{dots}")
 
     def _on_progress(self, pct, total, remaining_str):
+        """Worker progress signal handler. Set the fat overall progress bar to
+        `pct` (0-100) and, when present, show "~<remaining_str> remaining".
+        Ignored after the user cancelled."""
         if getattr(self, "_run_cancelled", False):
             return
         self._progress_bar.setRange(0, 100)
@@ -4077,6 +4389,9 @@ class MainWindow(QMainWindow):
             self._has_estimate = True
 
     def _on_batch_info(self, batch_num, n_batches):
+        """Worker signal at the start of each batch. Update the "Batch X of Y"
+        label and reset both per-step (Detecting / Repairing) bars back to
+        0% / "waiting" / blue for the new batch."""
         self._batch_text = f"Batch {batch_num} of {n_batches}"
         self._batch_label.setText(self._batch_text)
         # Reset step bars for new batch
@@ -4096,6 +4411,11 @@ class MainWindow(QMainWindow):
         self._step2_bar.setStyleSheet(step1_style)
 
     def _on_step_progress(self, step, current, total, global_current, global_total):
+        """Worker signal driving the two per-step bars. `step` is 1 (Detecting)
+        or 2 (Repairing); `current`/`total` are this batch's frame progress;
+        `global_current`/`global_total` place it in the whole job. Sets the
+        bar percent and a "Detecting/Repairing frames 21-40 (of 450)" style
+        label, turning the bar green at 100%. Ignored after cancellation."""
         if getattr(self, "_run_cancelled", False):
             return
         green_style = (
@@ -4137,6 +4457,10 @@ class MainWindow(QMainWindow):
                 self._step2_label.setText(f"Repairing {head}\n{nums}")
 
     def _on_warmup_active(self, active):
+        """Worker signal toggling the AI-warmup heartbeat. `active` True starts
+        the rotating "Studying your stars..." log messages that fill the silent
+        15-30 s while the model loads; False stops them once real per-frame
+        progress begins. Idempotent so a repeat True won't restart the rotation."""
         if active:
             # Idempotent: if the heartbeat is already running (because we triggered
             # it at "frames loaded"), don't reset the rotation when "Step 1" arrives.
@@ -4150,6 +4474,10 @@ class MainWindow(QMainWindow):
             self._warmup_timer.stop()
 
     def _warmup_tick(self):
+        """Fired every 500 ms while the warmup heartbeat is active. Appends one
+        rotating astro-flavored phrase to the Star Log every 2 seconds (4 ticks)
+        so a long model-load never looks frozen; after the first cycle it
+        settles on a steady "Warming up the AI trail detector" line."""
         # Append once per phrase, no in-place dot animation. The previous
         # "append on tick 0, replace last block on ticks 1-3" approach
         # caused doubling when worker messages interleaved with warmup
@@ -4174,10 +4502,15 @@ class MainWindow(QMainWindow):
         self._warmup_counter += 1
 
     def _on_frame_count(self, current, total):
+        """Worker signal updating the "Scrubbing the stars... N of M" line and
+        the frames-done counter used by the running per-frame averages."""
         self._frame_counter.setText(f"Scrubbing the stars\u2026 {current} of {total}")
         self._stats_frames_done = current
 
     def _on_initial_estimate(self, seconds):
+        """Worker signal carrying the first measured total-time estimate.
+        Locks it into the "Estimated Time: ..." label (formatted compactly).
+        Emitted once, only when the estimate is based on real measured speed."""
         secs = int(round(seconds))
         if secs < 60:
             self._initial_est_label.setText(f"Estimated Time: {secs}s")
@@ -4187,11 +4520,16 @@ class MainWindow(QMainWindow):
             self._initial_est_label.setText(f"Estimated Time: {fmt_estimate(secs)}")
 
     def _on_format_changed(self, text):
+        """Step 5 output-format change handler. Enable the JPEG-quality spinbox
+        only when the format is JPG (it's meaningless for TIFF output)."""
         is_jpg = text == "JPG"
         self._jpeg_quality.setEnabled(is_jpg)
         self._jpeg_quality_label.setEnabled(is_jpg)
 
     def _on_trail_count_update(self, count):
+        """Worker signal with the running total of trails cleaned so far.
+        Update the big "N Trails Cleaned" counter and the secondary
+        trails/frame and seconds/frame averages."""
         self._stats_last_trail_count = count  # kept for cancelled-run summaries
         self._trail_counter_label.setText(f"{count:,} Trails Cleaned")
         # Running averages over the whole run so far. frame_count fires just
@@ -4207,6 +4545,11 @@ class MainWindow(QMainWindow):
             )
 
     def _on_stats_ready(self, total_trails, total_frames):
+        """Worker signal at run end with the final totals. Stores them for the
+        log and builds the HTML summary line (self._stats_trail_line) shown in
+        the run-complete dialog: either a "sky was clean" message or a
+        "swept N trails ... TIME SAVED" message estimating time saved at 30 s
+        per manually-cleaned trail."""
         # Capture for the run-summary file and the run-complete dialog.
         self._run_total_trails = total_trails
         self._run_total_frames = total_frames
@@ -4251,6 +4594,11 @@ class MainWindow(QMainWindow):
         # Stats HTML stored on self; the modal dialog renders it on _on_done.
 
     def _on_timing_stats(self, initial_est_sec, actual_sec):
+        """Worker signal at run end comparing the original estimate to the
+        actual time. Builds the small "Thought it'd take X. Took Y." HTML line
+        (self._stats_timing_line) appended in the run-complete dialog, with a
+        cheeky "You're welcome." / "My apologies." depending on which was
+        faster."""
         self._run_initial_est_sec = initial_est_sec
         self._run_actual_sec = actual_sec
         tail = "You're welcome." if actual_sec <= initial_est_sec else "My apologies."
@@ -4265,11 +4613,15 @@ class MainWindow(QMainWindow):
         # Modal dialog will read this on _on_done.
 
     def _on_status(self, text):
+        """Worker status signal: append `text` to the scrolling Star Log and
+        keep the view scrolled to the bottom."""
         self._status_out.append(text)
         sb = self._status_out.verticalScrollBar()
         sb.setValue(sb.maximum())
 
     def _switch_to_back_btn(self):
+        """Repurpose the Cancel button into "Back to Setup" once a run has
+        ended (rewires its click to _go_to_setup)."""
         self._cancel_btn.setText("Back to Setup")
         self._cancel_btn.setEnabled(True)
         try:
@@ -4279,6 +4631,9 @@ class MainWindow(QMainWindow):
         self._cancel_btn.clicked.connect(self._go_to_setup)
 
     def _on_error(self, msg):
+        """Worker error signal. Stop the timers, append the error plus an
+        app-version/OS line to the Star Log, and flip the button to "Back to
+        Setup". The run summary is still written by _on_finished afterward."""
         import platform as _plat
         self._stop_elapsed_timer()
         self._status_out.append(f"\nERROR: {msg}")
@@ -4460,6 +4815,12 @@ class MainWindow(QMainWindow):
         msg.exec()
 
     def _on_done(self, output_folder):
+        """Worker done signal — a run finished successfully. `output_folder` is
+        the cleaned-frames folder. Marks the UI complete (green 100% bar,
+        "Cleaning Complete"), enables the Open-Folder buttons, flips to "Back
+        to Setup", and pops the run-complete summary dialog. The run-summary
+        text file is written later in _on_finished (which also covers
+        stop/error)."""
         # Bounce the Dock icon (Mac) or flash the taskbar button (Windows) to
         # get the user's attention if they've switched to another app. No-op
         # if the window is currently in focus.
@@ -4575,6 +4936,9 @@ class MainWindow(QMainWindow):
         # real values. frameGeometry() on the parent includes the title
         # bar so the vertical math is what the user actually sees.
         def _center_dialog():
+            """Move the run-complete dialog to the center of the main window.
+            Deferred via QTimer so it runs after the dialog is on screen and
+            reports real width/height (see the comment above)."""
             parent_frame = self.frameGeometry()
             if not (parent_frame.isValid() and parent_frame.width() > 0):
                 return
@@ -4686,6 +5050,9 @@ class MainWindow(QMainWindow):
 
         # Read EXIF from the first image in the input folder.
         def _read_exif_summary(folder):
+            """Return a dict of camera/lens/date/f-stop/ISO read from the first
+            image's EXIF, for the "Camera Info" block of the run summary. Every
+            field defaults to "Unknown" and any read failure is swallowed."""
             from PIL import Image as _PILImage
             from PIL.ExifTags import TAGS
             from modules.frame_list import IMAGE_EXTS as exts
@@ -4882,6 +5249,8 @@ class MainWindow(QMainWindow):
             pass
 
     def _update_open_btn_state(self):
+        """Enable the Setup page's big "Open Cleaned Folder" button only when
+        the output folder exists and already contains at least one file."""
         folder = self._output_input.text().strip()
         has_files = False
         if folder and os.path.isdir(folder):
@@ -4889,6 +5258,9 @@ class MainWindow(QMainWindow):
         self._setup_open_btn.setEnabled(has_files)
 
     def _open_output_from_setup(self):
+        """Setup page "Open Cleaned Folder" button. Open the output folder
+        (falling back to the last completed run's output) in the file manager,
+        with inline errors if it isn't set or doesn't exist yet."""
         folder = self._output_input.text().strip()
         if not folder:
             folder = getattr(self, '_done_output_folder', None)
@@ -4901,11 +5273,17 @@ class MainWindow(QMainWindow):
         _open_folder_in_file_manager(folder)
 
     def _open_output_folder(self):
+        """Processing page / run-complete dialog "Open Cleaned Folder" button.
+        Open the just-finished run's output folder in the file manager."""
         folder = getattr(self, '_done_output_folder', None)
         if folder and os.path.isdir(folder):
             _open_folder_in_file_manager(folder)
 
     def _on_finished(self):
+        """QThread.finished handler — fires after every run end (clean finish,
+        cancel, or error). Stops timers, restores the Settings run-locked
+        controls, writes the run-summary text file, and reveals the "View Star
+        Log" link if that file was written."""
         self._stop_elapsed_timer()
         self._switch_to_back_btn()
         self._set_updates_run_state(False)
@@ -4933,10 +5311,17 @@ class MainWindow(QMainWindow):
 
 
 class MaskEditorWindow(QMainWindow):
-    """Separate window for mask painting — closes back to main setup."""
+    """Separate window for mask painting — closes back to main setup.
+
+    A thin host around MaskPainterWidget: it sizes itself to 90% of the screen,
+    forwards frame/mask loading to the painter, and re-emits the painter's
+    finished mask as the mask_saved signal (which MainWindow saves to disk).
+    """
     mask_saved = Signal(np.ndarray)
 
     def __init__(self, parent=None):
+        """Create the mask-editor window: embed a MaskPainterWidget, wire its
+        done/skip/back signals, and center it at 90% of the screen size."""
         super().__init__(parent)
         self.setWindowTitle("Star Trail CleanR \u2014 Foreground Mask")
         self._painter = MaskPainterWidget()
@@ -4959,15 +5344,21 @@ class MaskEditorWindow(QMainWindow):
             self.move(x, y)
 
     def load_image(self, img_path: str):
+        """Show a single image in the painter as the mask backdrop."""
         self._painter.load_image(img_path)
 
     def load_frames(self, paths, index=0):
+        """Load the full frame list into the painter (so the user can flip
+        between frames while masking) and show the one at `index`."""
         self._painter.load_frames(paths, index)
 
     def load_existing_mask(self, mask_path: str):
+        """Load a previously saved mask PNG into the painter for editing."""
         self._painter.load_existing_mask(mask_path)
 
     def _on_done(self, mask_np):
+        """Painter finished. Re-emit the painted mask array via mask_saved
+        (MainWindow writes it to disk) and close this window."""
         self.mask_saved.emit(mask_np)
         self.close()
 
@@ -5159,6 +5550,8 @@ if __name__ == '__main__':
         from modules.sparkle_updater import init_sparkle
 
         def _dismiss_splash_for_update():
+            """Close the startup splash so Sparkle's update popup isn't hidden
+            behind it. Passed to init_sparkle as the on-update-found callback."""
             try:
                 _splash.close()
             except Exception:
@@ -5195,9 +5588,9 @@ if __name__ == '__main__':
         _handle_launch_failure(_launch_exc)
         sys.exit(1)
 
-    # Dismiss the startup splash. Minimum on-screen duration of 1500 ms so
-    # the user gets to see the title + tagline + progress bar even on a
-    # cached relaunch where the rest of startup is fast. On a true cold
+    # Dismiss the startup splash. Minimum on-screen duration of 3000 ms (3
+    # seconds) so the user gets to see the title + tagline + progress bar even
+    # on a cached relaunch where the rest of startup is fast. On a true cold
     # first launch, the slow imports keep the splash up longer than the
     # minimum and this delay is effectively zero.
     _elapsed_ms = int((_time.monotonic() - _splash_shown_at) * 1000)
@@ -5209,6 +5602,10 @@ if __name__ == '__main__':
     # palette. QSettings preserves folder selections and options, so the
     # user lands right back where they were.
     def _on_color_scheme_changed(_scheme):
+        """OS light/dark toggle handler. Relaunch the app so every themed
+        widget rebuilds with the new palette (QSettings preserves the user's
+        in-progress choices). Skipped while a run is active to avoid
+        interrupting it."""
         try:
             if window.worker and window.worker.isRunning():
                 return

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Smoke test the PyInstaller-bundled app by running the worker on one
-synthetic frame and verifying it exits cleanly with an output file.
+"""Smoke test the PyInstaller-bundled app by running the worker on three
+synthetic frames and verifying it exits cleanly with an output file.
 
 Catches the kind of bug that doesn't reproduce in dev but breaks the
 shipped binary: bundled torchvision missing MPS ops, missing PyInstaller
@@ -24,12 +24,32 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+# Repo root: this file lives in <repo>/scripts/, so two levels up is the
+# project root. Used to locate the PyInstaller output under dist/.
 REPO = Path(__file__).resolve().parent.parent
+# Hard cap (in seconds) on how long we let the bundled worker run for a single
+# output format before declaring failure. The worker loads PyTorch and the YOLO
+# model and runs inference, which is slow the first time, so this is generous.
 TIMEOUT_SECS = 240
 
 
 def _bundled_paths():
-    """Return (executable, worker_script, model_path) for the current platform."""
+    """Work out where PyInstaller put the three files we need to run the
+    smoke test, for whichever operating system we're on.
+
+    PyInstaller lays out the frozen app differently on each platform, so the
+    paths to the launcher executable, the worker script, and the bundled YOLO
+    model all differ between macOS, Windows, and Linux.
+
+    Returns a 3-tuple of pathlib.Path objects:
+        (executable, worker_script, model_path)
+      - executable:    the app binary the user double-clicks / CI invokes
+      - worker_script: astro_clean_v5.py, the detection+repair worker the GUI
+                       launches as a subprocess
+      - model_path:    best.pt, the bundled YOLO trail-detection model
+
+    Takes no arguments; it reads the current platform name itself. Exists so the
+    rest of the script can stay platform-agnostic."""
     sysname = platform.system()
     if sysname == "Darwin":
         app = REPO / "dist" / "StarTrailCleanR.app"
@@ -58,15 +78,47 @@ def _make_synthetic_frame(path):
     """Save one 640x640 BGR JPG with a few stars + a fake trail. The YOLO
     model doesn't have to detect it correctly; we just need the worker to
     load the model, run inference, and write an output frame without
-    crashing."""
+    crashing.
+
+    Input:
+      - path: where to write the JPG (a pathlib.Path, converted to str for
+        OpenCV). The caller writes several of these into a temp folder to act
+        as a fake star-trail sequence.
+
+    Returns nothing; its side effect is the written file. Exists so the smoke
+    test needs no real image fixtures checked into the repo."""
+    # Start from a black 640x640 frame (the YOLO tile size used in this app).
     img = np.zeros((640, 640, 3), dtype=np.uint8)
+    # Scatter a handful of small near-white dots to stand in for stars.
     for x, y in [(100, 200), (300, 100), (500, 400), (450, 250), (180, 480)]:
         cv2.circle(img, (x, y), 2, (220, 230, 255), -1)
+    # One horizontal light-gray line plays the part of an airplane/satellite
+    # trail. Whether the model actually flags it is irrelevant to this test.
     cv2.line(img, (50, 320), (590, 320), (240, 240, 240), 2)
+    # JPEG quality 95 keeps the synthetic stars crisp; matches the high-quality
+    # setting used elsewhere in the project.
     cv2.imwrite(str(path), img, [cv2.IMWRITE_JPEG_QUALITY, 95])
 
 
 def main():
+    """Run the actual smoke test against the freshly built bundle and exit
+    non-zero on any failure.
+
+    Steps it performs, in order:
+      1. Resolve the platform-specific bundle paths and print them.
+      2. Bail out immediately if any of the three required files is missing.
+      3. Build a throwaway folder of 3 synthetic frames (the worker needs at
+         least 3 because Star Bridge repair borrows from neighbor frames).
+      4. Run the bundled worker once for each output format (jpg, tif8, tif16),
+         each of which exercises a different image-writing code path and its
+         runtime dependency.
+      5. For every format, fail if the worker times out, exits non-zero, or
+         produces no output file of the expected extension.
+
+    Takes no arguments and returns nothing. It signals success or failure to
+    CI through the process exit code: any failure calls sys.exit(1), so the
+    build job fails and the broken artifact never ships. Reaching the end
+    means every format passed and the process exits 0."""
     exe, worker, model = _bundled_paths()
     print(f"Bundle exec:  {exe}", flush=True)
     print(f"Worker:       {worker}", flush=True)
@@ -91,9 +143,16 @@ def main():
         for i in range(3):
             _make_synthetic_frame(in_dir / f"smoke_frame_{i}.jpg")
 
+        # Note tif8 and tif16 both write a ".tif" file (only the bit depth
+        # differs), so the format name and the file extension to look for are
+        # tracked separately as (fmt, ext).
         for fmt, ext in [("jpg", "jpg"), ("tif8", "tif"), ("tif16", "tif")]:
             out_dir = Path(td) / f"out_{fmt}"
 
+            # Invoke the bundle's own launcher in "worker" mode: the first arg
+            # tells the frozen app to run astro_clean_v5.py as the worker rather
+            # than open the GUI. This mirrors exactly how the shipped GUI spawns
+            # a batch, so we test the real production code path.
             cmd = [
                 str(exe), "--cleanr-worker", str(worker),
                 str(in_dir), "-o", str(out_dir),
@@ -129,6 +188,8 @@ def main():
                 print(f"FAIL ({fmt}): worker exited {proc.returncode}", file=sys.stderr)
                 sys.exit(1)
 
+            # A zero exit isn't enough: confirm the worker actually wrote at
+            # least one cleaned frame of the expected type into the out folder.
             outputs = list(out_dir.glob(f"*.{ext}"))
             if not outputs:
                 print(f"FAIL ({fmt}): no .{ext} output produced in {out_dir}", file=sys.stderr)

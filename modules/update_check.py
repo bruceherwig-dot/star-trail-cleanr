@@ -1,7 +1,24 @@
 """App-update check against GitHub's latest release.
 
-Quiet on any failure (offline, DNS error, timeout, rate limit, parse error).
-Returns None so the caller just skips the banner.
+What this file is for, in plain English:
+  When Star Trail CleanR starts up, it wants to tell the user "a newer version
+  is available" without getting in the way. This module is the small helper
+  that answers one question: "Is there a release on GitHub newer than the copy
+  the user is running?" If yes, it hands back the new version's tag and a
+  download link the GUI can show in a banner. If no — or if anything at all
+  goes wrong — it stays silent.
+
+How it fits into the app:
+  The GUI calls check_for_update() with the local version string (read from
+  version.txt). That function contacts GitHub's public "latest release" API,
+  parses the version numbers, compares them, and returns either an update
+  dictionary or None. The GUI also uses get_download_url() to build a direct,
+  always-current download link for the right operating system and CPU.
+
+Why it never raises:
+  Quiet on any failure (offline, DNS error, timeout, rate limit, parse error).
+  An update check is a nice-to-have, never a reason to block or crash startup,
+  so every failure path returns None and the caller simply skips the banner.
 """
 import json
 import platform
@@ -11,12 +28,22 @@ import urllib.error
 import urllib.request
 from typing import Optional
 
+# GitHub "owner/repo" slug for the public Star Trail CleanR repository. Used to
+# build both the API URL (below) and the human-facing download URLs.
 REPO = "bruceherwig-dot/star-trail-cleanr"
+# GitHub REST endpoint that returns metadata for the single most recent
+# NON-prerelease release. (This is why model-only "model-v*" releases must be
+# published as prereleases — otherwise they would show up here and the app
+# would offer a model file as if it were an app update.)
 API_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
+# Default network timeout, in seconds, for the GitHub request. Kept short so a
+# slow or dead network never noticeably delays the app.
 TIMEOUT_S = 5
 
 # Asset filenames published by .github/workflows/build.yml on every tag.
-# Keep these in sync with the artifact-upload step names in that workflow.
+# Keep these in sync with the asset filenames attached in the workflow's
+# Create Release step (the path: values of the upload-artifact steps), not the
+# upload-artifact step name: fields.
 MAC_AS_ASSET = "StarTrailCleanR-Mac-AppleSilicon.dmg"
 MAC_INTEL_ASSET = "StarTrailCleanR-Mac-Intel.dmg"
 WIN_ASSET = "StarTrailCleanRSetup.zip"
@@ -43,6 +70,10 @@ def _version_tuple(s) -> Optional[tuple]:
     if not s or not isinstance(s, str):
         return None
     parts = []
+    # Drop any leading 'v'/'V' (e.g. "v2.47"), then split on dots and read the
+    # leading run of digits from each piece. Stop at the first piece with no
+    # leading digit, which is how the '-beta' suffix (and anything after it)
+    # gets discarded.
     for chunk in s.strip().lstrip("vV").split("."):
         m = re.match(r"\d+", chunk)
         if not m:
@@ -120,6 +151,9 @@ def check_for_update(local_version_str: str, timeout_s: float = TIMEOUT_S) -> Op
         return None
     tag = data.get("tag_name")
     remote = parse_tag(tag)
+    # Only surface an update when the remote version is STRICTLY greater than the
+    # local one. Equal versions (user is current) and unparseable tags both fall
+    # through to None, so no banner is shown.
     if remote is None or remote <= local:
         return None
     return {"tag": tag, "download_url": get_download_url()}

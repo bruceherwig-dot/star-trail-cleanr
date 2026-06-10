@@ -1,8 +1,48 @@
 """
 mask_painter.py — Foreground mask painting widget for Star Trail CleanR.
 
-Green overlay mask: user paints over ground/buildings/rocks so the AI skips those areas.
-Left-click = paint, Right-click = erase, Scroll = brush size, Space+drag = pan.
+WHAT THIS FILE IS
+-----------------
+This is the on-screen tool where the user hand-paints a "foreground mask" before
+trail cleaning runs. The user looks at one of their photos and roughly brushes a
+green overlay over everything that is NOT sky — the ground, rocks, buildings, the
+horizon line. That green area tells the rest of the app: "don't bother looking
+for airplane or satellite trails down here, and never try to 'repair' this part."
+
+WHY IT EXISTS
+-------------
+The trail-detection AI only makes sense in the sky. If it ran over the foreground
+it could mistake a roofline or a tree branch for a trail and damage the landscape.
+A single hand-painted mask is reused for every frame in the sequence because all
+the user's shots are on a fixed tripod, so the foreground sits in exactly the same
+pixels in every photo.
+
+HOW IT FITS INTO THE APP
+------------------------
+This widget is a screen inside the main PySide6 GUI (`star_trail_cleanr.py`). The
+GUI shows it after the user picks a folder of photos. When the user clicks
+"Save Mask", this widget hands back a black-and-white image (255 = foreground to
+skip, 0 = sky to process) via the `mask_done` signal; the GUI then feeds that mask
+into the detection/repair pipeline.
+
+WHAT'S IN HERE (two classes + one helper)
+-----------------------------------------
+- `numpy_to_qimage`     — converts an OpenCV image (numpy array) into a Qt image.
+- `MaskGraphicsView`    — the zoomable/pannable canvas that handles all the actual
+                          painting, erasing, brush sizing, undo/redo, and the mask
+                          data itself.
+- `MaskPainterWidget`   — the whole screen: instruction banner, toolbar (brush
+                          mode, sliders, undo, help, Save), the canvas above, and a
+                          status bar of shortcuts.
+
+CONTROLS (also shown to the user in the status bar / Help dialog)
+-----------------------------------------------------------------
+Left-click = paint, Right-click = toggle paint/erase, Scroll = brush size,
+Shift+click = straight line, Space+drag = pan, Ctrl/Cmd+scroll or pinch = zoom.
+
+IMPORTANT: the mask is stored as a numpy uint8 array where 255 means "foreground
+to skip" and 0 means "sky to process". The green overlay the user sees is just a
+visualization of that array.
 """
 
 import math
@@ -20,21 +60,56 @@ from PySide6.QtGui import (
 
 
 def numpy_to_qimage(arr: np.ndarray) -> QImage:
-    """Convert a BGR numpy array (uint8) to QImage RGB888."""
+    """Convert an OpenCV-style image array into a Qt image for on-screen display.
+
+    OpenCV loads color photos in BGR channel order (blue, green, red), but Qt
+    expects RGB, so a 3-channel array is reversed channel-wise before wrapping.
+    Single-channel arrays (e.g. a grayscale mask) are wrapped as 8-bit grayscale.
+
+    Input:
+        arr  numpy uint8 image. If 3-D it is treated as BGR color; if 2-D it is
+             treated as grayscale.
+    Returns:
+        A QImage referencing the pixel data. NOTE: for the grayscale path the
+        QImage shares the array's memory (no copy), so the caller must keep the
+        array alive while the QImage is in use; the color path copies (`.copy()`).
+        `3 * w` and `w` are the bytes-per-row (stride) Qt needs.
+    """
     h, w = arr.shape[:2]
     if arr.ndim == 3:
-        rgb = arr[:, :, ::-1].copy()  # BGR → RGB
+        rgb = arr[:, :, ::-1].copy()  # BGR → RGB (reverse the channel axis)
         return QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888)
     return QImage(arr.data, w, h, w, QImage.Format_Grayscale8)
 
 
 class MaskGraphicsView(QGraphicsView):
-    """Custom QGraphicsView with painting, panning, and zooming."""
+    """The interactive canvas where the user actually paints the mask.
 
-    brush_changed = Signal(int)   # emitted when brush radius changes
-    mode_changed = Signal(bool)   # emitted when erase mode toggles (True=erase)
+    This is a Qt graphics view stacked into three layers:
+      Z=0  the photo (the frame the user is tracing against)
+      Z=1  the green mask overlay (a translucent picture of the mask array)
+      Z=10 the brush-circle cursor that follows the pointer
+    It owns the mask itself as a numpy array (`_mask_np`) and rebuilds the green
+    overlay whenever the mask changes. It also handles all direct interaction:
+    left-drag to paint, right-click to flip paint/erase, scroll to size the brush,
+    space+drag to pan, Ctrl/Cmd+scroll or pinch to zoom, and undo/redo.
+
+    The parent `MaskPainterWidget` wraps this in a toolbar and reads the finished
+    mask back out via `get_mask()`.
+    """
+
+    # Qt signals this view emits so the surrounding toolbar can stay in sync.
+    brush_changed = Signal(int)   # emitted when brush radius changes (new radius px)
+    mode_changed = Signal(bool)   # emitted when paint/erase toggles (True = erase)
 
     def __init__(self, scene, parent=None):
+        """Set up the view's look, interaction state, and the mask buffers.
+
+        `scene` is the QGraphicsScene this view draws into (created by the parent
+        widget). All the `_` attributes here are just the starting state: no image
+        loaded yet, brush at 150px, paint mode (not erase), empty undo/redo, and a
+        default 50% overlay opacity. The actual mask array is not allocated until
+        an image is loaded (see `load_image`)."""
         super().__init__(scene, parent)
         self.setRenderHint(QPainter.Antialiasing, False)
         self.setRenderHint(QPainter.SmoothPixmapTransform, True)
@@ -88,6 +163,11 @@ class MaskGraphicsView(QGraphicsView):
     # ── Zoom overlay ─────────────────────────────────────────────────────────
 
     def _build_zoom_overlay(self):
+        """Build the small floating zoom control that sits in the corner of the
+        canvas: a minus button, a percentage readout, a plus button, and a "Fit"
+        button. It is a child widget drawn on top of the view (not part of the
+        scrollable scene), so it stays pinned in place while the photo pans and
+        zooms underneath it. Called once from __init__."""
         self._zoom_overlay = QWidget(self)
         self._zoom_overlay.setStyleSheet(
             "QWidget { background-color: rgba(30,30,30,210); border-radius: 14px; }"
@@ -133,6 +213,9 @@ class MaskGraphicsView(QGraphicsView):
         self._zoom_overlay.raise_()
 
     def _position_zoom_overlay(self):
+        """Re-pin the floating zoom control to the bottom-right corner of the
+        viewport. Called on resize so it tracks the corner as the window changes
+        size."""
         if self._zoom_overlay is None:
             return
         margin = 14
@@ -143,6 +226,11 @@ class MaskGraphicsView(QGraphicsView):
         self._zoom_overlay.raise_()
 
     def _zoom_by(self, factor):
+        """Zoom in or out by a multiplier (>1 zooms in, <1 zooms out), keeping the
+        center of the view fixed. The +/- buttons, keyboard +/-, and Ctrl/Cmd+
+        scroll all route through here. The anchor is temporarily forced to the
+        view center (so button zooms feel centered) and then restored to whatever
+        it was (normally anchored under the mouse)."""
         old_anchor = self.transformationAnchor()
         self.setTransformationAnchor(QGraphicsView.AnchorViewCenter)
         self.scale(factor, factor)
@@ -150,11 +238,15 @@ class MaskGraphicsView(QGraphicsView):
         self._update_zoom_label()
 
     def _zoom_to_fit(self):
+        """Scale the view so the whole photo fits in the window. Backs the "Fit"
+        button and the 0 key."""
         if self._photo_item:
             self.fitInView(self._photo_item, Qt.KeepAspectRatio)
             self._update_zoom_label()
 
     def _update_zoom_label(self):
+        """Refresh the percentage readout in the floating zoom control. `m11()` is
+        the horizontal scale factor of the current view transform, so 1.0 = 100%."""
         if self._zoom_label is None:
             return
         pct = int(round(self.transform().m11() * 100))
@@ -163,12 +255,19 @@ class MaskGraphicsView(QGraphicsView):
     # ── Public API ───────────────────────────────────────────────────────────
 
     def load_image(self, img_np: np.ndarray):
-        """Load a BGR numpy image as the background."""
+        """Show a photo as the background and start a fresh, empty mask for it.
+
+        `img_np` is a BGR color image (OpenCV order). This records the image size,
+        keeps an untouched copy for re-rendering at different brightness, allocates
+        a new all-zero mask the same size, and zooms to fit. Use this when opening
+        a new photo; use `set_background_image` instead to swap the photo while
+        keeping an existing mask. The `pad = 500` enlarges the scrollable scene
+        beyond the photo edges so the user can pan/zoom past the borders."""
         self._img_h, self._img_w = img_np.shape[:2]
         self._original_img = img_np.copy()
         self._update_photo_display()
 
-        # Initialize blank mask
+        # Initialize blank mask (all 0 = nothing masked yet)
         self._mask_np = np.zeros((self._img_h, self._img_w), dtype=np.uint8)
         self._refresh_overlay()
         pad = 500
@@ -199,7 +298,13 @@ class MaskGraphicsView(QGraphicsView):
             self._update_photo_display()
 
     def load_mask(self, mask_np: np.ndarray):
-        """Load an existing mask (255=foreground)."""
+        """Load a previously painted mask so the user can keep editing it.
+
+        `mask_np` is a grayscale array where 255 = foreground (skip) and 0 = sky.
+        If it does not match the current photo's size it is nearest-neighbor
+        resized to fit (nearest-neighbor keeps the mask strictly black-or-white —
+        no gray edges that would smear the foreground boundary). Used when
+        reopening the mask editor on a folder that already has a saved mask."""
         if mask_np.shape[:2] != (self._img_h, self._img_w):
             import cv2
             mask_np = cv2.resize(mask_np, (self._img_w, self._img_h),
@@ -208,43 +313,63 @@ class MaskGraphicsView(QGraphicsView):
         self._refresh_overlay()
 
     def get_mask(self) -> np.ndarray:
-        """Return the current mask as numpy uint8 (255=foreground)."""
+        """Hand back a copy of the finished mask (uint8: 255 = foreground/skip,
+        0 = sky/process). A copy is returned so the caller can't accidentally edit
+        the live mask. This is what the pipeline ultimately consumes."""
         return self._mask_np.copy()
 
     def has_mask(self) -> bool:
-        """True if any pixels are painted."""
+        """True if the user has painted anything at all (any non-zero pixel). Used
+        to warn the user before saving an empty mask."""
         return self._mask_np is not None and self._mask_np.any()
 
     def clear_mask(self):
-        """Clear the entire mask."""
+        """Erase the entire mask back to all-sky. Snapshots first so a stray "Clear
+        All" can be undone."""
         self._push_undo()
         self._mask_np[:] = 0
         self._refresh_overlay()
 
     def set_overlay_opacity(self, value: float):
+        """Set how see-through the green overlay is. Clamped to 0.1–0.9 so the
+        overlay is never fully invisible nor fully hides the photo underneath.
+        Driven by the "Overlay" slider in the toolbar."""
         self._overlay_opacity = max(0.1, min(0.9, value))
         self._refresh_overlay()
 
     def set_brightness(self, value: float):
+        """Brighten or darken the displayed photo (this is a viewing aid only — it
+        does NOT change the saved photo or the mask). Clamped to 0.5–3.0. Helps
+        the user see a dark horizon line. Driven by the "Brightness" slider."""
         self._brightness = max(0.5, min(3.0, value))
         self._update_photo_display()
 
     def set_brush_radius(self, radius: int):
+        """Set the brush size in pixels, clamped to the allowed 5–500 range, then
+        tell the toolbar (via `brush_changed`) so the label updates. Used by the
+        scroll wheel and the [ / ] keys."""
         self._brush_radius = max(self._min_brush, min(self._max_brush, radius))
         self.brush_changed.emit(self._brush_radius)
         self._update_cursor()
 
     @property
     def brush_radius(self):
+        """Current brush radius in pixels (read-only accessor)."""
         return self._brush_radius
 
     def undo(self):
+        """Step back one paint action. Pushes the current mask onto the redo stack,
+        then restores the most recent snapshot saved by `_push_undo`. No-op if
+        there is nothing to undo."""
         if self._undo_stack:
             self._redo_stack.append(self._mask_np.copy())
             self._mask_np = self._undo_stack.pop()
             self._refresh_overlay()
 
     def redo(self):
+        """Re-apply an action that was just undone. Mirror image of `undo`: pushes
+        the current mask back onto the undo stack and restores the top of the redo
+        stack. No-op if there is nothing to redo."""
         if self._redo_stack:
             self._undo_stack.append(self._mask_np.copy())
             self._mask_np = self._redo_stack.pop()
@@ -253,11 +378,19 @@ class MaskGraphicsView(QGraphicsView):
     # ── Display helpers ──────────────────────────────────────────────────────
 
     def _update_photo_display(self):
-        """Recompute the displayed photo with brightness adjustment."""
+        """Redraw the background photo, applying the current brightness setting.
+
+        Brightness is a gamma-style curve built as a 256-entry lookup table: each
+        possible pixel value 0–255 is remapped, then `lut[img]` recolors the whole
+        image in one vectorized step (fast). At brightness 1.0 the table is skipped
+        entirely and the original pixels are shown untouched. Called whenever the
+        photo or the brightness changes. Creates the photo scene item on first call
+        (Z=0, the bottom layer) and reuses it afterward."""
         if not hasattr(self, '_original_img'):
             return
         img = self._original_img
         if self._brightness != 1.0:
+            # Gamma lookup table: value^(1/brightness). >1 brightens, <1 darkens.
             lut = np.clip(255.0 * (np.arange(256) / 255.0) ** (1.0 / self._brightness),
                           0, 255).astype(np.uint8)
             img = lut[img]
@@ -265,40 +398,64 @@ class MaskGraphicsView(QGraphicsView):
         pixmap = QPixmap.fromImage(qimg)
         if self._photo_item is None:
             self._photo_item = self.scene().addPixmap(pixmap)
-            self._photo_item.setZValue(0)
+            self._photo_item.setZValue(0)  # bottom layer
         else:
             self._photo_item.setPixmap(pixmap)
 
     def _refresh_overlay(self):
-        """Rebuild the green overlay from the mask numpy array."""
+        """Repaint the translucent green layer so it matches the mask array.
+
+        Builds a four-channel (color + transparency) picture the same size as the
+        photo: where the mask is set, the pixel is opaque-ish green; everywhere
+        else it is fully transparent so the photo shows through. Call this after
+        ANY change to `_mask_np` (paint, erase, clear, undo, opacity change) — it
+        is the one place the on-screen green is regenerated. Sits at Z=1, above the
+        photo and below the brush cursor.
+
+        The `masked = _mask_np > 127` threshold treats the mask as black-or-white
+        (a resized mask could contain in-between gray values; this picks the
+        white side). `.copy()` is required because the QImage otherwise just
+        references the temporary `argb` buffer, which would be freed."""
         if self._mask_np is None:
             return
         h, w = self._mask_np.shape
         alpha = int(255 * self._overlay_opacity)
 
-        # Build ARGB overlay — QImage Format_ARGB32 is BGRA in memory on little-endian
+        # Format_ARGB32 is stored as B,G,R,A in memory on little-endian machines.
+        # Index 1 = Green, index 3 = Alpha; leaving R and B at 0 gives pure green.
         argb = np.zeros((h, w, 4), dtype=np.uint8)
         masked = self._mask_np > 127
-        argb[masked, 1] = 255      # G channel
-        argb[masked, 3] = alpha    # A channel
+        argb[masked, 1] = 255      # G channel → green where painted
+        argb[masked, 3] = alpha    # A channel → opacity where painted
         overlay = QImage(argb.data, w, h, 4 * w, QImage.Format_ARGB32).copy()
 
         pixmap = QPixmap.fromImage(overlay)
         if self._mask_overlay_item is None:
             self._mask_overlay_item = self.scene().addPixmap(pixmap)
-            self._mask_overlay_item.setZValue(1)
+            self._mask_overlay_item.setZValue(1)  # above photo, below cursor
         else:
             self._mask_overlay_item.setPixmap(pixmap)
 
     def _update_cursor(self):
-        """Update the brush circle cursor."""
+        """Reset the pointer to a crosshair and drop the old brush-circle outline.
+
+        Called when the brush size changes; the circle is then rebuilt at the live
+        size by the next `_move_cursor_circle`. The crosshair is the pointer shape
+        the user sees over the canvas."""
         if self._cursor_circle is not None:
             self.scene().removeItem(self._cursor_circle)
             self._cursor_circle = None
         self.setCursor(Qt.CrossCursor)
 
     def _move_cursor_circle(self, scene_pos):
-        """Position the brush circle indicator at the given scene coordinate."""
+        """Draw the brush-size outline (the ring that shows how big the brush is)
+        centered on the pointer at `scene_pos` (a point in photo coordinates).
+
+        Removes the previous ring and draws a fresh one. The ring is RED in erase
+        mode and WHITE in paint mode so the user can tell at a glance which mode
+        they are in. `pen_width` is divided by the current zoom (`m11()`) so the
+        outline stays a thin, constant on-screen thickness no matter how far the
+        user has zoomed in. Drawn at Z=10, on top of everything."""
         r = self._brush_radius
         if self._cursor_circle is not None:
             self.scene().removeItem(self._cursor_circle)
@@ -309,11 +466,17 @@ class MaskGraphicsView(QGraphicsView):
         pen = QPen(color, pen_width)
         self._cursor_circle = self.scene().addEllipse(
             scene_pos.x() - r, scene_pos.y() - r, 2 * r, 2 * r, pen)
-        self._cursor_circle.setZValue(10)
+        self._cursor_circle.setZValue(10)  # top layer, above the green overlay
 
     # ── Undo helpers ─────────────────────────────────────────────────────────
 
     def _push_undo(self):
+        """Snapshot the current mask onto the undo stack BEFORE a new edit begins.
+
+        Called at the start of each paint stroke and before Clear All. Keeps at
+        most `_max_undo` (50) snapshots, discarding the oldest when full. Starting a
+        new edit also clears the redo stack, since the redo history no longer
+        applies once the user paints something new."""
         self._undo_stack.append(self._mask_np.copy())
         if len(self._undo_stack) > self._max_undo:
             self._undo_stack.pop(0)
@@ -322,18 +485,28 @@ class MaskGraphicsView(QGraphicsView):
     # ── Painting ─────────────────────────────────────────────────────────────
 
     def _paint_at(self, scene_pos, erase=False):
-        """Paint or erase a circle on the mask at the given scene position."""
+        """Stamp one filled brush circle into the mask array at `scene_pos`.
+
+        `scene_pos` is a point in photo (pixel) coordinates; the brush radius is
+        the current `_brush_radius`. Painting sets the covered pixels to 255 (mark
+        as foreground); erasing sets them to 0. The window is first clamped to the
+        image edges (so a brush hanging off the edge doesn't go out of bounds), and
+        a circular boolean mask (`xx² + yy² <= r²`) restricts the write to a true
+        circle rather than the bounding square. Does NOT refresh the overlay — the
+        caller (`_paint_line`) does that once per stroke for speed."""
         cx = int(scene_pos.x())
         cy = int(scene_pos.y())
         r = self._brush_radius
 
+        # Clamp the brush's bounding box to the image so slicing stays in bounds.
         y0 = max(0, cy - r)
         y1 = min(self._img_h, cy + r + 1)
         x0 = max(0, cx - r)
         x1 = min(self._img_w, cx + r + 1)
         if y0 >= y1 or x0 >= x1:
-            return
+            return  # brush is entirely off the image — nothing to paint
 
+        # Boolean circle relative to the (possibly clipped) box, centered on cx,cy.
         yy, xx = np.ogrid[y0 - cy:y1 - cy, x0 - cx:x1 - cx]
         circle = (xx * xx + yy * yy) <= r * r
 
@@ -343,15 +516,21 @@ class MaskGraphicsView(QGraphicsView):
             self._mask_np[y0:y1, x0:x1][circle] = 255
 
     def _paint_line(self, from_pos, to_pos, erase=False):
-        """Interpolate between two points and paint along the line."""
+        """Paint a continuous streak between two points by stamping circles along
+        the line. Without this, fast mouse movement would leave gaps between
+        individual circle stamps. Steps roughly every third of a brush radius (so
+        consecutive stamps overlap and the streak looks solid), then refreshes the
+        green overlay once at the end. Used both for click-drag strokes and for the
+        Shift+click straight-line feature."""
         x0, y0 = from_pos.x(), from_pos.y()
         x1, y1 = to_pos.x(), to_pos.y()
         dist = math.hypot(x1 - x0, y1 - y0)
-        # Step size = half brush radius for smooth coverage
+        # Step size ~ a third of the brush radius keeps consecutive stamps
+        # overlapping so the streak has no gaps.
         step = max(1, self._brush_radius // 3)
         n_steps = max(1, int(dist / step))
         for i in range(n_steps + 1):
-            t = i / n_steps if n_steps > 0 else 0
+            t = i / n_steps if n_steps > 0 else 0  # 0..1 along the segment
             px = x0 + t * (x1 - x0)
             py = y0 + t * (y1 - y0)
             self._paint_at(QPointF(px, py), erase=erase)
@@ -360,6 +539,19 @@ class MaskGraphicsView(QGraphicsView):
     # ── Mouse events ─────────────────────────────────────────────────────────
 
     def mousePressEvent(self, event):
+        """Handle a mouse-button press: start panning, toggle mode, or begin a
+        paint stroke.
+
+        Priority order matters:
+          1. If Space is held, this press starts a PAN (grab the canvas) and
+             nothing is painted.
+          2. A right-click TOGGLES paint/erase mode (and stamps the time, so the
+             trackpad two-finger-tap that accompanies a right-click doesn't also
+             resize the brush — see `wheelEvent`).
+          3. A left-click begins painting: snapshot for undo, then either draw a
+             straight line from the previous click (if Shift is down) or stamp a
+             single circle. The two `_last_*_pos` values remember where we are so
+             drags interpolate and Shift+click chains straight segments."""
         if self._space_held:
             self._panning = True
             self._last_pan_pos = event.position().toPoint()
@@ -369,7 +561,8 @@ class MaskGraphicsView(QGraphicsView):
         scene_pos = self.mapToScene(event.position().toPoint())
 
         if event.button() == Qt.RightButton:
-            # Toggle erase mode on/off
+            # Toggle erase mode on/off. Record the time so wheelEvent can ignore
+            # the stray scroll a Mac trackpad emits alongside a right-click.
             import time as _time
             self._last_right_click_time = _time.time()
             self._erase_mode = not self._erase_mode
@@ -387,20 +580,30 @@ class MaskGraphicsView(QGraphicsView):
                 self._paint_at(scene_pos, erase=self._erase_mode)
                 self._refresh_overlay()
 
-            self._last_paint_pos = scene_pos
-            self._last_click_pos = scene_pos
+            self._last_paint_pos = scene_pos   # for drag interpolation
+            self._last_click_pos = scene_pos   # anchor for the next Shift+click
 
     def _pos_in_image(self, scene_pos):
+        """True if a scene point falls inside the photo's bounds. (Helper; not
+        currently called elsewhere in this file.)"""
         if self._photo_item is None:
             return False
         return self._photo_item.boundingRect().contains(scene_pos)
 
     def _hide_cursor_circle(self):
+        """Remove the brush-size ring from the scene. (Helper; not currently called
+        elsewhere in this file.)"""
         if self._cursor_circle is not None:
             self.scene().removeItem(self._cursor_circle)
             self._cursor_circle = None
 
     def mouseMoveEvent(self, event):
+        """Handle pointer motion: pan while dragging, keep painting while the left
+        button is down, and keep the brush ring under the cursor otherwise.
+
+        While panning, the scrollbars are nudged by the drag delta to move the
+        view. While painting, `_paint_line` connects the previous point to the
+        current one so a fast drag still produces a solid streak."""
         scene_pos = self.mapToScene(event.position().toPoint())
         if self._panning:
             pass
@@ -422,6 +625,8 @@ class MaskGraphicsView(QGraphicsView):
             self._last_paint_pos = scene_pos
 
     def mouseReleaseEvent(self, event):
+        """End a paint stroke and/or a pan when the button is released, resetting
+        the drag state and restoring the crosshair cursor."""
         if event.button() == Qt.LeftButton:
             self._painting = False
             self._last_paint_pos = None
@@ -431,6 +636,19 @@ class MaskGraphicsView(QGraphicsView):
             self.setCursor(Qt.CrossCursor)
 
     def wheelEvent(self, event):
+        """Scroll wheel / trackpad: zoom with Ctrl/Cmd held, otherwise resize the
+        brush.
+
+        Two subtleties:
+          - A Mac trackpad fires a phantom scroll right after a right-click
+            (two-finger tap). The 300ms guard ignores scrolls that closely follow
+            a right-click so the brush doesn't jump when the user only meant to
+            toggle mode.
+          - Trackpads emit many tiny scroll deltas (a mouse wheel emits one big
+            120-unit 'click'). To make the brush grow smoothly, fractional changes
+            are accumulated in `_brush_scroll_accum` and only applied once a whole
+            pixel of change has built up. `step_per_click` scales the speed with
+            the current brush size (6–25px) so big brushes resize faster."""
         # Ignore scroll events within 300ms of right-click (Mac trackpad two-finger tap)
         import time as _time
         if _time.time() - self._last_right_click_time < 0.3:
@@ -451,12 +669,19 @@ class MaskGraphicsView(QGraphicsView):
             if delta == 0:
                 event.accept()
                 return
-            self._brush_scroll_accum -= delta
+            self._brush_scroll_accum -= delta  # keep the leftover fraction
             self.set_brush_radius(self._brush_radius + delta)
             scene_pos = self.mapToScene(event.position().toPoint())
             self._move_cursor_circle(scene_pos)
 
     def keyPressEvent(self, event):
+        """Keyboard shortcuts on the canvas.
+
+        Space (held) = pan mode; E = toggle paint/erase; [ and ] = shrink/grow the
+        brush by 10px; 0 (or Ctrl/Cmd+0) = fit to window; + / - = zoom. `isAutoRepeat`
+        checks ignore the repeated key events the OS sends while a key is held, so
+        Space and E only fire once per physical press. Anything else falls through
+        to the default handler."""
         if event.key() == Qt.Key_Space and not event.isAutoRepeat():
             self._space_held = True
             self.setCursor(Qt.OpenHandCursor)
@@ -479,6 +704,7 @@ class MaskGraphicsView(QGraphicsView):
             super().keyPressEvent(event)
 
     def keyReleaseEvent(self, event):
+        """Releasing Space ends pan mode and restores the crosshair cursor."""
         if event.key() == Qt.Key_Space and not event.isAutoRepeat():
             self._space_held = False
             self.setCursor(Qt.CrossCursor)
@@ -486,6 +712,8 @@ class MaskGraphicsView(QGraphicsView):
             super().keyReleaseEvent(event)
 
     def resizeEvent(self, event):
+        """On window resize, re-fit the photo to the new size and re-pin the
+        floating zoom control to the corner."""
         super().resizeEvent(event)
         if self._photo_item:
             self.fitInView(self._photo_item, Qt.KeepAspectRatio)
@@ -493,6 +721,11 @@ class MaskGraphicsView(QGraphicsView):
         self._position_zoom_overlay()
 
     def event(self, event):
+        """Intercept trackpad pinch gestures for zoom before the default handling.
+
+        Qt delivers pinch as a generic Gesture event; when the pinch's scale factor
+        changes we zoom by that factor. All other events pass through to the base
+        class unchanged."""
         if event.type() == QEvent.Gesture:
             pinch = event.gesture(Qt.PinchGesture)
             if pinch is not None:
@@ -506,13 +739,27 @@ class MaskGraphicsView(QGraphicsView):
 
 
 class MaskPainterWidget(QWidget):
-    """Full mask painting screen — toolbar + canvas + status bar."""
+    """The complete mask-painting screen the user sees, wrapping the canvas.
 
-    mask_done = Signal(np.ndarray)   # emitted with the final mask when user clicks Done
-    mask_skipped = Signal()          # emitted when user skips masking
-    go_back = Signal()               # emitted when user clicks Back
+    Layout top to bottom: a green instruction banner (with the "Skyline hard to
+    see?" frame-stepping arrows on its right), a dark toolbar (Back, Paint/Erase
+    toggle, brush readout, overlay + brightness sliders, Undo/Redo, Clear All,
+    Help, and the blue "Save Mask" button), the `MaskGraphicsView` canvas, and a
+    one-line status bar of shortcuts.
+
+    This widget owns no mask data of its own — the canvas (`self._view`) does. The
+    widget's job is the surrounding chrome and routing button/slider events into
+    the canvas. It signals the host GUI when the user finishes."""
+
+    # Signals the host GUI (star_trail_cleanr.py) listens to.
+    mask_done = Signal(np.ndarray)   # final mask, emitted when user clicks Save Mask
+    mask_skipped = Signal()          # user chose to process the whole frame (no mask)
+    go_back = Signal()               # user clicked Back to leave this screen
 
     def __init__(self, parent=None):
+        """Build the screen. `_frame_paths`/`_frame_idx` track the folder's photos
+        and which one is currently shown as the background to trace against (the
+        banner arrows step through them)."""
         super().__init__(parent)
         self._frame_paths = []   # all photos in the folder, in order
         self._frame_idx = 0      # which one is currently shown as the background
@@ -520,6 +767,10 @@ class MaskPainterWidget(QWidget):
         self._setup_shortcuts()
 
     def _build_ui(self):
+        """Construct and lay out every widget on the screen (banner, toolbar,
+        canvas, status bar) and wire each control to its handler. Long but
+        mechanical; the inline section comments mark each region. Called once from
+        __init__."""
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -727,6 +978,8 @@ class MaskPainterWidget(QWidget):
         layout.addWidget(status_bar)
 
     def _add_separator(self, layout):
+        """Add a thin vertical divider line into a toolbar layout, used to group
+        related controls visually."""
         sep = QWidget()
         sep.setFixedWidth(1)
         sep.setFixedHeight(24)
@@ -734,13 +987,19 @@ class MaskPainterWidget(QWidget):
         layout.addWidget(sep)
 
     def _setup_shortcuts(self):
+        """Register the window-level undo/redo shortcuts. On macOS Qt maps Ctrl to
+        the Cmd key automatically, so these are Cmd+Z / Cmd+Shift+Z on a Mac."""
         QShortcut(QKeySequence("Ctrl+Z"), self, self._on_undo)
         QShortcut(QKeySequence("Ctrl+Shift+Z"), self, self._on_redo)
 
     # ── Public API ───────────────────────────────────────────────────────────
 
     def load_image(self, img_path: str):
-        """Load an image file into the canvas."""
+        """Open an image file from disk into the canvas as a fresh background.
+
+        Reads the file with `robust_imread` (the app's safe loader that handles
+        odd paths/formats) in color; silently does nothing if it fails to load.
+        Resets to an empty mask via the canvas's `load_image`."""
         import cv2
         from modules.io_safe import robust_imread
         img = robust_imread(img_path, cv2.IMREAD_COLOR)
@@ -752,7 +1011,9 @@ class MaskPainterWidget(QWidget):
         self._banner.show()
 
     def load_image_array(self, img_np):
-        """Load a BGR numpy array directly."""
+        """Same as `load_image` but takes an already-decoded BGR numpy array
+        instead of a file path. Used when the caller already has the pixels in
+        memory."""
         self._view.load_image(img_np)
         self._update_brush_label(self._view.brush_radius)
         self._banner.show()
@@ -770,11 +1031,15 @@ class MaskPainterWidget(QWidget):
         self._update_frame_nav()
 
     def _prev_frame(self):
+        """Banner left-arrow: show the previous photo as the background (mask kept).
+        Stops at the first photo."""
         if self._frame_idx > 0:
             self._frame_idx -= 1
             self._show_background(self._frame_idx)
 
     def _next_frame(self):
+        """Banner right-arrow: show the next photo as the background (mask kept).
+        Stops at the last photo."""
         if self._frame_idx < len(self._frame_paths) - 1:
             self._frame_idx += 1
             self._show_background(self._frame_idx)
@@ -799,7 +1064,9 @@ class MaskPainterWidget(QWidget):
         self._next_frame_btn.setEnabled(self._frame_idx < n - 1)
 
     def load_existing_mask(self, mask_path: str):
-        """Load a previously saved mask."""
+        """Load a saved mask PNG from disk so the user can continue editing it.
+        Reads grayscale via the safe loader; ignores load failures. Call after the
+        image is loaded so sizes line up."""
         import cv2
         from modules.io_safe import robust_imread
         mask = robust_imread(mask_path, cv2.IMREAD_GRAYSCALE)
@@ -807,24 +1074,41 @@ class MaskPainterWidget(QWidget):
             self._view.load_mask(mask)
 
     # ── Slots ────────────────────────────────────────────────────────────────
+    # Small handlers connected to the toolbar controls; each just forwards to the
+    # canvas. Slider values come in as integers (Qt sliders are integer-only) and
+    # are divided by 100 to get the fractional opacity / brightness the canvas wants.
 
     def _on_opacity_changed(self, value):
+        """Overlay slider moved: pass the 0–100 value to the canvas as 0.0–1.0."""
         self._view.set_overlay_opacity(value / 100.0)
 
     def _on_brightness_changed(self, value):
+        """Brightness slider moved: 50–300 becomes 0.5–3.0 for the canvas."""
         self._view.set_brightness(value / 100.0)
 
     def _on_undo(self):
+        """Undo button / shortcut: undo the last paint action on the canvas."""
         self._view.undo()
 
     def _on_redo(self):
+        """Redo button / shortcut: redo the last undone action."""
         self._view.redo()
 
     def _set_mode(self, erase):
+        """Switch the canvas between paint and erase (called by the toolbar's
+        Paint/Erase buttons) and refresh which button looks active.
+
+        NOTE: this reaches into the canvas's `_erase_mode` directly rather than
+        going through a setter, so it does NOT emit `mode_changed`; the button
+        styling is updated here instead."""
         self._view._erase_mode = erase
         self._update_mode_btns()
 
     def _update_mode_btns(self):
+        """Restyle the Paint and Erase buttons so the active one is highlighted
+        (green for paint, red for erase) and the other looks dimmed. Called after
+        any mode change, from a button click or a right-click/E-key toggle on the
+        canvas."""
         active_green = ("QPushButton { background-color: #2a7a2a; color: white; font-size: 12px; "
                         "font-weight: bold; border-radius: 4px 0 0 4px; border: none; }")
         active_red = ("QPushButton { background-color: #aa3333; color: white; font-size: 12px; "
@@ -843,6 +1127,9 @@ class MaskPainterWidget(QWidget):
             self._erase_btn.setStyleSheet(inactive_right)
 
     def _show_help(self):
+        """Pop up the shortcuts cheat-sheet dialog (the toolbar "?" button). The
+        modifier label shows "Cmd" on macOS and "Ctrl" elsewhere so the listed
+        shortcuts match the user's actual keyboard."""
         import sys as _sys
         mod = "Cmd" if _sys.platform == "darwin" else "Ctrl"
         QMessageBox.information(self, "Mask Editor Shortcuts",
@@ -864,9 +1151,16 @@ class MaskPainterWidget(QWidget):
             f"  {mod}+0 \u2014 fit image to window")
 
     def _on_clear(self):
+        """Clear All button: wipe the whole mask (undoable)."""
         self._view.clear_mask()
 
     def _on_done(self):
+        """Save Mask button: finish the screen and hand the result to the host GUI.
+
+        If nothing was painted, warns the user that the whole frame will be
+        processed and asks to confirm; on confirm it emits `mask_skipped`. If a
+        mask exists it emits `mask_done` carrying a copy of the mask array. These
+        signals are how the host moves on to the detection/repair pipeline."""
         if not self._view.has_mask():
             reply = QMessageBox.question(
                 self, "No mask painted",
@@ -879,6 +1173,9 @@ class MaskPainterWidget(QWidget):
             self.mask_done.emit(self._view.get_mask())
 
     def _update_brush_label(self, radius=None):
+        """Refresh the toolbar's "Brush: Npx" readout. Connected to the canvas's
+        `brush_changed` signal; if no radius is passed it reads the current one
+        from the canvas."""
         if radius is None:
             radius = self._view.brush_radius
         self._brush_label.setText(f"Brush: {radius}px")

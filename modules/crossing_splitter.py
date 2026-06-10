@@ -1,6 +1,17 @@
 """
 Crossing splitter -- spine + tips model for X, T, Y, V, and multi-crossing blobs.
 
+WHERE THIS FITS IN THE APP
+--------------------------
+Star Trail CleanR detects airplane/satellite trails with a YOLO+SAHI model.
+When two (or more) trails cross, the detector often returns the crossing as ONE
+fat blob mask instead of separate trails. A single blob is hard to repair well,
+because the "Star Bridge" repair borrows clean sky along each trail's own motion
+direction, and a crossing has two directions. This module takes such a blob and
+splits it back into the individual trails (a long "spine" plus short crossing
+"tips") so each piece can be repaired with its own motion estimate. If a blob
+isn't actually a crossing, it's returned unchanged.
+
 SPINE + TIPS MODEL
 ------------------
 When trails cross, one trail is the SPINE (longest, runs unbroken through the
@@ -50,6 +61,12 @@ from skimage.measure import label as sklabel, regionprops as skregionprops
 
 
 # -- Constants ----------------------------------------------------------------
+# The two px-AREA thresholds below (_SPLIT_AREA_MIN, _MIN_AREA) are quoted "at
+# ref resolution" (a 6000x4000 = 24MP frame). At runtime only those two are
+# scaled by the actual frame size (see `area_scale` in `split_crossing`) so the
+# same physical trail behaves the same on a small JPEG and a full TIFF. The
+# Hough px thresholds (_HOUGH_MIN_LINE, _HOUGH_MAX_GAP) and the dimensionless
+# ratio/angle/percentile constants are NOT scaled.
 
 _SPLIT_AREA_MIN     = 5000    # px (at ref resolution) -- blobs smaller skip
 _ELONGATION_THRESH  = 4.5     # ratio -- blobs more elongated skip (already single trail)
@@ -64,44 +81,95 @@ _MIN_ASPECT         = 2.0     # ratio -- minimum major/minor for valid spine
 _SPINE_BAND_FACTOR  = 0.6     # spine half-width = measured_width * this factor
 _WIDTH_PERCENTILE   = 20      # percentile of cross-section widths for single-trail estimate
 _N_WIDTH_SAMPLES    = 20      # number of cross-section samples along the spine
-_END_FRACTION       = 0.15    # fraction of spine length at each end used for width
+_END_FRACTION       = 0.15    # px fraction -- UNUSED legacy constant from the old end-pixel width approach; width is now measured by binning the whole spine in _measure_spine_width
 _REF_FRAME_PX       = 6000 * 4000  # reference resolution for normalizing area thresholds
 
 
 # -- Geometry helpers ----------------------------------------------------------
 
 def _line_angle_deg(L):
-    """Angle of a line segment in degrees [0, 180)."""
+    """Angle of a line segment in degrees, folded into the range [0, 180).
+
+    A line has no direction (a segment pointing up-left is the same line as one
+    pointing down-right), so the angle is taken modulo 180 to treat those as
+    equal. Used to group Hough line segments by orientation.
+
+    L: a 4-tuple/list (x1, y1, x2, y2) of the segment's two endpoints.
+    Returns the orientation angle in degrees, 0 <= angle < 180.
+    """
     x1, y1, x2, y2 = L
     return float(np.degrees(np.arctan2(y2 - y1, x2 - x1)) % 180)
 
 
 def _circular_mean_angle(angle_list):
-    """Mean of angles in [0, 180) handling wraparound."""
+    """Average a set of orientation angles, handling the wraparound at 0/180.
+
+    A plain numeric average is wrong for angles: e.g. the mean of 1 deg and
+    179 deg should be 0 deg (they almost coincide), not 90 deg. This doubles
+    each angle so the [0,180) orientation space maps onto a full [0,360) circle,
+    averages the unit vectors there, then halves back. Used to get one
+    representative angle per DBSCAN cluster of Hough lines.
+
+    angle_list: a list of angles in degrees, each in [0, 180).
+    Returns the circular-mean angle in degrees, in [0, 180).
+    """
     rads = np.radians([2.0 * a for a in angle_list])
     mean_rad = np.arctan2(np.mean(np.sin(rads)), np.mean(np.cos(rads)))
     return float(np.degrees(mean_rad / 2.0) % 180.0)
 
 
 def _angle_dist(a, b):
-    """Angular distance in [0, 90] between two angles in [0, 180)."""
+    """Smallest angle between two orientations, in [0, 90].
+
+    Because orientations wrap at 180, the distance between e.g. 10 deg and
+    170 deg is 20 deg, not 160 deg. The result caps at 90 (perpendicular is the
+    most two undirected lines can differ). Used to decide whether two Hough
+    clusters point in genuinely different directions (a crossing) and as the
+    neighbourhood test inside the DBSCAN clustering.
+
+    a, b: angles in degrees, each in [0, 180).
+    Returns the wrap-aware angular separation in degrees, in [0, 90].
+    """
     d = abs(a - b)
     return min(d, 180.0 - d)
 
 
 def _line_length(L):
-    """Length of a line segment."""
+    """Euclidean length of a line segment.
+
+    L: a 4-tuple/list (x1, y1, x2, y2) of the segment's two endpoints.
+    Returns the straight-line distance between the endpoints, in pixels.
+    Used to weight each angle cluster by how much trail length it represents.
+    """
     x1, y1, x2, y2 = L
     return math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
 
 
 def _dbscan_angles(angles, eps, min_samples):
-    """DBSCAN clustering on circular angle values."""
+    """Group a list of orientation angles into clusters using DBSCAN.
+
+    This is a hand-rolled, from-scratch DBSCAN that runs on 1-D angle values
+    using the wrap-aware ``_angle_dist`` as its distance metric (so it correctly
+    treats angles near 0 and near 180 as close). It exists to find how many
+    distinct trail directions are present in a blob: each cluster is one
+    candidate trail orientation.
+
+    angles: list of angles in degrees, each in [0, 180).
+    eps: angular neighbourhood radius in degrees -- two angles within eps are
+        considered neighbours.
+    min_samples: minimum neighbours (including self) an angle needs to be a
+        "core" point that can grow a cluster.
+
+    Returns (labels, cluster_count) where ``labels[i]`` is the cluster id for
+    angle i (or -1 for noise/unclustered), and ``cluster_count`` is the number
+    of clusters formed.
+    """
     n = len(angles)
-    labels = [-1] * n
+    labels = [-1] * n        # -1 means "not yet assigned to any cluster" (noise)
     visited = [False] * n
     cluster_id = 0
 
+    # Neighbours of angle i: every angle within eps degrees of it (incl. itself).
     def nbrs(i):
         return [j for j in range(n) if _angle_dist(angles[i], angles[j]) <= eps]
 
@@ -110,8 +178,11 @@ def _dbscan_angles(angles, eps, min_samples):
             continue
         visited[i] = True
         hood = nbrs(i)
+        # Too few neighbours -> not a core point; leave as noise for now (it may
+        # still be pulled into a cluster later as a border point).
         if len(hood) < min_samples:
             continue
+        # Start a new cluster from this core point and flood-fill outward.
         labels[i] = cluster_id
         seed = list(hood)
         while seed:
@@ -119,8 +190,10 @@ def _dbscan_angles(angles, eps, min_samples):
             if not visited[q]:
                 visited[q] = True
                 q_hood = nbrs(q)
+                # Only core points expand the cluster further.
                 if len(q_hood) >= min_samples:
                     seed.extend(q_hood)
+            # Absorb q as a border point if it isn't already claimed.
             if labels[q] == -1:
                 labels[q] = cluster_id
         cluster_id += 1
@@ -137,18 +210,36 @@ def _measure_spine_width(xs_f, ys_f, along, perp, n_samples=20, pctl=20):
     extent (max - min) in each bin, and returns the pctl-th percentile extent.
     At crossing points the extent is wider; the low percentile captures the
     narrower sections where only the spine is present.
+
+    The goal is to recover how wide ONE trail is, even though the blob bulges
+    where trails overlap. Picking a low percentile (rather than the mean or max)
+    is the trick: most cross-sections contain only the spine and are narrow, so
+    the 20th percentile lands on a spine-only section and ignores the fat
+    junction zone.
+
+    xs_f, ys_f: float pixel coordinates of the blob (currently unused inside the
+        body -- the measurement works entirely from the projected ``along``/
+        ``perp`` arrays -- but kept in the signature for clarity/symmetry).
+    along: each pixel's distance projected along the spine direction.
+    perp: each pixel's signed perpendicular distance from the spine centerline.
+    n_samples: number of bins to slice the spine into along its length.
+    pctl: which percentile of the per-bin widths to return (low = spine-only).
+
+    Returns the estimated single-trail width in pixels.
     """
     t_min, t_max = float(along.min()), float(along.max())
     t_span = t_max - t_min
+    # Spine too short to slice meaningfully -> fall back to the full perp extent.
     if t_span < 5:
         return float(perp.max() - perp.min())
 
     edges = np.linspace(t_min, t_max, n_samples + 1)
     widths = []
     for i in range(n_samples):
+        # Pixels whose along-position falls in this bin.
         sel = (along >= edges[i]) & (along < edges[i + 1])
         if sel.sum() < 5:
-            continue
+            continue  # too few pixels in this slice to trust its width
         p_sel = perp[sel]
         widths.append(float(p_sel.max() - p_sel.min()))
 
@@ -177,25 +268,34 @@ def split_crossing(mask, frame_px=None):
     """
     area = int((mask > 0).sum())
     h, w = mask.shape[:2]
+    # Scale all px thresholds to this frame's resolution relative to the 24MP
+    # reference. frame_px lets the caller pass the FULL-frame size when `mask`
+    # is only a crop, so a cropped call behaves like a full-frame call.
     area_scale = (frame_px if frame_px else (h * w)) / _REF_FRAME_PX
     min_px = int(_MIN_AREA * area_scale)
     if area < _SPLIT_AREA_MIN * area_scale:
-        return [mask]
+        return [mask]  # too small to bother splitting
 
     # -- Elongation trigger (dimensionless) ------------------------------------
+    # Fit the tightest rotated rectangle around the blob. A lone trail is long
+    # and thin (high major/minor ratio); a crossing blob is squat. Only squat
+    # blobs proceed -- thin ones are already a single trail and need no split.
     blob_u8 = (mask > 0).astype(np.uint8) * 255
     ys, xs = np.where(blob_u8 > 0)
     pts = np.column_stack([xs, ys]).astype(np.float32)
     rect = cv2.minAreaRect(pts.reshape(-1, 1, 2))
-    major_len = max(rect[1])
+    major_len = max(rect[1])      # rect[1] is (width, height) of the box
     minor_len = min(rect[1])
     if minor_len < 1:
-        return [mask]
+        return [mask]  # degenerate (zero-thickness) box, can't form a ratio
     elongation = major_len / minor_len
     if elongation > _ELONGATION_THRESH:
         return [mask]  # already a single thin trail
 
     # -- Hough lines on tight crop ---------------------------------------------
+    # Crop to the blob's bounding box first so Hough only sees blob pixels and
+    # runs fast. A lower vote threshold is used for small blobs (fewer pixels
+    # means fewer votes are available, so 20 votes may be unreachable).
     row_lo, row_hi = int(ys.min()), int(ys.max())
     col_lo, col_hi = int(xs.min()), int(xs.max())
     blob_crop = blob_u8[row_lo:row_hi + 1, col_lo:col_hi + 1]
@@ -205,26 +305,33 @@ def split_crossing(mask, frame_px=None):
                                  minLineLength=_HOUGH_MIN_LINE,
                                  maxLineGap=_HOUGH_MAX_GAP)
     if lines_crop is None or len(lines_crop) < 2:
-        return [mask]
+        return [mask]  # need at least 2 line segments to detect a crossing
 
-    # Translate crop-local to full-frame coords
+    # Hough returned coords relative to the crop; shift them back to full-frame
+    # coordinates by adding the crop's top-left corner offset.
     lines = [[[L[0][0] + col_lo, L[0][1] + row_lo,
                L[0][2] + col_lo, L[0][3] + row_lo]]
              for L in lines_crop]
 
     # -- Angle clustering ------------------------------------------------------
+    # Group the line segments by orientation. Each cluster is one candidate
+    # trail direction; a true crossing produces 2+ clusters at different angles.
     angles = [_line_angle_deg(L[0]) for L in lines]
     labels, _ = _dbscan_angles(angles, _DBSCAN_EPS, _DBSCAN_MIN_SAMPLES)
-    unique = sorted(set(l for l in labels if l >= 0))
+    unique = sorted(set(l for l in labels if l >= 0))  # drop noise (-1)
     if not unique:
-        return [mask]
+        return [mask]  # no coherent direction found
 
+    # One representative angle per cluster.
     cluster_means = {cid: _circular_mean_angle(
         [angles[i] for i, l in enumerate(labels) if l == cid]
     ) for cid in unique}
 
     # Need at least 2 distinct angle clusters to identify a crossing
     if len(unique) >= 2:
+        # Find the largest angular gap between any two clusters. If even the
+        # widest pair is nearly parallel, this is parallel trails or noise, not
+        # a crossing -- bail.
         best_dist = 0.0
         for ci in range(len(unique)):
             for cj in range(ci + 1, len(unique)):
@@ -237,6 +344,10 @@ def split_crossing(mask, frame_px=None):
         return [mask]  # single direction, not a crossing
 
     # -- Pick spine direction: cluster with the most total Hough line length ----
+    # The spine is the dominant (longest) trail. "Most total line length" is a
+    # better proxy for the dominant trail than "most segments", because a long
+    # straight trail yields a few long segments while noise yields many short
+    # ones.
     cluster_lengths = {}
     for cid in unique:
         total = sum(_line_length(lines[i][0])
@@ -247,14 +358,19 @@ def split_crossing(mask, frame_px=None):
     spine_angle = cluster_means[spine_cid]
 
     # -- Project all blob pixels onto spine coordinate system ------------------
+    # Build a local axis system aligned to the spine: "along" runs down the
+    # spine, "perp" runs across it. Every blob pixel gets an (along, perp)
+    # coordinate measured from the blob centroid. This makes the spine a
+    # horizontal band (small |perp|) and the crossing arms stick out (large
+    # |perp|), which is what the band-split below relies on.
     xs_f = xs.astype(float)
     ys_f = ys.astype(float)
     cx_blob = float(xs_f.mean())
     cy_blob = float(ys_f.mean())
 
     spine_rad = np.radians(spine_angle)
-    along_dx, along_dy = np.cos(spine_rad), np.sin(spine_rad)
-    perp_dx, perp_dy = -np.sin(spine_rad), np.cos(spine_rad)
+    along_dx, along_dy = np.cos(spine_rad), np.sin(spine_rad)   # unit vector along spine
+    perp_dx, perp_dy = -np.sin(spine_rad), np.cos(spine_rad)    # unit vector across spine
 
     # along = projection onto spine direction (how far along the spine)
     along = (xs_f - cx_blob) * along_dx + (ys_f - cy_blob) * along_dy
@@ -267,7 +383,7 @@ def split_crossing(mask, frame_px=None):
         n_samples=_N_WIDTH_SAMPLES, pctl=_WIDTH_PERCENTILE)
 
     if spine_width < 3:
-        return [mask]
+        return [mask]  # implausibly thin measurement, don't trust the split
 
     # Find the spine's center offset by sampling per-bin median perpendicular
     # positions along the spine. Each bin contributes one center estimate;
@@ -275,25 +391,33 @@ def split_crossing(mask, frame_px=None):
     # end-pixel approach failed on T-shapes because one "end" IS the junction,
     # pulling the center way off.
     t_min, t_max = float(along.min()), float(along.max())
-    t_span = t_max - t_min
+    t_span = t_max - t_min      # (computed for symmetry with _measure_spine_width; not gated on here)
     edges = np.linspace(t_min, t_max, _N_WIDTH_SAMPLES + 1)
     bin_centers = []
     for i in range(_N_WIDTH_SAMPLES):
         sel = (along >= edges[i]) & (along < edges[i + 1])
         if sel.sum() < 5:
             continue
+        # Median perp of this slice = where the spine sits in this slice.
         bin_centers.append(float(np.median(perp[sel])))
+    # Median of the per-slice centers = the spine's overall perp offset.
     p_center = float(np.median(bin_centers)) if bin_centers else 0.0
 
     # -- Build spine and tip masks ---------------------------------------------
+    # Spine = every blob pixel within band_half of the spine centerline. The 0.6
+    # factor keeps the band a bit narrower than the full measured width so the
+    # arms separate cleanly while still capturing the junction overlap zone.
     band_half = spine_width * _SPINE_BAND_FACTOR
     spine_sel = np.abs(perp - p_center) <= band_half
 
-    # Spine mask
+    # Paint the selected pixels into a full-size mask (255 = spine).
     spine_mask = np.zeros_like(mask)
     spine_mask[ys[spine_sel], xs[spine_sel]] = 255
 
-    # Validate spine is elongated
+    # Validate spine is elongated. If the chosen band came out blobby rather
+    # than trail-shaped, the direction estimate was wrong -- abandon the split
+    # and return the original blob untouched. Uses the largest connected
+    # component of the spine mask (the band can fragment).
     sp_rp = skregionprops(sklabel(spine_mask))
     if sp_rp:
         sp = max(sp_rp, key=lambda x: x.area)
@@ -302,9 +426,11 @@ def split_crossing(mask, frame_px=None):
             if sp_elong < _MIN_ASPECT:
                 return [mask]  # spine isn't trail-shaped, bail
     else:
-        return [mask]
+        return [mask]  # spine mask is empty, bail
 
-    # Tip masks: remaining pixels, split into connected components
+    # Tip masks: every blob pixel NOT in the spine band. These are the crossing
+    # arms. Split them into separate connected components so each arm becomes
+    # its own tip mask (repaired independently downstream).
     tip_all = np.zeros_like(mask)
     tip_sel = ~spine_sel
     if tip_sel.sum() < min_px:
@@ -314,6 +440,8 @@ def split_crossing(mask, frame_px=None):
     n_cc, cc_labels, cc_stats, _ = cv2.connectedComponentsWithStats(
         tip_all, connectivity=8)
 
+    # cc id 0 is the background, so iterate from 1. Drop sub-threshold
+    # fragments; only arms with enough area become real tips.
     tips = []
     for cc_id in range(1, n_cc):
         cc_area = cc_stats[cc_id, cv2.CC_STAT_AREA]
@@ -324,14 +452,17 @@ def split_crossing(mask, frame_px=None):
         tips.append(tip_mask)
 
     if not tips:
-        return [mask]  # no valid tips
+        return [mask]  # no valid tips -> treat as a single trail after all
 
     # -- Verify full coverage --------------------------------------------------
-    # Every pixel of the original blob must be in spine or a tip.
-    # Tiny fragments that fell below min_px are reassigned to the spine.
+    # Every pixel of the original blob must end up in the spine or a tip, so the
+    # split loses no detected trail pixels (union(spine + tips) == blob). The
+    # only pixels that can leak out are the sub-threshold tip fragments dropped
+    # above; fold them back into the spine.
     covered = spine_mask.copy()
     for t in tips:
-        covered = cv2.bitwise_or(covered, t)
+        covered = cv2.bitwise_or(covered, t)          # union of spine + all tips
+    # uncovered = blob pixels not in any output mask (blob AND NOT covered).
     uncovered = cv2.bitwise_and(blob_u8, cv2.bitwise_not(covered))
     if uncovered.any():
         # Reassign uncovered pixels to spine (they are small sub-threshold fragments)
