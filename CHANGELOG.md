@@ -2,6 +2,15 @@
 
 ---
 
+## v2.51-beta
+- **Automatic updates on Mac actually work now.** The app's built-in one-click updater has been silently failing to start in every Mac version to date — one missing component killed it during launch, with no error shown anywhere. That's why updates never installed themselves and the Check for Updates button could do nothing. The component is fixed, and we watched the full loop run for the first time: open the app, get the native "new version available" window, click Install, and the app updates itself and relaunches. From this version forward, that's how updating works.
+- **A broken updater can never ship again.** Every Mac build is now launch-tested automatically before release: the build system starts the freshly built app and verifies the updater engine actually comes alive. If it doesn't, the release fails and never reaches anyone.
+- **One update notice, not two.** With the built-in updater now working, its native window handles new-version notices by itself. The orange in-app banner steps back to being the backup: it only appears if the built-in updater isn't available (and on Linux, which updates via the website).
+- **No more silent update failures anywhere.** If the updater can't run — most often because the app isn't in the Applications folder — the app now says so plainly and opens the download page instead of doing nothing. Update checks also keep a small diagnostic log, so if anything ever goes wrong again, one file tells the whole story.
+- **Main page polish.** The spacing above the folder field now matches the other steps, the blue frame count sits centered over the buttons, a clearer welcome line, and image dimensions read "(6,000 x 4,000px)".
+- **FAQ and About refreshed.** The Star Bridge description now matches how the repair really works (color-matched borrowing from the best neighboring frame), the Trail Detection description no longer overpromises, and the About tab gained an Instagram link.
+- **Smoke tests:** 164 passing.
+
 ## v2.50-beta
 - **Tangled crossings now get cleaned.** When three or more trails crossed through the same spot (an airplane crossed by satellites, for example), the app could fail to separate the tangle and would then discard the whole detection as a suspected false alarm — leaving every trail in that crossing untouched in the cleaned photo. Now, when a tangle can't be separated into individual trails, the app recognizes it as a genuine crossing, keeps the AI's detection exactly as found, and repairs all the trails through it. Simple two-trail crossings were always handled and are unchanged.
 - **Mac installing and updating made foolproof.** Three related fixes for a problem where macOS silently disables the app's built-in updater if the app isn't properly installed in the Applications folder — which left some users stuck downloading every release from the website by hand:
