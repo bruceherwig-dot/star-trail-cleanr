@@ -379,8 +379,10 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
         debug_out (dict, optional): filled with a "components" list. Each entry
             has id, area, bbox, split_into, and a "segments" list. Each segment
             has tracking_ok, dx, dy, n_stars, method, still_trail_px,
-            union_zeroed_px, and ring_off (the per-channel B,G,R brightness nudge
-            the ring-levelling step applied, or None if it could not measure).
+            union_zeroed_px, ring_off (the per-channel B,G,R brightness nudge
+            the final ring-levelling step applied, or None if it could not
+            measure), and base ("prev" or "next" -- which neighbor's sky colour
+            sat closest to this frame's local collar and was borrowed from).
     Returns:
         Repaired copy of frame.
     """
@@ -513,14 +515,17 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
             _ok = False
             _n_stars = 0
 
-            # ── Crayon v2: the cleaner RAW neighbor, for the give-up cases ───────
-            # When the bridge can't produce clean borrowed sky (tracking failed, a
-            # borrowed pixel still reads as trail, or both neighbors are dirty) we no
-            # longer synthesize a sky-color + grain patch (that speckled on smooth
-            # twilight skies). Instead we paste the CLEANER real neighbor frame raw
-            # (no shift, no brightness levelling). raw_clean = the per-pixel cleaner-
-            # neighbor image for this window. It is None only when there is genuinely no
-            # neighbor at all (degenerate single-frame run).
+            # ── Per-neighbor colour fit, measured on a local sky collar ──────────
+            # The collar is a thin ring hugging the trail (minus every trail pixel
+            # in the window). Medians on that collar tell us two things: (a) which
+            # neighbor's sky colour sits closest to THIS frame right here, and
+            # (b) the exact per-channel nudge that maps each neighbor's sky onto
+            # this frame's. Fire glow, moving smoke and airglow make neighbors
+            # genuinely differ frame to frame; borrowing without this produced
+            # two-toned violet patches (071A7602 blue rectangle, see
+            # known_problems). Every borrowed pixel below is pre-levelled with its
+            # OWN source's nudge, and where a base neighbor must be chosen the
+            # colour-closest one wins (Bruce's rule, 2026-06-10).
             _rp = neighbor_frames[prev_idx][y0:y1, x0:x1] if has_prev else None
             _rn = neighbor_frames[next_idx][y0:y1, x0:x1] if has_next else None
             _pdirty = ((neighbor_masks[prev_idx][y0:y1, x0:x1] > 0)
@@ -529,16 +534,55 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
             _ndirty = ((neighbor_masks[next_idx][y0:y1, x0:x1] > 0)
                        if (has_next and neighbor_masks is not None and neighbor_masks[next_idx] is not None)
                        else np.zeros(comp_mask.shape, dtype=bool))
+            _collar = ((cv2.dilate(comp_mask.astype(np.uint8), _RING_KERNEL) > 0)
+                       & ~trail[y0:y1, x0:x1])
+            _maxv = 65535 if frame.dtype == np.uint16 else 255
+            _off_p = _off_n = None
+            _cur_sky = frame[y0:y1, x0:x1][_collar]
+            if _cur_sky.shape[0] >= 20:
+                _cur_med = np.median(_cur_sky, axis=0).astype(np.float32)
+                if _rp is not None:
+                    _ps = _rp[_collar & ~_pdirty]
+                    if _ps.shape[0] >= 20:
+                        _off_p = _cur_med - np.median(_ps, axis=0).astype(np.float32)
+                if _rn is not None:
+                    _ns = _rn[_collar & ~_ndirty]
+                    if _ns.shape[0] >= 20:
+                        _off_n = _cur_med - np.median(_ns, axis=0).astype(np.float32)
+            # Which neighbor's sky is the closer colour match here?
+            _next_closer = (_off_p is not None and _off_n is not None
+                            and float(np.abs(_off_n).sum()) < float(np.abs(_off_p).sum()))
+
+            def _level(img, off):
+                """A borrowed window, nudged onto this frame's local sky colour."""
+                if off is None:
+                    return img.copy()
+                return np.clip(img.astype(np.float32) + off,
+                               0, _maxv).astype(frame.dtype)
+
+            # ── Crayon v2: the colour-closest RAW neighbor, for the give-up cases ──
+            # When the bridge can't produce clean borrowed sky (tracking failed, a
+            # borrowed pixel still reads as trail, or both neighbors are dirty) we
+            # paste the real neighbor frame, pre-levelled to this frame's local sky.
+            # Base = the colour-closest neighbor; pixels where the base is dirty and
+            # the other neighbor is clean come from the other (also pre-levelled, so
+            # the patch cannot end up two-toned). raw_clean is None only when there
+            # is genuinely no neighbor at all (degenerate single-frame run).
             if _rp is not None and _rn is not None:
-                raw_clean = _rp.copy()
-                raw_clean[_pdirty & ~_ndirty] = _rn[_pdirty & ~_ndirty]   # prev dirty -> next
-                _both = _pdirty & _ndirty                                  # both dirty -> less-dirty one
-                if _both.any() and int((_ndirty & comp_mask).sum()) < int((_pdirty & comp_mask).sum()):
-                    raw_clean[_both] = _rn[_both]
+                _rp_l = _level(_rp, _off_p)
+                _rn_l = _level(_rn, _off_n)
+                if _next_closer:
+                    raw_clean = _rn_l.copy()
+                    raw_clean[_ndirty & ~_pdirty] = _rp_l[_ndirty & ~_pdirty]
+                else:
+                    raw_clean = _rp_l.copy()
+                    raw_clean[_pdirty & ~_ndirty] = _rn_l[_pdirty & ~_ndirty]
+                # Pixels dirty in BOTH stay with the base: there is nothing clean
+                # to borrow, and the base is already the closest colour.
             elif _rp is not None:
-                raw_clean = _rp.copy()
+                raw_clean = _level(_rp, _off_p)
             elif _rn is not None:
-                raw_clean = _rn.copy()
+                raw_clean = _level(_rn, _off_n)
             else:
                 raw_clean = None
 
@@ -561,6 +605,12 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                     warped_prev = _shift_image(patch_prev,  dx / 2.0,  dy / 2.0)
                     warped_next = _shift_image(patch_next, -dx / 2.0, -dy / 2.0)
                     _addt("warp_s", time.perf_counter() - _ts)
+                    # Pre-level each warped neighbor onto this frame's local sky
+                    # colour BEFORE any composition, so pixels sourced from
+                    # different neighbors land on the same colour (no two-toned
+                    # patches when the fire glow / smoke shifts between frames).
+                    _wp = _level(warped_prev, _off_p)
+                    _wn = _level(warped_next, _off_n)
                     if neighbor_masks is None:
                         # No masks provided — fall back to color-based contamination check.
                         # A neighbor is "contaminated" if >20% of its trail-region pixels
@@ -579,18 +629,19 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                         if cp <= _CONTAM_THRESH and cn <= _CONTAM_THRESH:
                             if combine == "single_shift":
                                 # One neighbor, shifted into place. No averaging, so
-                                # borrowed stars keep full brightness.
-                                synth = warped_prev.copy()
+                                # borrowed stars keep full brightness. The colour-
+                                # closest neighbor is the one borrowed from.
+                                synth = (_wn.copy() if _next_closer else _wp.copy())
                                 _method = "single_shift"
                             else:
-                                synth = ((warped_prev.astype(np.float32) +
-                                          warped_next.astype(np.float32)) / 2.0).astype(frame.dtype)
+                                synth = ((_wp.astype(np.float32) +
+                                          _wn.astype(np.float32)) / 2.0).astype(frame.dtype)
                                 _method = "blend"
                         elif cp <= cn:
-                            synth = warped_prev.copy()
+                            synth = _wp.copy()
                             _method = "prev_only"
                         else:
-                            synth = warped_next.copy()
+                            synth = _wn.copy()
                             _method = "next_only"
                     else:
                         # Masks provided: decide per pixel which neighbor to trust.
@@ -603,23 +654,24 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                                   if has_next and neighbor_masks[next_idx] is not None
                                   else np.zeros(comp_mask.shape, dtype=bool))
                         # Base fill where both neighbors are clean: averaged blend
-                        # (default) or the previous neighbor alone (single_shift).
-                        # Then override the pixels where exactly one neighbor is
-                        # dirty: prev dirty & next clean -> take next only, and vice
-                        # versa. Pixels dirty in both are left as-is here and get
-                        # sky-filled later (see the AND union block). The per-pixel
-                        # dirty handling is identical under both modes.
+                        # (default) or the colour-closest neighbor alone
+                        # (single_shift). Then override the pixels where exactly one
+                        # neighbor is dirty: prev dirty & next clean -> take next
+                        # only, and vice versa. All sources are pre-levelled to this
+                        # frame's local sky, so mixing sources cannot two-tone the
+                        # patch. Pixels dirty in both are left as-is here and get
+                        # filled later (see the AND union block).
                         if combine == "single_shift":
-                            synth = warped_prev.copy()
+                            synth = (_wn.copy() if _next_closer else _wp.copy())
                         else:
-                            synth = ((warped_prev.astype(np.float32) +
-                                      warped_next.astype(np.float32)) / 2.0).astype(frame.dtype)
+                            synth = ((_wp.astype(np.float32) +
+                                      _wn.astype(np.float32)) / 2.0).astype(frame.dtype)
                         use_next_only = comp_mask & prev_c & ~next_c
                         if use_next_only.any():
-                            synth[use_next_only] = warped_next[use_next_only]
+                            synth[use_next_only] = _wn[use_next_only]
                         use_prev_only = comp_mask & next_c & ~prev_c
                         if use_prev_only.any():
-                            synth[use_prev_only] = warped_prev[use_prev_only]
+                            synth[use_prev_only] = _wp[use_prev_only]
                         _method = "single_shift" if combine == "single_shift" else "blend"
                 else:
                     # Tracking failed (too few stars to measure the shift). Crayon v2:
@@ -641,10 +693,10 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                 if _ok:
                     # prev's stars sit at p; in THIS frame they are at p+(dx,dy).
                     # Shift prev forward by (dx,dy) to land them on this frame.
-                    synth = _shift_image(patch_prev, _dx, _dy)
+                    synth = _level(_shift_image(patch_prev, _dx, _dy), _off_p)
                     _method = "prev_shift"
                 else:
-                    synth = patch_prev.copy()
+                    synth = _level(patch_prev, _off_p)
                     _method = "prev_only"
 
             else:
@@ -658,10 +710,10 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                 if _ok:
                     # next's stars sit at p+(dx,dy) relative to THIS frame's p.
                     # Shift next back by (-dx,-dy) to land them on this frame.
-                    synth = _shift_image(patch_next, -_dx, -_dy)
+                    synth = _level(_shift_image(patch_next, -_dx, -_dy), _off_n)
                     _method = "next_shift"
                 else:
-                    synth = patch_next.copy()
+                    synth = _level(patch_next, _off_n)
                     _method = "next_only"
 
             _tp = time.perf_counter()
@@ -715,8 +767,8 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                           else np.zeros(comp_mask.shape, dtype=bool))
                 union_both = comp_mask & prev_c & next_c
                 if union_both.any():
-                    # Crayon v2: both neighbors dirty here -> paste the less-dirty raw
-                    # neighbor (native brightness) instead of a synthetic fill.
+                    # Crayon v2: both neighbors dirty here -> paste the colour-
+                    # closest raw neighbor (pre-levelled) instead of a synthetic fill.
                     if raw_clean is not None:
                         result[y0:y1, x0:x1][union_both] = raw_clean[union_both]
                     else:
@@ -735,14 +787,11 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
             # Collar pixels exclude every trail pixel in the window so nearby trails
             # cannot skew the sky measurement.
             _ring_off = None
-            _ring = ((cv2.dilate(comp_mask.astype(np.uint8), _RING_KERNEL) > 0)
-                     & ~trail[y0:y1, x0:x1])
-            _ring_px = frame[y0:y1, x0:x1][_ring]
+            _ring_px = frame[y0:y1, x0:x1][_collar]
             _patch = result[y0:y1, x0:x1][comp_mask]
             if _ring_px.shape[0] >= 20 and _patch.shape[0] >= 20:
                 _off = (np.median(_ring_px, axis=0).astype(np.float32) -
                         np.median(_patch, axis=0).astype(np.float32))
-                _maxv = 65535 if frame.dtype == np.uint16 else 255
                 result[y0:y1, x0:x1][comp_mask] = np.clip(
                     _patch.astype(np.float32) + _off, 0, _maxv).astype(frame.dtype)
                 _ring_off = [round(float(v), 1) for v in _off]
@@ -758,6 +807,7 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                     "still_trail_px":  _still_trail_px,
                     "union_zeroed_px": _union_zeroed_px,
                     "ring_off":        _ring_off,
+                    "base":            "next" if _next_closer else "prev",
                 })
                 comp_dbg["segments"].append(seg_info)
 
