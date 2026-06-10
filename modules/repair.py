@@ -92,6 +92,10 @@ MAX_DISP  = 60.0  # maximum plausible star displacement N-1 to N+1 (px)
 MIN_STARS = 5     # minimum tracked stars needed to trust the shift
 TRAIL_WARM_MARGIN   = 20  # how much warmer than local sky R-B counts as a trail remnant
 TRAIL_BRIGHT_THRESH = 50  # minimum R value to be considered trail-bright
+# Collar for the ring-levelling step: the repaired patch is brightness-matched to
+# the sky in a thin ring hugging the trail (dilate by 15 px, minus the trail
+# itself). Local on purpose -- a whole-window match drags warm twilight fills gray.
+_RING_KERNEL = np.ones((31, 31), np.uint8)
 
 _LK_PARAMS = dict(
     winSize=(21, 21),
@@ -375,7 +379,8 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
         debug_out (dict, optional): filled with a "components" list. Each entry
             has id, area, bbox, split_into, and a "segments" list. Each segment
             has tracking_ok, dx, dy, n_stars, method, still_trail_px,
-            union_zeroed_px.
+            union_zeroed_px, and ring_off (the per-channel B,G,R brightness nudge
+            the ring-levelling step applied, or None if it could not measure).
     Returns:
         Repaired copy of frame.
     """
@@ -660,16 +665,11 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                     _method = "next_only"
 
             _tp = time.perf_counter()
-            # ── Paste the borrowed neighbor sky at its native brightness ─────────
-            # We deliberately do NOT brightness-level the patch to the surrounding
-            # window. On a twilight gradient the window average spans the darker sky
-            # above the warm horizon glow, so levelling dragged warm fills toward gray
-            # (a visible gray rectangle: the neighbor sky there reads red ~200, but
-            # levelling shipped red ~138). The neighbor frames are near-identical to this
-            # one, so their sky already matches -- pasting it raw keeps the warm glow.
-            # Levelling only ever helped a faint lighten on the first frame or two of a
-            # run (sky brightness drifts most at the very start); that is 1-2 frames in
-            # an 800-frame run, not worth graying every twilight fill.
+            # Paste the borrowed neighbor sky as-is. Brightness is corrected AFTER
+            # all the fills below, in one ring-levelling step (see end of this loop)
+            # that measures the sky in a thin LOCAL collar around the trail -- never
+            # against the whole window, which on a twilight gradient drags warm fills
+            # toward gray (the neighbor sky read red ~200 but shipped ~138 gray).
             result[y0:y1, x0:x1][comp_mask] = synth[comp_mask]
 
             # ── Warm-pixel cleanup (still-trail remnants after warp) ──────────
@@ -722,6 +722,30 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                     else:
                         _sky_fill(result[y0:y1, x0:x1], union_both, comp_mask)
                 _union_zeroed_px = int(union_both.sum())
+
+            # ── Ring levelling: match the finished patch to the sky right beside it ──
+            # Sky brightness drifts frame to frame (worst at a run's first and last
+            # frames), so a borrowed patch can sit a few levels brighter or darker
+            # than this frame's sky -- in a timelapse that flickers as a ghost
+            # rectangle. Nudge the whole repaired patch, per colour channel, by the
+            # median difference between the sky in a thin collar hugging the trail
+            # and the patch itself. The collar is LOCAL (~15 px), so on a twilight
+            # gradient it measures the warm glow next to the patch and warm fills
+            # stay warm. Mid-run the difference measures ~0 and this is a no-op.
+            # Collar pixels exclude every trail pixel in the window so nearby trails
+            # cannot skew the sky measurement.
+            _ring_off = None
+            _ring = ((cv2.dilate(comp_mask.astype(np.uint8), _RING_KERNEL) > 0)
+                     & ~trail[y0:y1, x0:x1])
+            _ring_px = frame[y0:y1, x0:x1][_ring]
+            _patch = result[y0:y1, x0:x1][comp_mask]
+            if _ring_px.shape[0] >= 20 and _patch.shape[0] >= 20:
+                _off = (np.median(_ring_px, axis=0).astype(np.float32) -
+                        np.median(_patch, axis=0).astype(np.float32))
+                _maxv = 65535 if frame.dtype == np.uint16 else 255
+                result[y0:y1, x0:x1][comp_mask] = np.clip(
+                    _patch.astype(np.float32) + _off, 0, _maxv).astype(frame.dtype)
+                _ring_off = [round(float(v), 1) for v in _off]
             _addt("paste_s", time.perf_counter() - _tp)
 
             if seg_info is not None:
@@ -733,6 +757,7 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                     "method":          _method,
                     "still_trail_px":  _still_trail_px,
                     "union_zeroed_px": _union_zeroed_px,
+                    "ring_off":        _ring_off,
                 })
                 comp_dbg["segments"].append(seg_info)
 
