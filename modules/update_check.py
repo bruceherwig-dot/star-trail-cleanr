@@ -21,12 +21,35 @@ Why it never raises:
   so every failure path returns None and the caller simply skips the banner.
 """
 import json
+import os
 import platform
 import re
 import sys
+import time
+import traceback
 import urllib.error
 import urllib.request
 from typing import Optional
+
+# Diagnostic log for the update-banner check. The check itself must never
+# crash or block startup, but its failures must ALSO never be invisible:
+# the orange banner silently not appearing in frozen Mac builds went unnoticed
+# for an unknown number of versions because every error was swallowed with no
+# trace (discovered 2026-06-10). One line per check attempt, plus the full
+# traceback on failure. Same location as sparkle_debug.log so a user can be
+# asked for both files at once.
+_LOG_PATH = os.path.expanduser("~/.star_trail_cleanr/update_check.log")
+
+
+def _log(msg: str):
+    """Append a timestamped line to the diagnostic log. Best-effort, never
+    raises (a logging failure must not break the check it documents)."""
+    try:
+        os.makedirs(os.path.dirname(_LOG_PATH), exist_ok=True)
+        with open(_LOG_PATH, "a") as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n")
+    except Exception:
+        pass
 
 # GitHub "owner/repo" slug for the public Star Trail CleanR repository. Used to
 # build both the API URL (below) and the human-facing download URLs.
@@ -136,6 +159,7 @@ def check_for_update(local_version_str: str, timeout_s: float = TIMEOUT_S) -> Op
     """
     local = parse_local(local_version_str)
     if local is None:
+        _log(f"check: local version unparseable ({local_version_str!r}) -> no banner")
         return None
     try:
         req = urllib.request.Request(
@@ -148,6 +172,7 @@ def check_for_update(local_version_str: str, timeout_s: float = TIMEOUT_S) -> Op
         with urllib.request.urlopen(req, timeout=timeout_s) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError, ValueError):
+        _log(f"check FAILED (local={local_version_str}):\n{traceback.format_exc()}")
         return None
     tag = data.get("tag_name")
     remote = parse_tag(tag)
@@ -155,5 +180,7 @@ def check_for_update(local_version_str: str, timeout_s: float = TIMEOUT_S) -> Op
     # local one. Equal versions (user is current) and unparseable tags both fall
     # through to None, so no banner is shown.
     if remote is None or remote <= local:
+        _log(f"check: local={local_version_str} latest={tag} -> current, no banner")
         return None
+    _log(f"check: local={local_version_str} latest={tag} -> UPDATE, banner should show")
     return {"tag": tag, "download_url": get_download_url()}

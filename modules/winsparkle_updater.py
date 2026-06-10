@@ -101,6 +101,14 @@ def init_winsparkle(appcast_url, app_name, app_version, company_name="Star Trail
         _dll = None
 
 
+def updater_alive():
+    """True when the WinSparkle engine loaded successfully. Mirrors
+    sparkle_updater.updater_alive(): used to suppress the orange banner when
+    the native one-click updater owns notification, and by fallback logic to
+    detect a dead engine."""
+    return _dll is not None
+
+
 def check_for_updates():
     """Trigger a foreground update check (shows native UI). User-initiated:
     the Settings 'Check for Updates' button and the in-app update banner.

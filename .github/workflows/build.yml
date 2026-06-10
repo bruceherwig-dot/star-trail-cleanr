@@ -53,6 +53,15 @@ jobs:
         # PyInstaller hidden imports, library version mismatches, etc.
         # If this fails, the bad bundle never reaches users.
         run: python scripts/smoke_built_bundle.py
+      - name: Updater-alive gate
+        # Launches the BUILT app with STC_UPDATER_SMOKE=1: it starts the
+        # Sparkle engine and exits 0 only if the engine actually came alive
+        # inside the frozen bundle. Five versions shipped with a dead engine
+        # (init_sparkle crashed on a module PyInstaller didn't bundle; every
+        # Mac user's auto-update silently never worked) because nothing in CI
+        # ever STARTED the engine -- presence of Sparkle.framework was checked,
+        # liveness never was. If this step fails, fix the engine; do not skip.
+        run: STC_UPDATER_SMOKE=1 ./dist/StarTrailCleanR.app/Contents/MacOS/StarTrailCleanR
       - name: Build DMG
         # DMG instead of ZIP because macOS Gatekeeper triggers App
         # Translocation on .app bundles launched from a downloaded ZIP,
@@ -104,6 +113,10 @@ jobs:
         run: python build_helper.py
       - name: Smoke test bundled app
         run: python scripts/smoke_built_bundle.py
+      - name: Updater-alive gate
+        # Same gate as the Apple Silicon job: the built app must prove its
+        # Sparkle engine starts, or the build fails. See that job's comment.
+        run: STC_UPDATER_SMOKE=1 ./dist/StarTrailCleanR.app/Contents/MacOS/StarTrailCleanR
       - name: Build DMG
         # Same drag-to-install layout as the Apple Silicon DMG: app icon next
         # to an Applications-folder shortcut, so users install it properly

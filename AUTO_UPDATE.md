@@ -45,13 +45,22 @@ which has no built-in installer and uses a download link.
 The installed app has **two independent notifications**. Both run on launch.
 Know the difference:
 
-**A) The orange in-app banner (our own custom notice).**
+**A) The orange in-app banner (our own custom notice) — the FALLBACK channel.**
 - Code: `star_trail_cleanr.py` → `_start_update_check()` (called every launch in
   the MainWindow setup) → `UpdateCheckThread` → `modules/update_check.py`
   `check_for_update()`; shown by `_on_update_result()`.
 - It checks **GitHub's latest release** (NOT the feed) on **every launch**.
+- **Suppressed when the engine is alive** (added 2026-06-10): if
+  `updater_alive()` is True on Mac/Windows in a frozen build, the banner does
+  NOT show — the engine's native popup owns notification, so the user never
+  sees two competing prompts for one release. The banner appears only when the
+  engine is dead (wrong install location / engine failure) and always on
+  Linux. The first day both channels were ever alive at once (2026-06-10), the
+  double-prompt confused Bruce immediately.
 - Its "Update" button (`_on_update_download`) runs the **one-click in-place
-  installer** on Mac/Windows, and only opens the website on **Linux**.
+  installer** on Mac/Windows when the engine is alive, shows the
+  explain-and-open-website fallback when it is dead, and opens the website on
+  **Linux**.
 
 **B) The built-in one-click installer (Sparkle on Mac, WinSparkle on Windows).**
 - Code: `modules/sparkle_updater.py`, `modules/winsparkle_updater.py`; started at

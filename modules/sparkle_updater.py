@@ -115,7 +115,15 @@ def init_sparkle(on_update_found=None):
             _log("init_sparkle: controller class missing from loaded bundle, aborting")
             return
         _log("init_sparkle: building delegate")
-        from Foundation import NSObject
+        # Get NSObject from the pyobjc bridge that is ALREADY imported and
+        # bundled (the `objc` module loaded a few lines up). Do NOT import it
+        # from the `Foundation` wrapper package -- that package is not bundled
+        # by PyInstaller, so `from Foundation import NSObject` raised
+        # ModuleNotFoundError inside every frozen Mac build, killing the
+        # updater engine at startup. That single line is why no Mac user ever
+        # received an automatic update (confirmed live on 2026-06-10: shipped
+        # 2.49 logs this exact exception, then "no controller, no-op" forever).
+        NSObject = objc.lookUpClass("NSObject")
 
         # An Objective-C delegate object that Sparkle calls back into when
         # events happen. Subclassing NSObject (not a plain Python class) is
@@ -163,6 +171,14 @@ def init_sparkle(on_update_found=None):
     except Exception:
         _log(f"init_sparkle: EXCEPTION\n{traceback.format_exc()}")
         traceback.print_exc()
+
+
+def updater_alive():
+    """True when the Sparkle engine started successfully (controller exists).
+    Used by the CI updater-alive gate (STC_UPDATER_SMOKE): the built app exits
+    nonzero when the engine is dead, failing the build before it ships. Added
+    after five versions shipped with a dead engine that nothing ever tested."""
+    return _updater_controller is not None
 
 
 def check_for_updates():
