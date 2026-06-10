@@ -103,10 +103,18 @@ def init_winsparkle(appcast_url, app_name, app_version, company_name="Star Trail
 
 def check_for_updates():
     """Trigger a foreground update check (shows native UI). User-initiated:
-    the Settings 'Check for Updates' button and the in-app update banner."""
+    the Settings 'Check for Updates' button and the in-app update banner.
+
+    Returns True when the check was handed to WinSparkle, False when the
+    updater engine never loaded -- callers treat False as "show the user a
+    visible fallback" so the button never silently does nothing."""
     if _dll is None:
-        return
-    _dll.win_sparkle_check_update_with_ui()
+        return False
+    try:
+        _dll.win_sparkle_check_update_with_ui()
+        return True
+    except Exception:
+        return False
 
 
 def check_for_updates_in_background():

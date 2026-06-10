@@ -167,17 +167,25 @@ def init_sparkle(on_update_found=None):
 
 def check_for_updates():
     """Trigger an update check. Sparkle handles the entire UI (native dialog,
-    download progress, install confirmation, restart). No-op if init_sparkle
-    didn't run successfully."""
+    download progress, install confirmation, restart).
+
+    Returns True when the check was handed to Sparkle, False when the updater
+    engine never started (init_sparkle failed or never ran) or the call blew
+    up. Callers MUST treat False as "show the user a visible fallback" -- a
+    Check for Updates button that silently does nothing is exactly the failure
+    a real Mac user hit on 2026-06-10 (engine dead on their machine, button
+    mute, no way to know why)."""
     if _updater_controller is None:
         _log("check_for_updates: no controller, no-op")
-        return
+        return False
     _log("check_for_updates: invoking checkForUpdates_(None)")
     try:
         _updater_controller.checkForUpdates_(None)
         _log("check_for_updates: returned")
+        return True
     except Exception:
         _log(f"check_for_updates: EXCEPTION\n{traceback.format_exc()}")
+        return False
 
 
 def check_for_updates_in_background():

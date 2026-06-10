@@ -72,6 +72,34 @@ Know the difference:
 | Windows | WinSparkle | appcast-windows.xml | one-click in-place |
 | Linux | none | (banner only) | banner button opens GitHub download page |
 
+## The wrong-location failure (added 2026-06-10, after a real user hit it)
+
+macOS **silently disables Sparkle** when the app runs from the mounted DMG or
+from the quarantine sandbox ("App Translocation" — typically when the .app was
+not properly dragged into /Applications). Symptoms: the launch splash says
+"Checking for updates…" (that text is OURS and appears before Sparkle starts),
+no update is ever offered, and Settings → Check for Updates does nothing. A
+user on 2.45 (Apple Silicon, latest macOS) hit exactly this and had been
+reinstalling from the website every release. Server side was verified healthy
+the same day (feed current, signature valid over the shipped DMG, key match,
+Sparkle present in the bundle) — the failure was entirely machine-local.
+
+Three defenses (all added 2026-06-10):
+1. **DMG layout**: both Mac DMGs now show the app NEXT TO an
+   Applications-folder shortcut (`.github/workflows/build.yml`, staged with
+   ditto + `ln -s /Applications`), the canonical drag-to-install layout.
+2. **Launch guard**: `star_trail_cleanr.py` (after MainWindow shows) detects
+   `/AppTranslocation/` or a `/Volumes/…` executable path and tells the user
+   to move the app to Applications.
+3. **Never-silent button**: `sparkle_updater.check_for_updates()` /
+   `winsparkle_updater.check_for_updates()` return False when the engine is
+   dead; both button handlers then show `_updater_unavailable_fallback()` (a
+   plain-language dialog + the download page) instead of doing nothing.
+
+Diagnostic: every install writes `~/.star_trail_cleanr/sparkle_debug.log` —
+it records whether the engine started and what each check attempt did. Ask a
+user for that file before theorizing.
+
 ## The bootstrapping rule (important, easy to forget)
 
 The updater can only fix itself **going forward**. A user on an OLD version runs

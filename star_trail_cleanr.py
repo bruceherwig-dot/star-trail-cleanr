@@ -2174,17 +2174,40 @@ class MainWindow(QMainWindow):
             self._scrub_chk.setEnabled(not running)
             self._scrub_run_hint.setVisible(running)
 
+    def _updater_unavailable_fallback(self):
+        """The built-in updater engine is not running, most often because
+        macOS disabled it (app launched from the disk image or another
+        non-Applications location). NEVER fail silently -- a mute Check for
+        Updates button is exactly what stranded a real Mac user on 2026-06-10.
+        Explain the cause in plain language, then open the download page so
+        the user can still update by hand."""
+        QMessageBox.information(
+            self, "Updater not available",
+            "The built-in updater isn't available in this session.\n\n"
+            "On a Mac this usually means the app isn't running from the "
+            "Applications folder: open the downloaded disk image, drag "
+            "Star Trail CleanR into Applications, and launch it from there. "
+            "Updates will then install themselves with one click.\n\n"
+            "Opening the download page so you can get the latest version "
+            "now.")
+        import webbrowser
+        webbrowser.open("https://startrailcleanr.com")
+
     def _on_check_for_updates(self):
         """Settings tab "Check for Updates" button. In a frozen build, trigger
         the platform's in-app updater (Sparkle on Mac, WinSparkle on Windows);
-        on Linux or when running from source, just open the project website."""
+        on Linux or when running from source, just open the project website.
+        If the updater engine isn't running, show the visible fallback instead
+        of doing nothing."""
         if getattr(sys, 'frozen', False):
             if sys.platform == "darwin":
                 from modules.sparkle_updater import check_for_updates
-                check_for_updates()
+                if not check_for_updates():
+                    self._updater_unavailable_fallback()
             elif sys.platform == "win32":
                 from modules.winsparkle_updater import check_for_updates
-                check_for_updates()
+                if not check_for_updates():
+                    self._updater_unavailable_fallback()
             else:
                 import webbrowser
                 webbrowser.open("https://startrailcleanr.com")
@@ -2466,10 +2489,12 @@ class MainWindow(QMainWindow):
         page in the browser."""
         if sys.platform == "darwin":
             from modules.sparkle_updater import check_for_updates
-            check_for_updates()
+            if not check_for_updates():
+                self._updater_unavailable_fallback()
         elif sys.platform == "win32":
             from modules.winsparkle_updater import check_for_updates
-            check_for_updates()
+            if not check_for_updates():
+                self._updater_unavailable_fallback()
         elif self._update_download_url:
             from PySide6.QtCore import QUrl
             from PySide6.QtGui import QDesktopServices
@@ -5615,6 +5640,32 @@ if __name__ == '__main__':
     except Exception as _launch_exc:
         _handle_launch_failure(_launch_exc)
         sys.exit(1)
+
+    # Mac location guard: if the app is running off the mounted disk image or
+    # from the quarantine sandbox ("App Translocation"), macOS silently
+    # disables the built-in Sparkle updater -- the user sees "Checking for
+    # updates" at launch but no update ever arrives and the Check for Updates
+    # button stays mute. Stranded a real user on 2026-06-10 (they reinstalled
+    # from the website every release, never knowing why). Tell them how to fix
+    # it the moment the window is up.
+    if sys.platform == "darwin" and getattr(sys, "frozen", False):
+        _exe_path = sys.executable
+        if "/AppTranslocation/" in _exe_path or _exe_path.startswith("/Volumes/"):
+            _where = ("the downloaded disk image"
+                      if _exe_path.startswith("/Volumes/")
+                      else "a temporary location macOS uses for newly "
+                           "downloaded apps")
+            def _show_move_to_applications_notice():
+                """Deferred so the dialog appears over the main window, after
+                the splash is gone."""
+                QMessageBox.information(
+                    window, "Move Star Trail CleanR to Applications",
+                    f"Star Trail CleanR is running from {_where}, so macOS "
+                    "has turned off automatic updates for this session.\n\n"
+                    "To fix it: drag Star Trail CleanR into your Applications "
+                    "folder, then launch it from there. Updates will then "
+                    "install themselves with one click.")
+            QTimer.singleShot(3500, _show_move_to_applications_notice)
 
     # Dismiss the startup splash. Minimum on-screen duration of 3000 ms (3
     # seconds) so the user gets to see the title + tagline + progress bar even

@@ -60,9 +60,19 @@ jobs:
         # crashed two confirmed users. Mounting a DMG and dragging the
         # .app to /Applications is the canonical macOS install flow and
         # avoids translocation entirely.
+        #
+        # The DMG window shows the app NEXT TO an Applications-folder
+        # shortcut (the canonical drag-to-install layout). A bare lone icon
+        # invites users to run the app straight off the DMG, where macOS
+        # disables Sparkle updates -- which stranded a real user (2026-06-10,
+        # on 2.45, reinstalling from the website every release). ditto, not
+        # cp -R: cp corrupts code-signing seals and symlinks.
         run: |
+          mkdir dmg_stage
+          ditto dist/StarTrailCleanR.app dmg_stage/StarTrailCleanR.app
+          ln -s /Applications dmg_stage/Applications
           hdiutil create -volname "Star Trail CleanR" \
-            -srcfolder dist/StarTrailCleanR.app \
+            -srcfolder dmg_stage \
             -ov -format UDZO \
             StarTrailCleanR-Mac-AppleSilicon.dmg
       - uses: actions/upload-artifact@v4
@@ -95,9 +105,15 @@ jobs:
       - name: Smoke test bundled app
         run: python scripts/smoke_built_bundle.py
       - name: Build DMG
+        # Same drag-to-install layout as the Apple Silicon DMG: app icon next
+        # to an Applications-folder shortcut, so users install it properly
+        # instead of running it off the DMG (which kills Sparkle updates).
         run: |
+          mkdir dmg_stage
+          ditto dist/StarTrailCleanR.app dmg_stage/StarTrailCleanR.app
+          ln -s /Applications dmg_stage/Applications
           hdiutil create -volname "Star Trail CleanR" \
-            -srcfolder dist/StarTrailCleanR.app \
+            -srcfolder dmg_stage \
             -ov -format UDZO \
             StarTrailCleanR-Mac-Intel.dmg
       - uses: actions/upload-artifact@v4
