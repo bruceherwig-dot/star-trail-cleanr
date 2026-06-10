@@ -1855,15 +1855,17 @@ class MainWindow(QMainWindow):
         <h2 style='color:{BRAND_HEADING_BLUE}; margin-bottom:2px;'>Trail Detection</h2>
         <p style='margin-top:2px;'>Each frame is run through a YOLO segmentation model
         trained on thousands of manually labeled airplane and satellite trails across many
-        cameras, lenses, and sky conditions. The model produces pixel-accurate masks for
-        every trail it finds.</p>
+        cameras, lenses, and sky conditions. The model traces a mask over the trails it
+        finds before we apply the repair.</p>
 
         <h2 style='color:{BRAND_HEADING_BLUE}; margin-bottom:2px;'>The Fix: Star Bridge Repair</h2>
-        <p style='margin-top:2px;'>For each trail, Star Trail CleanR pulls clean pixels
-        from the frame immediately before and after, blending them across the trail using
-        a morphing technique called <i>Star Bridge</i>. This preserves the real stars
-        underneath the trail and keeps the brightness and color natural. No smudges,
-        no blank patches.</p>
+        <p style='margin-top:2px;'>For each trail, Star Trail CleanR looks at the frames
+        just before and after, picks the neighbor whose sky best matches, and shifts it
+        so the stars line up exactly with the frame being repaired. Every borrowed pixel
+        is color-corrected to the local sky before it is laid over the trail, so the real
+        stars underneath come back at full brightness and the repair blends invisibly,
+        even against twilight gradients or a glowing horizon. We call this technique
+        <i>Star Bridge</i>. No smudges, no blank patches.</p>
 
         <h2 style='color:{BRAND_HEADING_BLUE}; margin-bottom:2px;'>Workflow</h2>
         <ol style='margin-top:2px;'>
@@ -2264,12 +2266,13 @@ class MainWindow(QMainWindow):
         <li>Project site: <a href='https://startrailcleanr.com'>StarTrailCleanR.com</a></li>
         <li>Photos for sale: <a href='https://bruceherwigphotographer.square.site/shop/astrophotography/3?page=1&amp;limit=30&amp;sort_by=category_order&amp;sort_order=asc'>bruceherwig.com</a></li>
         <li>Blog: <a href='https://bruceherwig.wordpress.com'>bruceherwig.wordpress.com</a></li>
+        <li>Instagram: <a href='https://www.instagram.com/bruceherwig'>instagram.com/bruceherwig</a></li>
         </ul>
 
         <h3 style='color:{BRAND_HEADING_BLUE}; margin:12px 0 2px 0;'>Acknowledgments</h3>
         <p style='margin-top:2px;'>Star Trail CleanR exists because of the generosity of fellow astrophotographers
         who shared their image sequences for AI training, tested early builds, and offered
-        feedback. Thank you, all of you.</p>
+        feedback. Thank you, all.</p>
         <p><a href='https://bruceherwig.wordpress.com/star-trail-cleanr/#Thanks'>See the
         full list of contributors &rarr;</a></p>
 
@@ -2459,7 +2462,27 @@ class MainWindow(QMainWindow):
         """Handle the background update check's result. `result` carries the
         release "tag" and "download_url". Shows the orange update banner unless
         the user already dismissed this exact tag (via banner or pre-window
-        popup)."""
+        popup) -- or unless the built-in one-click updater engine is alive, in
+        which case the engine OWNS update notification (its native install
+        popup) and the banner stays hidden so the user never faces two
+        competing prompts for the same release. The banner is the FALLBACK
+        channel: it appears when the engine is dead (wrong install location,
+        engine failure -- the user then gets the explain-and-open-website
+        path) and on Linux, which has no engine. First day both channels were
+        ever alive at once was 2026-06-10; the double-prompt confused Bruce
+        within seconds, hence this gate."""
+        if getattr(sys, 'frozen', False):
+            try:
+                if sys.platform == "darwin":
+                    from modules.sparkle_updater import updater_alive
+                    if updater_alive():
+                        return
+                elif sys.platform == "win32":
+                    from modules.winsparkle_updater import updater_alive
+                    if updater_alive():
+                        return
+            except Exception:
+                pass  # any doubt -> show the banner (never zero prompts)
         tag = result.get("tag", "")
         # Stay quiet if the user has already dismissed this release tag
         # (either via the pre-window popup or a previous banner click).
@@ -3060,8 +3083,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(headline)
 
         subtitle = QLabel(
-            "Drop in a folder of star trail frames and let the AI scrub out "
-            "airplane and satellite streaks."
+            "Point it at a folder of star trail frames and our AI will do "
+            "its best to remove all the airplane and satellite trails."
         )
         sub_font = QFont()
         sub_font.setPointSize(13)
@@ -3077,9 +3100,13 @@ class MainWindow(QMainWindow):
         # has to align two QLabels of different fonts on the same line —
         # that produced overlap. Frame count is dynamic, lives in its own
         # label to the right.
-        # Option A: heading + frame count share one row. Heading on the left
-        # at its sizeHint width; count on the far right, pushed there by a
-        # stretch. No separate count row, no extra vertical space.
+        # Heading + frame count genuinely share ONE row: heading on the left,
+        # blue "N frames found (WxH)" count on the far right, pushed there by
+        # the stretch between them. No separate count row, so Step 1's
+        # heading-to-field gap is structurally identical to Step 2's. (An
+        # earlier version kept the count in its own stretch-proportioned row
+        # below the heading -- that row's height was a visible extra gap
+        # Bruce flagged on 2026-06-10.)
         step1_row = QHBoxLayout()
         step1_row.setSpacing(12)
         step1 = QLabel(
@@ -3087,26 +3114,17 @@ class MainWindow(QMainWindow):
             f"&nbsp;&nbsp;<span style='font-size:14pt; color:{MUTED_TEXT}; vertical-align:baseline;'>(.JPG, .TIF 8/16-bit, and RAW)</span>"
         )
         step1.setTextFormat(Qt.RichText)
-        step1_row.addWidget(step1)
-        step1_row.addStretch(1)
-        layout.addLayout(step1_row)
-
-        # Frame count label sits in its own row above the input field, with
-        # stretch proportions matching row_in below (4 empty : 2 label).
-        # That keeps the label horizontally centered above the Browse +
-        # Open Folder buttons no matter how wide the window is. Replaces
-        # the prior "padding-right: 100px" workaround which only worked at
-        # one fixed window width.
-        count_row = QHBoxLayout()
-        count_row.setContentsMargins(0, 0, 0, 0)
-        count_row.addStretch(4)
+        # Mirror row_in's 4:2 stretch proportions (field=4, buttons=1+1) so the
+        # count label's slot sits exactly over the Browse + Open Folder buttons
+        # and the centered text stays centered over them at any window width.
+        step1_row.addWidget(step1, 4)
         self._frame_count_label = QLabel("")
         self._frame_count_label.setAlignment(Qt.AlignCenter)
         self._frame_count_label.setStyleSheet(
             "color: #5b9bd5; font-size: 15pt;"
         )
-        count_row.addWidget(self._frame_count_label, 2)
-        layout.addLayout(count_row)
+        step1_row.addWidget(self._frame_count_label, 2)
+        layout.addLayout(step1_row)
 
         row_in = QHBoxLayout()
         self._folder_input = QLineEdit()
@@ -3842,7 +3860,7 @@ class MainWindow(QMainWindow):
                     _sz = _image_size(first)
                     if _sz is not None:
                         _w, _h = _sz
-                        dim_str = f"  ({_w:,}px x {_h:,}px)"
+                        dim_str = f"  ({_w:,} x {_h:,}px)"
                 except Exception:
                     pass
                 self._frame_count_label.setText(
@@ -5611,6 +5629,17 @@ if __name__ == '__main__':
                 pass
 
         init_sparkle(on_update_found=_dismiss_splash_for_update)
+        # CI updater-alive gate: when launched with STC_UPDATER_SMOKE=1 the
+        # app exits immediately after starting the updater engine -- exit 0
+        # only if the engine actually came alive inside this frozen build.
+        # Exists because five versions shipped with a dead engine (a missing
+        # bundled module killed init_sparkle on every user's Mac) and nothing
+        # in CI ever started the engine to notice.
+        if os.environ.get("STC_UPDATER_SMOKE") == "1":
+            from modules.sparkle_updater import updater_alive
+            _alive = updater_alive()
+            print(f"UPDATER_SMOKE: controller_alive={_alive}", flush=True)
+            sys.exit(0 if _alive else 1)
         # Check for an update on EVERY launch. Sparkle shows its one-click
         # "install now" popup ONLY if a newer version exists; if the user is
         # current, nothing appears. So a new release reaches people the moment
