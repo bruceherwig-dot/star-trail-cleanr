@@ -2,6 +2,14 @@
 
 ---
 
+## v2.50-beta
+- **Tangled crossings now get cleaned.** When three or more trails crossed through the same spot (an airplane crossed by satellites, for example), the app could fail to separate the tangle and would then discard the whole detection as a suspected false alarm — leaving every trail in that crossing untouched in the cleaned photo. Now, when a tangle can't be separated into individual trails, the app recognizes it as a genuine crossing, keeps the AI's detection exactly as found, and repairs all the trails through it. Simple two-trail crossings were always handled and are unchanged.
+- **Mac installing and updating made foolproof.** Three related fixes for a problem where macOS silently disables the app's built-in updater if the app isn't properly installed in the Applications folder — which left some users stuck downloading every release from the website by hand:
+  - The downloaded disk image now shows the app next to an Applications-folder shortcut, the standard "drag here to install" layout, instead of a lone icon.
+  - If the app is launched from the disk image or another temporary location, it now tells you right away that automatic updates are off and how to fix it (drag the app into Applications).
+  - The Check for Updates button never silently does nothing anymore. If the built-in updater isn't running, the app explains why and opens the download page instead.
+- **Smoke tests:** 164 passing.
+
 ## v2.49-beta
 - **Folders that mix file types now clean instead of stopping with an error.** If your folder holds both 8-bit and 16-bit versions of the same shots (a common export leftover), the app used to halt and ask you to move one set out. Now it checks every frame up front, picks the depth most of the sequence uses, quietly evens out the odd frames to match, and just cleans. Your originals are never touched, and a one-line note in the run header tells you it happened.
 - **Repaired spots now match the sky around them, always.** Three related fixes to how trail gaps are filled:
