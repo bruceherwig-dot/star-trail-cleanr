@@ -2,6 +2,15 @@
 
 ---
 
+## v2.49-beta
+- **Folders that mix file types now clean instead of stopping with an error.** If your folder holds both 8-bit and 16-bit versions of the same shots (a common export leftover), the app used to halt and ask you to move one set out. Now it checks every frame up front, picks the depth most of the sequence uses, quietly evens out the odd frames to match, and just cleans. Your originals are never touched, and a one-line note in the run header tells you it happened.
+- **Repaired spots now match the sky around them, always.** Three related fixes to how trail gaps are filled:
+  - The first and last frames of a run no longer show faint bright or dark rectangles where trails were removed. The sky's brightness drifts slightly at the very start and end of a night, so patches borrowed from a neighboring frame could sit a few shades off. Every patch is now matched to the sky immediately around it before it's pasted.
+  - Repairs near changing light — a wildfire glow, drifting smoke, twilight gradients — no longer leave off-color rectangles. When the light genuinely changes between frames, the app now borrows from whichever neighboring frame matches the local color best, and color-corrects every borrowed pixel to the frame being repaired, so a patch can never show a color that wasn't really there.
+  - The last-resort fill (used when no clean neighbor exists, e.g. a slow satellite covering the same spot for three frames) now uses real neighboring sky with the same color matching, instead of a synthesized patch that could look speckled on smooth twilight skies.
+- **Faint stars survive repairs better.** Repairs used to blend two neighboring frames together, which dimmed the faintest borrowed stars toward the sky. Repairs now borrow from a single neighbor shifted precisely into place, so borrowed stars keep their full brightness.
+- **Smoke tests:** 164 passing.
+
 ## v2.48-beta
 - **Updates now install themselves with one click, the way they're meant to.** When a new version is available, the in-app update notice downloads it, installs it in place, and restarts Star Trail CleanR for you, on Mac and Windows. It no longer sends you to the website to download and reinstall by hand. (Linux still uses the download page, since it has no built-in installer.)
 - **The app now checks for a new version the moment you open it, every time.** Previously the built-in installer only checked on a once-a-day schedule, so a new release could take up to a day to show up. Now it checks on launch and offers the update right away when there's something new.

@@ -108,12 +108,12 @@ from modules.trail_grouper import detection_props
 from modules.repair import repair_frame
 from modules.run_logger import RunLogger
 
-# TEMPORARY TEST (2026-06-09): Star Bridge repair combine mode under evaluation.
-# "average" is the shipped default (blend both warped neighbors). "single_shift"
-# is the candidate Bruce is testing (use one shifted neighbor, no averaging, so
-# faint stars don't wash out). Overridable via the STC_REPAIR_COMBINE env var.
-# REVERT this default to "average" before any release until single+shift is
-# confirmed by Bruce's real-run review. Does NOT affect the Crayon give-up path.
+# Star Bridge repair combine mode. "single_shift" is the SHIPPED default
+# (v2.49-beta, 2026-06-10): borrow one colour-matched neighbor shifted into
+# place -- no averaging, so faint stars keep full brightness instead of washing
+# out. Confirmed better than the old "average" (blend both warped neighbors) by
+# Bruce's side-by-side review across multiple real datasets. "average" remains
+# available via the STC_REPAIR_COMBINE env var for comparison runs.
 REPAIR_COMBINE = os.environ.get("STC_REPAIR_COMBINE", "single_shift")
 
 
