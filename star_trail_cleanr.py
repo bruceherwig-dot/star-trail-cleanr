@@ -4154,11 +4154,21 @@ class MainWindow(QMainWindow):
                     _usable = _available * _SAFETY
                     _fit = int((_usable - _BASE) / _PER_FRAME) if _PER_FRAME else 20
                     _bit = _bytes_per * 8
-                    if _fit < 5:
-                        # Even the smallest safe batch won't fit. Don't shrink
-                        # below 5 -- tell the user honestly and let them decide.
+                    # Raw memory the smallest safe batch (5 frames) actually needs,
+                    # WITHOUT the 20% cushion. Only warn when free memory is below
+                    # this -- i.e. the run genuinely might not fit. The cushion
+                    # still governs the batch SIZE below, but it must not trigger a
+                    # scary "not enough memory" dialog when the user objectively
+                    # has more free RAM than the job needs (Bruce, 2026-06-11: a
+                    # 6.5 GB-free / 5.2 GB-needed case warned anyway, because the
+                    # old gate compared against cushioned memory, not raw free).
+                    _need_raw = _BASE + _PER_FRAME * 5
+                    if _available < _need_raw:
+                        # Genuinely short: even the smallest batch's raw need is
+                        # more than the free memory. Tell the user honestly and let
+                        # them decide. (Don't shrink below the 5-frame quality floor.)
                         from PySide6.QtWidgets import QMessageBox as _QMB
-                        _need = _fmt_gb(_BASE + _PER_FRAME * 5)
+                        _need = _fmt_gb(_need_raw)
                         resp = _QMB.warning(
                             self,
                             "Not enough memory",
@@ -4176,7 +4186,11 @@ class MainWindow(QMainWindow):
                             return None
                         self._max_batch = 5
                     else:
-                        self._max_batch = min(20, _fit)
+                        # Enough raw memory. Pick the largest batch the cushion
+                        # allows, but never below the 5-frame quality floor -- so a
+                        # tight-but-sufficient machine just runs at the small batch
+                        # with no warning, instead of being blocked.
+                        self._max_batch = max(5, min(20, _fit))
                     self._mem_note = (
                         f"mem_avail={_available // (1024 * 1024)}MB "
                         f"bit={_bit} frame={_decoded_frame // (1024 * 1024)}MB "
