@@ -158,6 +158,19 @@ jobs:
       - name: Smoke test bundled app
         run: python scripts/smoke_built_bundle.py
         shell: pwsh
+      - name: Updater-alive gate
+        # Windows edition of the Mac gate: the BUILT app must prove its
+        # WinSparkle engine loads (STC_UPDATER_SMOKE=1 makes it exit 0 only
+        # when the DLL came alive), or the build fails. GUI exes detach from
+        # the console, so Start-Process -Wait is required to read the real
+        # exit code. Added after the Mac engine shipped dead for 50 versions
+        # because nothing in CI ever started it.
+        run: |
+          $env:STC_UPDATER_SMOKE = "1"
+          $p = Start-Process -FilePath "dist\StarTrailCleanR\StarTrailCleanR.exe" -Wait -PassThru
+          Write-Host "updater smoke exit code: $($p.ExitCode)"
+          if ($p.ExitCode -ne 0) { exit 1 }
+        shell: pwsh
       - name: Read version
         id: version
         run: echo "version=$(Get-Content version.txt)" >> $env:GITHUB_OUTPUT

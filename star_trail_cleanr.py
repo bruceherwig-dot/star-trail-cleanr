@@ -5658,6 +5658,17 @@ if __name__ == '__main__':
             app_version=VERSION,
             company_name="Star Trail CleanR",
         )
+        # CI updater-alive gate, Windows edition: same contract as the Mac
+        # gate above -- with STC_UPDATER_SMOKE=1 the app exits right after
+        # starting the updater engine, exit 0 only if the WinSparkle DLL
+        # actually loaded inside this frozen build. Added 2026-06-10 after the
+        # Mac engine was found dead in every shipped build with nothing in CI
+        # ever starting it; the Windows engine had the same zero-witness risk.
+        if os.environ.get("STC_UPDATER_SMOKE") == "1":
+            from modules.winsparkle_updater import updater_alive
+            _alive = updater_alive()
+            print(f"UPDATER_SMOKE: controller_alive={_alive}", flush=True)
+            sys.exit(0 if _alive else 1)
         # Same on Windows: check on every launch via WinSparkle. The native
         # "update available" window appears only if there's a newer version.
         _winsparkle_check_on_launch()
