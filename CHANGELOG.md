@@ -2,6 +2,12 @@
 
 ---
 
+## v2.52-beta
+- **Folders with simple numbered names now process in the right order.** If your frames are named without leading zeros (1.jpg, 2.jpg ... 900.jpg, as GoPro and some cameras and phones do), Star Trail CleanR was reading them in text order (1, 10, 100 ... 2, 20), which scrambled the sequence. That made repairs borrow from the wrong neighboring frames and put the final stack out of order. Frames are now sorted by their actual number, so 2 follows 1 and 10 follows 9. Your files are never renamed or changed; only the reading order is fixed. Folders with zero-padded names (IMG_0001, DSC_0001, and similar) were always correct and are unaffected.
+- **The low-memory warning no longer cries wolf.** Before a run, the app warned about memory whenever things were tight, even when you actually had more free memory than the job needed. It now only warns when your free memory is genuinely below what the run requires, and a tight-but-sufficient computer simply runs at a smaller batch size with no interruption.
+- **Windows auto-updates get the same safety net as Mac.** Every Windows build is now launch-tested before release to confirm its updater actually starts, so a broken updater can't ship unnoticed.
+- **Smoke tests:** 169 passing.
+
 ## v2.51-beta
 - **Automatic updates on Mac actually work now.** The app's built-in one-click updater has been silently failing to start in every Mac version to date — one missing component killed it during launch, with no error shown anywhere. That's why updates never installed themselves and the Check for Updates button could do nothing. The component is fixed, and we watched the full loop run for the first time: open the app, get the native "new version available" window, click Install, and the app updates itself and relaunches. From this version forward, that's how updating works.
 - **A broken updater can never ship again.** Every Mac build is now launch-tested automatically before release: the build system starts the freshly built app and verifies the updater engine actually comes alive. If it doesn't, the release fails and never reaches anyone.
