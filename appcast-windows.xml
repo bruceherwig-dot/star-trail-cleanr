@@ -6,6 +6,13 @@
     <description>Auto-update feed for Star Trail CleanR on Windows.</description>
     <language>en</language>
         <item>
+            <title>Version 2.51-beta</title>
+            <pubDate>Thu, 11 Jun 2026 00:34:31 +0000</pubDate>
+            <sparkle:version>2.51</sparkle:version>
+            <sparkle:shortVersionString>2.51-beta</sparkle:shortVersionString>
+            <enclosure url="https://github.com/bruceherwig-dot/star-trail-cleanr/releases/download/v2.51-beta/StarTrailCleanRSetup.zip" length="699695700" type="application/octet-stream" sparkle:edSignature="feDzzqfJq2rNpCFnaSpUrhN8m8xQOa45EJ6y1g4EGXSd7cO4EBGcgQLrD6+s3znMg8/RlVu3Kf/Vt2fJcwptCA=="/>
+        </item>
+        <item>
             <title>Version 2.50-beta</title>
             <pubDate>Wed, 10 Jun 2026 20:23:33 +0000</pubDate>
             <sparkle:version>2.50</sparkle:version>
