@@ -727,10 +727,11 @@ class CleanerWorker(QThread):
             os.makedirs(output_folder, exist_ok=True)
 
             from modules.frame_list import (
-                dedupe_frames, glob_patterns, frame_too_small, MIN_FRAME_SHORT_SIDE)
+                dedupe_frames, glob_patterns, frame_too_small, MIN_FRAME_SHORT_SIDE,
+                natural_key)
             frames = sorted(set(
                 f for e in glob_patterns() for f in glob.glob(os.path.join(folder, e))
-            ))
+            ), key=natural_key)
             if not frames:
                 self.error.emit(f"No image files found in: {folder}")
                 return

@@ -27,6 +27,28 @@ the preference, so nothing is ever dropped to zero.
 """
 
 import os
+import re
+
+# Number-aware ("natural") ordering of frame paths. A plain text sort puts
+# "10.jpg" right after "1.jpg" (and "2.jpg" all the way after "100.jpg"), which
+# scrambles the capture order for folders whose filenames are NOT zero-padded --
+# e.g. GoPro sets named 1.jpg ... 900.jpg. Scrambled order means the Star Bridge
+# repair borrows from the wrong neighbor frames and the final stack is out of
+# sequence. natural_key splits each path into text and number chunks and sorts
+# the number chunks numerically, so 1, 2, ... 9, 10, 11 come out in true order.
+# Zero-padded names (IMG_0001, 143A8819, LRT_00651) are UNAFFECTED -- their text
+# order already equals their numeric order. re.split with a capturing group
+# always alternates text/number chunks at fixed positions, so two paths compare
+# text-to-text and int-to-int by position and never raise a type error.
+_NUM_CHUNK_RE = re.compile(r"(\d+)")
+
+
+def natural_key(path):
+    """Sort key giving number-aware order for a file path (str or Path).
+    Used for EVERY frame-list ordering so the GUI and worker stay in lockstep."""
+    return [int(chunk) if chunk.isdigit() else chunk.lower()
+            for chunk in _NUM_CHUNK_RE.split(str(path))]
+
 
 # Extensions we treat as frames. Lower-case; callers compare case-insensitively.
 # Camera RAW formats (libraw/rawpy coverage). A RAW is debayered to a 16-bit RGB
@@ -129,7 +151,7 @@ def dedupe_frames(paths, prefer_raw=True):
     # (the > comparison below is strict). This pre-sort is what makes the
     # tie-break deterministic and identical on the GUI and worker sides.
     chosen = {}
-    for fp in sorted(paths, key=lambda p: str(p)):
+    for fp in sorted(paths, key=natural_key):
         stem, ext = _stem_and_ext(fp)
         if stem in chosen:
             _, prev_ext = _stem_and_ext(chosen[stem])
@@ -139,7 +161,7 @@ def dedupe_frames(paths, prefer_raw=True):
                 chosen[stem] = fp
         else:
             chosen[stem] = fp
-    return sorted(chosen.values(), key=lambda p: str(p))
+    return sorted(chosen.values(), key=natural_key)
 
 
 def dedupe_jpg_tiff(paths):
@@ -197,4 +219,4 @@ def gather_frames(folder):
             full = os.path.join(folder, name)
             if os.path.isfile(full):
                 out.append(full)
-    return sorted(out)
+    return sorted(out, key=natural_key)

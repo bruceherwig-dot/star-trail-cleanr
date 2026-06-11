@@ -139,7 +139,7 @@ def _raw_labeled_from_state(state, h, w):
             raw[rz > 0] = label_id
     return raw
 from modules.io_safe import robust_imread, robust_imread_diag, robust_imwrite
-from modules.frame_list import dedupe_frames, IMAGE_EXTS, RAW_EXTS
+from modules.frame_list import dedupe_frames, natural_key, IMAGE_EXTS, RAW_EXTS
 
 
 def _init_worker_sentry():
@@ -304,7 +304,8 @@ def load_frame_files(frame_dir: Path, start: int, batch: int,
     Note: this helper is the no-neighbor variant; the actual run uses
     load_with_neighbors so repair can see one frame on each side.
     """
-    files = sorted(p for p in frame_dir.iterdir() if p.suffix.lower() in IMAGE_EXTS)
+    files = sorted((p for p in frame_dir.iterdir() if p.suffix.lower() in IMAGE_EXTS),
+                   key=natural_key)
     # Drop twins (JPG/TIFF/RAW of the same frame) on the FULL list before
     # slicing, so frame indices match the GUI's (which dedups the same way,
     # with the same RAW-vs-JPG/TIFF preference, before planning batches).
@@ -323,7 +324,8 @@ def load_with_neighbors(frame_dir: Path, start: int, batch: int,
     up to one extra frame before and after, and core_start/core_end
     mark the indices of the actual batch frames within all_files.
     """
-    all_sorted = sorted(p for p in frame_dir.iterdir() if p.suffix.lower() in IMAGE_EXTS)
+    all_sorted = sorted((p for p in frame_dir.iterdir() if p.suffix.lower() in IMAGE_EXTS),
+                        key=natural_key)
     # Drop twins on the FULL list before slicing/indexing, so frame numbers
     # match the GUI's batch plan (which dedups identically, same preference, up front).
     all_sorted = dedupe_frames(all_sorted, prefer_raw=prefer_raw)
