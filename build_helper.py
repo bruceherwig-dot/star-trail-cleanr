@@ -198,6 +198,13 @@ cmd = [
     '--collect-all', 'tifffile',
     '--collect-all', 'rawpy',
     '--collect-all', 'psutil',
+    # matplotlib 3.11.0 (June 2026) imports fontTools at module load
+    # (dviread.py: import fontTools.agl) and PyInstaller's matplotlib recipe
+    # doesn't pack it yet -- every frozen build died at launch with
+    # ModuleNotFoundError: fontTools (caught by the CI launch-test gate,
+    # v2.53-beta first attempt). fontTools is a matplotlib dependency, always
+    # installed, so collecting it is free.
+    '--collect-all', 'fontTools',
     '--runtime-hook', 'rthooks/pyi_rthook_gpu_override.py',
 ]
 # Force PyInstaller to exclude the same skip list at the module-analysis level,
