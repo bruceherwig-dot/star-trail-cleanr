@@ -59,6 +59,20 @@ _MIRROR_BASES = [
     f"https://mirrors.aliyun.com/pytorch-wheels/{CUDA_SUFFIX}",
 ]
 
+# Known-good (torch, torchvision) pairs that have published cu128 Windows wheels,
+# newest first. This is the SELF-HEAL fallback: if the version baked into a build
+# ever has no cu128 wheel (PyTorch occasionally skips a CUDA flavor for a release,
+# e.g. 2.12.0 shipped cu126 + cu130 but NOT cu128), the installer walks this list
+# and uses the newest pair that is actually downloadable instead of dying on a 404.
+# Every pair here is verified present on the cu128 index. The first entry should
+# match the version the Windows build is pinned to. Keep newest-first.
+_KNOWN_GOOD_CU128 = [
+    ("2.11.0", "0.26.0"),
+    ("2.10.0", "0.25.0"),
+    ("2.9.1", "0.24.1"),
+    ("2.8.0", "0.23.0"),
+]
+
 # Folder-name pieces used to build the persistent override path under LOCALAPPDATA.
 _APP_DIR = "StarTrailCleanR"
 _OVERRIDE_DIR = "gpu_override"
@@ -194,11 +208,22 @@ def get_all_download_url_sets() -> List[Tuple[str, str, str, str]]:
     tv_ver = get_expected_torchvision_version()
     if not torch_ver or not tv_ver:
         return []
+    return build_download_url_sets(torch_ver, tv_ver)
 
+
+def build_download_url_sets(torch_ver: str,
+                            tv_ver: str) -> List[Tuple[str, str, str, str]]:
+    """Build the per-mirror download URLs for an EXPLICIT version pair.
+
+    Pure function (no bundle reads, no network): given a torch and torchvision
+    version, returns one (torch_url, torchvision_url, torch_ver, tv_ver) tuple per
+    mirror, in priority order. Both the in-app installer and the build-time wheel
+    gate call this so they test the exact same URLs the app will request.
+    """
     result = []
     for base in _MIRROR_BASES:
         # Wheel filename convention, e.g.:
-        #   torch-2.6.0+cu128-cp311-cp311-win_amd64.whl
+        #   torch-2.11.0+cu128-cp311-cp311-win_amd64.whl
         # The "+" between version and CUDA suffix must be URL-encoded as %2B, and
         # the cp311 ABI tag appears twice (Python tag and ABI tag).
         torch_url = (
@@ -211,6 +236,87 @@ def get_all_download_url_sets() -> List[Tuple[str, str, str, str]]:
         )
         result.append((torch_url, tv_url, torch_ver, tv_ver))
     return result
+
+
+def candidate_version_pairs() -> List[Tuple[str, str]]:
+    """Return (torch_ver, torchvision_ver) pairs to try, in priority order.
+
+    The version baked into this build comes first (so a correctly-pinned build
+    always uses exactly what it shipped with), followed by the known-good cu128
+    fallbacks. Duplicates are removed while preserving order. Running from live
+    source (no bundled version files) yields just the known-good list.
+    """
+    pairs: List[Tuple[str, str]] = []
+    baked_t = get_expected_torch_version()
+    baked_v = get_expected_torchvision_version()
+    if baked_t and baked_v:
+        pairs.append((baked_t, baked_v))
+    for pair in _KNOWN_GOOD_CU128:
+        if pair not in pairs:
+            pairs.append(pair)
+    return pairs
+
+
+def wheel_published(package: str, version: str, timeout: float = 20.0):
+    """Definitively check whether a cu128 cp311 win_amd64 wheel is published.
+
+    pytorch.org returns HTTP 403 for BOTH a missing file and a region block, so a
+    direct HEAD can't tell "doesn't exist" from "you're blocked". The authoritative
+    answer is the package's simple index page, which lists every published wheel.
+
+    `package` is "torch" or "torchvision"; `version` is the bare version (e.g.
+    "2.11.0"). Returns True if the wheel is listed, False if the index loaded but
+    the wheel is absent, or None if the index itself couldn't be fetched (network
+    down / blocked) so existence is genuinely unknown.
+    """
+    import urllib.request
+    index_url = f"{_MIRROR_BASES[0]}/{package}/"  # pytorch.org per-package index
+    # The index lists hrefs %2B-encoded and link text with a literal "+"; match either.
+    tail = f"{CUDA_SUFFIX}-{PYTHON_TAG}-{PYTHON_TAG}-win_amd64.whl"
+    needles = (f"{package}-{version}+{tail}", f"{package}-{version}%2B{tail}")
+    req = urllib.request.Request(
+        index_url, headers={"User-Agent": "StarTrailCleanR-GpuPack"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            html = resp.read().decode("utf-8", "replace")
+    except Exception:
+        return None
+    return any(n in html for n in needles)
+
+
+def resolve_available_url_set(timeout: float = 20.0
+                              ) -> Tuple[List[Tuple[str, str, str, str]], bool]:
+    """Pick a version whose cu128 wheels are actually published.
+
+    Normally returns the version baked into this build. Self-heal: only if that
+    baked version is DEFINITIVELY absent from pytorch.org's index (e.g. a release
+    that shipped without a cu128 wheel) does it fall forward to the newest
+    known-good pair the index confirms exists. If the index can't be reached at all
+    (network/block), it returns the baked URLs unchanged and lets the download's
+    mirror fallback do its job.
+
+    Returns (url_sets, healed). `healed` is True only when it switched off the
+    baked version.
+    """
+    candidates = candidate_version_pairs()
+    if not candidates:
+        return [], False
+    baked = candidates[0]
+    baked_sets = build_download_url_sets(baked[0], baked[1])
+    bt = wheel_published("torch", baked[0], timeout)
+    bv = wheel_published("torchvision", baked[1], timeout)
+    if bt is not False and bv is not False:
+        # Both present, or the index was unreachable (None) — trust the build gate
+        # and use the baked version; the download still has its mirror fallback.
+        return baked_sets, False
+
+    # Baked version is genuinely gone from the index. Heal to the newest pair the
+    # index confirms exists.
+    for pair in candidates[1:]:
+        if (wheel_published("torch", pair[0], timeout) is True
+                and wheel_published("torchvision", pair[1], timeout) is True):
+            return build_download_url_sets(pair[0], pair[1]), True
+    return baked_sets, False
 
 
 def write_version_tag(torch_ver: str) -> bool:

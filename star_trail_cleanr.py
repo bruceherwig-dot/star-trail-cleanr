@@ -664,6 +664,11 @@ class CleanerWorker(QThread):
         self.mem_note = mem_note
         self._cancelled = False
         self._proc = None  # current subprocess
+        # Crash breadcrumb: if the PREVIOUS run ended without a clean-finish
+        # marker (e.g. the OS hard-killed the whole app on low memory), its last
+        # recorded steps are stashed here at this run's start and folded into the
+        # Star Log so the silent crash still reaches a support email.
+        self._prev_crash_log = ""
         # Bad-file dialog plumbing. The QThread blocks reading subprocess
         # stdout when it sees a prompt sentinel; the main thread shows the
         # modal and calls set_bad_file_decision() to release it.
@@ -1073,6 +1078,43 @@ class CleanerWorker(QThread):
                      note=f"n={total} batches={n_batches} res={dominant[0]}x{dominant[1]}"
                           + (f" {self.mem_note}" if self.mem_note else ""))
 
+            # ── Crash breadcrumb: rotate this machine's progress log ──────────
+            # The worker subprocess appends a flushed line per frame as it runs.
+            # Read the prior run's log first: if it lacks the clean-finish marker
+            # the previous run was hard-killed (no exception, no Sentry trace, as
+            # in a macOS low-memory force-quit) — stash its tail so this run's
+            # Star Log carries that silent crash's fingerprint. Then start fresh.
+            _crumb_path = os.path.join(os.path.expanduser("~"),
+                                       ".star_trail_cleanr", "last_run_progress.log")
+            try:
+                _crumb_prev = _crumb_path[:-4] + ".prev.log"
+                os.makedirs(os.path.dirname(_crumb_path), exist_ok=True)
+                if os.path.isfile(_crumb_path):
+                    try:
+                        with open(_crumb_path, "r", encoding="utf-8",
+                                  errors="replace") as _pf:
+                            _prior = _pf.read()
+                    except OSError:
+                        _prior = ""
+                    if _prior.strip() and "=== RUN ENDED ===" not in _prior:
+                        self._prev_crash_log = "\n".join(
+                            _prior.rstrip().splitlines()[-25:])
+                    try:
+                        os.replace(_crumb_path, _crumb_prev)
+                    except OSError:
+                        pass
+                with open(_crumb_path, "w", encoding="utf-8") as _pf:
+                    _pf.write(
+                        f"=== RUN START "
+                        f"{_dt.datetime.now().isoformat(timespec='seconds')} "
+                        f"run_id={_run_id} ===\n"
+                        f"frames={total} batches={n_batches} "
+                        f"res={dominant[0]}x{dominant[1]} "
+                        f"out={self.output_format} {self.mem_note}\n"
+                    )
+            except Exception:
+                pass
+
             for i, start in enumerate(starts):
                 if self._cancelled:
                     _log_est("cancelled", i, None, None, None, None, force=True)
@@ -1357,6 +1399,13 @@ class CleanerWorker(QThread):
             self.progress.emit(100, 100, "")
             _log_est("run_complete", None, None, None, 100, 0, force=True,
                      note=f"actual_total={round(time.time()-t0,2)}")
+            # Clean-finish marker: every batch wrote breadcrumbs above; stamp the
+            # log so the NEXT run can tell this run ended cleanly (no crash tail).
+            try:
+                with open(_crumb_path, "a", encoding="utf-8") as _pf:
+                    _pf.write("=== RUN COMPLETE ===\n")
+            except Exception:
+                pass
             done_msg = f"Done! {total} frames in {n_batches} batch{'es' if n_batches > 1 else ''} ({fmt_hms(time.time() - t0)})"
             _add_log(done_msg)
             self.step_detail.emit(done_msg)
@@ -1506,11 +1555,13 @@ class GpuPackInstallThread(QThread):
     failed = Signal(str)
 
     def _download(self, label, urls, dest_path):
-        """Try each URL in order. On HTTP 403 move to the next mirror silently.
-        Raises RuntimeError with a __blocked__ sentinel if every mirror returns 403."""
+        """Try each URL in order. On HTTP 403 (region block) or 404 (mirror lacks
+        the file) move to the next mirror silently. Raises RuntimeError with a
+        __blocked__ sentinel only if every mirror was blocked (403)."""
         import urllib.request
         import urllib.error
-        last_403 = None
+        last_err = None
+        saw_block = False
         for idx, url in enumerate(urls):
             if idx > 0:
                 self.progress.emit(f"{label} — trying backup server...", 0, 0)
@@ -1529,15 +1580,23 @@ class GpuPackInstallThread(QThread):
                             self.progress.emit(label, done, total)
                 return
             except urllib.error.HTTPError as e:
+                last_err = e
+                # 403 = region/network block; 404 = this mirror doesn't carry the
+                # file. Either way, fall through to the next mirror rather than
+                # giving up on the first server.
                 if e.code == 403:
-                    last_403 = e
+                    saw_block = True
+                    continue
+                if e.code == 404:
                     continue
                 raise RuntimeError(f"{label} failed: {e}") from e
             except Exception as e:
                 raise RuntimeError(f"{label} failed: {e}") from e
-        raise RuntimeError(
-            f"{label} blocked: all servers returned 403 Forbidden\n__blocked__"
-        ) from last_403
+        if saw_block:
+            raise RuntimeError(
+                f"{label} blocked: all servers returned 403 Forbidden\n__blocked__"
+            ) from last_err
+        raise RuntimeError(f"{label} failed: {last_err}") from last_err
 
     def run(self):
         """Download and install the CUDA torch + torchvision wheels into the
@@ -1547,17 +1606,25 @@ class GpuPackInstallThread(QThread):
         success or failed() with a user-friendly message (permission, 403, or
         connection errors get tailored text)."""
         import zipfile
-        from modules.gpu_pack import (get_all_download_url_sets, get_override_dir,
+        from modules.gpu_pack import (resolve_available_url_set, get_override_dir,
                                        write_version_tag, clear_gpu_files,
                                        chmod_extracted_files)
 
-        url_sets = get_all_download_url_sets()
+        # Resolve to a version whose wheels are actually downloadable. Normally
+        # this is the version baked into the build; if that version ever lacks a
+        # cu128 wheel, resolve self-heals to the newest known-good pair instead of
+        # dying on a 404 (a quick reachability check, runs in this worker thread).
+        self.progress.emit("Checking GPU support download...", 0, 0)
+        url_sets, healed = resolve_available_url_set()
         if not url_sets:
             self.failed.emit(
                 "Cannot determine download URLs for this build.\n"
                 "Try updating Star Trail CleanR first, then install GPU support again."
             )
             return
+        if healed:
+            self.progress.emit(
+                "Using the latest compatible GPU support version...", 0, 0)
 
         torch_urls = [s[0] for s in url_sets]
         tv_urls    = [s[1] for s in url_sets]
@@ -5332,6 +5399,25 @@ class MainWindow(QMainWindow):
                 "================================================",
             ]
 
+        # If the PREVIOUS run was hard-killed (the app vanished with no error and
+        # nothing in Sentry — the classic low-memory force-quit), the worker's
+        # last breadcrumbs were stashed at this run's start. Surface them here so
+        # the silent crash rides along in the very next Star Log the user emails.
+        _prev_crash = getattr(getattr(self, "worker", None), "_prev_crash_log", "")
+        if _prev_crash and _prev_crash.strip():
+            lines += [
+                "",
+                "Previous run ended unexpectedly (no clean finish)",
+                "================================================",
+                "These are the last steps recorded to disk before the previous "
+                "run stopped. A line that stops mid-batch with the free memory "
+                "near zero points to a low-memory force-quit by the operating "
+                "system.",
+                "",
+                _prev_crash,
+                "================================================",
+            ]
+
         workspace = os.path.join(input_folder, WORKSPACE_DIR)
         try:
             os.makedirs(workspace, exist_ok=True)
@@ -5387,6 +5473,18 @@ class MainWindow(QMainWindow):
         self._write_run_summary()
         if getattr(self, "_last_log_path", None) and os.path.isfile(self._last_log_path):
             self._view_log_link.setVisible(True)
+        # Stamp the crash breadcrumb log as cleanly ended. This handler runs on
+        # EVERY run end the app survives (finish, cancel, or error), so the only
+        # time this marker is absent is a hard kill of the app itself — exactly
+        # the silent crash the next run should surface.
+        try:
+            _cp = os.path.join(os.path.expanduser("~"),
+                               ".star_trail_cleanr", "last_run_progress.log")
+            if os.path.isfile(_cp):
+                with open(_cp, "a", encoding="utf-8") as _pf:
+                    _pf.write("=== RUN ENDED ===\n")
+        except Exception:
+            pass
 
     def _view_star_log(self, *args):
         """Open this run's saved Star Log text file in the system text viewer."""

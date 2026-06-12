@@ -142,6 +142,41 @@ from modules.io_safe import robust_imread, robust_imread_diag, robust_imwrite
 from modules.frame_list import dedupe_frames, natural_key, IMAGE_EXTS, RAW_EXTS
 
 
+# ── Black-box recorder ──────────────────────────────────────────────────────
+# A crash breadcrumb the worker forces to disk after every frame at every stage.
+# If the OS hard-kills the whole app (e.g. a macOS low-memory force-quit, which
+# leaves no Python exception and no Sentry trace), the last line on disk still
+# shows exactly which frame and stage we died on, and how much memory was left
+# at that moment. The GUI rotates this file each run and folds an abnormal
+# previous run's tail into the Star Log. Every write is wrapped so logging can
+# never itself break a run.
+_CRUMB_PATH = os.path.join(
+    os.path.expanduser("~"), ".star_trail_cleanr", "last_run_progress.log")
+
+
+def _crumb(stage, idx=None, total=None, name="", extra=""):
+    """Append one flushed+fsync'd breadcrumb line. Never raises."""
+    try:
+        pos = f"{idx}/{total}" if idx is not None else ""
+        mem = ""
+        try:
+            import psutil
+            rss = psutil.Process().memory_info().rss / (1024 ** 3)
+            avail = psutil.virtual_memory().available / (1024 ** 3)
+            mem = f"| proc {rss:.2f}G | free {avail:.2f}G "
+        except Exception:
+            pass
+        line = (f"{time.strftime('%Y-%m-%d %H:%M:%S')} | {stage} {pos} | "
+                f"{name} {mem}{extra}".rstrip() + "\n")
+        os.makedirs(os.path.dirname(_CRUMB_PATH), exist_ok=True)
+        with open(_CRUMB_PATH, "a") as _f:
+            _f.write(line)
+            _f.flush()
+            os.fsync(_f.fileno())
+    except Exception:
+        pass
+
+
 def _init_worker_sentry():
     """Initialize Sentry in the worker subprocess if the GUI passed a DSN.
 
@@ -783,6 +818,8 @@ def main():
                         help="Run detection a second time on each frame rotated 180°, merging any new trails found")
     args = parser.parse_args()
 
+    _crumb("BATCHSTART", extra=f"start={args.start} count={args.batch}")
+
     # Dev flag: auto-enable mask saving when ~/.star_trail_cleanr/.dev_save_masks exists
     if not args.save_masks and (Path.home() / ".star_trail_cleanr" / ".dev_save_masks").exists():
         args.save_masks = True
@@ -1096,6 +1133,7 @@ def main():
     for fi, fp in enumerate(frame_files_all):
         is_core = core_start <= fi < core_end
         is_before_core = fi < core_start
+        _crumb("LOAD", fi + 1, len(frame_files_all), fp.name)
         _t_read1 = time.perf_counter()
         img, diag = robust_imread_diag(fp, cv2.IMREAD_UNCHANGED)
         if fp.suffix.lower() in RAW_EXTS and img is not None:
@@ -1375,6 +1413,7 @@ def main():
         edge_cands = []
         frame_segs = []
         frame_corners = []
+        _crumb("DETECT", i + 1, len(frame_files_all), fp.name)
         _t0 = time.perf_counter()
         state = dp.detect_frame(model=model, image=frames_8bit_all[i],
                                 foreground_mask=fg_mask, frame_name=fp.stem,
@@ -1745,6 +1784,7 @@ def main():
     running_trail_total = 0
     total_trail = 0
     for i, (fp, img, mask) in enumerate(zip(frame_files, frames, masks_per_frame)):
+        _crumb("CLEAN", i + 1, n, fp.name)
         trail_px = int((mask > 0).sum())
         total_trail += trail_px
         if trail_px > 0:
@@ -1848,6 +1888,7 @@ def main():
     print(f"  avg trail px/frame: {total_trail // n}")
     print(f"BATCH_TRAIL_COUNT: {batch_trail_count}", flush=True)
     print(f"BATCH_FRAME_COUNT: {n}", flush=True)
+    _crumb("BATCHOK", extra=f"{n_repaired}/{n} cleaned")
     print(f"\nOutput: {output_dir}")
 
     if logger is not None:

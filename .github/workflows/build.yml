@@ -143,9 +143,22 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install CPU-only PyTorch
-        run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+        # PINNED. 2.11.0 is the newest torch with published cu128 Windows wheels,
+        # which the in-app GPU installer downloads. Left unpinned, the build grabbed
+        # whatever was newest (2.12.0) — and PyTorch shipped 2.12.0 for cu126 + cu130
+        # but NOT cu128, so the GPU installer 404'd for every Windows NVIDIA user.
+        # The GPU wheel gate below fails the build if these versions ever lose their
+        # cu128 wheels, so this can't silently rot again. To move forward later,
+        # bump to a version verified present on the cu128 index (and in
+        # modules/gpu_pack.py _KNOWN_GOOD_CU128).
+        run: pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cpu
       - name: Install dependencies
         run: pip install pyinstaller opencv-python-headless 'numpy<2' pillow PySide6 ultralytics sahi nvidia-ml-py sentry-sdk tifffile scikit-image rawpy
+      - name: GPU wheel gate
+        # Prove the in-app GPU installer's download links actually resolve for the
+        # torch version this build ships, using the app's own URL builder so it
+        # tests exactly what users will request. Fails the build on a dead link.
+        run: python scripts/check_gpu_wheels.py
       - name: Bake Sentry DSN
         env:
           SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
