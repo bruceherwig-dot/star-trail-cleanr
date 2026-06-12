@@ -424,7 +424,7 @@ def _is_bright_trail(comp_pixels, img_bgr):
 def _suppress_static_fps(masks_all, core_start, core_end,
                          iou_threshold=0.70, min_matches=1,
                          raw_masks_all=None, frames_all=None, debug_out=None,
-                         timing_out=None):
+                         timing_out=None, removed_out=None):
     """Remove detection components that are static false positives.
 
     PURPOSE: The AI sometimes detects fixed foreground objects (building edges,
@@ -686,10 +686,18 @@ def _suppress_static_fps(masks_all, core_start, core_end,
         timing_out["sfp_compare_s"] = time.perf_counter() - _t0_cmp
 
     # Pass 2: apply all suppressions now that overlap checks are complete.
+    # removed_out (when given) receives {frame_index: boolean removed-pixel map}
+    # so the caller can apply the SAME verdict to its per-polygon lists -- the
+    # repair step and the _polys.json export read those lists, and without this
+    # they kept cleaning/exporting detections the suppressor had rejected
+    # (the GoPro plume: rejected on 21 straight frames, yet repaired and
+    # uploaded to CVAT on all 21 -- todo #94).
     _t0_apply = time.perf_counter()
     suppressed_count = 0
     for i, to_suppress in suppress_maps.items():
         masks_all[i][to_suppress] = 0
+        if removed_out is not None:
+            removed_out[i] = to_suppress
         n_cc, _ = cv2.connectedComponents(to_suppress.astype(np.uint8))
         suppressed_count += max(0, n_cc - 1)
     if timing_out is not None:
@@ -1487,12 +1495,14 @@ def main():
     print("\nStep 1c - removing static false positives...", flush=True)
     static_fp_dbg = {} if logger is not None else None
     _sfp_timing = {}
+    _sfp_removed = {}
     _t0 = time.perf_counter()
     n_static = _suppress_static_fps(masks_all, core_start, core_end,
                                     raw_masks_all=raw_masks_all,
                                     frames_all=frames_all,
                                     debug_out=static_fp_dbg,
-                                    timing_out=_sfp_timing)
+                                    timing_out=_sfp_timing,
+                                    removed_out=_sfp_removed)
     _tacc("static_fp_s", time.perf_counter() - _t0)
     for _k, _v in _sfp_timing.items():
         _tacc(_k, _v)
@@ -1501,6 +1511,41 @@ def main():
               flush=True)
     else:
         print("  No static false positives found", flush=True)
+
+    # Apply the suppressor's verdict to the per-polygon lists too. Repair
+    # iterates segs_all (one Star Bridge pass per polygon) and the _polys.json
+    # export writes corners_all, so a polygon left in these lists gets cleaned
+    # and uploaded to CVAT even though its pixels were just erased from the
+    # mask (todo #94: 29 rejected outlines reached CVAT training review, and
+    # repair kept "fixing" spots the suppressor rejected). A polygon is dropped
+    # when at least half its pixels were suppressed -- the suppressor removes
+    # whole components, so affected polygons lose essentially all their pixels;
+    # untouched polygons lose none. segs and corners are index-aligned pairs
+    # (same contract as the sky-mask trim above).
+    _sfp_polys_removed = {}
+    if _sfp_removed:
+        for _fi, _rm in _sfp_removed.items():
+            if _fi >= len(segs_all) or not segs_all[_fi]:
+                continue
+            _kept_s, _kept_c = [], []
+            _n_drop = 0
+            for _sj, _seg in enumerate(segs_all[_fi]):
+                _seg_on = _seg > 0
+                _seg_px = int(_seg_on.sum())
+                if _seg_px and int((_seg_on & _rm).sum()) * 2 >= _seg_px:
+                    _n_drop += 1
+                    continue
+                _kept_s.append(_seg)
+                if _sj < len(corners_all[_fi]):
+                    _kept_c.append(corners_all[_fi][_sj])
+            if _n_drop:
+                segs_all[_fi] = _kept_s
+                corners_all[_fi] = _kept_c
+                _sfp_polys_removed[_fi] = _n_drop
+        _total_polys_dropped = sum(_sfp_polys_removed.values())
+        if _total_polys_dropped:
+            print(f"  Removed {_total_polys_dropped} rejected polygon(s) from the "
+                  f"repair and export lists", flush=True)
 
     # Step 1d - Edge rescue: recover trails that were clipped at the frame boundary.
     #
@@ -1629,6 +1674,11 @@ def main():
                     _harvest_fg += 1
             _dbg["static_fp_suppressed"]    = _sfp
             _dbg["static_fp_kept_by_veto"]  = _veto_by_frame.get(_i, [])
+            if _i in _sfp_polys_removed:
+                # How many polygons the verdict pulled out of the repair/export
+                # lists on this frame (todo #94) -- proof in the log that
+                # rejected detections no longer reach repair, MaskViewR, or CVAT.
+                _dbg["suppressed_polys_removed"] = _sfp_polys_removed[_i]
             for _st in (_dbg.get("detect_stages") or []):
                 for _ev in (_st.get("events") or []):
                     if _ev.get("reason") == "bridge_gap_miss":

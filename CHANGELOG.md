@@ -2,6 +2,12 @@
 
 ---
 
+## v2.53-beta
+- **RAW photo runs no longer die partway through on ordinary machines.** The pre-run memory check was counting RAW frames at half their true size (a RAW file decodes to a 16-bit image, twice the weight of a JPG at the same resolution), so the app could bite off a bigger batch than the computer could hold and the run would stall with an error mid-way. RAW frames are now counted at their real size, so the app picks a batch that genuinely fits. Reported by a tester running 20 Canon CR3 files.
+- **One dotted trail no longer comes out wearing several overlapping detection outlines.** Airplane trails that show as a row of dashes (blinking lights) could fool the crossing detector into seeing two trails where there was one, splitting a single trail into stacked near-parallel pieces. Two new sanity checks fix this: pieces produced by a split must actually point in different directions, and a "second trail direction" inside a blob must carry real evidence, not just a few stray traces across the dashes. Real crossings are provably untouched, including the hardest multi-trail tangles.
+- **Detections the false-positive filter rejects now stay rejected everywhere.** Previously a rejected detection was erased from the painted mask but still got cleaned by the repair step and still appeared in exported detection data. The rejection now removes it from both, so the app no longer spends time repairing spots it already decided were not trails.
+- **Smoke tests:** 169 passing.
+
 ## v2.52-beta
 - **Folders with simple numbered names now process in the right order.** If your frames are named without leading zeros (1.jpg, 2.jpg ... 900.jpg, as GoPro and some cameras and phones do), Star Trail CleanR was reading them in text order (1, 10, 100 ... 2, 20), which scrambled the sequence. That made repairs borrow from the wrong neighboring frames and put the final stack out of order. Frames are now sorted by their actual number, so 2 follows 1 and 10 follows 9. Your files are never renamed or changed; only the reading order is fixed. Folders with zero-padded names (IMG_0001, DSC_0001, and similar) were always correct and are unaffected.
 - **The low-memory warning no longer cries wolf.** Before a run, the app warned about memory whenever things were tight, even when you actually had more free memory than the job needed. It now only warns when your free memory is genuinely below what the run requires, and a tight-but-sufficient computer simply runs at a smaller batch size with no interruption.

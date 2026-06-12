@@ -76,6 +76,14 @@ _HOUGH_MAX_GAP      = 15      # px -- maximum gap in a Hough line
 _DBSCAN_EPS         = 5.0     # deg -- angular neighbourhood for DBSCAN
 _DBSCAN_MIN_SAMPLES = 2       # minimum lines per DBSCAN cluster
 _MIN_SPLIT_ANGLE    = 15.0    # deg -- below this, all clusters are near-parallel
+_MIN_SECOND_DIR_FRAC = 0.15   # a second direction only counts as crossing evidence
+                              # when it carries >= this fraction of the TOTAL Hough
+                              # line length. A dashed/dotted trail band manufactures
+                              # fake off-angle traces (dot-to-dot diagonals, the
+                              # frame-edge clip), but those carry only 1-2% of the
+                              # evidence; a real crossing's second trail carries
+                              # ~40%+ (143A8819: 57/43 split vs GoPro dashed trails
+                              # 93-97% one-direction). Measured 2026-06-11.
 _MIN_AREA           = 1000    # px (at ref resolution) -- minimum area for a valid output
 _MIN_ASPECT         = 2.0     # ratio -- minimum major/minor for valid spine
 _SPINE_BAND_FACTOR  = 0.6     # spine half-width = measured_width * this factor
@@ -327,20 +335,7 @@ def split_crossing(mask, frame_px=None):
         [angles[i] for i, l in enumerate(labels) if l == cid]
     ) for cid in unique}
 
-    # Need at least 2 distinct angle clusters to identify a crossing
-    if len(unique) >= 2:
-        # Find the largest angular gap between any two clusters. If even the
-        # widest pair is nearly parallel, this is parallel trails or noise, not
-        # a crossing -- bail.
-        best_dist = 0.0
-        for ci in range(len(unique)):
-            for cj in range(ci + 1, len(unique)):
-                d = _angle_dist(cluster_means[unique[ci]], cluster_means[unique[cj]])
-                if d > best_dist:
-                    best_dist = d
-        if best_dist < _MIN_SPLIT_ANGLE:
-            return [mask]  # all near-parallel, not a crossing
-    else:
+    if len(unique) < 2:
         return [mask]  # single direction, not a crossing
 
     # -- Pick spine direction: cluster with the most total Hough line length ----
@@ -356,6 +351,23 @@ def split_crossing(mask, frame_px=None):
 
     spine_cid = max(unique, key=lambda c: cluster_lengths[c])
     spine_angle = cluster_means[spine_cid]
+
+    # -- Crossing-evidence gate: a WEIGHTY second direction ---------------------
+    # A crossing means another trail runs through the spine: it must sit at a
+    # real angle to the spine (>= _MIN_SPLIT_ANGLE) AND carry real line evidence
+    # (>= _MIN_SECOND_DIR_FRAC of the total). Dashed/dotted trail bands produce
+    # off-angle clusters from dot-to-dot traces and the frame-edge clip, but
+    # those carry only 1-2% of the evidence -- a real crossing trail carries
+    # ~40%+. Without the weight test, a handful of noise traces split (or
+    # rescued) single dashed trails (GoPro frames 77/365/536/370).
+    total_len = sum(cluster_lengths.values())
+    has_weighty_second = any(
+        cid != spine_cid
+        and _angle_dist(cluster_means[cid], spine_angle) >= _MIN_SPLIT_ANGLE
+        and cluster_lengths[cid] >= _MIN_SECOND_DIR_FRAC * total_len
+        for cid in unique)
+    if not has_weighty_second:
+        return [mask]  # no real second direction, not a crossing
 
     # -- Project all blob pixels onto spine coordinate system ------------------
     # Build a local axis system aligned to the spine: "along" runs down the
@@ -468,6 +480,37 @@ def split_crossing(mask, frame_px=None):
         # Reassign uncovered pixels to spine (they are small sub-threshold fragments)
         spine_mask = cv2.bitwise_or(spine_mask, uncovered)
 
+    # -- Post-split sanity: the pieces must actually point different ways ------
+    # A wide DOTTED trail band can manufacture a fake second Hough direction:
+    # short diagonal traces from a dot in one row to a dot in the next, or the
+    # straight artificial edge where the frame border clips the mask. That fake
+    # cluster passes the entry angle gate and the band-split then carves a
+    # single trail into stacked near-parallel strips (GoPro frames 77/365/536,
+    # known_problems false_crossing_split entries -- four overlapping polygons
+    # on one dotted trail). A real crossing produces pieces whose own long-axis
+    # directions differ by at least the entry gate's angle; if every piece
+    # points the same way, the "crossing" was noise -- cancel the split and
+    # return the blob whole.
+    piece_angles = []
+    for pm in [spine_mask] + tips:
+        pys, pxs = np.where(pm > 0)
+        if len(pxs) < min_px:
+            continue
+        prect = cv2.minAreaRect(
+            np.column_stack([pxs, pys]).astype(np.float32).reshape(-1, 1, 2))
+        (pw, ph), ptheta = prect[1], prect[2]
+        if min(pw, ph) <= 0:
+            continue
+        # Angle of the LONG side, folded to [0, 180) like _line_angle_deg.
+        piece_angles.append((ptheta if pw >= ph else ptheta + 90.0) % 180.0)
+    if len(piece_angles) < 2:
+        return [mask]  # fewer than two measurable pieces: nothing to separate
+    widest_piece_angle = max(_angle_dist(a, b)
+                             for i, a in enumerate(piece_angles)
+                             for b in piece_angles[i + 1:])
+    if widest_piece_angle < _MIN_SPLIT_ANGLE:
+        return [mask]  # all pieces near-parallel: one trail, not a crossing
+
     return [spine_mask] + tips
 
 
@@ -525,10 +568,18 @@ def has_crossing_evidence(mask, frame_px=None):
         return False                    # one direction = a single trail, not a crossing
     means = {cid: _circular_mean_angle(
         [angles[i] for i, l in enumerate(labels) if l == cid]) for cid in unique}
-    widest = 0.0
-    for ci in range(len(unique)):
-        for cj in range(ci + 1, len(unique)):
-            d = _angle_dist(means[unique[ci]], means[unique[cj]])
-            if d > widest:
-                widest = d
-    return widest >= _MIN_SPLIT_ANGLE   # genuinely different directions = crossing
+    # Same weighty-second-direction gate as split_crossing: the rescue must not
+    # protect a single dashed trail whose dot-to-dot noise traces mimic a second
+    # direction (GoPro 370: 93% one direction, fake second at 2%; the real
+    # 143A8819 tangle reads 57/43). The second direction must sit at a real
+    # angle to the dominant one AND carry real line evidence.
+    lengths = {cid: sum(_line_length(lines[i][0])
+                        for i, l in enumerate(labels) if l == cid)
+               for cid in unique}
+    total_len = sum(lengths.values())
+    dom = max(unique, key=lambda c: lengths[c])
+    return any(
+        cid != dom
+        and _angle_dist(means[cid], means[dom]) >= _MIN_SPLIT_ANGLE
+        and lengths[cid] >= _MIN_SECOND_DIR_FRAC * total_len
+        for cid in unique)

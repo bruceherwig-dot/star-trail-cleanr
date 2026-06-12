@@ -152,14 +152,22 @@ def fetch_cvat_tasks(auth):
     out.sort(key=lambda t: t["name"].lower())
     return out
 
+def _norm_name(s):
+    """Lowercase and treat underscores/hyphens as spaces, collapsing runs of
+    whitespace, so 'GoPro_G0037688' and 'GoPro G0037688' compare equal. CVAT
+    task names and disk folder names drift on exactly this punctuation."""
+    return " ".join(s.lower().replace("_", " ").replace("-", " ").split())
+
+
 def resolve_image_dir(task_name):
     """Map a CVAT task name to the on-disk folder of its source images.
 
     Tries, in order: the special gkyle staging folder; an explicit alias from
     TASK_FOLDER_ALIASES; a folder under TRAILS_ROOT named exactly like the task
-    (also trying the part before a " - v..." version suffix); and finally a
-    case-insensitive substring match against the children of TRAILS_ROOT.
-    Returns the matching Path, or None if nothing is found.
+    (also trying the part before a " - v..." version suffix); then a match
+    against the children of TRAILS_ROOT that ignores case AND treats
+    underscores/hyphens/spaces as the same character (exact-normalized first,
+    substring second). Returns the matching Path, or None if nothing is found.
     """
     if "gkyle" in task_name.lower() and GKYLE_STAGING.exists():
         return GKYLE_STAGING
@@ -176,8 +184,13 @@ def resolve_image_dir(task_name):
             return p
     base = candidates[-1]
     if TRAILS_ROOT.exists():
-        for child in TRAILS_ROOT.iterdir():
-            if child.is_dir() and base.lower() in child.name.lower():
+        norm_base = _norm_name(base)
+        children = [c for c in TRAILS_ROOT.iterdir() if c.is_dir()]
+        for child in children:
+            if _norm_name(child.name) == norm_base:
+                return child
+        for child in children:
+            if norm_base in _norm_name(child.name):
                 return child
     return None
 

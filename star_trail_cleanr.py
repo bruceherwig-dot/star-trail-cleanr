@@ -4146,7 +4146,16 @@ class MainWindow(QMainWindow):
                         except Exception:
                             _bytes_per, _channels = 2, 3  # conservative (16-bit RGB)
                     else:
-                        _bytes_per, _channels = 1, 3  # jpg / png are 8-bit
+                        # RAW debayers to 16-bit RGB (rawpy), so it weighs TWICE
+                        # what a JPG of the same resolution does. This branch
+                        # used to count everything non-TIFF as 8-bit, so a RAW
+                        # folder's batch came out ~2x too big and the worker was
+                        # killed mid-batch out of memory (tester's 20-CR3 run
+                        # "started working but stalled", 2026-06-12). JPG/PNG
+                        # stay 8-bit.
+                        from modules.frame_list import is_raw as _is_raw
+                        _bytes_per = 2 if _is_raw(_frames[0]) else 1
+                        _channels = 3
                     _decoded_frame = _w * _h * _channels * _bytes_per
                     _BASE = int(4.4 * 1_073_741_824)   # model + torch floor
                     _PER_FRAME = 5 * _decoded_frame    # measured peak per frame
