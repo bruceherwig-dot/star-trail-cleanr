@@ -8,6 +8,18 @@ import sys, os
 # small ops like NMS, fixes the crash. Must be set BEFORE any torch
 # import (including those pulled in by ultralytics / sahi).
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+
+# The detection engine (ultralytics, pulled in by sahi) monkey-patches PIL's
+# image opener so the FIRST time any image fails to open it tries to pip-INSTALL
+# a missing add-on ("pi-heif") at RUNTIME. In our frozen app that install runs
+# the app itself as the installer, which relaunches/hangs it -- a zombie that
+# won't quit and blocks restart. It only ever fired on RAW, because only RAW
+# makes PIL's open fail. Forbid the engine from auto-downloading anything: the
+# failed open then raises cleanly (we catch it) instead of hanging, and any
+# future "auto-install" surprise is closed off too. Must be set BEFORE
+# ultralytics is imported -- its AUTOINSTALL flag is read at import time.
+os.environ.setdefault("YOLO_AUTOINSTALL", "False")
+os.environ.setdefault("ULTRALYTICS_SKIP_REQUIREMENTS_CHECKS", "1")
 try:
     if hasattr(sys.stdout, 'reconfigure'):
         sys.stdout.reconfigure(encoding='utf-8')
@@ -140,6 +152,42 @@ def _raw_labeled_from_state(state, h, w):
     return raw
 from modules.io_safe import robust_imread, robust_imread_diag, robust_imwrite
 from modules.frame_list import dedupe_frames, natural_key, IMAGE_EXTS, RAW_EXTS
+
+
+def _source_metadata(path):
+    """Read (exif_bytes, icc_profile, dpi) from a frame's ORIGINAL source file.
+
+    JPEG/TIFF are read straight from the file. RAW files cannot be opened by PIL
+    at all -- and merely asking PIL to try would trip the detection engine's
+    patched opener into a runtime pi-heif auto-install that hangs the app (see
+    the YOLO_AUTOINSTALL note at the top of this file). So for RAW we read the
+    metadata from the JPEG preview the RAW file embeds, which carries the capture
+    date and shoot settings (verified on Canon CR3 and Fuji RAF). A RAW whose
+    preview is a bitmap, or any unreadable file, yields (None, None, None) so the
+    frame still cleans with no date rather than failing. Never raises.
+    """
+    try:
+        from PIL import Image as _PILImage
+        ext = os.path.splitext(str(path))[1].lower()
+        if ext in RAW_EXTS:
+            import rawpy
+            import io as _io
+            with rawpy.imread(str(path)) as _r:
+                _thumb = _r.extract_thumb()
+            if not str(_thumb.format).endswith("JPEG"):
+                return (None, None, None)
+            _src = _io.BytesIO(_thumb.data)
+        else:
+            _src = str(path)
+        with _PILImage.open(_src) as _im:
+            try:
+                _e = _im.getexif()
+                _exif = _e.tobytes() if _e else None
+            except Exception:
+                _exif = _im.info.get("exif")
+            return (_exif, _im.info.get("icc_profile"), _im.info.get("dpi"))
+    except Exception:
+        return (None, None, None)
 
 
 # ── Black-box recorder ──────────────────────────────────────────────────────
@@ -925,8 +973,32 @@ def main():
             if icc_profile:
                 # TIFF tag 34675 = InterColorProfile (ICC). 'B' = byte array.
                 extratags.append((34675, 'B', len(icc_profile), icc_profile, False))
+            # tifffile (unlike the JPEG / tif8 PIL path) does NOT embed the EXIF
+            # block, so the capture date was dropped for EVERY source on 16-bit
+            # TIFF -- the exact format RAW shooters are told to use for full bit
+            # depth. Carry the human-meaningful tags across as standard TIFF
+            # tags. Wrapped so a malformed EXIF block can never break the write.
+            try:
+                if exif_bytes:
+                    from PIL import Image as _PILImage
+                    _ex = _PILImage.Exif(); _ex.load(exif_bytes)
+                    _dt = _ex.get(306)      # DateTime  (capture time)
+                    _mk = _ex.get(271)      # Make
+                    _md = _ex.get(272)      # Model
+                    if _dt:
+                        extratags.append((306, 's', 0, str(_dt), True))
+                    if _mk:
+                        extratags.append((271, 's', 0, str(_mk), True))
+                    if _md:
+                        extratags.append((272, 's', 0, str(_md), True))
+            except Exception:
+                pass
+            # Orientation normal: pixels are turned upright before write, so the
+            # source's rotate tag must not ride along (would double-rotate).
+            extratags.append((274, 'H', 1, 1, True))
             tiff_kwargs = {
                 "photometric": "rgb",
+                "software": _stamp,
                 "extratags": extratags,
             }
             if dpi:
@@ -970,15 +1042,11 @@ def main():
     # are constant across a sequence. EXIF (capture date/time, exposure, lens, GPS) is
     # read PER FRAME at write time from each frame's own file — never shared across the
     # batch — so every cleaned frame keeps its own original capture metadata.
-    icc_profile = None
-    dpi = None
-    try:
-        from PIL import Image as _PILImage
-        with _PILImage.open(str(frame_files_all[core_start])) as _meta_im:
-            icc_profile = _meta_im.info.get("icc_profile")
-            dpi = _meta_im.info.get("dpi")
-    except Exception as _e:
-        print(f"  WARN: could not read color profile ({_e})")
+    # _source_metadata reads RAW from its embedded preview (PIL can't open a RAW
+    # directly, and asking it to would trip the engine's pi-heif auto-install
+    # hang); JPEG/TIFF read from the file. ICC may be absent on a RAW preview,
+    # leaving output tagged sRGB, which is correct for a RAW preview.
+    _, icc_profile, dpi = _source_metadata(frame_files_all[core_start])
 
     # Build the Software-tag stamp that goes into every cleaned file's EXIF.
     # Format: "Star Trail CleanR v<app> / Trail Detector v<model> / www.startrailcleanr.com"
@@ -1030,23 +1098,14 @@ def main():
             return source_bytes
 
     def _frame_exif_bytes(path):
-        """Read a single frame's OWN EXIF bytes from its source file. Returns None when the
-        format carries no PIL-readable EXIF (e.g. RAW). Called once per output frame so each
-        cleaned file inherits ITS OWN capture date/time, exposure, lens, and GPS — never the
-        batch leader's. EXIF is the camera's record of the shot and is preserved verbatim;
-        only the Software comment and orientation tag are added (see _stamp_exif)."""
-        try:
-            from PIL import Image as _PILImage
-            with _PILImage.open(str(path)) as _im:
-                # info.get("exif") works for JPEGs but returns None for TIFFs.
-                # getexif().tobytes() works for both formats.
-                try:
-                    _e = _im.getexif()
-                    return _e.tobytes() if _e else None
-                except Exception:
-                    return _im.info.get("exif")
-        except Exception:
-            return None
+        """Read a single frame's OWN EXIF bytes from its source file. For RAW the
+        EXIF is read from the file's embedded preview (PIL cannot open a RAW
+        directly); for JPEG/TIFF, from the file itself. Returns None when no EXIF
+        is available. Called once per output frame so each cleaned file inherits
+        ITS OWN capture date/time, exposure, and camera — never the batch
+        leader's. Only the Software comment and orientation tag are added on top
+        (see _stamp_exif)."""
+        return _source_metadata(path)[0]
 
     def _write_finder_comment(out_path: str) -> None:
         """Write _stamp to macOS Finder Comments field via Finder AppleScript. No-op if not macOS."""
