@@ -134,6 +134,42 @@ def _open_folder_in_file_manager(path):
     else:
         subprocess.run(["xdg-open", path])
 
+
+# ── Run-time estimate: a calibrated ballpark ─────────────────────────────────
+# The goal is a useful "about this long" up front, not precision. Cost is driven
+# by three things we know before the run starts: frame count, megapixels, and
+# file format (RAW and big 16-bit TIFFs load far slower than JPG). These numbers
+# are seconds-per-frame PER MEGAPIXEL, calibrated from Bruce's own run history on
+# Apple Silicon. They are ONLY the cold-start guess for a machine we've never
+# timed; every run then tunes to the user's real hardware (live while it runs,
+# and saved for next time -- see the estimator block in the worker). An assumed
+# "average busy sky" of trails is already folded into these constants, so we
+# never count trails -- a heavy frame and a light frame wash out across a run.
+_EST_SEC_PER_MP = {
+    "jpg":    0.18,
+    "tiff8":  0.20,
+    "tiff16": 0.30,
+    "raw":    0.34,
+}
+_EST_SEC_PER_MP_DEFAULT = 0.22   # unknown format -> overall median of the above
+
+
+def _est_format_key(frames, dominant_bitdepth):
+    """Classify a run's input format for the cost model: 'raw', 'tiff16',
+    'tiff8', or 'jpg'. `frames` is the list of source filenames; `dominant_bitdepth`
+    is 8, 16, or None. Used to pick the right per-megapixel cost."""
+    try:
+        from modules.frame_list import is_raw as _is_raw
+        if frames and _is_raw(frames[0]):
+            return "raw"
+    except Exception:
+        pass
+    ext = os.path.splitext(frames[0])[1].lower() if frames else ""
+    if ext in (".tif", ".tiff"):
+        return "tiff16" if dominant_bitdepth == 16 else "tiff8"
+    return "jpg"
+
+
 # ── Theme system ─────────────────────────────────────────────────────────────
 # One central place for every color the app uses. Brand colors (header navy,
 # banner orange, button green/blue/red, heading blue) read fine on both light
@@ -217,6 +253,38 @@ SECONDARY_BTN_BG    = THEME["light"]["secondary_btn"]
 BROWSER_BG          = THEME["light"]["browser_bg"]
 BROWSER_TEXT        = THEME["light"]["browser_text"]
 SUCCESS_TEXT        = THEME["light"]["success_text"]
+
+
+# ── Text style: ONE definition of how headings and body copy look ────────────
+# "It's just text — handle it the same." Both the HTML tabs (FAQ/About, whose
+# default stylesheet pulls these px values) and the widget tabs (Settings, via
+# make_section_heading / make_body_text) derive from these four numbers, so a
+# heading is a heading and a paragraph is a paragraph everywhere, with no per-tab
+# hand-tuning. The gap values are the FAQ's measured collapsed margins.
+HEADING_TEXT_PX = 20        # section headings (FAQ/About <h2>, Settings headings)
+BODY_TEXT_PX = 14           # descriptive body copy everywhere
+HEADING_BODY_GAP_PX = 2     # vertical gap from a heading to the body beneath it
+SECTION_GAP_PX = 16         # vertical gap between sections
+
+
+def make_section_heading(text):
+    """A section-heading label: blue, bold, HEADING_TEXT_PX. The widget-tab twin
+    of an FAQ/About <h2>. Colour is read at call time so it follows the active
+    theme. Use this for EVERY section heading instead of a hand-written stylesheet."""
+    lbl = QLabel(text)
+    lbl.setStyleSheet(
+        f"color: {BRAND_HEADING_BLUE}; font-size: {HEADING_TEXT_PX}px; font-weight: bold;")
+    return lbl
+
+
+def make_body_text(text):
+    """A wrapped body-copy label: BODY_TEXT_PX. The widget-tab twin of an
+    FAQ/About <p>. Colour is read at call time so it follows the active theme.
+    Use this for EVERY descriptive paragraph instead of a hand-written stylesheet."""
+    lbl = QLabel(text)
+    lbl.setStyleSheet(f"color: {BROWSER_TEXT}; font-size: {BODY_TEXT_PX}px;")
+    lbl.setWordWrap(True)
+    return lbl
 
 
 def _detect_mode():
@@ -330,22 +398,33 @@ def _secondary_btn_css():
 
 
 SCRIPT = os.path.join(_base, "astro_clean_v5.py")
-# Post-run share outputs (video + Red Trail Map) render in a SEPARATE process via
-# this script, re-invoked the same way as the cleaning engine (--cleanr-worker).
+# Post-run share outputs (star trail + video + Red Trail Map) render in a SEPARATE
+# process via this script, re-invoked the same way as the cleaning engine
+# (--cleanr-worker).
 SHARE_SCRIPT = os.path.join(_base, "make_share_clip.py")
+# Human-readable names for each share-render kind, used in the run-screen status
+# lines ("Your ... is ready." / "Could not create the ...").
+_SHARE_KIND_LABELS = {
+    "star_trail": "Quick and Dirty Star Trail",
+    "video": "video",
+    "red": "Red Trail Map",
+}
 _bundled_model = os.path.join(_base, "best.pt")
 _DEV_FALLBACK_MODEL = os.path.join(
     os.path.expanduser("~"),
     "Documents/yolo_runs/trail_detector_v5/weights/best.pt")
 
-# Dev-only (the Model picker + the Red Trail Map) — shown ONLY when running from
-# SOURCE. A frozen build hides them, so the built .app shows exactly what the
-# public sees. (Was keyed to a ~/.star_trail_cleanr/.dev_model_switcher marker
-# file, which also showed them in frozen builds; changed 2026-06-19.)
+# THE dev-only gate. Shown ONLY when running from SOURCE; a frozen build hides
+# everything behind it, so the built .app shows exactly what the public sees.
+# (Was keyed to per-feature ~/.star_trail_cleanr/.dev_* marker files, which also
+# showed in frozen builds; unified onto this single flag 2026-06-19/20.)
+#
+# RULE for every dev-only item (Model picker, Red Trail Map, Streaking-star
+# filter, and anything added later):
+#   1. Gate it on `_DEV_SWITCHER_ENABLED` — never a marker file.
+#   2. If it lives on the Settings page, append it at the BOTTOM of the list, so
+#      the public-facing settings stay on top and dev items collect at the end.
 _DEV_SWITCHER_ENABLED = not getattr(sys, "frozen", False)
-# Dev-only: show the streaking-star filter checkbox when this hidden file exists.
-_DEV_STREAK_FILTER = Path.home().joinpath(
-    ".star_trail_cleanr", ".dev_star_filter").is_file()
 _YOLO_RUNS_DIR = Path.home() / "Documents" / "yolo_runs"
 
 
@@ -894,12 +973,6 @@ class CleanerWorker(QThread):
             # log per run, easy to read.
             _run_log_ts = time.strftime("%Y-%m-%d_%H-%M-%S")
 
-            ref_pixels = 5472 * 3648
-            img_pixels = dominant[0] * dominant[1]
-            res_scale = img_pixels / ref_pixels
-            frames_in_batch = min(batch_size, total)
-            est_seconds = int(frames_in_batch * 5 * res_scale * n_batches)
-
             import re
             mask_note = " with foreground mask" if self.mask_path else ""
             skipped_total = self._skipped_resolution_count + self._skipped_unreadable_count
@@ -1029,27 +1102,37 @@ class CleanerWorker(QThread):
             EST_MIN_WORK_FOR_MEASURED = 2.0  # frame-equivalents before trusting measured rate
             EST_PAD_FACTOR = 1.20  # under-promise: bias estimate 20% high
 
-            # Load persisted timing from prior runs to seed the estimator per-machine
+            # ── Up-front seed: format + megapixel cost model, tuned per machine ──
+            # Calibrated model gives a same-machine-as-Bruce baseline; the prior
+            # run (if any) tells us how THIS computer compares, so a first-ever run
+            # uses the baseline and every run after tunes to the user's hardware.
             _timing_path = os.path.join(os.path.expanduser("~"),
                                         ".star_trail_cleanr", "last_timing.json")
-            seeded_sec_per_frame = None
+            megapixels = (dominant[0] * dominant[1]) / 1_000_000.0
+            est_format_key = _est_format_key(frames, getattr(self, "_dominant_bitdepth", None))
+            model_sec_per_frame = _EST_SEC_PER_MP.get(
+                est_format_key, _EST_SEC_PER_MP_DEFAULT) * megapixels
+
+            # machine_factor: how the LAST run's real speed compared to what the
+            # baseline model predicted for it. 1.0 = like Bruce's Mac, >1 slower,
+            # <1 faster. Stored with the format so a JPG run is never tuned by a
+            # RAW run's slower raw speed. Clamped so one odd run can't wildly skew.
+            machine_factor = 1.0
             try:
                 if os.path.isfile(_timing_path):
                     with open(_timing_path) as _tf:
                         _prior = json.load(_tf)
-                    _prior_pixels = int(_prior.get("image_pixels", 0))
-                    _prior_spf = float(_prior.get("sec_per_frame", 0))
-                    if _prior_spf > 0 and _prior_pixels > 0:
-                        cur_pixels = dominant[0] * dominant[1]
-                        seeded_sec_per_frame = _prior_spf * (cur_pixels / _prior_pixels)
-                    else:
-                        # Backward compatibility with old warm_batch_mean format
-                        _prior_per_batch = float(_prior.get("warm_batch_mean", 0))
-                        if _prior_per_batch > 0 and _prior_pixels > 0:
-                            cur_pixels = dominant[0] * dominant[1]
-                            seeded_sec_per_frame = (_prior_per_batch / 20.0) * (cur_pixels / _prior_pixels)
+                    _p_spf = float(_prior.get("sec_per_frame", 0))
+                    _p_px = int(_prior.get("image_pixels", 0))
+                    _p_fmt = _prior.get("format")
+                    if _p_spf > 0 and _p_px > 0:
+                        _p_k = _EST_SEC_PER_MP.get(_p_fmt, _EST_SEC_PER_MP_DEFAULT)
+                        _p_model = _p_k * (_p_px / 1_000_000.0)
+                        if _p_model > 0:
+                            machine_factor = min(4.0, max(0.25, _p_spf / _p_model))
             except (OSError, ValueError, KeyError):
                 pass
+            seeded_sec_per_frame = model_sec_per_frame * machine_factor
 
             est_processing_start_t = None   # set when first frame tick fires
             est_batches_done_frames = 0     # sum of frame counts of fully-completed batches
@@ -1069,13 +1152,12 @@ class CleanerWorker(QThread):
                 across batch boundaries (no lurching). Returns
                 (remaining_seconds_or_None, measured); see the comment below for
                 why `measured` matters."""
-                # Returns (remaining_seconds_or_None, measured) where `measured`
-                # is True only when the number comes from the rate we've actually
-                # timed this run -- False while we're still falling back to the
-                # cold-start seed from the previous run. The headline "Estimated
-                # Time" locks only on a measured value, so a wrong seed (e.g. a
-                # slow-TIFF prior run seeding a fast-JPG run) can't freeze a
-                # bogus 3-hour headline next to an accurate live estimate.
+                # Returns (remaining_seconds_or_None, measured). `measured` is True
+                # once we've timed real frames this run, False while still on the
+                # calibrated cost-model seed. The headline "Estimated Time" is now
+                # shown up front from that seed (see the run_start block); this live
+                # value just refines the "remaining" countdown toward real speed as
+                # the run progresses.
                 if phase == "detect":
                     frac = (frame_num / frame_total) * DETECT_FRAC
                 else:
@@ -1099,7 +1181,17 @@ class CleanerWorker(QThread):
 
             _log_est("run_start", None, None, None, 0, None, force=True,
                      note=f"n={total} batches={n_batches} res={dominant[0]}x{dominant[1]}"
+                          + f" fmt={est_format_key} mp={megapixels:.1f} mf={machine_factor:.2f}"
                           + (f" {self.mem_note}" if self.mem_note else ""))
+
+            # Show a ballpark up front, before any frame runs, from the calibrated
+            # cost model (seeded_sec_per_frame is always set now). This is the
+            # headline the run summary records as "Estimated time"; the live value
+            # above then refines the "remaining" countdown as real speed comes in.
+            if seeded_sec_per_frame and seeded_sec_per_frame > 0:
+                est_initial_shown = total * seeded_sec_per_frame * EST_PAD_FACTOR
+                self.initial_estimate.emit(float(est_initial_shown))
+                self.progress.emit(0, 100, fmt_estimate(est_initial_shown))
 
             # ── Crash breadcrumb: rotate this machine's progress log ──────────
             # The worker subprocess appends a flushed line per frame as it runs.
@@ -1193,7 +1285,7 @@ class CleanerWorker(QThread):
                 if (_DEV_SWITCHER_ENABLED
                         and SETTINGS.value("red_trail_map_enabled", True, type=bool)):
                     cmd.append("--save-detections")
-                if _DEV_STREAK_FILTER and SETTINGS.value("streak_filter_enabled", False, type=bool):
+                if _DEV_SWITCHER_ENABLED and SETTINGS.value("streak_filter_enabled", False, type=bool):
                     cmd.append("--streak-filter")
 
                 worker_env = os.environ.copy()
@@ -1457,6 +1549,7 @@ class CleanerWorker(QThread):
                         json.dump({
                             "sec_per_frame": final_sec_per_frame,
                             "image_pixels": dominant[0] * dominant[1],
+                            "format": est_format_key,
                             "app_version": VERSION,
                         }, _tf)
                 except OSError:
@@ -1980,16 +2073,22 @@ class MainWindow(QMainWindow):
         browser.setStyleSheet(
             f"QTextBrowser {{ background: {BROWSER_BG}; color: {BROWSER_TEXT}; border: none; font-size: 13px; }}"
         )
+        # Body copy uses the shared BODY_TEXT_PX (Qt honours font-size on <p>).
+        # Section headings are <h2>: Qt sizes heading TAGS by its own scale of the
+        # base font and ignores any CSS font-size on them, so every <h2> renders at
+        # the shared heading size, and the Settings QLabel headings are set to that
+        # same size (HEADING_TEXT_PX). That's why "it's just text" looks the same.
+        browser.document().setDefaultStyleSheet(f"p, li {{ font-size: {BODY_TEXT_PX}px; }}")
         browser.setHtml(f"""
         <html><body style='font-family: Inter, -apple-system, Segoe UI, sans-serif; line-height: 1.5; margin:0; padding:0; color:{BROWSER_TEXT}; background-color:{BROWSER_BG};'>
         <p style='margin:0; padding:0; line-height:0; font-size:1px; height:0;'></p>
         <h2 style='color:{BRAND_HEADING_BLUE}; margin-top:0; margin-bottom:2px;'>Why Star Trail CleanR?</h2>
         <p style='margin-top:2px;'>Star Trail CleanR removes airplane and satellite trails
         from astrophotography sequences while preserving the real stars. The result is a
-        clean set of frames you can stack into a star trail composite. (That's the goal, anyway.)</p>
+        clean set of frames you can stack into a star trail composite.</p>
 
         <h2 style='color:{BRAND_HEADING_BLUE}; margin-bottom:2px;'>What image formats can I use?</h2>
-        <p style='margin-top:2px;'>Star Trail CleanR works with JPG, TIF (8-bit and 16-bit),
+        <p style='margin-top:2px;'>Star Trail CleanR works with .JPG, .TIF 8/16-bit,
         and RAW files.</p>
 
         <h2 style='color:{BRAND_HEADING_BLUE}; margin-bottom:2px;'>Trail Detection</h2>
@@ -2012,8 +2111,8 @@ class MainWindow(QMainWindow):
         <li><b>Browse.</b> Choose your folder of frames.</li>
         <li><b>Mask (optional).</b> Paint over ground, buildings, and rocks so
         the AI ignores them. Trees can be left unmasked.</li>
-        <li><b>Format.</b> Pick output format (JPG / TIFF 8-bit / TIFF 16-bit)
-        and JPEG quality.</li>
+        <li><b>Format.</b> Pick output format (.JPG, .TIF 8/16-bit)
+        and .JPG compression quality.</li>
         <li><b>Run.</b> Sit back. Cleaned frames land in a <code>cleaned/</code>
         folder next to your originals.</li>
         <li><b>Stack.</b> Load the cleaned frames into your favorite stacker
@@ -2057,18 +2156,17 @@ class MainWindow(QMainWindow):
         toggles on self. Returns the wrapper widget for the tab bar."""
         wrap = QWidget()
         layout = QVBoxLayout(wrap)
-        layout.setContentsMargins(16, 16, 16, 16)
+        # 32px all round to MATCH the FAQ/About content inset: those tabs stack a
+        # 16px wrapper margin AND a 16px QTextBrowser document margin (16+16=32).
+        # Settings has no document, so it carries the full 32 on the layout itself.
+        layout.setContentsMargins(32, 32, 32, 32)
         layout.setSpacing(0)
         layout.setAlignment(Qt.AlignTop)
 
-        _h = QLabel("Updates")
-        _h.setStyleSheet(f"color: {BRAND_HEADING_BLUE}; font-size: 18px; font-weight: bold;")
-        layout.addWidget(_h)
-        layout.addSpacing(4)
-        _d = QLabel("Star Trail CleanR checks for a new version every time you open it. Use this to check right now.")
-        _d.setStyleSheet(f"color: {BROWSER_TEXT}; font-size: 13px;")
-        _d.setWordWrap(True)
-        layout.addWidget(_d)
+        layout.addWidget(make_section_heading("Updates"))
+        layout.addSpacing(HEADING_BODY_GAP_PX)
+        layout.addWidget(make_body_text(
+            "Star Trail CleanR checks for a new version every time you open it. Use this to check right now."))
 
         check_btn = QPushButton("Check for Updates")
         check_btn.setFixedHeight(34)
@@ -2097,14 +2195,12 @@ class MainWindow(QMainWindow):
         layout.addSpacing(4)
         layout.addLayout(btn_row)
 
-        layout.addSpacing(14)
+        layout.addSpacing(SECTION_GAP_PX)
 
-        _h = QLabel("GPU Acceleration")
-        _h.setStyleSheet(f"color: {BRAND_HEADING_BLUE}; font-size: 18px; font-weight: bold;")
-        layout.addWidget(_h)
+        layout.addWidget(make_section_heading("GPU Acceleration"))
 
         compute_status = QLabel("Detecting...")
-        compute_status.setStyleSheet(f"color: {MUTED_TEXT}; font-size: 13px; margin-left: 16px;")
+        compute_status.setStyleSheet(f"color: {MUTED_TEXT}; font-size: 14px; margin-left: 16px;")
         compute_status.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self._compute_status_label = compute_status
         layout.addSpacing(4)
@@ -2125,13 +2221,15 @@ class MainWindow(QMainWindow):
         gpu_upgrade_browser.setStyleSheet(
             f"QTextBrowser {{ background: {BROWSER_BG}; color: {BROWSER_TEXT}; border: none; font-size: 13px; }}"
         )
+        # Body copy from the shared constant (no headings here).
+        gpu_upgrade_browser.document().setDefaultStyleSheet(f"p, li {{ font-size: {BODY_TEXT_PX}px; }}")
         gpu_upgrade_browser.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         gpu_upgrade_browser.setHtml(f"""
         <html><body style='font-family: Inter, -apple-system, Segoe UI, sans-serif; line-height: 1.5; margin:0; padding:0; color:{BROWSER_TEXT}; background-color:{BROWSER_BG};'>
         <p style='margin-top:8px;'>An NVIDIA GPU is available. Installing GPU support downloads approximately 3-4 GB from pytorch.org. This is a one-time download that survives app updates automatically.</p>
         </body></html>
         """)
-        gpu_upgrade_browser.setFixedHeight(50)
+        gpu_upgrade_browser.setFixedHeight(54)
         self._gpu_upgrade_browser = gpu_upgrade_browser
         gpu_install_layout.addSpacing(4)
         gpu_install_layout.addWidget(gpu_upgrade_browser)
@@ -2229,23 +2327,17 @@ class MainWindow(QMainWindow):
         layout.addSpacing(4)
         layout.addWidget(gpu_install_widget)
 
-        layout.addSpacing(14)
+        layout.addSpacing(SECTION_GAP_PX)
 
-        _h = QLabel("Second ScrubbeR")
-        _h.setStyleSheet(f"color: {BRAND_HEADING_BLUE}; font-size: 18px; font-weight: bold;")
-        layout.addWidget(_h)
-        layout.addSpacing(4)
-        _d = QLabel("Runs the trail detector a second time on each frame after rotating it 180°. Catches trails the first pass tends to miss. Detection takes roughly twice as long.")
-        _d.setStyleSheet(f"color: {BROWSER_TEXT}; font-size: 13px;")
-        _d.setWordWrap(True)
-        layout.addWidget(_d)
-        _d2 = QLabel("Most helpful with earlier detection models. Less necessary now that the AI trains on rotated trail images at multiple angles.")
-        _d2.setStyleSheet(f"color: {BROWSER_TEXT}; font-size: 13px;")
-        _d2.setWordWrap(True)
-        layout.addWidget(_d2)
+        layout.addWidget(make_section_heading("Second ScrubbeR"))
+        layout.addSpacing(HEADING_BODY_GAP_PX)
+        layout.addWidget(make_body_text(
+            "Runs the trail detector a second time on each frame after rotating it 180°. Catches trails the first pass tends to miss. Detection takes roughly twice as long."))
+        layout.addWidget(make_body_text(
+            "Most helpful with earlier detection models. Less necessary now that the AI trains on rotated trail images at multiple angles."))
 
         scrub_chk = QCheckBox("Enable Second ScrubbeR")
-        scrub_chk.setStyleSheet(f"QCheckBox {{ font-size: 13px; color: {BROWSER_TEXT}; margin-left: 16px; }}")
+        scrub_chk.setStyleSheet(f"QCheckBox {{ font-size: 14px; color: {BROWSER_TEXT}; margin-left: 16px; }}")
         scrub_chk.setChecked(SETTINGS.value("second_scrub_enabled", False, type=bool))
         scrub_chk.toggled.connect(lambda v: SETTINGS.setValue("second_scrub_enabled", v))
         self._scrub_chk = scrub_chk
@@ -2264,47 +2356,15 @@ class MainWindow(QMainWindow):
         layout.addSpacing(4)
         layout.addLayout(scrub_row)
 
-        layout.addSpacing(14)
+        layout.addSpacing(SECTION_GAP_PX)
 
-        if _DEV_STREAK_FILTER:
-            _h = QLabel("Streaking-star filter (dev)")
-            _h.setStyleSheet(f"color: {BRAND_HEADING_BLUE}; font-size: 18px; font-weight: bold;")
-            layout.addWidget(_h)
-            layout.addSpacing(4)
-            _d = QLabel("For long-exposure sets where the stars themselves streak into lines. "
-                        "Measures how long the stars run in this set and leaves alone any "
-                        "detection shorter than that (so streaking stars aren't erased), unless "
-                        "it's a red nav light. Does nothing on sharp-star sets. Dev-only.")
-            _d.setStyleSheet(f"color: {BROWSER_TEXT}; font-size: 13px;")
-            _d.setWordWrap(True)
-            layout.addWidget(_d)
-
-            streak_chk = QCheckBox("Filter streaking stars (dev)")
-            streak_chk.setStyleSheet(f"QCheckBox {{ font-size: 13px; color: {BROWSER_TEXT}; margin-left: 16px; }}")
-            streak_chk.setChecked(SETTINGS.value("streak_filter_enabled", False, type=bool))
-            streak_chk.toggled.connect(lambda v: SETTINGS.setValue("streak_filter_enabled", v))
-            self._streak_chk = streak_chk
-
-            streak_row = QHBoxLayout()
-            streak_row.setContentsMargins(16, 0, 0, 0)
-            streak_row.addWidget(streak_chk)
-            streak_row.addStretch()
-            layout.addSpacing(4)
-            layout.addLayout(streak_row)
-
-            layout.addSpacing(14)
-
-        _h = QLabel("Crash Reporting")
-        _h.setStyleSheet(f"color: {BRAND_HEADING_BLUE}; font-size: 18px; font-weight: bold;")
-        layout.addWidget(_h)
-        layout.addSpacing(4)
-        _d = QLabel("Sends anonymous crash reports to help find and fix bugs. Reports contain technical details like error messages and basic image dimensions.")
-        _d.setStyleSheet(f"color: {BROWSER_TEXT}; font-size: 13px;")
-        _d.setWordWrap(True)
-        layout.addWidget(_d)
+        layout.addWidget(make_section_heading("Crash Reporting"))
+        layout.addSpacing(HEADING_BODY_GAP_PX)
+        layout.addWidget(make_body_text(
+            "Sends anonymous crash reports to help find and fix bugs. Reports contain technical details like error messages and basic image dimensions."))
 
         crash_chk = QCheckBox("Send anonymous crash reports")
-        crash_chk.setStyleSheet(f"QCheckBox {{ font-size: 13px; color: {BROWSER_TEXT}; margin-left: 16px; }}")
+        crash_chk.setStyleSheet(f"QCheckBox {{ font-size: 14px; color: {BROWSER_TEXT}; margin-left: 16px; }}")
         crash_chk.setChecked(SETTINGS.value("crash_reporting_enabled", False, type=bool))
 
         def _on_crash_chk_toggled(v):
@@ -2324,6 +2384,33 @@ class MainWindow(QMainWindow):
         crash_row.addStretch()
         layout.addSpacing(4)
         layout.addLayout(crash_row)
+
+        # Dev-only items live at the BOTTOM of Settings (see the rule at
+        # _DEV_SWITCHER_ENABLED). Streaking-star filter is the last section so the
+        # public-facing settings stay on top; it disappears entirely in the
+        # frozen app.
+        if _DEV_SWITCHER_ENABLED:
+            layout.addSpacing(SECTION_GAP_PX)
+            layout.addWidget(make_section_heading("Streaking-star filter (dev)"))
+            layout.addSpacing(HEADING_BODY_GAP_PX)
+            layout.addWidget(make_body_text(
+                "For long-exposure sets where the stars themselves streak into lines. "
+                "Measures how long the stars run in this set and leaves alone any "
+                "detection shorter than that (so streaking stars aren't erased), unless "
+                "it's a red nav light. Does nothing on sharp-star sets. Dev-only."))
+
+            streak_chk = QCheckBox("Filter streaking stars (dev)")
+            streak_chk.setStyleSheet(f"QCheckBox {{ font-size: 14px; color: {BROWSER_TEXT}; margin-left: 16px; }}")
+            streak_chk.setChecked(SETTINGS.value("streak_filter_enabled", False, type=bool))
+            streak_chk.toggled.connect(lambda v: SETTINGS.setValue("streak_filter_enabled", v))
+            self._streak_chk = streak_chk
+
+            streak_row = QHBoxLayout()
+            streak_row.setContentsMargins(16, 0, 0, 0)
+            streak_row.addWidget(streak_chk)
+            streak_row.addStretch()
+            layout.addSpacing(4)
+            layout.addLayout(streak_row)
 
         layout.addStretch()
         return wrap
@@ -2408,6 +2495,12 @@ class MainWindow(QMainWindow):
             f"QTextBrowser {{ background: {BROWSER_BG}; color: {BROWSER_TEXT}; border: none; font-size: 13px; }}"
         )
         bio.document().setDocumentMargin(16)
+        # Body copy uses the shared BODY_TEXT_PX. EVERY section heading (the intro
+        # and the former sub-headings) is now an <h2> so they all render at the one
+        # heading size Qt gives heading tags -- matching the FAQ and the Settings
+        # headings. (Qt ignores CSS font-size on heading tags, so <h2> is the lever,
+        # not a font-size rule.) The photo stays in the left column of the layout.
+        bio.document().setDefaultStyleSheet(f"p, li {{ font-size: {BODY_TEXT_PX}px; }}")
         bio.setHtml(f"""
         <html><body style='font-family: Inter, -apple-system, Segoe UI, sans-serif; line-height: 1.5; margin:0; padding:0; color:{BROWSER_TEXT}; background-color:{BROWSER_BG};'>
         <p style='margin:0; padding:0; line-height:0; font-size:1px; height:0;'></p>
@@ -2424,7 +2517,7 @@ class MainWindow(QMainWindow):
 
         <p>Star Trail CleanR is my free gift to the astrophotography community.</p>
 
-        <h3 style='color:{BRAND_HEADING_BLUE}; margin:12px 0 2px 0;'>Links</h3>
+        <h2 style='color:{BRAND_HEADING_BLUE}; margin:{SECTION_GAP_PX}px 0 {HEADING_BODY_GAP_PX}px 0;'>Links</h2>
         <ul style='margin-top:2px;'>
         <li>Project site: <a href='https://startrailcleanr.com'>StarTrailCleanR.com</a></li>
         <li>Photos for sale: <a href='https://bruceherwigphotographer.square.site/shop/astrophotography/3?page=1&amp;limit=30&amp;sort_by=category_order&amp;sort_order=asc'>bruceherwig.com</a></li>
@@ -2432,17 +2525,17 @@ class MainWindow(QMainWindow):
         <li>Instagram: <a href='https://www.instagram.com/bruceherwig'>instagram.com/bruceherwig</a></li>
         </ul>
 
-        <h3 style='color:{BRAND_HEADING_BLUE}; margin:12px 0 2px 0;'>Acknowledgments</h3>
+        <h2 style='color:{BRAND_HEADING_BLUE}; margin:{SECTION_GAP_PX}px 0 {HEADING_BODY_GAP_PX}px 0;'>Acknowledgments</h2>
         <p style='margin-top:2px;'>Star Trail CleanR exists because of the generosity of fellow astrophotographers
         who shared their image sequences for AI training, tested early builds, and offered
         feedback. Thank you, all.</p>
         <p><a href='https://bruceherwig.wordpress.com/star-trail-cleanr/#Thanks'>See the
         full list of contributors &rarr;</a></p>
 
-        <h3 style='color:{BRAND_HEADING_BLUE}; margin:12px 0 2px 0;'>Version History</h3>
+        <h2 style='color:{BRAND_HEADING_BLUE}; margin:{SECTION_GAP_PX}px 0 {HEADING_BODY_GAP_PX}px 0;'>Version History</h2>
         <p style='margin-top:2px;'>See the full <a href='https://github.com/bruceherwig-dot/star-trail-cleanr/blob/main/CHANGELOG.md'>version history on GitHub</a>.</p>
 
-        <h3 style='color:{BRAND_HEADING_BLUE}; margin:12px 0 2px 0;'>Share Your Work&hellip; Have a Suggestion?</h3>
+        <h2 style='color:{BRAND_HEADING_BLUE}; margin:{SECTION_GAP_PX}px 0 {HEADING_BODY_GAP_PX}px 0;'>Share Your Work&hellip; Have a Suggestion?</h2>
         <p style='margin-top:2px;'>Got a before-and-after you'd like to share? I would love to see it!<br>
         Have an idea or feedback to make Star Trail CleanR even better? I want to hear it!<br>
         Email me at <a href='mailto:bruceherwig+startrailcleanr@gmail.com?subject=Star%20Trail%20CleanR'>bruceherwig+startrailcleanr@gmail.com</a></p>
@@ -3498,12 +3591,23 @@ class MainWindow(QMainWindow):
         layout.addLayout(hp_row)
         layout.addSpacing(6)
 
-        # Two share-output toggles on ONE row, spaced apart. Both default ON and
-        # remember their last state. They drive the post-run extras (wired
-        # separately): a shareable before/after wipe video and a red trail-map
-        # image, both saved into cleanr_workspace/. ("&&" renders one literal &.)
+        # Share-output toggles on ONE row, spaced apart. Each defaults ON and
+        # remembers its last state. They drive the post-run extras (wired
+        # separately), all saved into STC Extras: a quick full-res star trail, a
+        # shareable before/after wipe video, and a dev-only red trail-map image.
+        # ("&&" renders one literal &.)
         share_row = QHBoxLayout()
-        self._make_video_chk = QCheckBox("Sharable Before && After Video")
+        # Quick-and-dirty full-res star trail: a lighten-max stack of the CLEANED
+        # frames (trails removed) -> cleaned_star_trail.jpg. Public, default ON.
+        self._star_trail_chk = QCheckBox("Quick and Dirty Star Trail")
+        self._star_trail_chk.setFont(step_font)
+        self._star_trail_chk.setChecked(
+            SETTINGS.value("make_star_trail_enabled", True, type=bool))
+        self._star_trail_chk.toggled.connect(
+            lambda v: SETTINGS.setValue("make_star_trail_enabled", v))
+        share_row.addWidget(self._star_trail_chk)
+        share_row.addSpacing(40)
+        self._make_video_chk = QCheckBox("10-Second Sharable Before && After Video")
         self._make_video_chk.setFont(step_font)
         self._make_video_chk.setChecked(
             SETTINGS.value("make_video_enabled", True, type=bool))
@@ -5208,11 +5312,12 @@ class MainWindow(QMainWindow):
         separate-process runs into cleanr_workspace/, opening each when it finishes.
         The video is public; the Red Trail Map is dev-only. No-op if neither is
         enabled or the paths don't resolve. Never blocks the UI or the finished run."""
+        make_star = SETTINGS.value("make_star_trail_enabled", True, type=bool)
         make_video = SETTINGS.value("make_video_enabled", True, type=bool)
         make_red = (_DEV_SWITCHER_ENABLED
                     and getattr(self, "_red_map_chk", None) is not None
                     and SETTINGS.value("red_trail_map_enabled", True, type=bool))
-        if not (make_video or make_red):
+        if not (make_star or make_video or make_red):
             return
         original_dir = getattr(self.worker, "folder", None) if self.worker else None
         if not original_dir or not os.path.isdir(original_dir) \
@@ -5221,12 +5326,18 @@ class MainWindow(QMainWindow):
         ws_dir = output_workspace(cleaned_folder, create=True)
         self._share_threads = []        # keep refs so the QThreads aren't GC'd
         labels = []
+        if make_star:
+            star = os.path.join(ws_dir, "cleaned_star_trail.jpg")
+            self._start_share_run(
+                "star_trail", ["--star-trail", "--cleaned", cleaned_folder,
+                               "--out", star], star)
+            labels.append("Quick and Dirty Star Trail")
         if make_video:
             vid = os.path.join(ws_dir, "share_clip.mp4")
             self._start_share_run(
                 "video", ["--original", original_dir, "--cleaned", cleaned_folder,
                           "--out", vid], vid)
-            labels.append("Sharable Before & After Video")
+            labels.append("10-Second Sharable Before & After Video")
         if make_red:
             red = os.path.join(ws_dir, "red_trail_map.jpg")
             red_args = ["--red-map", "--original", original_dir, "--out", red,
@@ -5236,11 +5347,16 @@ class MainWindow(QMainWindow):
                 red_args += ["--foreground", fg]
             self._start_share_run("red", red_args, red)
             labels.append("Red Trail Map")
+        # Open the workspace folder ONCE, when the LAST job finishes (not per job).
+        # _share_job_finished counts these down and opens the folder on the last.
+        self._share_pending = len(self._share_threads)
+        self._share_any_done = False
+        self._share_ws_dir = ws_dir
         try:
             self._status_out.append(
                 f"\nCreating your {' and '.join(labels)} in the background, each as "
-                f"its own run. This may take a few minutes; each opens automatically "
-                f"when it's finished.")
+                f"its own run. This may take a few minutes; the folder opens "
+                f"automatically once they're all finished.")
         except Exception:
             pass
 
@@ -5254,21 +5370,33 @@ class MainWindow(QMainWindow):
         t.start()
 
     def _on_share_render_done(self, kind, out_path):
-        label = "video" if kind == "video" else "Red Trail Map"
+        label = _SHARE_KIND_LABELS.get(kind, "share output")
         try:
             self._status_out.append(f"Your {label} is ready.")
         except Exception:
             pass
-        # Open the folder only -- do NOT auto-open/play the file itself, so this
-        # matches the caption ("The folder opens when it's finished.").
-        _open_folder_in_file_manager(os.path.dirname(out_path))
+        self._share_any_done = True
+        self._share_job_finished()
 
     def _on_share_render_failed(self, kind, msg):
-        label = "video" if kind == "video" else "Red Trail Map"
+        label = _SHARE_KIND_LABELS.get(kind, "share output")
         try:
             self._status_out.append(f"Could not create the {label}: {msg}")
         except Exception:
             pass
+        self._share_job_finished()
+
+    def _share_job_finished(self):
+        """Called when any share render finishes (success or failure). Opens the
+        workspace folder ONCE -- only after the LAST job is done, and only if at
+        least one job actually produced a file -- so the folder doesn't pop open
+        once per output. Do NOT auto-open the files themselves, matching the
+        on-screen caption ('the folder opens when it's finished')."""
+        self._share_pending = getattr(self, "_share_pending", 1) - 1
+        if self._share_pending > 0:
+            return
+        if getattr(self, "_share_any_done", False) and getattr(self, "_share_ws_dir", None):
+            _open_folder_in_file_manager(self._share_ws_dir)
 
     def _show_run_complete_dialog(self):
         """Centered modal showing run summary. Replaces the old inline card
@@ -5743,12 +5871,12 @@ class MainWindow(QMainWindow):
             pass
 
     def _view_star_log(self, *args):
-        """Open this run's saved Star Log text file in the system text viewer."""
+        """Open the FOLDER that holds this run's saved Star Log (not the log file
+        itself), so the log sits alongside the run's other files (masks, share
+        outputs) in the file manager."""
         path = getattr(self, "_last_log_path", None)
         if path and os.path.isfile(path):
-            from PySide6.QtGui import QDesktopServices
-            from PySide6.QtCore import QUrl
-            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+            _open_folder_in_file_manager(os.path.dirname(path))
 
     def closeEvent(self, event):
         """Save window size and clean up worker thread before closing."""

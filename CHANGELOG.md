@@ -2,6 +2,14 @@
 
 ---
 
+## v2.57-beta
+- **New: a one-click finished star trail.** A new "Quick and Dirty Star Trail" option in Output Options stacks your cleaned frames into a full-resolution star trail image (`cleaned_star_trail.jpg`) the moment a run finishes — the trail-free composite you'd normally build in StarStaX, made for you automatically. It's a fast lighten-blend (brightest pixel wins), not a polished comet-mode stack, so it's a quick share-ready result, not a replacement for your final edit.
+- **The time estimate is smarter and shows up immediately.** "Estimated Time" now appears the moment a run starts instead of waiting for the first frames to be measured, and it accounts for your file type — RAW and 16-bit TIFF take longer to load than JPG, and the estimate now knows that. It also learns your computer's speed from your last run, so repeat runs are tuned to your hardware. It's still a ballpark — a sky full of trails takes longer than an empty one, and we can't know that in advance — but it's a much better first guess.
+- **Bigger, cleaner text on the FAQ, About, and Settings tabs.** The body text is a notch larger and the headings, spacing, and margins now match across all three tabs, so they read consistently.
+- **"View Star Log" now opens the folder** that holds the log, alongside your run's other files (masks, the star trail, any share video), instead of just opening the log file by itself.
+- **When you make share outputs, the folder opens once** — after the last one finishes — instead of popping open for each.
+- **Smoke tests:** 189 passing.
+
 ## v2.56-beta
 - **Star Trail CleanR now creates a shareable before/after comparison video.** After a cleaning run, the app can generate a short looping video with a wipe slider that reveals the before and after side by side. It opens in a folder when it's done. The option is in Output Options.
 - **Trail DetectoR v5 is now the detection engine.** Trained on a broader dataset that includes GoPro and action-cam footage, tighter satellite crossings, long-exposure trails, and hard cases the previous version missed. Handles more cameras and trail shapes with fewer blind spots.

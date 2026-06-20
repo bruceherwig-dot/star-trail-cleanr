@@ -354,3 +354,42 @@ jobs:
         # the new version within the timeout. This is the alarm that makes a
         # skipped or partial publish impossible to miss.
         run: python3 scripts/publish_appcast.py "${GITHUB_REF_NAME}" --verify
+
+  sync-changelog:
+    # Keep CHANGELOG.md on `main` current. Releases are tagged from a long-lived
+    # working branch, NOT main, so main's CHANGELOG used to freeze: it sat at
+    # v1.995-beta while the app shipped v2.56, and the in-app "version history on
+    # GitHub" link (About tab -> blob/main/CHANGELOG.md) showed a stale history.
+    # This copies the tagged CHANGELOG.md onto main automatically so that link is
+    # always current. Doc-only: it touches CHANGELOG.md on main and nothing else.
+    # It runs in PARALLEL with publish-appcast (both only need `release`), so a
+    # failure here can never block the release or the auto-update publish that
+    # actually reaches users.
+    needs: [release]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@v4
+        with:
+          path: tagged
+      - name: Check out main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: main-co
+      - name: Copy the tagged CHANGELOG.md onto main and push if changed
+        run: |
+          cp tagged/CHANGELOG.md main-co/CHANGELOG.md
+          cd main-co
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add CHANGELOG.md
+          if git diff --cached --quiet; then
+            echo "CHANGELOG.md on main already current — nothing to sync."
+          else
+            git commit -m "Sync CHANGELOG.md to main for ${GITHUB_REF_NAME}"
+            git push origin main
+          fi

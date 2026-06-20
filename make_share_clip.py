@@ -1,42 +1,56 @@
-"""make_share_clip.py — standalone shareable before/after star-trail clip.
+"""make_share_clip.py — builds the post-run "share" outputs from a finished clean.
 
-WHAT IT DOES
-------------
-Lighten-stacks the ORIGINAL frames into a "before" image (airplane/satellite
-trails visible) and the CLEANED frames into an "after" image (trails removed),
-then writes a short MP4 as a before/after WIPE: a white divider line with a
-round comparison-slider grip sweeps across the frame. Left of the line shows the
-BEFORE, right of the line shows the CLEANED.
+After Star Trail CleanR finishes a run, the user can ask for one or more keepsake
+images/clips made from their frames. This one file produces ALL THREE of them.
+It has no GUI: the app launches it as a separate process (one per requested
+output) after a run, and it can also be run by hand from the command line.
 
-The line starts centered, slides to the right edge (revealing the full before),
-holds, slides all the way to the left edge (revealing the full cleaned), holds,
-then returns to center and loops seamlessly. A 10-second loop:
-  center -> right edge   1.5s   (reveals full BEFORE)
-  hold                   2.0s
-  right edge -> left edge 3.0s  (reveals full CLEANED)
-  hold                   2.0s
-  left edge -> center    1.5s   (loops)
+THE THREE OUTPUTS
+-----------------
+1. STAR TRAIL  (make_star_trail, `--star-trail`)
+   A full-resolution "quick and dirty" star trail: lighten-stack the CLEANED
+   frames (trails already removed) into one JPG. Just the brightest pixel per
+   location -- fast, not a comet-mode/gap-filled StarStaX stack. -> cleaned_star_trail.jpg
 
-A branding band along the bottom carries the tagline and the website; the wipe
-only affects the photo, never the text.
+2. BEFORE/AFTER VIDEO  (make_share_clip, default mode)
+   A short looping MP4 that wipes between the BEFORE (originals, trails visible)
+   and the CLEANED (trails removed) so viewers see exactly what was removed.
+   Details under that function.
 
-The canvas is a 4:5 ratio matched to the photo's orientation:
-  landscape source -> 1350 x 1080 (5:4 landscape)
-  portrait  source -> 1080 x 1350 (4:5 portrait)
-so the whole frame fills the post with minimal cropping.
+3. RED TRAIL MAP  (make_red_trail_map, `--red-map`)  [dev-only in the app]
+   The before-stack with every DETECTED trail painted solid red -- a visual of
+   what the detector found. -> red_trail_map.jpg
 
-The first 3 and last 3 frames of the sequence are skipped (usually test shots).
+THE SHARED IDEA (why all three look the way they do)
+----------------------------------------------------
+- "Lighten / maximum stack": for each pixel, keep the brightest value seen across
+  the sequence. Stars sweep into arcs (a star trail); a removed trail leaves no
+  bright streak. This one operation underlies all three outputs.
+- "Before" = stack of the ORIGINAL frames (trails IN). "After"/"cleaned" = stack
+  of the CLEANED frames (trails OUT). The words are used that precise way
+  throughout this file.
+- The first 3 and last 3 frames are always skipped (usually test shots) -- see
+  _list_frames.
+- NO SILENT DROPS: if a frame can't be read it is counted and reported LOUDLY at
+  the end, because a short stack means short trails and a misleading result.
 
-STANDALONE, no GUI. Call make_share_clip(original_dir, cleaned_dir, out_path)
-from anywhere (e.g. a future "make a share clip" checkbox after a run), or run
-it from the command line:
-
+HOW TO RUN BY HAND
+------------------
+    python3 make_share_clip.py --star-trail --cleaned "<cleaned folder>" [--out <file.jpg>]
     python3 make_share_clip.py --original "<frames folder>" [--cleaned <dir>] [--out <file.mp4>]
+    python3 make_share_clip.py --red-map --original "<frames folder>" [--out <file.jpg>]
 
-Output defaults to <original_dir>/share_clip.mp4. cleaned_dir defaults to
-<original_dir>/cleaned.
+cleaned_dir defaults to <original_dir>/cleaned. Each output's default filename is
+noted in its function.
 
-The previous crossfade-boomerang version is archived at
+FILE LAYOUT (top to bottom)
+---------------------------
+  - Shared helpers: canvas sizing, frame listing, the two stack functions.
+  - Video-only helpers: fonts, text box, slider grip, wipe timing, the encoder.
+  - The three outputs: make_share_clip / make_red_trail_map / make_star_trail.
+  - Command-line entry point.
+
+The previous crossfade-boomerang version of the video is archived at
 archive/make_share_clip_crossfade_2026_06_13.py.
 """
 import os
@@ -56,7 +70,7 @@ SKIP_LAST = 3         # drop the last N frames (test shots) from the sequence
 FPS = 30
 BOX_FRAC = 0.13       # bottom BLACK text box height, as a fraction of canvas height
 
-# Wipe timing (seconds). Total = 8.0s loop.
+# Wipe timing (seconds). Total = 10.0s loop.
 MOVE_RIGHT_S = 1.5    # center -> right edge (reveals the full BEFORE)
 HOLD_BEFORE_S = 2.0   # hold on the full before
 MOVE_LEFT_S = 3.0     # right edge -> left edge (reveals the full CLEANED)
@@ -70,6 +84,12 @@ _FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "
 # or 1080x1350) is the sweet spot for their re-encode pipeline.
 SCALE = 1
 
+
+# ════════════════════════════════════════════════════════════════════════════
+# SHARED HELPERS — canvas sizing, frame listing, and the two stack functions.
+# (_canvas_size / _fill_canvas are video-only sizing; _list_frames and the two
+#  _stack functions are the workhorses behind every output.)
+# ════════════════════════════════════════════════════════════════════════════
 
 def _canvas_size(w, h):
     """4:5 ratio in the orientation matching the source photo, rendered at SCALE x.
@@ -86,6 +106,19 @@ def _fill_canvas(img, cw, ch):
     r = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_AREA)
     x0, y0 = (nw - cw) // 2, (nh - ch) // 2
     return r[y0:y0 + ch, x0:x0 + cw]
+
+
+def _list_frames(folder):
+    """Sorted image frames in `folder`, dropping the first/last few test shots
+    (SKIP_FIRST / SKIP_LAST), in true capture order via natural_key."""
+    exts = tuple(IMAGE_EXTS)
+    fs = sorted(
+        [f for f in os.listdir(folder)
+         if os.path.splitext(f)[1].lower() in exts and os.path.isfile(os.path.join(folder, f))],
+        key=natural_key,
+    )
+    end = len(fs) - SKIP_LAST                       # drop the trailing test shots
+    return fs[SKIP_FIRST:end] if end > SKIP_FIRST else fs[SKIP_FIRST:]
 
 
 def _stack(dirpath, names, cw, ch, label):
@@ -126,7 +159,63 @@ def _stack(dirpath, names, cw, ch, label):
     return acc
 
 
+def _stack_fullres(dirpath, names, label):
+    """Lighten/maximum stack of `names` at FULL native resolution (no canvas
+    resize). Only one frame plus the running accumulator are held in memory at a
+    time (np.maximum writes back into the accumulator), so even hundreds of
+    full-size frames stay light. Same no-silent-drop accounting as _stack(): any
+    missing/unreadable frame is reported LOUDLY at the end. A frame whose size
+    differs from the first is resized to match (a complete stack with one resized
+    frame beats a silently shorter trail)."""
+    acc = None
+    used = 0
+    missing, unreadable, resized = [], [], []
+    for i, n in enumerate(names):
+        p = os.path.join(dirpath, n)
+        if not os.path.exists(p):
+            missing.append(n)
+            continue
+        im = robust_imread(p, cv2.IMREAD_COLOR)     # upright 8-bit BGR (16-bit TIFF -> 8-bit)
+        if im is None:
+            unreadable.append(n)
+            continue
+        if acc is None:
+            acc = im.copy()
+        else:
+            if im.shape != acc.shape:
+                im = cv2.resize(im, (acc.shape[1], acc.shape[0]), interpolation=cv2.INTER_AREA)
+                resized.append(n)
+            np.maximum(acc, im, out=acc)
+        used += 1
+        if i % 50 == 0:
+            print(f"  {label}: {i + 1}/{len(names)}", flush=True)
+    print(f"  {label}: stacked {used} of {len(names)} frames", flush=True)
+    dropped = missing + unreadable
+    if dropped:
+        print("  " + "!" * 60, flush=True)
+        print(f"  WARNING [{label}]: {len(dropped)} frame(s) NOT stacked "
+              f"({len(missing)} missing, {len(unreadable)} unreadable) -- the "
+              f"stack is INCOMPLETE.", flush=True)
+        print(f"    skipped: {', '.join(dropped[:20])}"
+              + (f" ... (+{len(dropped) - 20} more)" if len(dropped) > 20 else ""),
+              flush=True)
+        print("  " + "!" * 60, flush=True)
+    if resized:
+        print(f"  NOTE [{label}]: {len(resized)} frame(s) had a different size and "
+              f"were resized to match the first frame.", flush=True)
+    return acc
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# VIDEO-ONLY HELPERS — everything below is used solely by the before/after wipe
+# video: text fonts, the bottom branding box, the slider grip, the per-frame
+# divider positions for the loop, and the H.264 encoder. The star trail and red
+# map do not touch any of these.
+# ════════════════════════════════════════════════════════════════════════════
+
 def _font(size, bold=False):
+    """Load the Inter font (bold or regular) at `size` from assets/fonts, with a
+    Helvetica then PIL-default fallback if the bundled font isn't found."""
     f = os.path.join(_FONT_DIR, f"Inter-{'Bold' if bold else 'Regular'}.ttf")
     if os.path.exists(f):
         return ImageFont.truetype(f, size)
@@ -181,7 +270,7 @@ def _draw_handle(img, cx, cy, r):
 
 
 def _wipe_positions(cw):
-    """The divider column X for every frame of the 8-second loop, in order.
+    """The divider column X for every frame of the 10-second loop, in order.
     Move phases interpolate at a steady speed and END exactly on the target so
     the following hold continues from there; the loop is seamless because the
     return-to-center ends where the next move-right begins."""
@@ -248,19 +337,35 @@ def _open_writer(path, cw, ch):
         return _W()
 
 
+# ════════════════════════════════════════════════════════════════════════════
+# THE THREE OUTPUTS — one public function each. All three lighten-stack frames
+# (see "THE SHARED IDEA" at the top); they differ only in WHICH frames they stack
+# and how they present the result.
+# ════════════════════════════════════════════════════════════════════════════
+
 def make_share_clip(original_dir, cleaned_dir=None, out_path=None):
+    """OUTPUT 2 — the before/after wipe VIDEO (this is the default CLI mode).
+
+    Builds two lighten-stacks at video resolution -- BEFORE (original frames,
+    trails in) and AFTER (cleaned frames, trails out) -- then writes an MP4 where
+    a white divider line with a round slider grip sweeps across the frame: left of
+    the line shows the before, right shows the cleaned. The line starts centered,
+    slides right (reveals full before), holds, slides left (reveals full cleaned),
+    holds, returns to center, and loops seamlessly. A 10-second loop:
+        center -> right edge    1.5s   (reveals full BEFORE)
+        hold                    2.0s
+        right edge -> left edge 3.0s   (reveals full CLEANED)
+        hold                    2.0s
+        left edge -> center     1.5s   (loops)
+    A black branding box along the bottom carries the tagline + website and the
+    wipe never touches it. Canvas is 4:5 matched to the photo orientation (1350x1080
+    landscape / 1080x1350 portrait) so it fills a social post with minimal crop.
+    The before and after folders are stacked from their OWN file lists paired by
+    sequence position (not by filename), so a zero-padded cleaned export can't
+    silently drop frames. Output defaults to <original_dir>/share_clip.mp4.
+    """
     if cleaned_dir is None:
         cleaned_dir = os.path.join(original_dir, "cleaned")
-    exts = tuple(IMAGE_EXTS)
-
-    def _list_frames(folder):
-        fs = sorted(
-            [f for f in os.listdir(folder)
-             if os.path.splitext(f)[1].lower() in exts and os.path.isfile(os.path.join(folder, f))],
-            key=natural_key,
-        )
-        end = len(fs) - SKIP_LAST                       # drop the trailing test shots
-        return fs[SKIP_FIRST:end] if end > SKIP_FIRST else fs[SKIP_FIRST:]
 
     names = _list_frames(original_dir)
     if not names:
@@ -327,8 +432,10 @@ def make_share_clip(original_dir, cleaned_dir=None, out_path=None):
 
 def make_red_trail_map(original_dir, out_path=None, masks_dir=None,
                        foreground_mask=None):
-    """Save a 'Red Trail Map' (Option B): the lighten-stacked BEFORE image with
-    every DETECTED trail painted solid red. Detections come from the per-frame
+    """OUTPUT 3 — the RED TRAIL MAP (dev-only in the app, `--red-map`).
+
+    The lighten-stacked BEFORE image with every DETECTED trail painted solid red:
+    a picture of what the detector found. Detections come from the per-frame
     <stem>_polys.json files STC writes to cleanr_workspace/masks/ during a run,
     unioned across frames. The foreground is excluded via the foreground mask so
     red never lands on the landscape. Skips the first/last 3 like the video. No
@@ -423,20 +530,72 @@ def make_red_trail_map(original_dir, out_path=None, masks_dir=None,
     return out_path
 
 
+def make_star_trail(cleaned_dir, out_path=None):
+    """OUTPUT 1 — the quick-and-dirty full-resolution STAR TRAIL (`--star-trail`).
+
+    A lighten/maximum stack of the CLEANED frames (trails already removed) written
+    as a JPG. This is NOT a comet-mode / gap-filled StarStaX stack -- just the
+    brightest pixel per location across the cleaned sequence: fast, full-res, and
+    good enough to share. Saved as cleaned_star_trail.jpg.
+
+    STANDALONE: call make_star_trail(cleaned_dir, out_path) from anywhere, or run
+        python3 make_share_clip.py --star-trail --cleaned "<cleaned folder>" [--out <file.jpg>]
+    """
+    if not os.path.isdir(cleaned_dir):
+        raise SystemExit(f"cleaned folder not found: {cleaned_dir}")
+    names = _list_frames(cleaned_dir)
+    if not names:
+        raise SystemExit(f"no cleaned frames found in {cleaned_dir}")
+    print(f"{len(names)} cleaned frames (first {SKIP_FIRST} and last {SKIP_LAST} "
+          f"skipped) -> full-res lighten-max star trail", flush=True)
+    stack = _stack_fullres(cleaned_dir, names, "star trail")
+    if stack is None:
+        raise SystemExit(f"stacking failed (cleaned dir = {cleaned_dir})")
+    if out_path is None:
+        out_path = os.path.join(cleaned_dir, "cleaned_star_trail.jpg")
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    ok = cv2.imwrite(out_path, stack, [cv2.IMWRITE_JPEG_QUALITY, 95])
+    if not ok:
+        raise SystemExit(f"could not write {out_path}")
+    h, w = stack.shape[:2]
+    print(f"wrote {out_path}  ({w}x{h}, lighten-max of {len(names)} cleaned frames)",
+          flush=True)
+    return out_path
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# COMMAND-LINE ENTRY POINT — picks ONE output by flag. The app calls this same
+# script (one process per requested output); a person can run it the same way.
+#   --star-trail  -> make_star_trail   (needs --cleaned, or --original to derive it)
+#   --red-map     -> make_red_trail_map (needs --original)
+#   (no flag)     -> make_share_clip    (the video; needs --original)
+# ════════════════════════════════════════════════════════════════════════════
+
 if __name__ == "__main__":
     import argparse
-    ap = argparse.ArgumentParser(description="Make a shareable before/after star-trail MP4 or Red Trail Map.")
-    ap.add_argument("--original", required=True, help="folder of original frames")
+    ap = argparse.ArgumentParser(description="Make a shareable before/after star-trail MP4, Red Trail Map, or full-res cleaned star trail.")
+    ap.add_argument("--original", default=None, help="folder of original frames (video / red map)")
     ap.add_argument("--cleaned", default=None, help="cleaned frames (default: <original>/cleaned)")
     ap.add_argument("--out", default=None, help="output file (default depends on mode)")
     ap.add_argument("--red-map", action="store_true",
                     help="make the Red Trail Map image instead of the wipe video")
+    ap.add_argument("--star-trail", action="store_true",
+                    help="make the full-res cleaned star trail (lighten-max of the cleaned frames)")
     ap.add_argument("--masks-dir", default=None,
                     help="folder of <stem>_polys.json detections (red map; default: resolved)")
     ap.add_argument("--foreground", default=None,
                     help="foreground mask PNG to exclude from the red map (default: resolved)")
     args = ap.parse_args()
-    if args.red_map:
+    if args.star_trail:
+        st_cleaned = args.cleaned or (os.path.join(args.original, "cleaned") if args.original else None)
+        if not st_cleaned:
+            ap.error("--star-trail needs --cleaned (or --original to default to <original>/cleaned)")
+        make_star_trail(st_cleaned, args.out)
+    elif args.red_map:
+        if not args.original:
+            ap.error("--red-map needs --original")
         make_red_trail_map(args.original, args.out, args.masks_dir, args.foreground)
     else:
+        if not args.original:
+            ap.error("the wipe video needs --original")
         make_share_clip(args.original, args.cleaned, args.out)
