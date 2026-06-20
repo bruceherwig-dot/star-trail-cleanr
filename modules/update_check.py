@@ -147,33 +147,45 @@ def get_download_url() -> str:
     return f"{base}/{_detect_asset()}"
 
 
-def check_for_update(local_version_str: str, timeout_s: float = TIMEOUT_S) -> Optional[dict]:
+def check_for_update(local_version_str: str, timeout_s: float = TIMEOUT_S,
+                     retries: int = 1) -> Optional[dict]:
     """Ask GitHub for the latest release and compare.
 
     Returns {'tag': str, 'download_url': str} when a newer release exists.
     Returns None when the user is current OR when any failure occurs.
 
     timeout_s lets the pre-window launch path use a tighter budget (~1.5s)
-    so a slow network never visibly delays startup. Background banner
-    callers keep the default 5s.
+    so a slow network never visibly delays startup. retries lets the BACKGROUND
+    banner check (which runs off the UI thread and never delays startup) try a
+    few times before giving up: the check routinely takes ~3.5s, so a single slow
+    moment was tipping it over the timeout and blanking the banner. One transient
+    timeout must never mean "no update notice" for something this important.
     """
     local = parse_local(local_version_str)
     if local is None:
         _log(f"check: local version unparseable ({local_version_str!r}) -> no banner")
         return None
-    try:
-        req = urllib.request.Request(
-            API_URL,
-            headers={
-                "Accept": "application/vnd.github+json",
-                "User-Agent": "StarTrailCleanR-UpdateCheck",
-            },
-        )
-        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError, ValueError):
-        _log(f"check FAILED (local={local_version_str}):\n{traceback.format_exc()}")
-        return None
+    attempts = max(1, retries)
+    data = None
+    for attempt in range(1, attempts + 1):
+        try:
+            req = urllib.request.Request(
+                API_URL,
+                headers={
+                    "Accept": "application/vnd.github+json",
+                    "User-Agent": "StarTrailCleanR-UpdateCheck",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            break
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError, ValueError):
+            _log(f"check attempt {attempt}/{attempts} FAILED "
+                 f"(local={local_version_str}):\n{traceback.format_exc()}")
+            if attempt < attempts:
+                time.sleep(min(2.0 * attempt, 5.0))   # brief backoff before retry
+            else:
+                return None
     tag = data.get("tag_name")
     remote = parse_tag(tag)
     # Only surface an update when the remote version is STRICTLY greater than the

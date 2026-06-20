@@ -54,7 +54,7 @@ TIMEOUT_S = 5
 # Version label of the model shipped inside the app bundle. Bumped only when
 # we publish a new app release that carries a newer bundled model. Downloaded
 # models in the user folder always take precedence over this.
-BUNDLED_MODEL_VERSION = "model-v4"
+BUNDLED_MODEL_VERSION = "model-v5"
 
 # Matches a model tag and captures its numeric version, e.g. "model-v4" -> "4"
 # or "model-v2.5" -> "2.5". Anchored at the start so it only accepts the exact

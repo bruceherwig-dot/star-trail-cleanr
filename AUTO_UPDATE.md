@@ -6,7 +6,9 @@ works, read THIS and verify against the cited code lines. **Do not describe
 update behavior from memory.** Getting this wrong and stating it confidently is
 exactly the mistake this document exists to prevent.
 
-Verified against the actual code on 2026-06-09.
+Verified against the actual code on 2026-06-09. **Updated 2026-06-19** for the
+banner-primary redesign — the in-app banner is now the primary notification and
+the engine no longer pops its own window on launch (see Half 2).
 
 ---
 
@@ -42,35 +44,66 @@ which has no built-in installer and uses a download link.
 
 ### Half 2: DELIVERING (app side) — the installed app checking + installing
 
-The installed app has **two independent notifications**. Both run on launch.
-Know the difference:
+**Redesigned 2026-06-19 (the "banner-primary" model).** There is now ONE primary,
+always-visible notification — the in-app amber banner — plus the one-click install
+engine behind it. The engine **no longer pops its own window on launch.**
 
-**A) The orange in-app banner (our own custom notice) — the FALLBACK channel.**
-- Code: `star_trail_cleanr.py` → `_start_update_check()` (called every launch in
-  the MainWindow setup) → `UpdateCheckThread` → `modules/update_check.py`
-  `check_for_update()`; shown by `_on_update_result()`.
-- It checks **GitHub's latest release** (NOT the feed) on **every launch**.
-- **Suppressed when the engine is alive** (added 2026-06-10): if
-  `updater_alive()` is True on Mac/Windows in a frozen build, the banner does
-  NOT show — the engine's native popup owns notification, so the user never
-  sees two competing prompts for one release. The banner appears only when the
-  engine is dead (wrong install location / engine failure) and always on
-  Linux. The first day both channels were ever alive at once (2026-06-10), the
-  double-prompt confused Bruce immediately.
-- Its "Update" button (`_on_update_download`) runs the **one-click in-place
-  installer** on Mac/Windows when the engine is alive, shows the
-  explain-and-open-website fallback when it is dead, and opens the website on
-  **Linux**.
+Why the change: on the 2.51 build (2026-06-19) the engine's native popup opened
+**behind** the main window, where the user never saw it — and the banner was being
+*suppressed* because the engine was alive. Both channels went silent at once and
+the app looked like its updater was dead. So the banner (which lives inside the
+window and cannot hide) became primary, and the engine's unprompted launch popup
+was removed.
 
-**B) The built-in one-click installer (Sparkle on Mac, WinSparkle on Windows).**
+**A) The amber in-app banner — the PRIMARY notification (every platform).**
+- Code: `star_trail_cleanr.py` → `_start_update_check()` (every launch in the
+  MainWindow setup) → `UpdateCheckThread` → `modules/update_check.py`
+  `check_for_update()`; shown by `_reveal_update_banner()`, called from either
+  `_on_update_result()` (live check) or `_show_cached_update_banner()` (sticky).
+- It checks **GitHub's latest release** (the REST API `releases/latest`, NOT the
+  appcast feed) on **every launch**. If that tag is newer than the running
+  version, the banner shows. It lives inside the main window, so unlike a
+  free-floating popup it **cannot hide behind the window.**
+- It shows **whenever a newer release exists** — it is NOT suppressed by the
+  engine being alive any more. (That suppression was removed 2026-06-19: with the
+  engine no longer auto-popping, suppressing the banner left users with NO visible
+  notice.) Only a per-release **dismiss** (the X button → `dismissed_update_tag`)
+  keeps it hidden.
+- **Resilience (added 2026-06-19 — the check is online and can be slow):**
+  - The background check **retries with a generous timeout**
+    (`check_for_update(VERSION, timeout_s=12, retries=3)`). It runs off the UI
+    thread, so it never delays startup; one slow GitHub response no longer blanks
+    the banner. (The check routinely takes ~3.5s — a single slow moment was
+    tipping it past the old 5s budget.)
+  - **Sticky memory**: a found tag is persisted (`last_seen_update_tag`). On the
+    next launch the banner shows **instantly from memory** if that tag is still
+    newer than the running version and not dismissed — BEFORE/without a successful
+    live check — so a transient timeout or a brief offline launch can't make a
+    known update silently disappear. The live check then confirms/refreshes it.
+  - Guarded by `tests/test_update_banner.py` (in `tests/run_all.py`): it fails the
+    build if the banner stops showing, **including a guard that simulates
+    engine-alive + frozen** — the exact condition a re-added suppression would
+    hide.
+- Its **Update/Download button** (`_on_update_download`) drives the one-click
+  in-place installer on Mac/Windows (engine B), shows the explain-and-open-website
+  fallback when the engine is dead, and opens the website on **Linux**.
+
+**B) The one-click install engine (Sparkle on Mac, WinSparkle on Windows).**
 - Code: `modules/sparkle_updater.py`, `modules/winsparkle_updater.py`; started at
   launch in `star_trail_cleanr.py` (`init_sparkle` / `init_winsparkle`).
-- It reads the **appcast feed**. When the feed shows a newer version it pops its
-  **own native "A new version is available — Install" window** and does the
-  download + in-place install + restart.
-- It checks on **every launch** (`check_for_updates_in_background`, added
-  v2.48-beta) AND on a daily timer (`SUScheduledCheckInterval = 86400`) as a
-  backstop, AND when the user clicks **Settings → Check for Updates**.
+- It reads the **appcast feed** and does the download + in-place install + restart.
+- It is **NO LONGER triggered automatically on launch** — the
+  `check_for_updates_in_background()` launch call was removed 2026-06-19. It is
+  driven by the **banner's Update button** and **Settings → Check for Updates**.
+  The engine still STARTS on launch (so those buttons work and the dead-engine
+  fallback can tell when it didn't); it just doesn't throw up its own window
+  unprompted.
+- When the engine DOES show its window (from the banner button or Settings), the
+  app pulls itself to the front so that window can't open behind the main window
+  (`bring_app_to_front()` + the `SPUStandardUserDriverDelegate`
+  "willHandleShowingUpdate" hook in `sparkle_updater.py`).
+- Sparkle's own daily timer (`SUScheduledCheckInterval = 86400`) still runs as the
+  engine's internal backstop.
 
 ## Platform matrix
 
@@ -80,6 +113,40 @@ Know the difference:
 | Mac Intel | Sparkle | appcast-mac-intel.xml | one-click in-place |
 | Windows | WinSparkle | appcast-windows.xml | one-click in-place |
 | Linux | none | (banner only) | banner button opens GitHub download page |
+
+## Model updates — a SEPARATE channel from app updates (verified against code 2026-06-17)
+
+The AI model (the trail detector, `best.pt`) updates on its OWN path, independent of the
+app/appcast above. A new model does NOT need a new app version to reach users.
+
+- Code: `modules/model_update.py` `check_for_model_update()`; GUI shows it via
+  `_start_model_update_check()` → `ModelUpdateCheckThread` → `_on_model_update_result()`
+  (the orange **model-update card**, separate from the app banner).
+- On **every launch**, it queries **all** GitHub releases (`/releases?per_page=100`, so it
+  sees prereleases), finds the newest tag matching **`model-v<number>`** (e.g. `model-v5`),
+  and compares it to the model in use. "In use" = a model the user previously downloaded
+  into their app folder (`get_installed_model_version()`) if present, else the bundled
+  `BUNDLED_MODEL_VERSION` (currently **`model-v4`**, in `modules/model_update.py`).
+- If a release is **strictly newer** AND has a **`.pt` asset attached**, the card appears
+  with the release's first-line summary + a `Credits:` line. One click downloads the `.pt`
+  into the user's app folder (`save_installed_model_version`), and that downloaded model
+  then takes precedence over the bundled one. It is an **opt-in download prompt, not a
+  silent push.**
+
+### To SHIP a new model (e.g. v5)
+1. Create a GitHub release tagged **exactly `model-v5`** (the matcher needs the
+   `model-v<number>` form; `model-v5.1` is fine, `v5`/`trail-v5` are NOT detected).
+2. **Attach `best.pt`** (the first `.pt` asset is what downloads).
+3. **Mark it PRERELEASE** — a full release would make `/releases/latest` resolve to the
+   model tag and break the website's permanent app-download link (see CLAUDE.md).
+4. Optional: put a one-line summary + a `Credits: <name>` line in the release notes — both
+   show on the card.
+- Publishing is **MANUAL** (`gh release create model-v5 --prerelease` with `best.pt`).
+  There is **no CI automation for `model-v*` tags** (unlike app `v*` tags, which auto-publish
+  the appcast). Confirmed: nothing in `.github/workflows/` reacts to `model-v*`.
+- The bundled `BUNDLED_MODEL_VERSION` only changes when a future APP build bakes in a newer
+  `best.pt` and bumps that constant + `_DEV_FALLBACK_MODEL` (CLAUDE.md rule). The
+  model-release path reaches existing users WITHOUT that app build.
 
 ## The wrong-location failure (added 2026-06-10, after a real user hit it)
 
@@ -125,9 +192,14 @@ applies. A broken updater cannot fix the very update that fixes it.
 - **Did the last release publish?** In CI, the `publish-appcast` job must be
   green. Locally, `python3 scripts/publish_appcast.py vX.YY-beta --verify`
   exits non-zero unless all three live feeds advertise that version.
-- **Does the app check on launch?** `_start_update_check()` (orange bar) is in
-  the MainWindow setup; `check_for_updates_in_background()` is called right after
-  `init_sparkle` / `init_winsparkle`.
+- **Does the app notify on launch?** `_start_update_check()` (the amber banner)
+  runs in the MainWindow setup and shows the banner from the live GitHub check or
+  from sticky memory. The engine (`init_sparkle` / `init_winsparkle`) still starts
+  on launch but no longer auto-pops — `check_for_updates_in_background()` is NOT
+  called on launch any more (removed 2026-06-19).
+- **Does the banner survive a flaky network?** `tests/run_all.py` →
+  `test_update_banner.py` must be green (it locks the banner-shows behavior,
+  including the engine-alive-and-frozen no-suppression guard).
 
 ## Version numbering
 

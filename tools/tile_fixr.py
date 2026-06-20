@@ -84,6 +84,9 @@ CVAT_URL = "http://localhost:8080"
 CVAT_USER = "bherwig2"
 TRAILS_ROOT = Path("/Volumes/T7 Shield/AI Projects/Star Trail CleanR/star trail images")
 GKYLE_STAGING = Path("/Volumes/T7 Shield/AI Projects/Star Trail CleanR/external_datasets/gkyle_startrails/cvat_staging")
+# Out-of-root dataset folders live in one shared file (add a dataset there, once,
+# and all three review tools pick it up).
+from dataset_paths import TASK_ABS_FOLDERS, longest_prefix_folder, resolve_workspace
 BRIDGE_STAGING = Path("/Volumes/T7 Shield/AI Projects/Star Trail CleanR/bridge_review_107")
 AUG_BRIDGE_STAGING = Path("/Volumes/T7 Shield/AI Projects/Star Trail CleanR/bridge_fix_tiles_2026_06/aug_bridge_review")
 CROSSING_STAGING = Path("/Volumes/T7 Shield/AI Projects/Star Trail CleanR/bridge_fix_tiles_2026_06/crossing_review")
@@ -131,6 +134,11 @@ def resolve_image_dir(task_name):
     # Special case: gkyle tiles live outside TRAILS_ROOT
     if "gkyle" in task_name.lower() and GKYLE_STAGING.exists():
         return GKYLE_STAGING
+    # Datasets whose originals live outside TRAILS_ROOT (shared mapping)
+    if task_name in TASK_ABS_FOLDERS:
+        p = Path(TASK_ABS_FOLDERS[task_name])
+        if p.exists():
+            return p
     # Special case: crossing AUGMENTATION review (checked before plain "crossing"/"augmentation")
     if "crossing" in task_name.lower() and "augmentation" in task_name.lower() and CROSSING_AUG_STAGING.exists():
         return CROSSING_AUG_STAGING
@@ -161,6 +169,9 @@ def resolve_image_dir(task_name):
         for child in TRAILS_ROOT.iterdir():
             if child.is_dir() and base.lower() in child.name.lower():
                 return child
+    hit = longest_prefix_folder(task_name, TRAILS_ROOT)
+    if hit:
+        return hit
     return None
 
 
@@ -992,7 +1003,7 @@ class TaskPickerDialog(QDialog):
             self.btns.button(QDialogButtonBox.Ok).setEnabled(False)
             self._rb_cleaned.setEnabled(False)
         else:
-            masks_dir = img_dir / "cleanr_workspace" / "masks"
+            masks_dir = resolve_workspace(img_dir) / "masks"
             has_masks = masks_dir.is_dir()
             self._rb_cleaned.setEnabled(has_masks)
             if not has_masks and self._rb_cleaned.isChecked():
@@ -2083,7 +2094,7 @@ class TileFixR(QMainWindow):
             return None
         row_letter = chr(ord('A') + self.tile_filter[0])
         col_num = self.tile_filter[1] + 1
-        return IMG_DIR / "cleanr_workspace" / f"screener_flags_{row_letter}{col_num}.json"
+        return resolve_workspace(IMG_DIR) / f"screener_flags_{row_letter}{col_num}.json"
 
     def _load_flags(self):
         """Load the set of flagged frame indices saved by a previous Scan Tile
@@ -3752,9 +3763,9 @@ class ScanWorker(QThread):
                 self.failed.emit("No JPG frames found")
                 return
 
-            mask_path = img_dir / "cleanr_workspace" / "foreground_mask.png"
+            mask_path = resolve_workspace(img_dir) / "foreground_mask.png"
             if not mask_path.exists():
-                self.failed.emit("No foreground_mask.png in cleanr_workspace")
+                self.failed.emit("No foreground_mask.png in the run-artifact folder")
                 return
 
             mask_full = np.array(Image.open(mask_path).convert("L"))
@@ -3995,7 +4006,7 @@ def main():
     by_frame, frame_names, job_id = load_cvat_polygons(progress_cb=splash.update_progress)
     if mode == "cleaned":
         entries, all_polys = build_tile_entries_from_masks(
-            img_dir / "cleanr_workspace" / "masks", frame_names,
+            resolve_workspace(img_dir) / "masks", frame_names,
             progress_cb=splash.update_progress)
         view_only = True
     else:

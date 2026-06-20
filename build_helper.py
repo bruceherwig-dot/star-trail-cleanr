@@ -129,7 +129,7 @@ except Exception:
 
 # Always include the algorithm script, the version file, and the
 # modules/ and assets/ folders.
-add_data = [f'astro_clean_v5.py{sep}.', f'version.txt{sep}.',
+add_data = [f'astro_clean_v5.py{sep}.', f'make_share_clip.py{sep}.', f'version.txt{sep}.',
             f'modules{sep}modules', f'assets{sep}assets']
 seen = set()
 
@@ -198,6 +198,8 @@ cmd = [
     '--collect-all', 'tifffile',
     '--collect-all', 'rawpy',
     '--collect-all', 'psutil',
+    '--collect-all', 'imageio',
+    '--collect-all', 'imageio_ffmpeg',
     # matplotlib 3.11.0 (June 2026) imports fontTools at module load
     # (dviread.py: import fontTools.agl) and PyInstaller's matplotlib recipe
     # doesn't pack it yet -- every frozen build died at launch with

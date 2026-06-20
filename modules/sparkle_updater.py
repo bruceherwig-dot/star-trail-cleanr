@@ -60,6 +60,27 @@ def _log(msg):
         pass
 
 
+def bring_app_to_front():
+    """Activate the app so a Sparkle window that's just been shown lands IN FRONT
+    of the Qt main window instead of behind it.
+
+    Why this exists: Sparkle draws its own native 'A new version is available'
+    window, but nothing was pulling the app forward when it appeared, so on a Qt
+    app the main window stayed on top and the update prompt opened hidden behind
+    it -- the user sees nothing and concludes the updater is dead (exactly what
+    happened on 2026-06-19 with the 2.51 build). macOS-only, best-effort, never
+    raises."""
+    if sys.platform != "darwin":
+        return
+    try:
+        import objc
+        NSApplication = objc.lookUpClass("NSApplication")
+        NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+        _log("bring_app_to_front: activated app")
+    except Exception:
+        _log(f"bring_app_to_front: EXCEPTION\n{traceback.format_exc()}")
+
+
 def _bundled_sparkle_framework_path():
     """Return absolute path to Sparkle.framework inside the .app, or None
     if we're not in a frozen Mac bundle."""
@@ -149,6 +170,25 @@ def init_sparkle(on_update_found=None):
                         cb()
                     except Exception:
                         _log(f"delegate: callback raised\n{traceback.format_exc()}")
+                # Backstop: pull the app forward now, before the popup appears.
+                bring_app_to_front()
+
+            def standardUserDriverWillHandleShowingUpdate_forUpdate_state_(
+                    self, handleShowingUpdate, update, state):
+                """SPUStandardUserDriverDelegate hook: Sparkle calls this the
+                instant before it shows its update window. That's the exact right
+                moment to pull the app to the front so the window opens on top of
+                the Qt main window, not behind it. Implemented as a no-arg-suffix
+                PyObjC selector matching standardUserDriverWillHandleShowingUpdate:forUpdate:state:."""
+                _log("delegate: standardUserDriverWillHandleShowingUpdate fired")
+                bring_app_to_front()
+
+            def standardUserDriverWillShowModalAlert(self):
+                """Older SPUStandardUserDriverDelegate hook (modal alerts such as
+                'you're up to date'); same front-bringing behavior. Harmless if a
+                given Sparkle build never calls it."""
+                _log("delegate: standardUserDriverWillShowModalAlert fired")
+                bring_app_to_front()
 
         _updater_delegate = _SparkleDelegate.alloc().init()
         _log(f"init_sparkle: delegate={_updater_delegate!r}")
@@ -156,15 +196,18 @@ def init_sparkle(on_update_found=None):
         # Build and START Sparkle's standard updater controller. Argument
         # order matters and is the Sparkle 2 form (see module gotcha #1):
         #   startingUpdater=True   -> start the updater immediately
-        #   updaterDelegate        -> our delegate above (gets the callback)
-        #   userDriverDelegate=None -> use Sparkle's default UI, no override
+        #   updaterDelegate        -> our delegate above (gets didFindValidUpdate)
+        #   userDriverDelegate     -> the SAME delegate: it also implements the
+        #     SPUStandardUserDriverDelegate "will show update" hook so we can pull
+        #     the app to the front right as the popup appears (it otherwise opens
+        #     behind the Qt main window). Still uses Sparkle's default UI.
         # The returned controller is stored in the module-scope strong
         # reference so Python's garbage collector can't free it mid-check
         # (gotcha #2).
         _log("init_sparkle: calling alloc().initWithStartingUpdater...")
         _updater_controller = (
             SPUStandardUpdaterController.alloc()
-            .initWithStartingUpdater_updaterDelegate_userDriverDelegate_(True, _updater_delegate, None)
+            .initWithStartingUpdater_updaterDelegate_userDriverDelegate_(True, _updater_delegate, _updater_delegate)
         )
         _log(f"init_sparkle: controller={_updater_controller!r}")
         _log("init_sparkle: SUCCESS")

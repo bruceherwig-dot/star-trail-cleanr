@@ -2,6 +2,15 @@
 
 ---
 
+## v2.56-beta
+- **Star Trail CleanR now creates a shareable before/after comparison video.** After a cleaning run, the app can generate a short looping video with a wipe slider that reveals the before and after side by side. It opens in a folder when it's done. The option is in Output Options.
+- **Trail DetectoR v5 is now the detection engine.** Trained on a broader dataset that includes GoPro and action-cam footage, tighter satellite crossings, long-exposure trails, and hard cases the previous version missed. Handles more cameras and trail shapes with fewer blind spots.
+- **The comparison video is encoded specifically to survive Facebook's compression.** Facebook re-encodes every video upload through its own pipeline, which is brutal on dark, star-filled skies — banding in the gradients, smeared stars. The clip is encoded to fight that: a fixed high bitrate, dark-scene quantization, and fine grain baked in to protect the sky gradients. Preview quality on Facebook is still lower (that's Facebook's preview, not the file), but the HD view is clean.
+- **The update notice now shows reliably inside the app window.** When a new version is available, the native prompt could open behind the main window where you'd never see it. The in-app banner is now the primary notice — it lives inside the window so it can't hide — and it remembers the last update it found so it shows instantly even if the internet check is slow.
+- **A spinning indicator in the title bar shows when cleaning is running,** so you can see the app is still working even if you switch to another tab.
+- **Run artifacts moved to the cleaned folder.** The Star Log, detection data, and related files now live inside the `cleaned/` output folder (in `STC Extras/`) instead of next to your original photos. Existing folders with the old layout are found automatically.
+- **Smoke tests:** 182 passing.
+
 ## v2.55-beta
 - **RAW photo sets clean reliably now (Canon, Nikon, Sony, Fuji, and more), and the cleaned files keep their capture date.** A run on RAW files could start and then stall partway, with the app stuck open in the Dock and refusing to relaunch. The cause was the detection engine reaching out to the internet mid-run to download a missing add-on the instant it met a file it couldn't read, which only ever happened with RAW. That download is now forbidden outright, so RAW runs finish cleanly. On top of that, each cleaned RAW frame now carries its own capture date and camera, read from the preview built into every RAW file, the same way JPEG and TIFF sources already did. Reported by a tester whose Canon R5 CR3 sets stalled at the end of Step 1.
 - **16-bit TIFF output now keeps the capture date too.** Saving to 16-bit TIFF was silently dropping the date and camera for every source, not just RAW, even though that is the format we recommend for preserving full quality. 16-bit TIFF files now carry the capture date, camera, and software stamp like every other format.

@@ -98,6 +98,10 @@ TASK_FOLDER_ALIASES = {
     "Thomas Jackson - Borrego": "Thomas Jackson Star Trails Borrego",
 }
 
+# Out-of-root dataset folders live in one shared file -- add a dataset there, once,
+# and all three review tools (trail_fixr/mask_checkr/tile_fixr) pick it up.
+from dataset_paths import TASK_ABS_FOLDERS, longest_prefix_folder
+
 GKYLE_STAGING = Path("/Volumes/T7 Shield/AI Projects/Star Trail CleanR/external_datasets/gkyle_startrails/cvat_staging")
 
 # These four globals are overwritten by the task picker at launch.
@@ -169,6 +173,10 @@ def resolve_image_dir(task_name):
     Tries alias lookup, then exact match, then strips ' - v...' version suffix, then prefix match."""
     if "gkyle" in task_name.lower() and GKYLE_STAGING.exists():
         return GKYLE_STAGING
+    if task_name in TASK_ABS_FOLDERS:
+        p = Path(TASK_ABS_FOLDERS[task_name])
+        if p.exists():
+            return p
     if task_name in TASK_FOLDER_ALIASES:
         p = TRAILS_ROOT / TASK_FOLDER_ALIASES[task_name]
         if p.exists():
@@ -185,6 +193,9 @@ def resolve_image_dir(task_name):
         for child in TRAILS_ROOT.iterdir():
             if child.is_dir() and base.lower() in child.name.lower():
                 return child
+    hit = longest_prefix_folder(task_name, TRAILS_ROOT)
+    if hit:
+        return hit
     return None
 
 

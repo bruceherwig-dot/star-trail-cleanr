@@ -330,24 +330,40 @@ def _secondary_btn_css():
 
 
 SCRIPT = os.path.join(_base, "astro_clean_v5.py")
+# Post-run share outputs (video + Red Trail Map) render in a SEPARATE process via
+# this script, re-invoked the same way as the cleaning engine (--cleanr-worker).
+SHARE_SCRIPT = os.path.join(_base, "make_share_clip.py")
 _bundled_model = os.path.join(_base, "best.pt")
 _DEV_FALLBACK_MODEL = os.path.join(
     os.path.expanduser("~"),
-    "Documents/yolo_runs/trail_detector_v13s_tiled/weights/best.pt")
+    "Documents/yolo_runs/trail_detector_v5/weights/best.pt")
 
-_DEV_SWITCHER_ENABLED = Path.home().joinpath(
-    ".star_trail_cleanr", ".dev_model_switcher").is_file()
+# Dev-only (the Model picker + the Red Trail Map) — shown ONLY when running from
+# SOURCE. A frozen build hides them, so the built .app shows exactly what the
+# public sees. (Was keyed to a ~/.star_trail_cleanr/.dev_model_switcher marker
+# file, which also showed them in frozen builds; changed 2026-06-19.)
+_DEV_SWITCHER_ENABLED = not getattr(sys, "frozen", False)
+# Dev-only: show the streaking-star filter checkbox when this hidden file exists.
+_DEV_STREAK_FILTER = Path.home().joinpath(
+    ".star_trail_cleanr", ".dev_star_filter").is_file()
 _YOLO_RUNS_DIR = Path.home() / "Documents" / "yolo_runs"
 
 
 def _get_dev_model_choices():
-    """Return list of (folder_name, best.pt path) from ~/Documents/yolo_runs, newest first."""
+    """Return the curated dev model menu: only the three product versions, labelled
+    v3/v4/v5, mapped to their yolo_runs folders. Every other experimental folder is
+    intentionally hidden -- the model files stay on disk, only the menu is trimmed.
+    Each entry is (label, best.pt path); an entry is omitted if its file is missing."""
+    mapping = [
+        ("v3", "trail_detector_v12s_tiled"),   # Trail DetectoR v3 (prior shipped)
+        ("v4", "trail_detector_v13s_tiled"),   # Trail DetectoR v4 (currently shipped)
+        ("v5", "trail_detector_v5"),           # Trail DetectoR v5 (new fine-tune)
+    ]
     choices = []
-    if _YOLO_RUNS_DIR.is_dir():
-        for folder in sorted(_YOLO_RUNS_DIR.iterdir(), reverse=True):
-            pt = folder / "weights" / "best.pt"
-            if pt.is_file():
-                choices.append((folder.name, str(pt)))
+    for label, folder in mapping:
+        pt = _YOLO_RUNS_DIR / folder / "weights" / "best.pt"
+        if pt.is_file():
+            choices.append((label, str(pt)))
     return choices
 
 
@@ -501,14 +517,15 @@ def _handle_launch_failure(exc):
         pass
 
 
-WORKSPACE_DIR = "cleanr_workspace"
+WORKSPACE_DIR = "cleanr_workspace"   # legacy name; existing sets still resolve via find_workspace()
+from modules.workspace import WORKSPACE_NAME, output_workspace, archive_old_logs  # noqa: E402
 
 
-def workspace_path(input_folder, filename):
-    """Return <input_folder>/cleanr_workspace/<filename>. Creates dir as needed."""
-    ws = os.path.join(input_folder, WORKSPACE_DIR)
-    os.makedirs(ws, exist_ok=True)
-    return os.path.join(ws, filename)
+def workspace_path(output_folder, filename):
+    """Return <output_folder>/STC Extras/<filename>, the WRITE path for a run's
+    artifacts, creating the folder. Callers pass the OUTPUT/cleaned folder now (the
+    workspace moved into the cleaned folder on 2026-06-19)."""
+    return os.path.join(output_workspace(output_folder, create=True), filename)
 
 
 def migrate_workspace(input_folder):
@@ -871,6 +888,12 @@ class CleanerWorker(QThread):
                 starts.pop()
             n_batches = len(starts)
 
+            # One run-log timestamp for the WHOLE run: every batch subprocess is
+            # handed this same stamp (--run-log-ts) so they all append to a single
+            # run_log_<ts>.jsonl instead of one file per 20-frame batch -- one clean
+            # log per run, easy to read.
+            _run_log_ts = time.strftime("%Y-%m-%d_%H-%M-%S")
+
             ref_pixels = 5472 * 3648
             img_pixels = dominant[0] * dominant[1]
             res_scale = img_pixels / ref_pixels
@@ -977,7 +1000,7 @@ class CleanerWorker(QThread):
                 except OSError:
                     pass
 
-            hot_map_file = workspace_path(folder, "hot_pixel_map.png")
+            hot_map_file = workspace_path(output_folder, "hot_pixel_map.png")
 
             def _cleanup_hot_map():
                 """Delete the cached hot-pixel map file if present (ignored if
@@ -1150,6 +1173,7 @@ class CleanerWorker(QThread):
                     cmd = [sys.executable, "-u", SCRIPT, folder,
                            "-o", output_folder, "--model", get_model_path(),
                            "--start", str(abs_start), "--batch", str(this_batch)]
+                cmd.extend(["--run-log-ts", _run_log_ts])  # one log file per run
 
                 if self.mask_path:
                     cmd.extend(["--foreground-mask", self.mask_path])
@@ -1163,6 +1187,14 @@ class CleanerWorker(QThread):
                     cmd.extend(["--expected-bitdepth", str(self._dominant_bitdepth)])
                 if SETTINGS.value("second_scrub_enabled", False, type=bool):
                     cmd.append("--second-scrub")
+                # Dev-only: when the Red Trail Map box is on, have the worker save
+                # the lightweight per-frame detection polygons that feed the map.
+                # Gated on the dev flag so a regular user never produces them.
+                if (_DEV_SWITCHER_ENABLED
+                        and SETTINGS.value("red_trail_map_enabled", True, type=bool)):
+                    cmd.append("--save-detections")
+                if _DEV_STREAK_FILTER and SETTINGS.value("streak_filter_enabled", False, type=bool):
+                    cmd.append("--streak-filter")
 
                 worker_env = os.environ.copy()
                 if (SETTINGS.value("crash_reporting_enabled", False, type=bool)
@@ -1447,7 +1479,9 @@ class UpdateCheckThread(QThread):
         """Query GitHub for a newer app release; emit the result dict if one
         exists. Any failure is swallowed silently."""
         from modules.update_check import check_for_update
-        result = check_for_update(VERSION)
+        # Runs off the UI thread, so it never delays startup -- give it room and
+        # retry, so one slow GitHub response can't blank the update banner.
+        result = check_for_update(VERSION, timeout_s=12, retries=3)
         if result:
             self.result_ready.emit(result)
 
@@ -1735,6 +1769,40 @@ class _XCloseButton(QPushButton):
         painter.drawLine(w - margin, margin, margin, h - margin)
 
 
+class ShareRenderThread(QThread):
+    """Renders ONE post-run share output in its own SEPARATE PROCESS, fully
+    independent of the other (re-invoked the same way as the cleaning engine).
+    Kept off the app's process on purpose: running the ffmpeg encoder inside the
+    app truncated the video partway through; this thread only waits on the
+    subprocess. `kind` is 'video' or 'red'. Wrapped so a failure here can never
+    affect the cleaning that already completed."""
+    done = Signal(str, str)    # (kind, output_path)
+    failed = Signal(str, str)  # (kind, message)
+
+    def __init__(self, kind, job_args, out_path, parent=None):
+        super().__init__(parent)
+        self._kind = kind
+        self._job_args = job_args
+        self._out_path = out_path
+
+    def run(self):
+        import subprocess
+        try:
+            os.makedirs(os.path.dirname(self._out_path), exist_ok=True)
+            if getattr(sys, "frozen", False):
+                cmd = [sys.executable, "--cleanr-worker", SHARE_SCRIPT] + self._job_args
+            else:
+                cmd = [sys.executable, "-u", SHARE_SCRIPT] + self._job_args
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+            if proc.returncode != 0:
+                msg = (proc.stderr or proc.stdout or "render failed").strip()
+                self.failed.emit(self._kind, msg[-400:])
+            else:
+                self.done.emit(self._kind, self._out_path)
+        except Exception as e:
+            self.failed.emit(self._kind, str(e))
+
+
 class MainWindow(QMainWindow):
     """The app's single main window — everything the user sees and clicks.
 
@@ -1920,6 +1988,10 @@ class MainWindow(QMainWindow):
         from astrophotography sequences while preserving the real stars. The result is a
         clean set of frames you can stack into a star trail composite. (That's the goal, anyway.)</p>
 
+        <h2 style='color:{BRAND_HEADING_BLUE}; margin-bottom:2px;'>What image formats can I use?</h2>
+        <p style='margin-top:2px;'>Star Trail CleanR works with JPG, TIF (8-bit and 16-bit),
+        and RAW files.</p>
+
         <h2 style='color:{BRAND_HEADING_BLUE}; margin-bottom:2px;'>Trail Detection</h2>
         <p style='margin-top:2px;'>Each frame is run through a YOLO segmentation model
         trained on thousands of manually labeled airplane and satellite trails across many
@@ -1960,10 +2032,6 @@ class MainWindow(QMainWindow):
         <li><b>Meteors will be removed too.</b> Their streaks look similar to airplane
         and satellite trails, so the detector can't tell them apart. If you want to
         keep them, use your originals to mask them back in.</li>
-        <li><b>RAW files are supported</b> (.CR2, .CR3, .NEF, .ARW, .RAF, .DNG, and most
-        others). Just drop the folder in. If a frame has both a RAW and a JPG/TIFF,
-        Star Trail CleanR asks once which to use (RAW by default). Keep your output
-        format set to TIFF 16-bit if you want to preserve the RAW's full bit depth.</li>
         <li><b>Not a one-click fix.</b> You'll still want to touch up the final
         composite in Photoshop or your editor of choice. But if we did our job
         right, it's a fraction of the time you used to spend.</li>
@@ -2198,6 +2266,34 @@ class MainWindow(QMainWindow):
 
         layout.addSpacing(14)
 
+        if _DEV_STREAK_FILTER:
+            _h = QLabel("Streaking-star filter (dev)")
+            _h.setStyleSheet(f"color: {BRAND_HEADING_BLUE}; font-size: 18px; font-weight: bold;")
+            layout.addWidget(_h)
+            layout.addSpacing(4)
+            _d = QLabel("For long-exposure sets where the stars themselves streak into lines. "
+                        "Measures how long the stars run in this set and leaves alone any "
+                        "detection shorter than that (so streaking stars aren't erased), unless "
+                        "it's a red nav light. Does nothing on sharp-star sets. Dev-only.")
+            _d.setStyleSheet(f"color: {BROWSER_TEXT}; font-size: 13px;")
+            _d.setWordWrap(True)
+            layout.addWidget(_d)
+
+            streak_chk = QCheckBox("Filter streaking stars (dev)")
+            streak_chk.setStyleSheet(f"QCheckBox {{ font-size: 13px; color: {BROWSER_TEXT}; margin-left: 16px; }}")
+            streak_chk.setChecked(SETTINGS.value("streak_filter_enabled", False, type=bool))
+            streak_chk.toggled.connect(lambda v: SETTINGS.setValue("streak_filter_enabled", v))
+            self._streak_chk = streak_chk
+
+            streak_row = QHBoxLayout()
+            streak_row.setContentsMargins(16, 0, 0, 0)
+            streak_row.addWidget(streak_chk)
+            streak_row.addStretch()
+            layout.addSpacing(4)
+            layout.addLayout(streak_row)
+
+            layout.addSpacing(14)
+
         _h = QLabel("Crash Reporting")
         _h.setStyleSheet(f"color: {BRAND_HEADING_BLUE}; font-size: 18px; font-weight: bold;")
         layout.addWidget(_h)
@@ -2326,8 +2422,7 @@ class MainWindow(QMainWindow):
         I wanted, Claude wrote the code, we tested it, I pushed back, we tried again.
         Star Trail CleanR wouldn't exist without that partnership.</p>
 
-        <p>Star Trail CleanR is my free gift to the astrophotography community that
-        has taught me so much.</p>
+        <p>Star Trail CleanR is my free gift to the astrophotography community.</p>
 
         <h3 style='color:{BRAND_HEADING_BLUE}; margin:12px 0 2px 0;'>Links</h3>
         <ul style='margin-top:2px;'>
@@ -2345,7 +2440,7 @@ class MainWindow(QMainWindow):
         full list of contributors &rarr;</a></p>
 
         <h3 style='color:{BRAND_HEADING_BLUE}; margin:12px 0 2px 0;'>Version History</h3>
-        <p style='margin-top:2px;'>See the full <a href='https://github.com/bruceherwig-dot/star-trail-cleanr/blob/v2-auto-update/CHANGELOG.md'>version history on GitHub</a>.</p>
+        <p style='margin-top:2px;'>See the full <a href='https://github.com/bruceherwig-dot/star-trail-cleanr/blob/main/CHANGELOG.md'>version history on GitHub</a>.</p>
 
         <h3 style='color:{BRAND_HEADING_BLUE}; margin:12px 0 2px 0;'>Share Your Work&hellip; Have a Suggestion?</h3>
         <p style='margin-top:2px;'>Got a before-and-after you'd like to share? I would love to see it!<br>
@@ -2407,6 +2502,16 @@ class MainWindow(QMainWindow):
         text_col.addWidget(self._header_subline)
         text_col.addStretch()
         outer.addWidget(text_wrap)
+        outer.addStretch()
+
+        self._header_spinner = QLabel("")
+        self._header_spinner.setStyleSheet(
+            f"color: {BRAND_HEADER_SUB}; font-size: 20px; background: transparent;")
+        self._header_spinner.setFixedWidth(24)
+        self._header_spinner.setAlignment(Qt.AlignCenter)
+        self._header_spinner.setVisible(False)
+        outer.addWidget(self._header_spinner)
+
         outer.addStretch()
 
         # Hidden relaunch button (invisible, to the left of Support)
@@ -2519,48 +2624,66 @@ class MainWindow(QMainWindow):
         self._update_banner_tag = ""
         return banner
 
+    def _reveal_update_banner(self, tag, download_url):
+        """Show the amber update banner for `tag`. Shared by the live check
+        (_on_update_result) and the optimistic startup path (_start_update_check),
+        so a known update is shown even if a given launch's live check is slow or
+        fails. Pure UI -- callers handle the dismissed-tag gating."""
+        self._update_banner_tag = tag
+        self._update_download_url = download_url
+        self._update_label.setText(f"New version available: {tag}")
+        self._update_banner.setVisible(True)
+
+    def _show_cached_update_banner(self):
+        """Optimistically show the banner from the last update we ever found
+        (persisted in settings), so a slow or failed live check on this launch
+        can't blank a known update -- the #1 way the notice silently goes missing.
+        Gated by the dismissed tag and by the remembered version still being newer
+        than the running one. Returns True if it revealed the banner."""
+        cached = SETTINGS.value("last_seen_update_tag", "", type=str) or ""
+        dismissed = SETTINGS.value("dismissed_update_tag", "", type=str) or ""
+        if not cached or cached == dismissed:
+            return False
+        from modules.update_check import parse_tag, parse_local, get_download_url
+        remote, local = parse_tag(cached), parse_local(VERSION)
+        if remote and local and remote > local:
+            self._reveal_update_banner(cached, get_download_url())
+            return True
+        return False
+
     def _start_update_check(self):
-        """Launch the background app-update check. Its result_ready signal is
-        wired to _on_update_result, which shows the orange banner if needed."""
+        """Launch the background app-update check. First show the banner instantly
+        from memory (a known update survives a slow/failed check this launch), then
+        start the live check, which confirms/refreshes via _on_update_result."""
+        self._show_cached_update_banner()
         self._update_thread = UpdateCheckThread(self)
         self._update_thread.result_ready.connect(self._on_update_result)
         self._update_thread.start()
 
     def _on_update_result(self, result):
         """Handle the background update check's result. `result` carries the
-        release "tag" and "download_url". Shows the orange update banner unless
-        the user already dismissed this exact tag (via banner or pre-window
-        popup) -- or unless the built-in one-click updater engine is alive, in
-        which case the engine OWNS update notification (its native install
-        popup) and the banner stays hidden so the user never faces two
-        competing prompts for the same release. The banner is the FALLBACK
-        channel: it appears when the engine is dead (wrong install location,
-        engine failure -- the user then gets the explain-and-open-website
-        path) and on Linux, which has no engine. First day both channels were
-        ever alive at once was 2026-06-10; the double-prompt confused Bruce
-        within seconds, hence this gate."""
-        if getattr(sys, 'frozen', False):
-            try:
-                if sys.platform == "darwin":
-                    from modules.sparkle_updater import updater_alive
-                    if updater_alive():
-                        return
-                elif sys.platform == "win32":
-                    from modules.winsparkle_updater import updater_alive
-                    if updater_alive():
-                        return
-            except Exception:
-                pass  # any doubt -> show the banner (never zero prompts)
+        release "tag" and "download_url". Shows the amber update banner whenever a
+        newer release exists, UNLESS the user already dismissed this exact tag.
+
+        The banner is the PRIMARY, always-visible update notification on every
+        platform: it lives inside the main window and cannot hide behind it. Its
+        "Update" button drives the built-in one-click installer (Sparkle on Mac,
+        WinSparkle on Windows; Linux falls back to opening the download page).
+        We no longer auto-pop the engine's own floating window on launch -- it
+        could open behind the main window where the user never saw it (the 2.51
+        build did this on 2026-06-19) -- so there is exactly ONE prompt, the
+        banner, and no competing double-prompt to gate against. The found tag is
+        persisted so the next launch can show it instantly even before/without a
+        successful check (see _start_update_check)."""
         tag = result.get("tag", "")
-        # Stay quiet if the user has already dismissed this release tag
-        # (either via the pre-window popup or a previous banner click).
+        # Stay quiet if the user has already dismissed this release tag.
         dismissed = SETTINGS.value("dismissed_update_tag", "", type=str) or ""
         if dismissed == tag:
             return
-        self._update_banner_tag = tag
-        self._update_download_url = result.get("download_url")
-        self._update_label.setText(f"New version available: {tag}")
-        self._update_banner.setVisible(True)
+        # Remember it: a later launch shows the banner instantly even if that
+        # launch's GitHub check is slow or fails -- never a silent miss.
+        SETTINGS.setValue("last_seen_update_tag", tag)
+        self._reveal_update_banner(tag, result.get("download_url"))
 
     def _on_update_banner_dismissed(self):
         """Hide the banner and remember the user's dismissal so we don't show
@@ -3346,18 +3469,15 @@ class MainWindow(QMainWindow):
         hp_row.addWidget(self._jpeg_quality)
         hp_row.addStretch(1)
 
-        self._format_combo.currentTextChanged.connect(self._on_format_changed)
-
-        layout.addLayout(hp_row)
-        layout.addSpacing(6)
-
+        # Dev-only model picker, tucked to the FAR RIGHT of this row. Only shown
+        # when running from source (frozen builds hide it); it no longer takes its
+        # own line.
         if _DEV_SWITCHER_ENABLED:
-            dev_row = QHBoxLayout()
             dev_label = QLabel("Model (dev):")
             dev_label.setFont(step_font)
-            dev_row.addWidget(dev_label)
+            hp_row.addWidget(dev_label)
             self._dev_model_combo = QComboBox()
-            self._dev_model_combo.setFixedWidth(300)
+            self._dev_model_combo.setFixedWidth(240)
             _choices = _get_dev_model_choices()
             _saved = SETTINGS.value("dev_model_override", "", type=str)
             _saved_idx = 0
@@ -3371,10 +3491,53 @@ class MainWindow(QMainWindow):
             self._dev_model_combo.currentIndexChanged.connect(
                 lambda idx: SETTINGS.setValue(
                     "dev_model_override", self._dev_model_combo.itemData(idx)))
-            dev_row.addWidget(self._dev_model_combo)
-            dev_row.addStretch(1)
-            layout.addLayout(dev_row)
-            layout.addSpacing(6)
+            hp_row.addWidget(self._dev_model_combo)
+
+        self._format_combo.currentTextChanged.connect(self._on_format_changed)
+
+        layout.addLayout(hp_row)
+        layout.addSpacing(6)
+
+        # Two share-output toggles on ONE row, spaced apart. Both default ON and
+        # remember their last state. They drive the post-run extras (wired
+        # separately): a shareable before/after wipe video and a red trail-map
+        # image, both saved into cleanr_workspace/. ("&&" renders one literal &.)
+        share_row = QHBoxLayout()
+        self._make_video_chk = QCheckBox("Sharable Before && After Video")
+        self._make_video_chk.setFont(step_font)
+        self._make_video_chk.setChecked(
+            SETTINGS.value("make_video_enabled", True, type=bool))
+        self._make_video_chk.toggled.connect(
+            lambda v: SETTINGS.setValue("make_video_enabled", v))
+        share_row.addWidget(self._make_video_chk)
+        # Red Trail Map is DEV-ONLY: it needs the per-frame detection files, and
+        # we do NOT write detections for regular users. Only shown (and only able
+        # to request detection-saving) when the dev flag is on, so a normal user
+        # never sees it and never produces detection files.
+        self._red_map_chk = None
+        if _DEV_SWITCHER_ENABLED:
+            share_row.addSpacing(40)
+            self._red_map_chk = QCheckBox("Red Trail Map (dev)")
+            self._red_map_chk.setFont(step_font)
+            self._red_map_chk.setChecked(
+                SETTINGS.value("red_trail_map_enabled", True, type=bool))
+            self._red_map_chk.toggled.connect(
+                lambda v: SETTINGS.setValue("red_trail_map_enabled", v))
+            share_row.addWidget(self._red_map_chk)
+        share_row.addStretch(1)
+        layout.addLayout(share_row)
+        # Caption directly beneath the video checkbox label, indented to line up
+        # with the label text (not the box). Muted gray, smaller than the label,
+        # regular weight.
+        _video_caption = QLabel(
+            "Takes a few extra minutes after your stars are cleaned. "
+            "The folder opens when it's finished.")
+        _vc_font = QFont()
+        _vc_font.setPointSize(13)
+        _video_caption.setFont(_vc_font)
+        _video_caption.setStyleSheet(f"color: {MUTED_TEXT}; margin-left: 22px;")
+        layout.addWidget(_video_caption)
+        layout.addSpacing(6)
 
         # ── Step 6: Run ──────────────────────────────────────────────────────
         step6 = QLabel(
@@ -3978,15 +4141,33 @@ class MainWindow(QMainWindow):
             self._update_mask_status()
             self._update_open_btn_state()
 
+    def _output_folder_for_workspace(self):
+        """The cleaned/output folder the run artifacts and the foreground mask live
+        under. Uses the Output Folder field; falls back to <input>/cleaned."""
+        out = self._output_input.text().strip()
+        if out:
+            return out
+        folder = self._folder_input.text().strip()
+        return os.path.join(folder, "cleaned") if folder else ""
+
+    def _find_foreground_mask(self):
+        """Path to an existing foreground mask: the new spot (in the cleaned folder)
+        first, then the legacy <input>/cleanr_workspace spot. '' if none."""
+        out = self._output_folder_for_workspace()
+        folder = self._folder_input.text().strip()
+        for c in (os.path.join(out, WORKSPACE_NAME, "foreground_mask.png") if out else "",
+                  os.path.join(folder, WORKSPACE_DIR, "foreground_mask.png") if folder else ""):
+            if c and os.path.exists(c):
+                return c
+        return ""
+
     def _update_mask_status(self):
-        """Check if a mask exists for the current input folder."""
+        """Check if a mask exists for the current input folder (new spot or legacy)."""
         folder = self._folder_input.text().strip()
         if folder:
             migrate_workspace(folder)
-            mask_path = os.path.join(folder, WORKSPACE_DIR, "foreground_mask.png")
-        else:
-            mask_path = ""
-        if mask_path and os.path.exists(mask_path):
+        mask_path = self._find_foreground_mask()
+        if mask_path:
             self._mask_path = mask_path
             self._mask_status.setText("\u2705 Mask saved")
             self._mask_status.setStyleSheet(f"color: {SUCCESS_TEXT}; font-size: 12px; margin-left: 8px;")
@@ -4027,10 +4208,10 @@ class MainWindow(QMainWindow):
 
         self._mask_window.load_frames(frames, 0)
 
-        # Load existing mask if available
+        # Load existing mask if available (new spot in the cleaned folder, or legacy)
         migrate_workspace(folder)
-        mask_path = os.path.join(folder, WORKSPACE_DIR, "foreground_mask.png")
-        if os.path.exists(mask_path):
+        mask_path = self._find_foreground_mask()
+        if mask_path:
             self._mask_window.load_existing_mask(mask_path)
 
         self._mask_window._painter._set_mode(False)
@@ -4039,23 +4220,29 @@ class MainWindow(QMainWindow):
         self._mask_window.activateWindow()
 
     def _on_mask_saved(self, mask_np):
-        """Receive the painted mask from the mask editor. `mask_np` is the
-        mask image array. If it has any painted pixels, save it as the
-        foreground mask PNG in the workspace; if it's blank, delete any
-        existing mask. Then refresh the Step 3 status label."""
+        """Receive the painted mask from the mask editor. If it has painted pixels,
+        save it as the foreground mask PNG in the run-artifact folder inside the
+        cleaned folder; if it's blank, delete any existing mask (new spot AND the
+        legacy <input>/cleanr_workspace spot). Then refresh the Step 3 status."""
         folder = self._folder_input.text().strip()
-        if folder:
-            if mask_np.any():
-                mask_path = workspace_path(folder, "foreground_mask.png")
-                from modules.io_safe import robust_imwrite
-                robust_imwrite(mask_path, mask_np)
-                self._mask_path = mask_path
-            else:
-                mask_path = os.path.join(folder, WORKSPACE_DIR, "foreground_mask.png")
-                if os.path.exists(mask_path):
-                    os.remove(mask_path)
-                self._mask_path = None
-            self._update_mask_status()
+        if not folder:
+            return
+        out = self._output_folder_for_workspace()
+        if mask_np.any() and out:
+            mask_path = workspace_path(out, "foreground_mask.png")
+            from modules.io_safe import robust_imwrite
+            robust_imwrite(mask_path, mask_np)
+            self._mask_path = mask_path
+        else:
+            for old in (os.path.join(out, WORKSPACE_NAME, "foreground_mask.png") if out else "",
+                        os.path.join(folder, WORKSPACE_DIR, "foreground_mask.png")):
+                if old and os.path.exists(old):
+                    try:
+                        os.remove(old)
+                    except OSError:
+                        pass
+            self._mask_path = None
+        self._update_mask_status()
 
     # ── Run ──────────────────────────────────────────────────────────────────
 
@@ -4400,6 +4587,7 @@ class MainWindow(QMainWindow):
         self._cancel_btn.clicked.connect(self._cancel_run)
         self._cancel_btn.show()
         self._stack.setCurrentIndex(1)
+        self._header_spinner.setVisible(True)
 
         self._spinner_chars = "|/-\\"
         self._spinner_idx = 0
@@ -4511,6 +4699,8 @@ class MainWindow(QMainWindow):
             self._warmup_timer.stop()
         if hasattr(self, '_star_log_title'):
             self._star_log_title.setText("Star Log")
+        if hasattr(self, '_header_spinner'):
+            self._header_spinner.setVisible(False)
 
     def _go_to_setup(self):
         """Stop the timers and switch the Main tab back to the Setup page
@@ -4529,6 +4719,8 @@ class MainWindow(QMainWindow):
         self._elapsed_label.setText(f"{ch}  Elapsed: {fmt_estimate(elapsed)}")
         if hasattr(self, '_star_log_title'):
             self._star_log_title.setText(f"Star Log  {ch}")
+        if hasattr(self, '_header_spinner'):
+            self._header_spinner.setText(ch)
 
 
         # Pulse "Estimating..." before real estimate arrives
@@ -5002,11 +5194,81 @@ class MainWindow(QMainWindow):
         self._done_output_folder = output_folder
         self._update_open_btn_state()
         self._switch_to_back_btn()
+        # Kick off the share outputs (video, and the dev Red Trail Map) in the
+        # background before the modal so they render while it's up.
+        self._maybe_start_share_render(output_folder)
         # The run log is written in _on_finished (covers stop/error too), which
         # always fires after this handler.
         # Run-complete dialog fires for every finished run, including
         # zero-trail runs (the dialog message branches on trail count).
         self._show_run_complete_dialog()
+
+    def _maybe_start_share_render(self, cleaned_folder):
+        """After a clean run, render the enabled share outputs as TWO independent
+        separate-process runs into cleanr_workspace/, opening each when it finishes.
+        The video is public; the Red Trail Map is dev-only. No-op if neither is
+        enabled or the paths don't resolve. Never blocks the UI or the finished run."""
+        make_video = SETTINGS.value("make_video_enabled", True, type=bool)
+        make_red = (_DEV_SWITCHER_ENABLED
+                    and getattr(self, "_red_map_chk", None) is not None
+                    and SETTINGS.value("red_trail_map_enabled", True, type=bool))
+        if not (make_video or make_red):
+            return
+        original_dir = getattr(self.worker, "folder", None) if self.worker else None
+        if not original_dir or not os.path.isdir(original_dir) \
+                or not cleaned_folder or not os.path.isdir(cleaned_folder):
+            return
+        ws_dir = output_workspace(cleaned_folder, create=True)
+        self._share_threads = []        # keep refs so the QThreads aren't GC'd
+        labels = []
+        if make_video:
+            vid = os.path.join(ws_dir, "share_clip.mp4")
+            self._start_share_run(
+                "video", ["--original", original_dir, "--cleaned", cleaned_folder,
+                          "--out", vid], vid)
+            labels.append("Sharable Before & After Video")
+        if make_red:
+            red = os.path.join(ws_dir, "red_trail_map.jpg")
+            red_args = ["--red-map", "--original", original_dir, "--out", red,
+                        "--masks-dir", os.path.join(ws_dir, "masks")]
+            fg = getattr(self, "_mask_path", None)
+            if fg and os.path.isfile(fg):
+                red_args += ["--foreground", fg]
+            self._start_share_run("red", red_args, red)
+            labels.append("Red Trail Map")
+        try:
+            self._status_out.append(
+                f"\nCreating your {' and '.join(labels)} in the background, each as "
+                f"its own run. This may take a few minutes; each opens automatically "
+                f"when it's finished.")
+        except Exception:
+            pass
+
+    def _start_share_run(self, kind, job_args, out_path):
+        """Launch one independent share render (its own process). Each output runs
+        and finishes on its own, so a problem with one never blocks the other."""
+        t = ShareRenderThread(kind, job_args, out_path, parent=self)
+        t.done.connect(self._on_share_render_done)
+        t.failed.connect(self._on_share_render_failed)
+        self._share_threads.append(t)
+        t.start()
+
+    def _on_share_render_done(self, kind, out_path):
+        label = "video" if kind == "video" else "Red Trail Map"
+        try:
+            self._status_out.append(f"Your {label} is ready.")
+        except Exception:
+            pass
+        # Open the folder only -- do NOT auto-open/play the file itself, so this
+        # matches the caption ("The folder opens when it's finished.").
+        _open_folder_in_file_manager(os.path.dirname(out_path))
+
+    def _on_share_render_failed(self, kind, msg):
+        label = "video" if kind == "video" else "Red Trail Map"
+        try:
+            self._status_out.append(f"Could not create the {label}: {msg}")
+        except Exception:
+            pass
 
     def _show_run_complete_dialog(self):
         """Centered modal showing run summary. Replaces the old inline card
@@ -5112,7 +5374,7 @@ class MainWindow(QMainWindow):
         dlg.exec()
 
     def _write_run_summary(self):
-        """Write a plain-text run summary into <input>/cleanr_workspace/."""
+        """Write a plain-text run summary into <output>/STC Extras/."""
         import datetime as _dt
         self._last_log_path = None  # set on success; stays None if we can't write
         input_folder = self._folder_input.text().strip()
@@ -5399,26 +5661,12 @@ class MainWindow(QMainWindow):
                 "================================================",
             ]
 
-        # If the PREVIOUS run was hard-killed (the app vanished with no error and
-        # nothing in Sentry — the classic low-memory force-quit), the worker's
-        # last breadcrumbs were stashed at this run's start. Surface them here so
-        # the silent crash rides along in the very next Star Log the user emails.
-        _prev_crash = getattr(getattr(self, "worker", None), "_prev_crash_log", "")
-        if _prev_crash and _prev_crash.strip():
-            lines += [
-                "",
-                "Previous run ended unexpectedly (no clean finish)",
-                "================================================",
-                "These are the last steps recorded to disk before the previous "
-                "run stopped. A line that stops mid-batch with the free memory "
-                "near zero points to a low-memory force-quit by the operating "
-                "system.",
-                "",
-                _prev_crash,
-                "================================================",
-            ]
+        # A hard-killed previous run's breadcrumbs are still preserved silently on disk
+        # (~/.star_trail_cleanr/last_run_progress.prev.log) for diagnostics, but are
+        # intentionally NOT surfaced in the user-facing Star Log (kept clean for testers).
 
-        workspace = os.path.join(input_folder, WORKSPACE_DIR)
+        ws_base = output_folder if output_folder else os.path.join(input_folder, "cleaned")
+        workspace = output_workspace(ws_base)
         try:
             os.makedirs(workspace, exist_ok=True)
             fname = f"star_trail_cleanr_log_{start.strftime('%Y-%m-%d_%H-%M-%S')}.txt"
@@ -5427,6 +5675,14 @@ class MainWindow(QMainWindow):
                 f.write('\n'.join(lines) + '\n')
             self._last_log_path = _full  # opened by the "View Star Log" link
         except OSError:
+            pass
+
+        # Keep the top of STC Extras tidy: tuck all but the newest of each run-log
+        # type into Archive/. Move-only (never deletes/overwrites); a sweep failure
+        # must never break the end of a run.
+        try:
+            archive_old_logs(workspace)
+        except Exception:
             pass
 
     def _update_open_btn_state(self):
@@ -5744,9 +6000,18 @@ if __name__ == '__main__':
 
         def _dismiss_splash_for_update():
             """Close the startup splash so Sparkle's update popup isn't hidden
-            behind it. Passed to init_sparkle as the on-update-found callback."""
+            behind it. Passed to init_sparkle as the on-update-found callback.
+            Also schedules a delayed re-activation: a beat after Sparkle's window
+            actually appears, pull the app to the front so the prompt lands on top
+            of the main window instead of behind it (the delegate hooks activate at
+            found/show time; this catches the window that materializes just after)."""
             try:
                 _splash.close()
+            except Exception:
+                pass
+            try:
+                from modules.sparkle_updater import bring_app_to_front
+                QTimer.singleShot(600, bring_app_to_front)
             except Exception:
                 pass
 
@@ -5762,18 +6027,17 @@ if __name__ == '__main__':
             _alive = updater_alive()
             print(f"UPDATER_SMOKE: controller_alive={_alive}", flush=True)
             sys.exit(0 if _alive else 1)
-        # Check for an update on EVERY launch. Sparkle shows its one-click
-        # "install now" popup ONLY if a newer version exists; if the user is
-        # current, nothing appears. So a new release reaches people the moment
-        # they open the app, not on the once-a-day timer. (Must be called here,
-        # right after the updater starts and before the Qt event loop spins.)
-        from modules.sparkle_updater import check_for_updates_in_background
-        check_for_updates_in_background()
+        # We deliberately DO NOT auto-pop Sparkle's update window on launch.
+        # That window is free-floating and could open BEHIND the Qt main window,
+        # where the user never saw it (the 2.51 build did exactly this on
+        # 2026-06-19 -- looked like the updater was dead). Instead the in-app amber
+        # banner is the launch notification: it lives inside the window and cannot
+        # hide. Its "Update" button still fires Sparkle's one-click install, and
+        # the engine stays started above so that button (and the Settings "Check
+        # for Updates" button) keeps working. See _start_update_check /
+        # _on_update_result for the banner.
     elif sys.platform == "win32":
-        from modules.winsparkle_updater import (
-            init_winsparkle,
-            check_for_updates_in_background as _winsparkle_check_on_launch,
-        )
+        from modules.winsparkle_updater import init_winsparkle
         init_winsparkle(
             appcast_url="https://bruceherwig-dot.github.io/star-trail-cleanr/appcast-windows.xml",
             app_name="Star Trail CleanR",
@@ -5791,9 +6055,8 @@ if __name__ == '__main__':
             _alive = updater_alive()
             print(f"UPDATER_SMOKE: controller_alive={_alive}", flush=True)
             sys.exit(0 if _alive else 1)
-        # Same on Windows: check on every launch via WinSparkle. The native
-        # "update available" window appears only if there's a newer version.
-        _winsparkle_check_on_launch()
+        # As on Mac, no auto-popup on launch -- the amber banner is the launch
+        # notification and its Update button drives WinSparkle's one-click install.
     _splash_status.setText("Warming up the trail detector…")
     app.processEvents()
     try:

@@ -75,6 +75,10 @@ TASK_FOLDER_ALIASES = {
     "Bruce Herwig - Pioneertown Fisheye": "Pioneertown 6mm Fisheye Training",
     "Bruce Herwig - Borrego Springs 1": "borrego_springs_1",
 }
+# Out-of-root dataset folders live in one shared file -- add a dataset there, once,
+# and all three review tools (trail_fixr/mask_checkr/tile_fixr) pick it up.
+from dataset_paths import (TASK_ABS_FOLDERS, longest_prefix_folder,
+                           resolve_workspace, WORKSPACE_NAME)
 STATE_DIR = Path.home() / ".star_trail_cleanr"
 LAST_PICK = STATE_DIR / "mask_checkr_last.json"
 LOCK_FILE = STATE_DIR / "mask_checkr.lock"
@@ -171,6 +175,10 @@ def resolve_image_dir(task_name):
     """
     if "gkyle" in task_name.lower() and GKYLE_STAGING.exists():
         return GKYLE_STAGING
+    if task_name in TASK_ABS_FOLDERS:
+        p = Path(TASK_ABS_FOLDERS[task_name])
+        if p.exists():
+            return p
     if task_name in TASK_FOLDER_ALIASES:
         p = TRAILS_ROOT / TASK_FOLDER_ALIASES[task_name]
         if p.exists():
@@ -192,6 +200,9 @@ def resolve_image_dir(task_name):
         for child in children:
             if norm_base in _norm_name(child.name):
                 return child
+    hit = longest_prefix_folder(task_name, TRAILS_ROOT)
+    if hit:
+        return hit
     return None
 
 # ── Persistence ───────────────────────────────────────────────────────────────
@@ -885,15 +896,16 @@ class StackWorker(QThread):
                 self.error.emit("No frames could be loaded.")
                 return
 
-            masks_dir = self.img_dir / "cleanr_workspace" / "masks"
+            masks_dir = resolve_workspace(self.img_dir) / "masks"
             if not masks_dir.is_dir():
                 self.error.emit(
                     f"Masks folder not found.\n"
-                    f"Expected cleanr_workspace/masks/ inside:\n{self.img_dir}"
+                    f"Expected 'STC Extras/masks/' (or legacy 'cleanr_workspace/masks/') "
+                    f"for:\n{self.img_dir}"
                 )
                 return
-            out_dir  = masks_dir / "mask_checkr_output"
-            out_dir.mkdir(exist_ok=True)
+            out_dir  = masks_dir.parent / "mask_checkr_output"   # STC Extras root, not masks/
+            out_dir.mkdir(parents=True, exist_ok=True)
             out_path = str(out_dir / f"{self.img_dir.name}_maskcheckr.jpg")
             stack_img = acc.astype(np.uint8)
             cv2.imwrite(out_path, stack_img, [cv2.IMWRITE_JPEG_QUALITY, 95])
@@ -976,11 +988,11 @@ class STCRunWorker(QThread):
                 self.error.emit("No frames could be loaded.")
                 return
 
-            # Write to the top-level dataset folder (alongside cleaned/), where
-            # the other Mask CheckR output already lives -- easy to find.
+            # Write into the run-artifact folder inside the cleaned folder
+            # (<cleaned>/STC Extras/mask_checkr_output), with the other outputs.
             dataset_dir = self.cleaned_dir.parent
-            out_dir = dataset_dir / "mask_checkr_output"
-            out_dir.mkdir(exist_ok=True)
+            out_dir = self.cleaned_dir / WORKSPACE_NAME / "mask_checkr_output"
+            out_dir.mkdir(parents=True, exist_ok=True)
             stack_img = acc.astype(np.uint8)
             out_path  = str(out_dir / f"{dataset_dir.name}_stcrun.jpg")
             cv2.imwrite(out_path, stack_img, [cv2.IMWRITE_JPEG_QUALITY, 95])

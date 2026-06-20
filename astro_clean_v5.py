@@ -152,6 +152,7 @@ def _raw_labeled_from_state(state, h, w):
     return raw
 from modules.io_safe import robust_imread, robust_imread_diag, robust_imwrite
 from modules.frame_list import dedupe_frames, natural_key, IMAGE_EXTS, RAW_EXTS
+from modules.workspace import WORKSPACE_NAME   # the run-artifact folder (in the output folder)
 
 
 def _source_metadata(path):
@@ -843,7 +844,11 @@ def main():
     parser.add_argument("--hot-pixel-map", type=str, default=None,
                         help="Path to hot pixel map file (load if exists, save if not)")
     parser.add_argument("--save-masks", action="store_true",
-                        help="Save detection masks to cleanr_workspace/masks/")
+                        help="Save detection masks to <output>/STC Extras/masks/")
+    parser.add_argument("--save-detections", action="store_true",
+                        help="Save ONLY the per-frame detection polygons "
+                             "(<stem>_polys.json) to <output>/STC Extras/masks/, no "
+                             "PNGs. Feeds the Red Trail Map.")
     parser.add_argument("--twin-prefer", choices=["raw", "nonraw"], default="raw",
                         help="When a frame exists as both a RAW and a JPG/TIFF, "
                              "which to process. Mirrors the GUI's one-time prompt; "
@@ -864,6 +869,13 @@ def main():
                              "omitted the worker uses the batch's own majority.")
     parser.add_argument("--second-scrub", action="store_true",
                         help="Run detection a second time on each frame rotated 180°, merging any new trails found")
+    parser.add_argument("--streak-filter", action="store_true",
+                        help="Dev: drop detections shorter than this set's measured star-streak "
+                             "length (unless red) -- for long-exposure sets where stars streak")
+    parser.add_argument("--run-log-ts", default=None,
+                        help="Shared run-log timestamp from the app so every batch of one "
+                             "run appends to ONE run_log_<ts>.jsonl instead of one file per "
+                             "batch. Omitted on a standalone run -> the engine stamps its own.")
     args = parser.parse_args()
 
     _crumb("BATCHSTART", extra=f"start={args.start} count={args.batch}")
@@ -876,13 +888,15 @@ def main():
     output_dir = Path(args.output_dir)
 
     # ── Dev-only run logger ───────────────────────────────────────────────────
-    # Written to {input_dir}/cleanr_workspace/run_log_{timestamp}.jsonl.
+    # Written to {output_dir}/STC Extras/run_log_{timestamp}.jsonl.
     # Dev-only: sys.frozen is True in the frozen bundle, so users never get this file.
     _is_dev = not getattr(sys, "frozen", False)
     if _is_dev:
-        _ws_dir = input_dir / "cleanr_workspace"
+        _ws_dir = output_dir / WORKSPACE_NAME
         _ws_dir.mkdir(parents=True, exist_ok=True)
-        _log_ts = time.strftime("%Y-%m-%d_%H-%M-%S")
+        # Use the app-supplied run timestamp so every batch of one run appends to
+        # the same file; fall back to our own stamp for a standalone run.
+        _log_ts = args.run_log_ts or time.strftime("%Y-%m-%d_%H-%M-%S")
         logger = RunLogger(str(_ws_dir / f"run_log_{_log_ts}.jsonl"))
     else:
         logger = None
@@ -1010,7 +1024,8 @@ def main():
         _write_finder_comment(out_path)
     cleaned_dir = output_dir
     cleaned_dir.mkdir(parents=True, exist_ok=True)
-    masks_dir = input_dir / "cleanr_workspace" / "masks" if args.save_masks else None
+    masks_dir = (output_dir / WORKSPACE_NAME / "masks"
+                 if (args.save_masks or args.save_detections) else None)
     if masks_dir:
         masks_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1465,6 +1480,17 @@ def main():
         log_phantom_negatives=not getattr(sys, "frozen", False),
     )
 
+    # Dev streaking-star filter: measure this set's star-streak ceiling ONCE (read off the
+    # frames, never a formula), then drop detections shorter than it unless red. Off by default.
+    streak_ceiling = None
+    streak_dropped_total = 0
+    streak_red_kept_total = 0
+    if args.streak_filter:
+        from modules.star_streak import MIN_TRAIL_PX
+        streak_ceiling = MIN_TRAIL_PX
+        print(f"  Streaking-star filter ON: dropping detections shorter than "
+              f"{streak_ceiling:.0f}px unless red", flush=True)
+
     for i, fp in enumerate(frame_files_all):
         is_neighbor = i < core_start or i >= core_end
         dbg = {} if logger is not None else None
@@ -1523,6 +1549,22 @@ def main():
                             kept_corners.append(frame_corners[_si])
                 frame_segs = kept_segs
                 frame_corners = kept_corners
+
+        # Dev streaking-star filter: drop segs shorter than the measured ceiling (unless red),
+        # and clear their pixels from the mask so mask/segs/repair/export stay consistent.
+        if args.streak_filter and streak_ceiling and frame_segs:
+            from modules.star_streak import filter_segs
+            _ks, _kc, _dropped, _nred = filter_segs(
+                frame_segs, frame_corners, frames_8bit_all[i], streak_ceiling)
+            if _dropped:
+                _keep_u = np.zeros(mask.shape, dtype=bool)
+                for _s in _ks:
+                    _keep_u |= (_s > 0)
+                for _s in _dropped:
+                    mask[(_s > 0) & ~_keep_u] = 0
+                streak_dropped_total += len(_dropped)
+                streak_red_kept_total += _nred
+            frame_segs, frame_corners = _ks, _kc
 
         small_dbg = {} if dbg is not None else None
         if min_area_scaled > 0 and mask.max() > 0:
@@ -1589,6 +1631,12 @@ def main():
                     print(f"  second scrub {core_num}/{n}: {fp.name} - {trail_count} trail{'s' if trail_count != 1 else ''}", flush=True)
         except Exception as e:
             print(f"  WARN: second scrub failed ({e}) - continuing with first-pass results only", flush=True)
+
+    if args.streak_filter and streak_ceiling:
+        print(f"  Streaking-star filter: dropped {streak_dropped_total} short detection(s) "
+              f"below {streak_ceiling:.0f}px as star streaks "
+              f"(kept {streak_red_kept_total} red as nav light{'s' if streak_red_kept_total != 1 else ''})",
+              flush=True)
 
     print("\nStep 1c - removing static false positives...", flush=True)
     static_fp_dbg = {} if logger is not None else None
@@ -1811,9 +1859,12 @@ def main():
         corners_per_frame = corners_all[core_start:core_end]
         for fp, mask, raw_mask, frm_corners in zip(
                 frame_files, masks_per_frame, raw_masks_per_frame, corners_per_frame):
-            robust_imwrite(masks_dir / (fp.stem + ".png"), mask)
-            if raw_mask.max() > 0:
-                robust_imwrite(masks_dir / (fp.stem + "_raw.png"), raw_mask)
+            # PNG mask dumps are the dev (--save-masks) path only. The Red Trail
+            # Map needs just the polygon JSON, so --save-detections skips the PNGs.
+            if args.save_masks:
+                robust_imwrite(masks_dir / (fp.stem + ".png"), mask)
+                if raw_mask.max() > 0:
+                    robust_imwrite(masks_dir / (fp.stem + "_raw.png"), raw_mask)
             if frm_corners:
                 h_fr, w_fr = mask.shape
                 polys_data = {

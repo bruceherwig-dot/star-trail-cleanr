@@ -70,6 +70,7 @@ from PySide6.QtWidgets import (
     QGraphicsScene, QGraphicsView, QHBoxLayout, QLabel,
     QLineEdit, QMainWindow, QPushButton, QSlider, QVBoxLayout, QWidget,
 )
+from dataset_paths import resolve_workspace  # run-artifact folder (STC Extras, legacy fallback)
 
 # Where the app remembers its last folder/frame, the flagged-frames list it
 # appends to, the image types it will open, and the on-screen display cap.
@@ -486,7 +487,7 @@ class SetupDialog(QDialog):
         """
         if not (self._img_dir and self._img_dir.is_dir()):
             return
-        candidate = self._img_dir / "cleanr_workspace" / "masks"
+        candidate = resolve_workspace(self._img_dir) / "masks"
         if candidate.is_dir():
             self._mask_dir = candidate
             self.accept()
