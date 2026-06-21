@@ -30,7 +30,8 @@ ARCHIVE_NAME = "Archive"               # older logs are tucked here to keep the 
 # at the top level and move the rest into Archive/. Timestamps are zero-padded
 # (YYYY-MM-DD_HH-MM-SS), so a plain name sort is chronological.
 _LOG_PATTERNS = ("run_log_*.jsonl",
-                 "star_trail_cleanr_log_*.txt",
+                 "star_log_*.txt",
+                 "star_trail_cleanr_log_*.txt",   # legacy name; kept so old logs still tidy up
                  "run_summary_*.txt")
 
 

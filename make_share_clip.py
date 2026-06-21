@@ -621,8 +621,12 @@ def make_red_trail_map(original_dir, out_path=None, masks_dir=None,
     return out_path
 
 
-def make_star_trail(cleaned_dir, out_path=None):
+def make_star_trail(cleaned_dir, out_path=None, stack=None):
     """OUTPUT 1 — the quick-and-dirty full-resolution STAR TRAIL (`--star-trail`).
+
+    `stack`: optional pre-built full-resolution lighten-max stack from the in-run
+    incremental stacker. When given, the cleaned folder is NOT re-read -- the stack
+    is saved straight to JPG. When None (the CLI path) the folder is stacked here.
 
     A lighten/maximum stack of the CLEANED frames (trails already removed) written
     as a JPG. This is NOT a comet-mode / gap-filled StarStaX stack -- just the
@@ -632,16 +636,17 @@ def make_star_trail(cleaned_dir, out_path=None):
     STANDALONE: call make_star_trail(cleaned_dir, out_path) from anywhere, or run
         python3 make_share_clip.py --star-trail --cleaned "<cleaned folder>" [--out <file.jpg>]
     """
-    if not os.path.isdir(cleaned_dir):
-        raise SystemExit(f"cleaned folder not found: {cleaned_dir}")
-    names = _list_frames(cleaned_dir)
-    if not names:
-        raise SystemExit(f"no cleaned frames found in {cleaned_dir}")
-    print(f"{len(names)} cleaned frames (first {SKIP_FIRST} and last {SKIP_LAST} "
-          f"skipped) -> full-res lighten-max star trail", flush=True)
-    stack = _stack_fullres(cleaned_dir, names, "star trail")
     if stack is None:
-        raise SystemExit(f"stacking failed (cleaned dir = {cleaned_dir})")
+        if not os.path.isdir(cleaned_dir):
+            raise SystemExit(f"cleaned folder not found: {cleaned_dir}")
+        names = _list_frames(cleaned_dir)
+        if not names:
+            raise SystemExit(f"no cleaned frames found in {cleaned_dir}")
+        print(f"{len(names)} cleaned frames (first {SKIP_FIRST} and last {SKIP_LAST} "
+              f"skipped) -> full-res lighten-max star trail", flush=True)
+        stack = _stack_fullres(cleaned_dir, names, "star trail")
+        if stack is None:
+            raise SystemExit(f"stacking failed (cleaned dir = {cleaned_dir})")
     if out_path is None:
         out_path = os.path.join(cleaned_dir, "cleaned_star_trail.jpg")
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
@@ -649,8 +654,7 @@ def make_star_trail(cleaned_dir, out_path=None):
     if not ok:
         raise SystemExit(f"could not write {out_path}")
     h, w = stack.shape[:2]
-    print(f"wrote {out_path}  ({w}x{h}, lighten-max of {len(names)} cleaned frames)",
-          flush=True)
+    print(f"wrote {out_path}  ({w}x{h} full-res lighten-max star trail)", flush=True)
     return out_path
 
 
@@ -676,6 +680,10 @@ if __name__ == "__main__":
                     help="folder of <stem>_polys.json detections (red map; default: resolved)")
     ap.add_argument("--foreground", default=None,
                     help="foreground mask PNG to exclude from the red map (default: resolved)")
+    ap.add_argument("--prebuilt-before", default=None,
+                    help="pre-built BEFORE canvas stack PNG (video; skips re-stacking the originals)")
+    ap.add_argument("--prebuilt-after", default=None,
+                    help="pre-built AFTER canvas stack PNG (video; skips re-stacking the cleaned frames)")
     args = ap.parse_args()
     if args.star_trail:
         st_cleaned = args.cleaned or (os.path.join(args.original, "cleaned") if args.original else None)
@@ -689,4 +697,10 @@ if __name__ == "__main__":
     else:
         if not args.original:
             ap.error("the wipe video needs --original")
-        make_share_clip(args.original, args.cleaned, args.out)
+        pb = pa = None
+        if args.prebuilt_before and args.prebuilt_after:
+            pb = robust_imread(args.prebuilt_before, cv2.IMREAD_COLOR)
+            pa = robust_imread(args.prebuilt_after, cv2.IMREAD_COLOR)
+            if pb is None or pa is None:
+                ap.error("could not read the pre-built stack PNGs")
+        make_share_clip(args.original, args.cleaned, args.out, before=pb, after=pa)

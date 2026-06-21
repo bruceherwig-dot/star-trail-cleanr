@@ -113,6 +113,7 @@ from PySide6.QtWidgets import (
     QTextEdit, QFileDialog, QStackedWidget, QCheckBox, QFrame,
     QSpinBox, QTabWidget, QTextBrowser, QScrollArea, QMessageBox,
 )
+import queue
 from PySide6.QtCore import Qt, QThread, Signal, QSettings, QTimer
 from PySide6.QtGui import QFont, QPixmap, QIcon, QPalette, QColor, QPainter, QIntValidator
 
@@ -405,7 +406,7 @@ SHARE_SCRIPT = os.path.join(_base, "make_share_clip.py")
 # Human-readable names for each share-render kind, used in the run-screen status
 # lines ("Your ... is ready." / "Could not create the ...").
 _SHARE_KIND_LABELS = {
-    "star_trail": "Quick and Dirty Star Trail",
+    "star_trail": "Preview Star Trail After Cleaning",
     "video": "video",
     "red": "Red Trail Map",
 }
@@ -1860,6 +1861,72 @@ class _XCloseButton(QPushButton):
         margin = max(10, int(min(w, h) * 0.34))
         painter.drawLine(margin, margin, w - margin, h - margin)
         painter.drawLine(w - margin, margin, margin, h - margin)
+
+
+class ShareStackThread(QThread):
+    """Builds the star-trail / before-after stacks DURING the clean run (on its own
+    thread) and renders them the instant the run finishes, so the star trail and video
+    appear right away instead of after a second full pass over every frame.
+
+    The cleaning worker is untouched. This only READS frames: the originals (all present
+    at run start) and the cleaned frames (folded in as each batch lands). It owns no
+    files the worker writes. On cancel it stops and produces nothing."""
+    done = Signal(dict)        # {kind: out_path} for what was produced
+    failed = Signal(str)
+
+    def __init__(self, original_dir, cleaned_dir, ws_dir, want_star, want_video,
+                 video_cmd_prefix=None, parent=None):
+        super().__init__(parent)
+        from modules.share_stacker import ShareStacker   # lazy: keeps GUI startup light
+        self._stacker = ShareStacker(original_dir, cleaned_dir, want_star, want_video,
+                                     video_cmd_prefix=video_cmd_prefix)
+        self._ws_dir = ws_dir
+        self._q = queue.Queue()
+        self._aborted = False
+
+    def notify_batch_done(self):
+        """Called at each batch boundary: fold any newly-cleaned frames into the after-stack."""
+        self._q.put("scan")
+
+    def finish(self):
+        """Called when the run finishes OK: do the last fold, then render."""
+        self._q.put("done")
+
+    def abort(self):
+        """Called on cancel: stop and discard (no outputs)."""
+        self._aborted = True
+        self._q.put("done")        # unblock the queue wait
+
+    def _abort_check(self):
+        return self._aborted
+
+    def run(self):
+        """Thread body. First build the before-stack from the originals (present now),
+        then wait for commands: 'scan' folds in the latest cleaned frames at each batch
+        boundary, 'done' breaks out to render. On a clean finish it renders the star
+        trail + video from the finished stacks and emits done(produced); on error it
+        emits failed(msg); on abort (cancel) it returns quietly with no output."""
+        try:
+            self._stacker.build_before(should_abort=self._abort_check)   # originals, available now
+            while True:
+                cmd = self._q.get()
+                if self._aborted:
+                    return
+                if cmd == "scan":
+                    self._stacker.scan_cleaned(should_abort=self._abort_check)
+                else:                      # "done"
+                    break
+            if self._aborted:
+                return
+            star = os.path.join(self._ws_dir, "cleaned_star_trail.jpg")
+            vid = os.path.join(self._ws_dir, "share_clip.mp4")
+            result = self._stacker.finalize(star_out=star, video_out=vid,
+                                            should_abort=self._abort_check)
+            if not self._aborted:
+                self.done.emit(result)
+        except Exception as e:
+            if not self._aborted:
+                self.failed.emit(str(e))
 
 
 class ShareRenderThread(QThread):
@@ -3533,7 +3600,7 @@ class MainWindow(QMainWindow):
 
         # ── Step 3: Foreground Mask ──────────────────────────────────────────
         step3 = QLabel(
-            f"<span style='font-size:19pt; font-weight:bold; color:{BRAND_HEADING_BLUE};'>3. Create a Foreground Mask</span>"
+            f"<span style='font-size:19pt; font-weight:bold; color:{BRAND_HEADING_BLUE};'>3. Create Foreground Mask</span>"
             f"&nbsp;&nbsp;<span style='font-size:14pt; color:{MUTED_TEXT}; vertical-align:baseline;'>Not required, but helpful: keeps the AI focused on the sky</span>"
         )
         step3.setTextFormat(Qt.RichText)
@@ -3672,7 +3739,7 @@ class MainWindow(QMainWindow):
         share_row = QHBoxLayout()
         # Quick-and-dirty full-res star trail: a lighten-max stack of the CLEANED
         # frames (trails removed) -> cleaned_star_trail.jpg. Public, default ON.
-        self._star_trail_chk = QCheckBox("Quick and Dirty Star Trail")
+        self._star_trail_chk = QCheckBox("Preview Star Trail After Cleaning")
         self._star_trail_chk.setFont(step_font)
         self._star_trail_chk.setChecked(
             SETTINGS.value("make_star_trail_enabled", True, type=bool))
@@ -3703,17 +3770,9 @@ class MainWindow(QMainWindow):
             share_row.addWidget(self._red_map_chk)
         share_row.addStretch(1)
         layout.addLayout(share_row)
-        # Caption directly beneath the video checkbox label, indented to line up
-        # with the label text (not the box). Muted gray, smaller than the label,
-        # regular weight.
-        _video_caption = QLabel(
-            "Takes a few extra minutes after your stars are cleaned. "
-            "The folder opens when it's finished.")
-        _vc_font = QFont()
-        _vc_font.setPointSize(13)
-        _video_caption.setFont(_vc_font)
-        _video_caption.setStyleSheet(f"color: {MUTED_TEXT}; margin-left: 22px;")
-        layout.addWidget(_video_caption)
+        # (No caption here any more: the star trail + video now build DURING the run
+        # and are ready within a couple of seconds of the finish, so the old "takes a
+        # few extra minutes" warning no longer applies.)
         layout.addSpacing(16)
 
         # ── Step 6: Run ──────────────────────────────────────────────────────
@@ -4837,6 +4896,9 @@ class MainWindow(QMainWindow):
         )
         self.worker.start()
         self._set_updates_run_state(True)
+        # Build the star trail / video stacks in parallel with the run (no-op if both
+        # checkboxes are off), so the results are ready the moment cleaning finishes.
+        self._start_share_stacker(folder, output)
 
     def _cancel_run(self):
         """Cancel Cleaning button. Tell the worker to stop (which kills its
@@ -4846,6 +4908,8 @@ class MainWindow(QMainWindow):
         if self.worker and self.worker.isRunning():
             self._run_cancelled = True
             self.worker.cancel()
+            if getattr(self, "_share_stack_thread", None):
+                self._share_stack_thread.abort()       # stop the in-run stacker, no outputs
             self._cancel_btn.setEnabled(False)
             self._cancel_btn.setText("Cancelling\u2026")
             # Stop progress bar animation immediately
@@ -4923,6 +4987,10 @@ class MainWindow(QMainWindow):
         """Worker signal at the start of each batch. Update the "Batch X of Y"
         label and reset both per-step (Detecting / Repairing) bars back to
         0% / "waiting" / blue for the new batch."""
+        # A new batch starting means the previous batch's cleaned frames are written;
+        # fold them into the in-run star-trail / video stacks (no-op if not enabled).
+        if getattr(self, "_share_stack_thread", None):
+            self._share_stack_thread.notify_batch_done()
         self._batch_text = f"Batch {batch_num} of {n_batches}"
         self._batch_label.setText(self._batch_text)
         # Reset step bars for new batch
@@ -5359,7 +5427,6 @@ class MainWindow(QMainWindow):
         self._stop_elapsed_timer()
         self._process_title.setText("Cleaning Complete")
         self._progress_bar.setValue(100)
-        self._progress_bar.setFormat("Complete!")
         self._progress_bar.setStyleSheet(
             f"QProgressBar {{ border: 1px solid {CARD_BORDER}; border-radius: 10px; "
             f"background: {CARD_BG}; text-align: center; font-weight: bold; font-size: 14px; color: {CARD_TEXT}; }}"
@@ -5371,65 +5438,157 @@ class MainWindow(QMainWindow):
         self._done_output_folder = output_folder
         self._update_open_btn_state()
         self._switch_to_back_btn()
-        # Kick off the share outputs (video, and the dev Red Trail Map) in the
-        # background before the modal so they render while it's up.
+        # Finalize the share outputs: the in-run stacker renders the star trail + video
+        # from the stacks it built DURING the run; the dev red map renders too.
         self._maybe_start_share_render(output_folder)
-        # The run log is written in _on_finished (covers stop/error too), which
-        # always fires after this handler.
-        # Run-complete dialog fires for every finished run, including
-        # zero-trail runs (the dialog message branches on trail count).
+        # Hold the "all done" summary dialog until those outputs are actually ready, so
+        # the completion lands WITH the star trail and video, not before them. On a
+        # slower machine the finalize takes a few seconds, so show "Finishing..." until
+        # the stacker signals done (_finish_completion pops the dialog). With nothing to
+        # build (clean-only, or only the dev red map) there's nothing to wait for.
+        # The run log is written later in _on_finished (covers stop/error too).
+        if getattr(self, "_share_stack_thread", None) is not None:
+            self._complete_pending = True
+            self._progress_bar.setFormat("Finishing your star trail and video…")
+        else:
+            self._complete_pending = False
+            self._progress_bar.setFormat("Complete!")
+            self._show_run_complete_dialog()
+
+    def _finish_completion(self):
+        """Flip the bar to 'Complete!' and pop the run-complete summary dialog, once the
+        in-run stacker has the star trail and video ready -- or it failed, in which case
+        we still complete so the user is never stranded waiting. Fires once per run."""
+        if not getattr(self, "_complete_pending", False):
+            return
+        self._complete_pending = False
+        self._progress_bar.setFormat("Complete!")
         self._show_run_complete_dialog()
 
+    def _start_share_stacker(self, original_dir, cleaned_dir):
+        """Called at the START of a run. If the star trail or video is enabled, begin
+        building their lighten-max stacks NOW, on a background thread, in parallel with
+        the cleaning -- so they're ready the instant the run finishes instead of after a
+        second full pass over every frame. Not even started when neither is enabled, so
+        a clean-only user pays nothing. The cleaning worker is untouched."""
+        self._share_stack_thread = None
+        want_star = SETTINGS.value("make_star_trail_enabled", True, type=bool)
+        want_video = SETTINGS.value("make_video_enabled", True, type=bool)
+        if not (want_star or want_video) or not original_dir or not cleaned_dir:
+            return
+        try:
+            ws_dir = output_workspace(cleaned_dir, create=True)
+            # How the video encode re-invokes make_share_clip in its OWN process
+            # (ffmpeg stalls inside a Qt thread), same pattern as the other share runs.
+            if getattr(sys, "frozen", False):
+                video_cmd = [sys.executable, "--cleanr-worker", SHARE_SCRIPT]
+            else:
+                video_cmd = [sys.executable, "-u", SHARE_SCRIPT]
+            t = ShareStackThread(original_dir, cleaned_dir, ws_dir,
+                                 want_star, want_video, video_cmd_prefix=video_cmd, parent=self)
+            t.done.connect(self._on_share_stack_done)
+            t.failed.connect(self._on_share_stack_failed)
+            self._share_stack_thread = t
+            self._share_stack_ws = ws_dir
+            t.start()
+        except Exception:
+            self._share_stack_thread = None
+
+    def _on_share_stack_done(self, result):
+        """The in-run stacker finished. `result` is {"produced": {kind: path},
+        "timings": {kind: seconds}}. Note each output and how long it took, append that
+        to the saved Star Log, open BOTH the cleaned folder and the STC Extras folder
+        where the outputs live, then land the held completion."""
+        produced = result.get("produced", {}) if isinstance(result, dict) else {}
+        timings = result.get("timings", {}) if isinstance(result, dict) else {}
+        lines = []
+        for kind, _path in produced.items():
+            label = _SHARE_KIND_LABELS.get(kind, "share output")
+            secs = timings.get(kind)
+            msg = f"Your {label} is ready" + (f" (took {secs:.1f}s)." if secs is not None else ".")
+            lines.append(msg)
+            try:
+                self._status_out.append(msg)
+            except Exception:
+                pass
+        self._append_share_log(lines)
+        # Open ONLY the STC Extras folder (where the star trail + video live), so the
+        # new outputs are obvious. The cleaned frames are one button away in the app, and
+        # not popping that window keeps it clean for bringing into StarStaX.
+        if produced:
+            ws = getattr(self, "_share_stack_ws", None)
+            if ws:
+                _open_folder_in_file_manager(ws)
+        # "done" and the outputs land together.
+        self._finish_completion()
+
+    def _append_share_log(self, lines):
+        """Append the share-output results (and their timings) to the saved Star Log txt.
+        The run summary is written a beat before the stacker finishes, so the outcome of
+        the star trail / video is added here instead of being lost at 'Finishing...'."""
+        path = getattr(self, "_last_log_path", None)
+        if not path or not lines:
+            return
+        try:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write("\n" + "\n".join(lines) + "\n")
+        except Exception:
+            pass
+
+    def _on_share_stack_failed(self, msg):
+        """The in-run stacker hit an error rendering the star trail / video. Note it in
+        the status log (the cleaned frames themselves are fine and already saved) and
+        still complete the run so the user is never left stuck on 'Finishing...'."""
+        line = f"Could not finish the star trail / video: {msg}"
+        try:
+            self._status_out.append(line)
+        except Exception:
+            pass
+        self._append_share_log([line])
+        # Don't strand the user on "Finishing..." if the render errored -- complete anyway.
+        self._finish_completion()
+
     def _maybe_start_share_render(self, cleaned_folder):
-        """After a clean run, render the enabled share outputs as TWO independent
-        separate-process runs into cleanr_workspace/, opening each when it finishes.
-        The video is public; the Red Trail Map is dev-only. No-op if neither is
-        enabled or the paths don't resolve. Never blocks the UI or the finished run."""
-        make_star = SETTINGS.value("make_star_trail_enabled", True, type=bool)
-        make_video = SETTINGS.value("make_video_enabled", True, type=bool)
+        """At run finish, finalize the share outputs. The star trail and video were
+        built DURING the run by the in-run ShareStackThread, so here we just tell it to
+        render them from the finished stacks; it opens the folder when ready. The dev
+        Red Trail Map (if enabled) still renders as its own process. No-op otherwise."""
+        stacker = getattr(self, "_share_stack_thread", None)
+        if stacker is not None:
+            try:
+                self._status_out.append(
+                    "\nFinishing your star trail and video from the stacks built during "
+                    "the run; the folder opens automatically when they're ready.")
+            except Exception:
+                pass
+            stacker.finish()
+
         make_red = (_DEV_SWITCHER_ENABLED
                     and getattr(self, "_red_map_chk", None) is not None
                     and SETTINGS.value("red_trail_map_enabled", True, type=bool))
-        if not (make_star or make_video or make_red):
+        if not make_red:
             return
         original_dir = getattr(self.worker, "folder", None) if self.worker else None
         if not original_dir or not os.path.isdir(original_dir) \
                 or not cleaned_folder or not os.path.isdir(cleaned_folder):
             return
         ws_dir = output_workspace(cleaned_folder, create=True)
-        self._share_threads = []        # keep refs so the QThreads aren't GC'd
-        labels = []
-        if make_star:
-            star = os.path.join(ws_dir, "cleaned_star_trail.jpg")
-            self._start_share_run(
-                "star_trail", ["--star-trail", "--cleaned", cleaned_folder,
-                               "--out", star], star)
-            labels.append("Quick and Dirty Star Trail")
-        if make_video:
-            vid = os.path.join(ws_dir, "share_clip.mp4")
-            self._start_share_run(
-                "video", ["--original", original_dir, "--cleaned", cleaned_folder,
-                          "--out", vid], vid)
-            labels.append("10-Second Sharable Before & After Video")
-        if make_red:
-            red = os.path.join(ws_dir, "red_trail_map.jpg")
-            red_args = ["--red-map", "--original", original_dir, "--out", red,
-                        "--masks-dir", os.path.join(ws_dir, "masks")]
-            fg = getattr(self, "_mask_path", None)
-            if fg and os.path.isfile(fg):
-                red_args += ["--foreground", fg]
-            self._start_share_run("red", red_args, red)
-            labels.append("Red Trail Map")
-        # Open the workspace folder ONCE, when the LAST job finishes (not per job).
-        # _share_job_finished counts these down and opens the folder on the last.
+        red = os.path.join(ws_dir, "red_trail_map.jpg")
+        red_args = ["--red-map", "--original", original_dir, "--out", red,
+                    "--masks-dir", os.path.join(ws_dir, "masks")]
+        fg = getattr(self, "_mask_path", None)
+        if fg and os.path.isfile(fg):
+            red_args += ["--foreground", fg]
+        self._share_threads = []
+        self._start_share_run("red", red_args, red)
         self._share_pending = len(self._share_threads)
         self._share_any_done = False
-        self._share_ws_dir = ws_dir
+        # Red opens the folder only when the in-run stacker isn't the one that will.
+        self._share_ws_dir = None if stacker is not None else ws_dir
         try:
             self._status_out.append(
-                f"\nCreating your {' and '.join(labels)} in the background, each as "
-                f"its own run. This may take a few minutes; the folder opens "
-                f"automatically once they're all finished.")
+                "\nCreating your Red Trail Map in the background; the folder opens when "
+                "it's finished.")
         except Exception:
             pass
 
@@ -5870,7 +6029,7 @@ class MainWindow(QMainWindow):
         workspace = output_workspace(ws_base)
         try:
             os.makedirs(workspace, exist_ok=True)
-            fname = f"star_trail_cleanr_log_{start.strftime('%Y-%m-%d_%H-%M-%S')}.txt"
+            fname = f"star_log_{start.strftime('%Y-%m-%d_%H-%M-%S')}.txt"
             _full = os.path.join(workspace, fname)
             with open(_full, 'w', encoding='utf-8') as f:
                 f.write('\n'.join(lines) + '\n')

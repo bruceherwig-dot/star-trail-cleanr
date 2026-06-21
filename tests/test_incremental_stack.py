@@ -81,9 +81,22 @@ def test_missing_frame_recorded_not_raised():
         assert inc.missing == ["does_not_exist.png"]
 
 
+def test_make_star_trail_prebuilt_stack_no_crash():
+    """make_star_trail(stack=...) must save the prebuilt stack WITHOUT referencing the
+    'names' list that only exists on the folder-stacking path. Regression: that print
+    threw UnboundLocalError, which saved the image but then killed the run before the
+    video step (the in-run stacker's whole point)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        stack = np.full((24, 32, 3), 50, np.uint8)
+        out = os.path.join(tmp, "star.jpg")
+        msc.make_star_trail("ignored-when-stack-given", out_path=out, stack=stack)
+        assert os.path.exists(out), "prebuilt-stack star trail not written"
+
+
 if __name__ == "__main__":
     test_fullres_incremental_equals_batch()
     test_canvas_incremental_equals_batch()
     test_feed_image_matches_feed_path()
     test_missing_frame_recorded_not_raised()
+    test_make_star_trail_prebuilt_stack_no_crash()
     print("all incremental-stack tests passed")
