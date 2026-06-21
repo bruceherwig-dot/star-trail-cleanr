@@ -2,6 +2,13 @@
 
 ---
 
+## v2.59-beta
+- **Your star trail and share video are ready the instant cleaning finishes.** They used to be built in a second pass after the run, which could add minutes on a big job. Now they're assembled in the background *while* your frames are being cleaned, so by the time the run ends they're essentially done — the app finishes them in a second or two and opens the folder with both inside. "Cleaning Complete" now waits for them, so when it says done, everything is actually there.
+- **No more stacked update prompts.** If both a new app version and a new Trail DetectoR were available, you could get two orange notices at once with two Download buttons — confusing, and a couple of Windows users hit a dead-end first press. The app update now takes priority (it already includes the newest detector), and when an app update quietly brings a new detector, the app tells you once on the next launch.
+- **"Preview Star Trail After Cleaning."** The Output Options star-trail checkbox is renamed to say what it actually does.
+- **"Open Me First" instructions in the download.** Mac and Windows each get a short text file explaining how to get past the first-launch security warning, so new users aren't stuck.
+- **Smoke tests:** 203 passing.
+
 ## v2.58-beta
 - **The one-click updater no longer crashes.** Starting in v2.56, the app could quit the moment the updater went to show its window, whether you clicked the update notice or Check for Updates. It was an internal type mismatch in a macOS hook added that version. The hook is removed and the updater shows and installs normally again. Note: if you are on v2.56 or v2.57, you will need to download v2.58 from the website by hand this one time to get past the crash. From v2.58 forward, in-app updating works on its own.
 - **The in-app update notice is reliable now.** The orange "new version available" banner could silently fail to appear on some machines, leaving you with no idea an update was waiting. Its check confirmed the secure connection to GitHub using the computer's own certificate store, which the installed app cannot always reach (a VPN, a work network, or certain security settings can block it), and when it failed there was no visible sign. The app now carries its own certificate bundle, so the update check, and the AI model update notice, work reliably no matter how the machine is set up. If your update banner was not showing, this is why.
