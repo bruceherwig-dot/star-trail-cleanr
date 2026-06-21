@@ -34,11 +34,24 @@ caller treats None as "show nothing."
 """
 import json
 import re
+import ssl
 import urllib.error
 import urllib.request
 from typing import Optional
 
 from modules.user_folder import get_installed_model_version
+
+
+def _verified_ssl_context():
+    """SSL context that verifies against certifi's BUNDLED CA roots, so the
+    model-update check works in the frozen app where the system root store may be
+    unreachable (the same CERTIFICATE_VERIFY_FAILED that hid the update banner).
+    Falls back to the default context only if certifi is unavailable."""
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
 
 # The GitHub repository that hosts the app and its model releases.
 REPO = "bruceherwig-dot/star-trail-cleanr"
@@ -212,7 +225,8 @@ def check_for_model_update() -> Optional[dict]:
                 "User-Agent": "StarTrailCleanR-ModelUpdateCheck",
             },
         )
-        with urllib.request.urlopen(req, timeout=TIMEOUT_S) as resp:
+        with urllib.request.urlopen(req, timeout=TIMEOUT_S,
+                                    context=_verified_ssl_context()) as resp:
             releases = json.loads(resp.read().decode("utf-8"))
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError, ValueError):
         return None

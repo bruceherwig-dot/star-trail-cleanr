@@ -977,7 +977,7 @@ class CleanerWorker(QThread):
             mask_note = " with foreground mask" if self.mask_path else ""
             skipped_total = self._skipped_resolution_count + self._skipped_unreadable_count
             header = (f"Processing {total} frames ({dominant[0]}\u00d7{dominant[1]}){mask_note}"
-                      + (f" \u2014 skipped {skipped_total} file(s)" if skipped_total else ""))
+                      + (f", skipped {skipped_total} file(s)" if skipped_total else ""))
             _dups = getattr(self, "_deduped_pairs_count", 0)
             if _dups:
                 header += (f"\nMerged {_dups} duplicate JPG/TIFF pair"
@@ -1691,7 +1691,7 @@ class GpuPackInstallThread(QThread):
         saw_block = False
         for idx, url in enumerate(urls):
             if idx > 0:
-                self.progress.emit(f"{label} — trying backup server...", 0, 0)
+                self.progress.emit(f"{label}: trying backup server...", 0, 0)
             req = urllib.request.Request(url, headers={"User-Agent": "StarTrailCleanR-GpuPack"})
             try:
                 with urllib.request.urlopen(req, timeout=60) as resp:
@@ -1826,7 +1826,7 @@ class GpuPackInstallThread(QThread):
                     "Download blocked (HTTP 403).\n\n"
                     "PyTorch's download servers are blocking requests from your network. "
                     "We automatically tried an alternative server, but it was also blocked.\n\n"
-                    "The most reliable fix is to use a VPN — connect to any US or European "
+                    "The most reliable fix is to use a VPN: connect to any US or European "
                     "server, then click Install GPU Support again.\n\n"
                     "Click More Info for step-by-step instructions.\n\n"
                     f"Details: {e}"
@@ -3277,22 +3277,22 @@ class MainWindow(QMainWindow):
         gpu_mismatch = bool(os.environ.get('STC_GPU_VERSION_MISMATCH'))
 
         if device == "mps":
-            status = "Apple MPS — GPU acceleration active"
+            status = "Apple MPS: GPU acceleration active"
         elif device == "cuda":
-            status = "NVIDIA CUDA — GPU acceleration active"
+            status = "NVIDIA CUDA: GPU acceleration active"
         elif device == "cpu" and outcome == "yes" and gpu_mismatch:
-            status = ("CPU — GPU pack version mismatch. "
+            status = ("CPU: GPU pack version mismatch. "
                       "Reinstall the GPU pack for this version of Star Trail CleanR "
                       "to re-enable acceleration.")
         elif device == "cpu" and outcome == "yes" and os.environ.get('STC_CUDA_UNSUPPORTED'):
             status = ("NVIDIA GPU detected but your card isn't supported by the current "
-                      "GPU pack — running on CPU.")
+                      "GPU pack, running on CPU.")
         elif device == "cpu" and outcome == "yes":
-            status = "CPU — NVIDIA GPU detected. Install the GPU pack for faster processing."
+            status = "CPU: NVIDIA GPU detected. Install the GPU pack for faster processing."
         elif device == "cpu" and _pl.system() == "Windows":
-            status = "CPU — no GPU acceleration"
+            status = "CPU: no GPU acceleration"
         elif device == "cpu":
-            status = "CPU processing only — GPU acceleration not available on this device"
+            status = "CPU processing only: GPU acceleration not available on this device"
         else:
             return
 
@@ -3367,13 +3367,13 @@ class MainWindow(QMainWindow):
         layout.addWidget(headline)
 
         subtitle = QLabel(
-            "Point it at a folder of star trail frames and our AI will do "
+            "Point to a folder of star trail frames and our AI will do "
             "its best to remove all the airplane and satellite trails."
         )
         sub_font = QFont()
         sub_font.setPointSize(13)
         subtitle.setFont(sub_font)
-        subtitle.setStyleSheet(f"color: {MUTED_TEXT};")
+        subtitle.setStyleSheet(f"color: {BROWSER_TEXT};")
         subtitle.setWordWrap(True)
         layout.addWidget(subtitle)
 
@@ -3394,7 +3394,7 @@ class MainWindow(QMainWindow):
         step1_row = QHBoxLayout()
         step1_row.setSpacing(12)
         step1 = QLabel(
-            "<span style='font-size:19pt; font-weight:bold;'>1. Select Folder with Your Star Trail Images</span>"
+            f"<span style='font-size:19pt; font-weight:bold; color:{BRAND_HEADING_BLUE};'>1. Select Folder with Your Star Trail Images</span>"
             f"&nbsp;&nbsp;<span style='font-size:14pt; color:{MUTED_TEXT}; vertical-align:baseline;'>(.JPG, .TIF 8/16-bit, and RAW)</span>"
         )
         step1.setTextFormat(Qt.RichText)
@@ -3429,11 +3429,11 @@ class MainWindow(QMainWindow):
         self._input_open_btn.clicked.connect(self._open_setup_input_folder)
         row_in.addWidget(self._input_open_btn, 1)
         layout.addLayout(row_in)
-        layout.addSpacing(4)
+        layout.addSpacing(16)
 
         # ── Step 2: Select Output ────────────────────────────────────────────
         step2 = QLabel(
-            "<span style='font-size:19pt; font-weight:bold;'>2. Select Output Folder</span>"
+            f"<span style='font-size:19pt; font-weight:bold; color:{BRAND_HEADING_BLUE};'>2. Select Output Folder</span>"
             f"&nbsp;&nbsp;<span style='font-size:14pt; color:{MUTED_TEXT}; vertical-align:baseline;'>(default: a \u2018Cleaned\u2019 folder inside your originals)</span>"
         )
         step2.setTextFormat(Qt.RichText)
@@ -3456,12 +3456,12 @@ class MainWindow(QMainWindow):
         self._output_open_btn.clicked.connect(self._open_setup_output_folder)
         row_out.addWidget(self._output_open_btn, 1)
         layout.addLayout(row_out)
-        layout.addSpacing(4)
+        layout.addSpacing(16)
 
         # ── Step 3: Foreground Mask ──────────────────────────────────────────
         step3 = QLabel(
-            "<span style='font-size:19pt; font-weight:bold;'>3. Foreground Mask (optional)</span>"
-            f"&nbsp;&nbsp;<span style='font-size:14pt; color:{MUTED_TEXT}; vertical-align:baseline;'>Not required, but helpful \u2014 keeps the AI focused on the sky</span>"
+            f"<span style='font-size:19pt; font-weight:bold; color:{BRAND_HEADING_BLUE};'>3. Create a Foreground Mask</span>"
+            f"&nbsp;&nbsp;<span style='font-size:14pt; color:{MUTED_TEXT}; vertical-align:baseline;'>Not required, but helpful: keeps the AI focused on the sky</span>"
         )
         step3.setTextFormat(Qt.RichText)
         layout.addWidget(step3)
@@ -3483,11 +3483,11 @@ class MainWindow(QMainWindow):
         mask_row.addWidget(self._mask_status)
         mask_row.addStretch()
         layout.addLayout(mask_row)
-        layout.addSpacing(4)
+        layout.addSpacing(16)
 
         # ── Step 4: Number of Images ─────────────────────────────────────────
         step4 = QLabel(
-            "<span style='font-size:19pt; font-weight:bold;'>4. Number of Images to Process</span>"
+            f"<span style='font-size:19pt; font-weight:bold; color:{BRAND_HEADING_BLUE};'>4. Number of Images to Process</span>"
             f"&nbsp;&nbsp;<span style='font-size:14pt; color:{MUTED_TEXT}; vertical-align:baseline;'>Recommended: test a small batch before doing a full run</span>"
         )
         step4.setTextFormat(Qt.RichText)
@@ -3525,11 +3525,11 @@ class MainWindow(QMainWindow):
             self._dev_start_frame = None
             self._dev_end_frame = None
 
-        layout.addSpacing(4)
+        layout.addSpacing(16)
 
         # ── Step 5: Output Options ───────────────────────────────────────────
         step5 = QLabel(
-            "<span style='font-size:19pt; font-weight:bold;'>5. Output Options</span>"
+            f"<span style='font-size:19pt; font-weight:bold; color:{BRAND_HEADING_BLUE};'>5. Output Options</span>"
             f"&nbsp;&nbsp;<span style='font-size:14pt; color:{MUTED_TEXT}; vertical-align:baseline;'>File format and quality</span>"
         )
         step5.setTextFormat(Qt.RichText)
@@ -3641,11 +3641,11 @@ class MainWindow(QMainWindow):
         _video_caption.setFont(_vc_font)
         _video_caption.setStyleSheet(f"color: {MUTED_TEXT}; margin-left: 22px;")
         layout.addWidget(_video_caption)
-        layout.addSpacing(6)
+        layout.addSpacing(16)
 
         # ── Step 6: Run ──────────────────────────────────────────────────────
         step6 = QLabel(
-            "<span style='font-size:19pt; font-weight:bold;'>6. Remove airplane and satellite trails</span>"
+            f"<span style='font-size:19pt; font-weight:bold; color:{BRAND_HEADING_BLUE};'>6. Remove airplane and satellite trails</span>"
             f"&nbsp;&nbsp;<span style='font-size:14pt; color:{MUTED_TEXT}; vertical-align:baseline;'>Processing time depends on frame count, pixel count of your images, and computer speed</span>"
         )
         step6.setTextFormat(Qt.RichText)
@@ -5017,7 +5017,7 @@ class MainWindow(QMainWindow):
         )
         if total_trails <= 0:
             self._stats_trail_line = (
-                f"Sky was clean — no airplane or satellite trails found<br>"
+                f"Sky was clean. No airplane or satellite trails found<br>"
                 f"in your <b>{total_frames:,}</b> frames.<br><br>"
                 f"<b>Time to stack!</b><br>"
                 f"Open the Cleaned Folder, then load the frames into your favorite "
@@ -5208,7 +5208,7 @@ class MainWindow(QMainWindow):
             for entry in breakdown:
                 marker = "  (will process)" if entry["is_dominant"] else "  (will skip)"
                 parts.append(
-                    f"<li>{entry['size']} &mdash; {entry['count']} frame(s){marker}</li>"
+                    f"<li>{entry['size']}: {entry['count']} frame(s){marker}</li>"
                 )
             parts.append("</ul>")
         if n_unreadable > 0:
@@ -5266,7 +5266,7 @@ class MainWindow(QMainWindow):
             "JPEGs and run Star Trail CleanR on the JPEG folder.</p>"
             "<p>If your input folder is on a USB or network drive, you "
             "can also try copying it to your main hard drive and running "
-            "again &mdash; external drives sometimes drop reads.</p>"
+            "again, external drives sometimes drop reads.</p>"
             "<p>The frames cleaned so far are preserved in the output "
             "folder.</p>"
         )
@@ -5718,7 +5718,7 @@ class MainWindow(QMainWindow):
                 "",
                 f"Time before cancel:    {fmt_hms(actual_sec)}",
                 "",
-                "Run cancelled before completion — the numbers above are the "
+                "Run cancelled before completion. The numbers above are the "
                 "progress made so far, not a finished run.",
                 "",
                 f"Time saved so far (at ~30 sec per trail):  {time_saved}",
@@ -5776,7 +5776,7 @@ class MainWindow(QMainWindow):
                 tail = log_lines[-TAIL_LINES:]
                 omitted = len(log_lines) - HEAD_LINES - TAIL_LINES
                 rendered_log = "\n".join(head) + (
-                    f"\n\n... ({omitted:,} lines elided — repetitive per-frame "
+                    f"\n\n... ({omitted:,} lines elided, repetitive per-frame "
                     f"progress; first {HEAD_LINES} and last {TAIL_LINES} lines kept) ...\n\n"
                 ) + "\n".join(tail)
             else:
@@ -5830,10 +5830,10 @@ class MainWindow(QMainWindow):
         if not folder:
             folder = getattr(self, '_done_output_folder', None)
         if not folder:
-            self._error_label.setText("No output folder set \u2014 select an input folder first.")
+            self._error_label.setText("No output folder set. Select an input folder first.")
             return
         if not os.path.isdir(folder):
-            self._error_label.setText(f"Output folder doesn\u2019t exist yet \u2014 run cleaning first.")
+            self._error_label.setText(f"Output folder doesn\u2019t exist yet. Run cleaning first.")
             return
         _open_folder_in_file_manager(folder)
 
@@ -5900,7 +5900,7 @@ class MaskEditorWindow(QMainWindow):
         """Create the mask-editor window: embed a MaskPainterWidget, wire its
         done/skip/back signals, and center it at 90% of the screen size."""
         super().__init__(parent)
-        self.setWindowTitle("Star Trail CleanR \u2014 Foreground Mask")
+        self.setWindowTitle("Star Trail CleanR: Foreground Mask")
         self._painter = MaskPainterWidget()
         self.setCentralWidget(self._painter)
 

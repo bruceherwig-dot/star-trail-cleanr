@@ -27,9 +27,23 @@ import re
 import sys
 import time
 import traceback
+import ssl
 import urllib.error
 import urllib.request
 from typing import Optional
+
+
+def _verified_ssl_context():
+    """An SSL context that verifies against certifi's BUNDLED CA roots. The
+    frozen app cannot rely on the system root store being reachable, which is
+    what produced the silent CERTIFICATE_VERIFY_FAILED that hid the update banner
+    (2026-06-20). The check now carries its own trusted roots. Falls back to the
+    plain default context only if certifi is somehow unavailable."""
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
 
 # Diagnostic log for the update-banner check. The check itself must never
 # crash or block startup, but its failures must ALSO never be invisible:
@@ -176,7 +190,8 @@ def check_for_update(local_version_str: str, timeout_s: float = TIMEOUT_S,
                     "User-Agent": "StarTrailCleanR-UpdateCheck",
                 },
             )
-            with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            with urllib.request.urlopen(req, timeout=timeout_s,
+                                        context=_verified_ssl_context()) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
             break
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError, ValueError):

@@ -207,6 +207,12 @@ cmd = [
     # v2.53-beta first attempt). fontTools is a matplotlib dependency, always
     # installed, so collecting it is free.
     '--collect-all', 'fontTools',
+    # certifi's CA bundle (cacert.pem) must be packed so the in-app update-banner
+    # check and model-update check can verify GitHub's SSL cert. Without it the
+    # frozen app's Python falls back to the system root store, which is not always
+    # reachable -- the silent CERTIFICATE_VERIFY_FAILED that hid the update banner
+    # (2026-06-20). update_check.py / model_update.py now pin certifi.where().
+    '--collect-all', 'certifi',
     '--runtime-hook', 'rthooks/pyi_rthook_gpu_override.py',
 ]
 # Force PyInstaller to exclude the same skip list at the module-analysis level,
