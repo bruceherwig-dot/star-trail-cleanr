@@ -1996,6 +1996,10 @@ class MainWindow(QMainWindow):
             lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
 
         self._start_update_check()
+        # After-the-fact: if an app update silently brought a newer detector, tell
+        # the user once. Called after _start_update_check so a pending app-update
+        # banner (shown synchronously from cache) defers the notice.
+        self._maybe_announce_new_model()
         self._start_model_update_check()
         self._start_nvidia_detect()
 
@@ -2726,6 +2730,11 @@ class MainWindow(QMainWindow):
         self._update_download_url = download_url
         self._update_label.setText(f"New version available: {tag}")
         self._update_banner.setVisible(True)
+        # App update takes priority over the model card: hide it so the user never
+        # sees two stacked orange Download prompts. The app update bundles the latest
+        # detector anyway. Covers the ordering where the model card showed first.
+        if hasattr(self, "_model_card"):
+            self._model_card.setVisible(False)
 
     def _show_cached_update_banner(self):
         """Optimistically show the banner from the last update we ever found
@@ -2927,7 +2936,22 @@ class MainWindow(QMainWindow):
 
     def _on_model_update_result(self, result):
         """Populate and show the model-update card from the check's result
-        dict ("tag", "download_url", optional "summary"/"credits")."""
+        dict ("tag", "download_url", optional "summary"/"credits").
+
+        Suppressed while the app-update banner is showing. An app update already
+        bundles the latest detector, so two stacked orange prompts (app banner +
+        model card) were a confusing double-Download on Windows -- a user pressed
+        the model "Download now" (which quietly saves a file, no installer), saw
+        "nothing happen", and had to find the second Download. App update wins; the
+        model check re-runs next launch and only surfaces if a newer model exists."""
+        if self._update_banner.isVisible():
+            # The app update will deliver this detector silently. Stash its
+            # what's-new so the after-the-fact "now installed" notice can replay
+            # it once the new detector is actually active (see _maybe_announce_new_model).
+            summary = result.get("summary") or ""
+            if summary:
+                SETTINGS.setValue("pending_model_whatsnew", summary)
+            return
         self._model_download_tag = result.get("tag", "")
         self._model_download_url = result.get("download_url")
         display = self._model_display_name(self._model_download_tag)
@@ -2945,6 +2969,50 @@ class MainWindow(QMainWindow):
         self._model_notnow_btn.setVisible(True)
         self._model_progress.setVisible(False)
         self._model_gotit_btn.setVisible(False)
+        self._model_card.setVisible(True)
+
+    def _maybe_announce_new_model(self):
+        """Tell the user once, after the fact, when a newer detector has become
+        active -- almost always because an app update quietly bundled it. Gated
+        purely on the model version going UP versus the one we last announced
+        (stored in settings), so it is update-path agnostic: it works the same
+        whether the app updated via the banner, via Settings 'Check for Updates',
+        or any future path. It never fires for an app-only update (same detector)
+        or for a fresh install. Reuses the orange model card in 'already installed'
+        mode with a single Close button."""
+        from modules.model_update import local_model_version, parse_model_tag
+        current = local_model_version()
+        last = SETTINGS.value("last_announced_model_version", "", type=str) or ""
+        if not last:
+            # Baseline silently the first time we ever record it -- a detector the
+            # user received with their initial install is not an "update".
+            SETTINGS.setValue("last_announced_model_version", current)
+            return
+        cur_n, last_n = parse_model_tag(current), parse_model_tag(last)
+        if cur_n is None or last_n is None or cur_n <= last_n:
+            return
+        # Don't compete with a pending app-update banner. Defer (leave the recorded
+        # version unchanged) so the notice fires on a later launch once they're caught up.
+        if self._update_banner.isVisible():
+            return
+        summary = SETTINGS.value("pending_model_whatsnew", "", type=str) or ""
+        self._show_model_installed_notice(current, summary)
+        SETTINGS.setValue("last_announced_model_version", current)
+        SETTINGS.remove("pending_model_whatsnew")
+
+    def _show_model_installed_notice(self, version_tag, summary):
+        """Post-update orange card: '<detector> is now installed' + its what's-new
+        line + a single Close button. No Download -- the detector is already active."""
+        display = self._model_display_name(version_tag)
+        self._model_title.setText(f"{display} is now installed")
+        self._model_summary.setText(summary or f"{display} is now installed.")
+        self._model_summary.setVisible(True)
+        self._model_credits.setVisible(False)
+        self._model_download_btn.setVisible(False)
+        self._model_notnow_btn.setVisible(False)
+        self._model_progress.setVisible(False)
+        self._model_gotit_btn.setText("Close")
+        self._model_gotit_btn.setVisible(True)
         self._model_card.setVisible(True)
 
     def _on_model_download_clicked(self):
@@ -2995,8 +3063,13 @@ class MainWindow(QMainWindow):
         self._model_title.setText(f"{display} installed")
         self._model_summary.setVisible(False)
         self._model_credits.setVisible(False)
+        self._model_gotit_btn.setText("Got it")
         self._model_gotit_btn.setVisible(True)
         self._header_subline.setText(f"Beta v{VERSION}\n{display}")
+        # They downloaded it themselves and saw this card, so don't re-announce
+        # the same detector via the post-update "now installed" notice next launch.
+        SETTINGS.setValue("last_announced_model_version", version)
+        SETTINGS.remove("pending_model_whatsnew")
 
     def _on_model_download_failed(self, err):
         """Model download failed. Stay quiet (the existing model still works):

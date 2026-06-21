@@ -12,6 +12,51 @@ the engine no longer pops its own window on launch (see Half 2).
 
 ---
 
+## TWO SEPARATE CHANNELS — do not conflate them (this caused real confusion 2026-06-20)
+
+There are TWO independent update channels, and they read DIFFERENT sources:
+
+1. **The orange BANNER** reads **GitHub `/releases/latest`** (the REST API). It only fires when a real
+   GitHub **release** exists with a newer version. A higher entry in the appcast feed does NOT make the
+   banner appear. (`modules/update_check.py`.)
+2. **The Sparkle ENGINE** (the native install window) reads the **appcast XML feed** on gh-pages. The
+   banner's Download button and Settings → Check for Updates both drive this engine, which then shows
+   its own install window. (`modules/sparkle_updater.py` + the appcasts.)
+
+So to TEST the banner you need a real release; to test the Sparkle install window you need an appcast
+entry. They are not interchangeable. (2026-06-20: a test was set against the appcast while expecting the
+banner to fire; it did not, because the banner reads releases, not the appcast.)
+
+## VERIFY ON A REAL FROZEN BUILD — the only proof that counts (rule added 2026-06-20)
+
+Three separate updater bugs shipped because the release was called "done" on a proxy (it built, the
+engine loaded, tests passed) that never touched the real update path: the dead Sparkle engine (2.51),
+the SSL banner failure (certifi, 2.58), and the BOOL-arg delegate crash (2.58). All three live in the
+Python ↔ Sparkle ↔ macOS boundary, which dev and CI cannot see.
+
+**RULE: no release is shipped until a real frozen build has been watched doing a full update end to end
+(banner appears → click → install window opens) WITHOUT crashing.** The repeatable test:
+1. Publish a throwaway `vX.YY-test` GitHub release (higher number; cancel the CI it triggers) so the
+   banner fires, and add a matching temp top entry to the appcast feed so the engine has something to show.
+2. Install the real build, relaunch, confirm the banner appears, click it, confirm the Sparkle install
+   window opens with no crash. Do NOT install. Click Skip.
+3. Delete the throwaway release + tag and revert the appcast. (`/releases/latest` may 404 for a few
+   seconds after deleting the latest release; it recomputes.)
+
+## Two frozen-app fragilities that MUST stay fixed (2026-06-20)
+
+- **SSL/certs:** the banner + model-update checks (`update_check.py`, `model_update.py`) verify against
+  `certifi.where()`, and `build_helper.py` does `--collect-all certifi`. The frozen app cannot rely on
+  the system root store. If certifi is dropped, the checks SSL-fail silently. Guarded by
+  `tests/test_update_ssl.py`.
+- **PyObjC delegate signatures:** an Objective-C delegate method with a non-object arg (e.g. a BOOL)
+  MUST carry an explicit `objc.selector` signature, or PyObjC reads the value as a pointer and SIGSEGVs.
+  This is why `standardUserDriverWillHandleShowingUpdate:forUpdate:state:` was REMOVED rather than kept
+  (it took a BOOL and crashed the whole app when Sparkle showed an update). See the comment in
+  `modules/sparkle_updater.py` and the guard in `tests/test_update_ssl.py`.
+
+---
+
 ## The promise (the agreed v2.0 design)
 
 Every update is seamless and in-app: the user opens the app, gets notified,
