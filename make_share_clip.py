@@ -206,6 +206,85 @@ def _stack_fullres(dirpath, names, label):
     return acc
 
 
+class IncrementalStack:
+    """A lighten/maximum stacker fed ONE frame at a time, so a star-trail or
+    before/after stack can be built DURING a run instead of in a second full pass
+    over every frame afterward (the slow tail the user waits on today).
+
+    It is the exact same math as _stack / _stack_fullres -- np.maximum into a
+    running accumulator -- just spread across many feed() calls, with the same
+    no-silent-drop accounting. Lighten-max is order-independent, so the result is
+    bit-identical to stacking the same frames all at once (proved in
+    tests/test_incremental_stack.py).
+
+    canvas=(cw, ch): resize each frame to the video canvas before stacking (matches
+    _stack, used for the before/after video). canvas=None: keep full native
+    resolution (matches _stack_fullres, used for the star trail), including resizing
+    a stray odd-sized frame to match the first one."""
+
+    def __init__(self, label, canvas=None):
+        self.label = label
+        self.canvas = canvas
+        self.acc = None
+        self.used = 0
+        self.missing = []
+        self.unreadable = []
+        self.resized = []
+
+    def feed_path(self, path):
+        """Stack one frame by path. A missing or unreadable frame is RECORDED (not
+        raised) so report() can warn loudly at the end, exactly like the batch stackers."""
+        name = os.path.basename(path)
+        if not os.path.exists(path):
+            self.missing.append(name)
+            return
+        im = robust_imread(path, cv2.IMREAD_COLOR)
+        if im is None:
+            self.unreadable.append(name)
+            return
+        self.feed_image(im, name)
+
+    def feed_image(self, im, name=""):
+        """Stack one already-decoded upright BGR frame -- lets a caller fold in a
+        frame it already holds in memory (zero extra disk read)."""
+        if self.canvas is not None:
+            cw, ch = self.canvas
+            c = _fill_canvas(im, cw, ch)
+            self.acc = c if self.acc is None else np.maximum(self.acc, c)
+        else:
+            if self.acc is None:
+                self.acc = im.copy()
+            else:
+                if im.shape != self.acc.shape:
+                    im = cv2.resize(im, (self.acc.shape[1], self.acc.shape[0]),
+                                    interpolation=cv2.INTER_AREA)
+                    if name:
+                        self.resized.append(name)
+                np.maximum(self.acc, im, out=self.acc)
+        self.used += 1
+
+    def report(self):
+        """Print the same LOUD no-silent-drop summary the batch stackers print."""
+        print(f"  {self.label}: stacked {self.used} frames", flush=True)
+        dropped = self.missing + self.unreadable
+        if dropped:
+            print("  " + "!" * 60, flush=True)
+            print(f"  WARNING [{self.label}]: {len(dropped)} frame(s) NOT stacked "
+                  f"({len(self.missing)} missing, {len(self.unreadable)} unreadable) -- "
+                  f"the stack is INCOMPLETE.", flush=True)
+            print(f"    skipped: {', '.join(dropped[:20])}"
+                  + (f" ... (+{len(dropped) - 20} more)" if len(dropped) > 20 else ""),
+                  flush=True)
+            print("  " + "!" * 60, flush=True)
+        if self.resized:
+            print(f"  NOTE [{self.label}]: {len(self.resized)} frame(s) had a different "
+                  f"size and were resized to match the first frame.", flush=True)
+
+    def result(self):
+        """The finished stacked image (BGR uint8), or None if nothing was fed yet."""
+        return self.acc
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # VIDEO-ONLY HELPERS — everything below is used solely by the before/after wipe
 # video: text fonts, the bottom branding box, the slider grip, the per-frame
@@ -343,8 +422,15 @@ def _open_writer(path, cw, ch):
 # and how they present the result.
 # ════════════════════════════════════════════════════════════════════════════
 
-def make_share_clip(original_dir, cleaned_dir=None, out_path=None):
+def make_share_clip(original_dir, cleaned_dir=None, out_path=None,
+                    before=None, after=None):
     """OUTPUT 2 — the before/after wipe VIDEO (this is the default CLI mode).
+
+    `before`/`after`: optional pre-built canvas stacks (photo-region size, BGR) from
+    the in-run incremental stacker. When both are passed, the two frame folders are
+    NOT re-read or re-stacked -- the expensive second pass is skipped and we go
+    straight to the wipe encode. When they're None (the plain CLI path) the folders
+    are stacked here exactly as before.
 
     Builds two lighten-stacks at video resolution -- BEFORE (original frames,
     trails in) and AFTER (cleaned frames, trails out) -- then writes an MP4 where
@@ -370,32 +456,37 @@ def make_share_clip(original_dir, cleaned_dir=None, out_path=None):
     names = _list_frames(original_dir)
     if not names:
         raise SystemExit("no frames left after skipping the first 3 and last 3")
-    # Stack each folder from its OWN file list, paired by sequence position, not
-    # by matching filenames: a cleaned export may zero-pad early names (001.jpg)
-    # while the originals don't (1.jpg), and name-matching would silently drop
-    # every mismatch from the cleaned stack (shorter trails on one side).
-    if not os.path.isdir(cleaned_dir):
-        raise SystemExit(f"cleaned folder not found: {cleaned_dir}")
-    clean_names = _list_frames(cleaned_dir)
-    if not clean_names:
-        raise SystemExit(f"no cleaned frames found in {cleaned_dir}")
-    if len(clean_names) != len(names):
-        print(f"  NOTE: {len(names)} before frames vs {len(clean_names)} cleaned "
-              f"frames; stacking each folder's full set.", flush=True)
 
     first = robust_imread(os.path.join(original_dir, names[0]), cv2.IMREAD_COLOR)
     if first is None:
         raise SystemExit("could not read first frame")
     cw, ch = _canvas_size(first.shape[1], first.shape[0])
-    print(f"{len(names)} frames (first {SKIP_FIRST} and last {SKIP_LAST} skipped), "
-          f"canvas {cw}x{ch}")
-
     box_h = int(ch * BOX_FRAC)
     img_h = ch - box_h                                          # photo region height
-    before = _stack(original_dir, names, cw, img_h, "before")        # originals: trails in
-    after = _stack(cleaned_dir, clean_names, cw, img_h, "after")     # cleaned: trails out
-    if before is None or after is None:
-        raise SystemExit(f"stacking failed (cleaned dir = {cleaned_dir})")
+
+    if before is not None and after is not None:
+        # Pre-built canvas stacks from the in-run incremental stacker -- skip the
+        # whole second read pass over every frame and go straight to the encode.
+        print(f"{len(names)} frames, canvas {cw}x{ch} (using pre-built in-run stacks)")
+    else:
+        # Stack each folder from its OWN file list, paired by sequence position, not
+        # by matching filenames: a cleaned export may zero-pad early names (001.jpg)
+        # while the originals don't (1.jpg), and name-matching would silently drop
+        # every mismatch from the cleaned stack (shorter trails on one side).
+        if not os.path.isdir(cleaned_dir):
+            raise SystemExit(f"cleaned folder not found: {cleaned_dir}")
+        clean_names = _list_frames(cleaned_dir)
+        if not clean_names:
+            raise SystemExit(f"no cleaned frames found in {cleaned_dir}")
+        if len(clean_names) != len(names):
+            print(f"  NOTE: {len(names)} before frames vs {len(clean_names)} cleaned "
+                  f"frames; stacking each folder's full set.", flush=True)
+        print(f"{len(names)} frames (first {SKIP_FIRST} and last {SKIP_LAST} skipped), "
+              f"canvas {cw}x{ch}")
+        before = _stack(original_dir, names, cw, img_h, "before")       # originals: trails in
+        after = _stack(cleaned_dir, clean_names, cw, img_h, "after")    # cleaned: trails out
+        if before is None or after is None:
+            raise SystemExit(f"stacking failed (cleaned dir = {cleaned_dir})")
 
     # Base canvas with the black text box rendered once; each frame overwrites
     # only the photo region above it.
