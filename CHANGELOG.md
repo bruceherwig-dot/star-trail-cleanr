@@ -2,6 +2,13 @@
 
 ---
 
+## v2.58-beta
+- **The one-click updater no longer crashes.** Starting in v2.56, the app could quit the moment the updater went to show its window, whether you clicked the update notice or Check for Updates. It was an internal type mismatch in a macOS hook added that version. The hook is removed and the updater shows and installs normally again. Note: if you are on v2.56 or v2.57, you will need to download v2.58 from the website by hand this one time to get past the crash. From v2.58 forward, in-app updating works on its own.
+- **The in-app update notice is reliable now.** The orange "new version available" banner could silently fail to appear on some machines, leaving you with no idea an update was waiting. Its check confirmed the secure connection to GitHub using the computer's own certificate store, which the installed app cannot always reach (a VPN, a work network, or certain security settings can block it), and when it failed there was no visible sign. The app now carries its own certificate bundle, so the update check, and the AI model update notice, work reliably no matter how the machine is set up. If your update banner was not showing, this is why.
+- **Main screen refresh.** The numbered step titles are now blue to match the FAQ tab, the spacing between steps is more even and roomier, and the intro line under the headline is solid black for stronger contrast. Step 3 now reads "Create a Foreground Mask."
+- **Cleaner punctuation across the app text.**
+- **Smoke tests:** 193 passing.
+
 ## v2.57-beta
 - **New: a one-click finished star trail.** A new "Quick and Dirty Star Trail" option in Output Options stacks your cleaned frames into a full-resolution star trail image (`cleaned_star_trail.jpg`) the moment a run finishes — the trail-free composite you'd normally build in StarStaX, made for you automatically. It's a fast lighten-blend (brightest pixel wins), not a polished comet-mode stack, so it's a quick share-ready result, not a replacement for your final edit.
 - **The time estimate is smarter and shows up immediately.** "Estimated Time" now appears the moment a run starts instead of waiting for the first frames to be measured, and it accounts for your file type — RAW and 16-bit TIFF take longer to load than JPG, and the estimate now knows that. It also learns your computer's speed from your last run, so repeat runs are tuned to your hardware. It's still a ballpark — a sky full of trails takes longer than an empty one, and we can't know that in advance — but it's a much better first guess.
