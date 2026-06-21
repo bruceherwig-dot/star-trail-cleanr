@@ -173,15 +173,19 @@ def init_sparkle(on_update_found=None):
                 # Backstop: pull the app forward now, before the popup appears.
                 bring_app_to_front()
 
-            def standardUserDriverWillHandleShowingUpdate_forUpdate_state_(
-                    self, handleShowingUpdate, update, state):
-                """SPUStandardUserDriverDelegate hook: Sparkle calls this the
-                instant before it shows its update window. That's the exact right
-                moment to pull the app to the front so the window opens on top of
-                the Qt main window, not behind it. Implemented as a no-arg-suffix
-                PyObjC selector matching standardUserDriverWillHandleShowingUpdate:forUpdate:state:."""
-                _log("delegate: standardUserDriverWillHandleShowingUpdate fired")
-                bring_app_to_front()
+            # REMOVED 2026-06-20: standardUserDriverWillHandleShowingUpdate:forUpdate:state:
+            # took a BOOL first argument (handleShowingUpdate). Without an explicit
+            # PyObjC selector signature, PyObjC treated that BOOL (value YES = 1) as an
+            # `id` and dereferenced 0x1 the instant Sparkle invoked it -> EXC_BAD_ACCESS /
+            # SIGSEGV. This fires right before Sparkle shows ANY update window, so every
+            # attempt to present an update CRASHED the app (crash report 2026-06-20-191110:
+            # Sparkle -> ffi_closure -> PyObjC method_stub -> id_to_python -> objc_msgSend
+            # @ 0x1). It was added in 2.56, so 2.55->2.56 worked but Check-for-Updates on
+            # 2.56/2.57/2.58 crashed. bring_app_to_front() is already pulled forward by
+            # updater_didFindValidUpdate_ (just before the popup) and the modal-alert hook
+            # below, so dropping this one keeps the z-order behaviour without the crash.
+            # Do NOT re-add without a correct objc.selector signature -- and note the BOOL
+            # encoding differs by arch ('B' on arm64, 'c' on x86_64), which is the trap.
 
             def standardUserDriverWillShowModalAlert(self):
                 """Older SPUStandardUserDriverDelegate hook (modal alerts such as

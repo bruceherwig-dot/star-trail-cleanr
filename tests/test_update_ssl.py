@@ -41,3 +41,15 @@ def test_certifi_is_collected_in_the_frozen_build():
     bh = (REPO / "build_helper.py").read_text()
     assert "'--collect-all', 'certifi'" in bh, \
         "build_helper must --collect-all certifi so the CA bundle ships in the frozen app"
+
+
+def test_sparkle_delegate_has_no_bool_arg_selector_without_signature():
+    # The Sparkle delegate method standardUserDriverWillHandleShowingUpdate:forUpdate:state:
+    # takes a BOOL first arg; PyObjC dereferenced it as an object and SIGSEGV'd the
+    # whole app whenever Sparkle showed an update (v2.56-v2.57 regression, fixed v2.58).
+    # It must NOT be defined as a plain method again. If re-added, it needs an explicit
+    # objc.selector signature (BOOL encoding is arch-specific). Guard against the naive form.
+    src = (REPO / "modules" / "sparkle_updater.py").read_text()
+    if "def standardUserDriverWillHandleShowingUpdate_forUpdate_state_" in src:
+        assert "objc.selector" in src, \
+            "the BOOL-arg Sparkle delegate method must carry an objc.selector signature"
