@@ -1,0 +1,18 @@
+Opening Star Trail CleanR on Windows
+
+Star Trail CleanR is free and not yet code-signed, so Windows shows a security
+warning the first time. This is normal and safe. To install it:
+
+1. Right-click the downloaded StarTrailCleanRSetup.zip and choose "Extract All".
+2. Open the extracted folder and double-click StarTrailCleanRSetup.exe.
+3. If a blue "Windows protected your PC" screen appears, click "More info",
+   then click "Run anyway".
+4. Follow the installer.
+
+If you see "Error 4551: An application control policy has blocked this file",
+right-click the installer and choose "Run as administrator". If it still fails,
+your computer has IT-managed security that blocks unsigned apps; try a personal
+computer or ask your IT department.
+
+You only do this once. After that it opens normally.
+Questions: bruceherwig+startrailcleanr@gmail.com

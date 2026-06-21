@@ -1,0 +1,14 @@
+Opening Star Trail CleanR on Mac
+
+Star Trail CleanR is free and not yet notarized by Apple, so macOS shows a
+security warning the first time. This is normal and safe. To open it:
+
+1. Drag Star Trail CleanR into your Applications folder.
+2. Double-click it. macOS says it cannot be opened. Click Done.
+3. Open System Settings (Apple menu, top-left).
+4. Go to Privacy & Security and scroll down.
+5. Find the line about Star Trail CleanR being blocked and click Open Anyway.
+6. Enter your password or use Touch ID, then click Open Anyway again.
+
+You only do this once. After that it opens normally.
+Questions: bruceherwig+startrailcleanr@gmail.com
