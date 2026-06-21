@@ -1,0 +1,32 @@
+assemble_v5_dataset.py — Steps 4-6
+============================================================
+base tiles: 34768   pile tiles: 2804
+
+[Step 4] dedup: 0 exact base region duplicates (expect 0). Pile tiles use disjoint names; no exact-content duplicates. Most piles come from datasets NOT in the fine-tune base (crossings/bridges from old sets) or are intentional augmentations, so cross-pile region dedup is a no-op here.
+
+[Step 6] val frames: 310 of 2088 base source frames (15% per dataset)
+  base 2000/34768  rot 276      base 4000/34768  rot 654      base 6000/34768  rot 1047      base 8000/34768  rot 1227      base 10000/34768  rot 1404      base 12000/34768  rot 1581      base 14000/34768  rot 1683      base 16000/34768  rot 1779      base 18000/34768  rot 1869      base 20000/34768  rot 2082      base 22000/34768  rot 2199      base 24000/34768  rot 2436      base 26000/34768  rot 2511      base 28000/34768  rot 2517      base 30000/34768  rot 2517      base 32000/34768  rot 2517      base 34000/34768  rot 2646    
+[Step 6] dropped 318 GoPro/Jeff aug tiles whose source frame is in val (prevents val->train leakage; val stays plain base tiles only)
+
+[Step 5] 540px long-trail rotations: 920 train tiles qualified -> 2760 rotated copies (90/180/270). Per dataset:
+           Stroudt's: 61
+             borrego: 3
+     Joshua Tree 80s: 283
+          TJ Borrego: 188
+         GoPro 88569: 77
+         GoPro 37688: 225
+             Katrina: 4
+              Bombay: 62
+        Jeff Fishman: 17
+
+============================================================
+FINAL DATASET
+  TRAIN: 34791  (base pos 9818, base neg 19727, 540-rotations 2760, pile tiles 2486)
+  VAL:   5223  (base pos 1735, base neg 3488; plain base tiles only)
+  TOTAL: 40014
+  yaml:  /Volumes/T7 Shield/AI Projects/Star Trail CleanR/dataset_v5_final/dataset.yaml
+  on disk: train images 34791 / labels 34791  |  val images 5223 / labels 5223
+  OK: image/label counts match and reconcile with the planned totals.
+
+Report -> /Volumes/T7 Shield/AI Projects/Star Trail CleanR/dataset_v5_final/ASSEMBLY_REPORT.txt
+Done.
