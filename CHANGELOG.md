@@ -2,6 +2,11 @@
 
 ---
 
+## v2.61-beta
+- **Fixed the "quit unexpectedly" crash for good.** v2.60 stopped the background star-trail builder when you closed the app, but only the one from the current run. If you ran a clean and then started another, the first run's builder got left behind, and that leftover is what crashed the app the next time you closed it. The app now tracks every builder it starts and stops all of them, both when a new run begins and when you close the app. Your files were never at risk; this was always a quit-time crash, after your cleaned frames were already saved.
+- **Your computer no longer falls asleep mid-run.** On a laptop running on battery, the system could idle-sleep partway through a long run and freeze it, sometimes for over an hour, making a 20-minute job look like it took two. The app now keeps the system awake while it cleans. The screen can still dim and sleep to save battery; only the machine itself stays up. Works on Mac, Windows, and Linux.
+- **Smoke tests:** 206 passing.
+
 ## v2.60-beta
 - **Fixed a crash when quitting the app.** Closing Star Trail CleanR could pop "Star Trail CleanR quit unexpectedly" right as it exited. The background helper that builds your star trail and share video *during* a run wasn't being told to stop when you closed the app, so the shutdown collided with it. The app now stops every background task cleanly before it closes. Your files were never at risk — this happened only on the way out, after your cleaned frames were already saved.
 - **The FAQ reads as plain questions now** — "How do you find trails in my photographs?", "How do you remove the trails you find?", "What is the workflow?", "What are known limitations?" — with the workflow steps spelled out more clearly. Small label cleanups too (the output setting now reads "JPG quality").

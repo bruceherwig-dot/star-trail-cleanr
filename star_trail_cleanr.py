@@ -2011,6 +2011,9 @@ class MainWindow(QMainWindow):
             else:
                 self.resize(1300, 1300)
         self.worker = None
+        from modules.keep_awake import KeepAwake
+        self._keep_awake = KeepAwake()
+        self._all_share_threads = []   # every ShareStackThread started this session
         self._mask_path = None
         self._mask_window = None
         self._nvidia_outcome = None
@@ -4908,6 +4911,9 @@ class MainWindow(QMainWindow):
             "font-size: 22px; font-weight: bold; color: #5b9bd5;"
         )
         self.worker.start()
+        # Hold the machine awake for the whole run so a laptop on battery can't
+        # idle-sleep mid-run and freeze the job (released in _on_finished).
+        self._keep_awake.acquire()
         self._set_updates_run_state(True)
         # Build the star trail / video stacks in parallel with the run (no-op if both
         # checkboxes are off), so the results are ready the moment cleaning finishes.
@@ -5478,13 +5484,34 @@ class MainWindow(QMainWindow):
         self._progress_bar.setFormat("Complete!")
         self._show_run_complete_dialog()
 
+    def _stop_share_threads(self):
+        """Stop and forget every share-stacker thread started this session -- the
+        current one AND any orphaned by a re-run. A share thread parks on its command
+        queue; abort() queues a stop so its blocked wait returns at once. Any left
+        running when the app exits would abort the process ("QThread destroyed while
+        running"), so this is called both when a new run starts and from closeEvent."""
+        for t in getattr(self, "_all_share_threads", None) or []:
+            try:
+                if t is not None and t.isRunning():
+                    t.abort()
+                    t.wait(5000)
+                    if t.isRunning():
+                        t.terminate()
+                        t.wait(1000)
+            except Exception:
+                pass
+        self._all_share_threads = []
+        self._share_stack_thread = None
+
     def _start_share_stacker(self, original_dir, cleaned_dir):
         """Called at the START of a run. If the star trail or video is enabled, begin
         building their lighten-max stacks NOW, on a background thread, in parallel with
         the cleaning -- so they're ready the instant the run finishes instead of after a
         second full pass over every frame. Not even started when neither is enabled, so
         a clean-only user pays nothing. The cleaning worker is untouched."""
-        self._share_stack_thread = None
+        # Stop any share thread left over from a previous run BEFORE starting a new
+        # one, so an orphaned (parked) thread can't survive to crash the app at quit.
+        self._stop_share_threads()
         want_star = SETTINGS.value("make_star_trail_enabled", True, type=bool)
         want_video = SETTINGS.value("make_video_enabled", True, type=bool)
         if not (want_star or want_video) or not original_dir or not cleaned_dir:
@@ -5502,6 +5529,7 @@ class MainWindow(QMainWindow):
             t.done.connect(self._on_share_stack_done)
             t.failed.connect(self._on_share_stack_failed)
             self._share_stack_thread = t
+            self._all_share_threads.append(t)
             self._share_stack_ws = ws_dir
             t.start()
         except Exception:
@@ -6094,6 +6122,7 @@ class MainWindow(QMainWindow):
         cancel, or error). Stops timers, restores the Settings run-locked
         controls, writes the run-summary text file, and reveals the "View Star
         Log" link if that file was written."""
+        self._keep_awake.release()   # run is over -- let the machine sleep again
         self._stop_elapsed_timer()
         self._switch_to_back_btn()
         self._set_updates_run_state(False)
@@ -6133,20 +6162,17 @@ class MainWindow(QMainWindow):
         the blocked wait returns at once.
         """
         SETTINGS.setValue("window_geometry", self.saveGeometry())
+        if getattr(self, "_keep_awake", None) is not None:
+            self._keep_awake.release()   # never leave the machine pinned awake
 
         # Main cleaning worker (unchanged: it responds to cancel()).
         if self.worker and self.worker.isRunning():
             self.worker.cancel()
             self.worker.wait(5000)
 
-        # In-run share-stacker: abort() flags abort + unblocks its queue.get().
-        sst = getattr(self, "_share_stack_thread", None)
-        if sst is not None and sst.isRunning():
-            sst.abort()
-            sst.wait(5000)
-            if sst.isRunning():
-                sst.terminate()
-                sst.wait(1000)
+        # In-run share-stackers: stop EVERY one started this session, the current
+        # one and any orphaned by a re-run (the orphan is what crashed v2.60).
+        self._stop_share_threads()
 
         # Defensive: any other background thread still alive at quit would trigger
         # the same Qt abort. Wait briefly, then force-stop as a last resort (safe
