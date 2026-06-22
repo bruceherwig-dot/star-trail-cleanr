@@ -2,6 +2,11 @@
 
 ---
 
+## v2.60-beta
+- **Fixed a crash when quitting the app.** Closing Star Trail CleanR could pop "Star Trail CleanR quit unexpectedly" right as it exited. The background helper that builds your star trail and share video *during* a run wasn't being told to stop when you closed the app, so the shutdown collided with it. The app now stops every background task cleanly before it closes. Your files were never at risk — this happened only on the way out, after your cleaned frames were already saved.
+- **The FAQ reads as plain questions now** — "How do you find trails in my photographs?", "How do you remove the trails you find?", "What is the workflow?", "What are known limitations?" — with the workflow steps spelled out more clearly. Small label cleanups too (the output setting now reads "JPG quality").
+- **Smoke tests:** 203 passing.
+
 ## v2.59-beta
 - **Your star trail and share video are ready the instant cleaning finishes.** They used to be built in a second pass after the run, which could add minutes on a big job. Now they're assembled in the background *while* your frames are being cleaned, so by the time the run ends they're essentially done — the app finishes them in a second or two and opens the folder with both inside. "Cleaning Complete" now waits for them, so when it says done, everything is actually there.
 - **No more stacked update prompts.** If both a new app version and a new Trail DetectoR were available, you could get two orange notices at once with two Download buttons — confusing, and a couple of Windows users hit a dead-end first press. The app update now takes priority (it already includes the newest detector), and when an app update quietly brings a new detector, the app tells you once on the next launch.
