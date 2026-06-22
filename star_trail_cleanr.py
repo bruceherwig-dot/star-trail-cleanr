@@ -2162,13 +2162,13 @@ class MainWindow(QMainWindow):
         <p style='margin-top:2px;'>Star Trail CleanR works with .JPG, .TIF 8/16-bit,
         and RAW files.</p>
 
-        <h2 style='color:{BRAND_HEADING_BLUE}; margin-bottom:2px;'>Trail Detection</h2>
-        <p style='margin-top:2px;'>Each frame is run through a YOLO segmentation model
+        <h2 style='color:{BRAND_HEADING_BLUE}; margin-bottom:2px;'>How do you find trails in my photographs?</h2>
+        <p style='margin-top:2px;'>Each frame is run through an AI YOLO segmentation model
         trained on thousands of manually labeled airplane and satellite trails across many
         cameras, lenses, and sky conditions. The model traces a mask over the trails it
         finds before we apply the repair.</p>
 
-        <h2 style='color:{BRAND_HEADING_BLUE}; margin-bottom:2px;'>The Fix: Star Bridge Repair</h2>
+        <h2 style='color:{BRAND_HEADING_BLUE}; margin-bottom:2px;'>How do you remove the trails you find?</h2>
         <p style='margin-top:2px;'>For each trail, Star Trail CleanR looks at the frames
         just before and after, picks the neighbor whose sky best matches, and shifts it
         so the stars line up exactly with the frame being repaired. Every borrowed pixel
@@ -2177,9 +2177,11 @@ class MainWindow(QMainWindow):
         even against twilight gradients or a glowing horizon. We call this technique
         <i>Star Bridge</i>. No smudges, no blank patches.</p>
 
-        <h2 style='color:{BRAND_HEADING_BLUE}; margin-bottom:2px;'>Workflow</h2>
+        <h2 style='color:{BRAND_HEADING_BLUE}; margin-bottom:2px;'>What is the workflow?</h2>
         <ol style='margin-top:2px;'>
-        <li><b>Browse.</b> Choose your folder of frames.</li>
+        <li><b>Browse.</b> Choose the folder where your star trail images live.</li>
+        <li><b>Save.</b> Choose where to save your cleaned images. The default
+        is a 'cleaned' folder inside your originals.</li>
         <li><b>Mask (optional).</b> Paint over ground, buildings, and rocks so
         the AI ignores them. Trees can be left unmasked.</li>
         <li><b>Format.</b> Pick output format (.JPG, .TIF 8/16-bit)
@@ -2190,11 +2192,11 @@ class MainWindow(QMainWindow):
         (StarStaX, Sequator, Photoshop, etc.) for the final composite.</li>
         </ol>
 
-        <h2 style='color:{BRAND_HEADING_BLUE}; margin-bottom:2px;'>Limitations</h2>
+        <h2 style='color:{BRAND_HEADING_BLUE}; margin-bottom:2px;'>What are known limitations?</h2>
         <ul style='margin-top:2px;'>
         <li><b>Trail variety is bounded by the AI's training data.</b> If a type of
         trail isn't being detected well in your sequences, you can help train the next
-        version: zip 300+ frames from that scene and send them to
+        version: zip up to 300 frames from that scene and send them to
         <a href='mailto:bruceherwig+startrailcleanr@gmail.com?subject=Star%20Trail%20CleanR%20training%20frames'>bruceherwig+startrailcleanr@gmail.com</a>.
         For large folders, share a Dropbox, Google Drive, or WeTransfer link instead
         of attaching directly. The model gets smarter every time the community
@@ -2202,10 +2204,10 @@ class MainWindow(QMainWindow):
         <li><b>Meteors will be removed too.</b> Their streaks look similar to airplane
         and satellite trails, so the detector can't tell them apart. If you want to
         keep them, use your originals to mask them back in.</li>
+        <li><b>Designed for wide-field star trail sequences,</b> not deep-sky tracked exposures.</li>
         <li><b>Not a one-click fix.</b> You'll still want to touch up the final
         composite in Photoshop or your editor of choice. But if we did our job
         right, it's a fraction of the time you used to spend.</li>
-        <li><b>Designed for wide-field star trail sequences,</b> not deep-sky tracked exposures.</li>
         </ul>
 
         <p style='color:{HINT_TEXT}; margin-top:24px;'>Star Trail CleanR is free and offered as
@@ -2457,10 +2459,80 @@ class MainWindow(QMainWindow):
         layout.addLayout(crash_row)
 
         # Dev-only items live at the BOTTOM of Settings (see the rule at
-        # _DEV_SWITCHER_ENABLED). Streaking-star filter is the last section so the
-        # public-facing settings stay on top; it disappears entirely in the
-        # frozen app.
+        # _DEV_SWITCHER_ENABLED); they disappear entirely in the frozen app. The Model
+        # picker, Frame range, and Red Trail Map moved here from the Main page on
+        # 2026-06-21 so the Main page stays clean for regular users. Default the
+        # attributes to None FIRST so the frozen build (which builds no dev section)
+        # never crashes on the references in _start_clean.
+        self._dev_model_combo = None
+        self._dev_start_frame = None
+        self._dev_end_frame = None
+        self._red_map_chk = None
         if _DEV_SWITCHER_ENABLED:
+            layout.addSpacing(SECTION_GAP_PX)
+            layout.addWidget(make_section_heading("Developer tools (dev)"))
+            layout.addSpacing(HEADING_BODY_GAP_PX)
+
+            # Detection model picker (moved from Main page Output Options).
+            model_row = QHBoxLayout()
+            model_row.setContentsMargins(16, 0, 0, 0)
+            _model_lbl = QLabel("Detection model:")
+            _model_lbl.setStyleSheet(f"font-size: 14px; color: {BROWSER_TEXT};")
+            model_row.addWidget(_model_lbl)
+            self._dev_model_combo = QComboBox()
+            self._dev_model_combo.setFixedWidth(260)
+            _choices = _get_dev_model_choices()
+            _saved = SETTINGS.value("dev_model_override", "", type=str)
+            _saved_idx = 0
+            for i, (name, pt_path) in enumerate(_choices):
+                self._dev_model_combo.addItem(name, pt_path)
+                if pt_path == _saved:
+                    _saved_idx = i
+            if _choices:
+                self._dev_model_combo.setCurrentIndex(_saved_idx)
+                SETTINGS.setValue("dev_model_override", _choices[_saved_idx][1])
+            self._dev_model_combo.currentIndexChanged.connect(
+                lambda idx: SETTINGS.setValue(
+                    "dev_model_override", self._dev_model_combo.itemData(idx)))
+            model_row.addWidget(self._dev_model_combo)
+            model_row.addStretch()
+            layout.addSpacing(4)
+            layout.addLayout(model_row)
+
+            # Frame range Start/End (moved from Main page Step 4).
+            range_row = QHBoxLayout()
+            range_row.setContentsMargins(16, 0, 0, 0)
+            _start_lbl = QLabel("Frame range — Start:")
+            _start_lbl.setStyleSheet(f"font-size: 14px; color: {BROWSER_TEXT};")
+            range_row.addWidget(_start_lbl)
+            self._dev_start_frame = QSpinBox()
+            self._dev_start_frame.setRange(0, 99999)
+            self._dev_start_frame.setFixedWidth(90)
+            range_row.addWidget(self._dev_start_frame)
+            range_row.addSpacing(12)
+            _end_lbl = QLabel("End (0 = last):")
+            _end_lbl.setStyleSheet(f"font-size: 14px; color: {BROWSER_TEXT};")
+            range_row.addWidget(_end_lbl)
+            self._dev_end_frame = QSpinBox()
+            self._dev_end_frame.setRange(0, 99999)
+            self._dev_end_frame.setFixedWidth(90)
+            range_row.addWidget(self._dev_end_frame)
+            range_row.addStretch()
+            layout.addSpacing(4)
+            layout.addLayout(range_row)
+
+            # Red Trail Map (moved from Main page Output Options).
+            red_row = QHBoxLayout()
+            red_row.setContentsMargins(16, 0, 0, 0)
+            self._red_map_chk = QCheckBox("Make the Red Trail Map")
+            self._red_map_chk.setStyleSheet(f"QCheckBox {{ font-size: 14px; color: {BROWSER_TEXT}; margin-left: 16px; }}")
+            self._red_map_chk.setChecked(SETTINGS.value("red_trail_map_enabled", True, type=bool))
+            self._red_map_chk.toggled.connect(lambda v: SETTINGS.setValue("red_trail_map_enabled", v))
+            red_row.addWidget(self._red_map_chk)
+            red_row.addStretch()
+            layout.addSpacing(4)
+            layout.addLayout(red_row)
+
             layout.addSpacing(SECTION_GAP_PX)
             layout.addWidget(make_section_heading("Streaking-star filter (dev)"))
             layout.addSpacing(HEADING_BODY_GAP_PX)
@@ -3641,30 +3713,9 @@ class MainWindow(QMainWindow):
         self._frame_limit.setFixedWidth(160)
         layout.addWidget(self._frame_limit)
 
-        if not getattr(sys, 'frozen', False):
-            dev_row = QHBoxLayout()
-            dev_label = QLabel("Dev: Start:")
-            dev_label.setFont(step_font)
-            dev_row.addWidget(dev_label)
-            self._dev_start_frame = QSpinBox()
-            self._dev_start_frame.setRange(0, 99999)
-            self._dev_start_frame.setValue(0)
-            self._dev_start_frame.setFixedWidth(90)
-            dev_row.addWidget(self._dev_start_frame)
-            dev_end_label = QLabel("End (0 = last):")
-            dev_end_label.setFont(step_font)
-            dev_row.addWidget(dev_end_label)
-            self._dev_end_frame = QSpinBox()
-            self._dev_end_frame.setRange(0, 99999)
-            self._dev_end_frame.setValue(0)
-            self._dev_end_frame.setFixedWidth(90)
-            dev_row.addWidget(self._dev_end_frame)
-            dev_row.addStretch()
-            layout.addLayout(dev_row)
-        else:
-            self._dev_start_frame = None
-            self._dev_end_frame = None
-
+        # (The Dev frame range, the Model picker, and Red Trail Map all moved to the
+        # developer section at the bottom of Settings on 2026-06-21, so the Main page
+        # stays clean for regular users. Their attributes are set in _build_settings_tab.)
         layout.addSpacing(16)
 
         # ── Step 5: Output Options ───────────────────────────────────────────
@@ -3686,7 +3737,7 @@ class MainWindow(QMainWindow):
         hp_row.addWidget(self._format_combo)
         hp_row.addSpacing(12)
 
-        self._jpeg_quality_label = QLabel("JPEG quality:")
+        self._jpeg_quality_label = QLabel("JPG quality:")
         self._jpeg_quality_label.setFont(step_font)
         hp_row.addWidget(self._jpeg_quality_label)
         self._jpeg_quality = QSpinBox()
@@ -3701,30 +3752,6 @@ class MainWindow(QMainWindow):
         # native arrows take up more horizontal room.
         hp_row.addWidget(self._jpeg_quality)
         hp_row.addStretch(1)
-
-        # Dev-only model picker, tucked to the FAR RIGHT of this row. Only shown
-        # when running from source (frozen builds hide it); it no longer takes its
-        # own line.
-        if _DEV_SWITCHER_ENABLED:
-            dev_label = QLabel("Model (dev):")
-            dev_label.setFont(step_font)
-            hp_row.addWidget(dev_label)
-            self._dev_model_combo = QComboBox()
-            self._dev_model_combo.setFixedWidth(240)
-            _choices = _get_dev_model_choices()
-            _saved = SETTINGS.value("dev_model_override", "", type=str)
-            _saved_idx = 0
-            for i, (name, pt_path) in enumerate(_choices):
-                self._dev_model_combo.addItem(name, pt_path)
-                if pt_path == _saved:
-                    _saved_idx = i
-            if _choices:
-                self._dev_model_combo.setCurrentIndex(_saved_idx)
-                SETTINGS.setValue("dev_model_override", _choices[_saved_idx][1])
-            self._dev_model_combo.currentIndexChanged.connect(
-                lambda idx: SETTINGS.setValue(
-                    "dev_model_override", self._dev_model_combo.itemData(idx)))
-            hp_row.addWidget(self._dev_model_combo)
 
         self._format_combo.currentTextChanged.connect(self._on_format_changed)
 
@@ -3754,20 +3781,6 @@ class MainWindow(QMainWindow):
         self._make_video_chk.toggled.connect(
             lambda v: SETTINGS.setValue("make_video_enabled", v))
         share_row.addWidget(self._make_video_chk)
-        # Red Trail Map is DEV-ONLY: it needs the per-frame detection files, and
-        # we do NOT write detections for regular users. Only shown (and only able
-        # to request detection-saving) when the dev flag is on, so a normal user
-        # never sees it and never produces detection files.
-        self._red_map_chk = None
-        if _DEV_SWITCHER_ENABLED:
-            share_row.addSpacing(40)
-            self._red_map_chk = QCheckBox("Red Trail Map (dev)")
-            self._red_map_chk.setFont(step_font)
-            self._red_map_chk.setChecked(
-                SETTINGS.value("red_trail_map_enabled", True, type=bool))
-            self._red_map_chk.toggled.connect(
-                lambda v: SETTINGS.setValue("red_trail_map_enabled", v))
-            share_row.addWidget(self._red_map_chk)
         share_row.addStretch(1)
         layout.addLayout(share_row)
         # (No caption here any more: the star trail + video now build DURING the run
@@ -6111,11 +6124,44 @@ class MainWindow(QMainWindow):
             _open_folder_in_file_manager(os.path.dirname(path))
 
     def closeEvent(self, event):
-        """Save window size and clean up worker thread before closing."""
+        """Save window size and stop EVERY background thread before closing.
+
+        Qt hard-aborts the process ("quit unexpectedly") if any QThread is still
+        running when the app tears down, so on quit we stop and wait for all of
+        them, not just the cleaner. The in-run share-stacker is the one that bit us
+        in v2.59: it parks on its command queue, and its abort() queues a stop so
+        the blocked wait returns at once.
+        """
         SETTINGS.setValue("window_geometry", self.saveGeometry())
+
+        # Main cleaning worker (unchanged: it responds to cancel()).
         if self.worker and self.worker.isRunning():
             self.worker.cancel()
             self.worker.wait(5000)
+
+        # In-run share-stacker: abort() flags abort + unblocks its queue.get().
+        sst = getattr(self, "_share_stack_thread", None)
+        if sst is not None and sst.isRunning():
+            sst.abort()
+            sst.wait(5000)
+            if sst.isRunning():
+                sst.terminate()
+                sst.wait(1000)
+
+        # Defensive: any other background thread still alive at quit would trigger
+        # the same Qt abort. Wait briefly, then force-stop as a last resort (safe
+        # here -- the process is exiting regardless).
+        others = [getattr(self, a, None) for a in (
+            "_update_thread", "_model_update_thread", "_model_download_thread",
+            "_nvidia_thread", "_best_device_thread", "_gpu_install_thread")]
+        others.extend(getattr(self, "_share_threads", []) or [])
+        for t in others:
+            if t is not None and t.isRunning():
+                t.wait(2000)
+                if t.isRunning():
+                    t.terminate()
+                    t.wait(500)
+
         event.accept()
 
 
