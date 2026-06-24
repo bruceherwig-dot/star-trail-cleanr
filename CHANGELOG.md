@@ -2,6 +2,12 @@
 
 ---
 
+## v2.62-beta
+- **The time estimate is clearer.** The number up top is now labeled "Initial Estimate," the single best guess made when a run starts, and it stays put. A new "Updated Estimate" sits next to the elapsed and remaining times and refreshes as the run goes, so the figures never contradict each other on a long job.
+- **The Star Log stays clean.** Technical warnings from the detection engine no longer appear in the run log on screen, where they looked alarming but meant nothing you needed to do. Only plain, readable status shows now. The full technical detail is still written to the saved log file for troubleshooting.
+- **New: optional anonymous usage data, to power community stats.** Star Trail CleanR can now send a small anonymous summary at the end of a run, so we can show community totals on startrailcleanr.com like how many trails have been removed and how many hours saved across everyone using the app. It is strictly opt-in and anonymous: a few counts plus your camera and lens settings read from the photo's own EXIF, and never your images, file names, folders, or any personal information. The first-launch prompt and the Settings toggle now cover both crash reports and this usage data in one choice, so you will see the updated prompt once.
+- **Smoke tests:** 211 passing.
+
 ## v2.61-beta
 - **Fixed the "quit unexpectedly" crash for good.** v2.60 stopped the background star-trail builder when you closed the app, but only the one from the current run. If you ran a clean and then started another, the first run's builder got left behind, and that leftover is what crashed the app the next time you closed it. The app now tracks every builder it starts and stops all of them, both when a new run begins and when you close the app. Your files were never at risk; this was always a quit-time crash, after your cleaned frames were already saved.
 - **Your computer no longer falls asleep mid-run.** On a laptop running on battery, the system could idle-sleep partway through a long run and freeze it, sometimes for over an hour, making a 20-minute job look like it took two. The app now keeps the system awake while it cleans. The screen can still dim and sleep to save battery; only the machine itself stays up. Works on Mac, Windows, and Linux.
