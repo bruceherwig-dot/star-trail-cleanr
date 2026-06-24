@@ -2231,7 +2231,7 @@ class MainWindow(QMainWindow):
         prompt.setIcon(QMessageBox.Question)
         prompt.setText("Send anonymous crash reports and usage data to improve Star Trail CleanR?")
         prompt.setInformativeText(
-            "Crash reports help us find and fix bugs, and a small anonymous usage summary "
+            "Crash reports help us find and fix bugs, and an anonymous usage summary "
             "helps improve the app and power the community totals on startrailcleanr.com, "
             "never your images or personal info."
         )
@@ -2572,7 +2572,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(make_section_heading("Crash reports and usage data"))
         layout.addSpacing(HEADING_BODY_GAP_PX)
         layout.addWidget(make_body_text(
-            "Crash reports help us find and fix bugs, and a small anonymous usage summary helps improve the app and power the community totals on startrailcleanr.com, never your images or personal info."))
+            "Crash reports help us find and fix bugs, and an anonymous usage summary helps improve the app and power the community totals on startrailcleanr.com, never your images or personal info."))
 
         crash_chk = QCheckBox("Send anonymous data")
         crash_chk.setStyleSheet(f"QCheckBox {{ font-size: 14px; color: {BROWSER_TEXT}; margin-left: 16px; }}")
