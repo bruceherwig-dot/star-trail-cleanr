@@ -44,7 +44,10 @@ jobs:
       - name: Bake Sentry DSN
         env:
           SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
-        run: python -c "import os; open('_sentry_config.py','w').write('DSN = ' + repr(os.environ.get('SENTRY_DSN','')))"
+          STC_COLLECT_SECRET: ${{ secrets.STC_COLLECT_SECRET }}
+        run: |
+          python -c "import os; open('_sentry_config.py','w').write('DSN = ' + repr(os.environ.get('SENTRY_DSN','')))"
+          python -c "import os; open('_collect_config.py','w').write('SECRET = ' + repr(os.environ.get('STC_COLLECT_SECRET','')))"
       - name: Build (Apple Silicon)
         run: python build_helper.py
       - name: Smoke test bundled app
@@ -109,7 +112,10 @@ jobs:
       - name: Bake Sentry DSN
         env:
           SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
-        run: python -c "import os; open('_sentry_config.py','w').write('DSN = ' + repr(os.environ.get('SENTRY_DSN','')))"
+          STC_COLLECT_SECRET: ${{ secrets.STC_COLLECT_SECRET }}
+        run: |
+          python -c "import os; open('_sentry_config.py','w').write('DSN = ' + repr(os.environ.get('SENTRY_DSN','')))"
+          python -c "import os; open('_collect_config.py','w').write('SECRET = ' + repr(os.environ.get('STC_COLLECT_SECRET','')))"
       - name: Build (Intel)
         run: python build_helper.py
       - name: Smoke test bundled app
@@ -164,7 +170,10 @@ jobs:
       - name: Bake Sentry DSN
         env:
           SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
-        run: python -c "import os; open('_sentry_config.py','w').write('DSN = ' + repr(os.environ.get('SENTRY_DSN','')))"
+          STC_COLLECT_SECRET: ${{ secrets.STC_COLLECT_SECRET }}
+        run: |
+          python -c "import os; open('_sentry_config.py','w').write('DSN = ' + repr(os.environ.get('SENTRY_DSN','')))"
+          python -c "import os; open('_collect_config.py','w').write('SECRET = ' + repr(os.environ.get('STC_COLLECT_SECRET','')))"
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
         shell: pwsh
@@ -239,7 +248,10 @@ jobs:
       - name: Bake Sentry DSN
         env:
           SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
-        run: python -c "import os; open('_sentry_config.py','w').write('DSN = ' + repr(os.environ.get('SENTRY_DSN','')))"
+          STC_COLLECT_SECRET: ${{ secrets.STC_COLLECT_SECRET }}
+        run: |
+          python -c "import os; open('_sentry_config.py','w').write('DSN = ' + repr(os.environ.get('SENTRY_DSN','')))"
+          python -c "import os; open('_collect_config.py','w').write('SECRET = ' + repr(os.environ.get('STC_COLLECT_SECRET','')))"
       - name: Build (PyInstaller)
         run: python build_helper.py
       - name: Smoke test bundled app

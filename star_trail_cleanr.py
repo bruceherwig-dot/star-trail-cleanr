@@ -652,6 +652,34 @@ def fmt_estimate(seconds):
     return f"{m}m {s}s"
 
 
+def _is_engine_noise(line):
+    """True if `line` is raw library/engine output (warnings, errors,
+    tracebacks) that must never reach the user-facing Star Log. A stray
+    "WARNING" or traceback reads as "the app is broken" and makes
+    non-technical users panic, even when it is harmless (e.g. an ultralytics
+    NMS time-limit notice on a very dense frame). These lines are still kept
+    on disk for debugging (the crash breadcrumb + run log); they just don't
+    scroll past the user. Our own calm status lines ("detecting 3/20",
+    "Step 1", "Batch complete") never match."""
+    s = line.strip()
+    if not s:
+        return False
+    low = s.lower()
+    if "⚠" in s:  # warning glyph, e.g. ultralytics "WARNING ⚠️ ..."
+        return True
+    if low.startswith(("warning", "warn ", "error", "error:", "critical", "traceback")):
+        return True
+    if low.startswith('file "') and '", line ' in low:  # traceback frame line
+        return True
+    if "nms time limit" in low:
+        return True
+    for w in ("UserWarning", "FutureWarning", "DeprecationWarning",
+              "RuntimeWarning", "PerformanceWarning"):
+        if w in s:
+            return True
+    return False
+
+
 def _windows_release_label():
     """Return '11' on Windows 11, '10' on Windows 10, etc.
 
@@ -667,6 +695,54 @@ def _windows_release_label():
     except Exception:
         pass
     return _p.release()
+
+
+def _leader_gear_exif(frames):
+    """Best-effort camera + shooting settings from the first source frame's
+    EXIF, for anonymous usage stats. Returns a dict of whatever is present
+    (camera, lens, focal length, exposure, ISO, aperture); empty if none or
+    unreadable (e.g. a RAW, which PIL can't open here). Never raises."""
+    out = {}
+    try:
+        if not frames:
+            return out
+        from PIL import Image, ExifTags
+        with Image.open(frames[0]) as im:
+            ex = im.getexif()
+            if not ex:
+                return out
+            cam = " ".join(
+                str(x).strip() for x in (ex.get(0x010F), ex.get(0x0110)) if x
+            ).strip()
+            if cam:
+                out["camera"] = cam
+            try:
+                sub = ex.get_ifd(ExifTags.IFD.Exif)
+            except Exception:
+                sub = {}
+            lens = sub.get(0xA434)            # LensModel
+            if lens:
+                out["lens"] = str(lens).strip()
+            for tag, key, conv in (
+                (0x920A, "focal_length", lambda v: round(float(v), 1)),   # FocalLength
+                (0x829A, "exposure_sec", lambda v: round(float(v), 4)),   # ExposureTime
+                (0x829D, "aperture",     lambda v: round(float(v), 1)),   # FNumber
+            ):
+                val = sub.get(tag)
+                if val is not None:
+                    try:
+                        out[key] = conv(val)
+                    except Exception:
+                        pass
+            iso = sub.get(0x8827)             # ISOSpeedRatings / PhotographicSensitivity
+            if iso is not None:
+                try:
+                    out["iso"] = int(iso[0] if isinstance(iso, (tuple, list)) else iso)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return out
 
 
 class CleanerWorker(QThread):
@@ -704,6 +780,7 @@ class CleanerWorker(QThread):
     trail_count_update = Signal(int)   # running total trails after each batch
     timing_stats = Signal(float, float)  # initial_estimate_sec, actual_total_sec
     initial_estimate = Signal(float)   # initial estimate seconds (emitted once)
+    remaining_estimate = Signal(float) # live seconds-left, drives the Updated Estimate label
     warmup_active = Signal(bool)       # True = AI loading window, False = real per-frame progress kicked in
     bad_file_prompt = Signal(str, str)  # path, diagnosis — main thread shows the modal
     too_many_bad_files = Signal(int)   # count — main thread shows the final notice
@@ -1193,6 +1270,7 @@ class CleanerWorker(QThread):
                 est_initial_shown = total * seeded_sec_per_frame * EST_PAD_FACTOR
                 self.initial_estimate.emit(float(est_initial_shown))
                 self.progress.emit(0, 100, fmt_estimate(est_initial_shown))
+                self.remaining_estimate.emit(float(est_initial_shown))
 
             # ── Crash breadcrumb: rotate this machine's progress log ──────────
             # The worker subprocess appends a flushed line per frame as it runs.
@@ -1414,6 +1492,7 @@ class CleanerWorker(QThread):
                                 overall_pct = int(((i + batch_pct) / n_batches) * 100)
                                 overall_pct = max(0, min(99, overall_pct))
                                 self.progress.emit(overall_pct, 100, fmt_estimate(remaining))
+                                self.remaining_estimate.emit(float(remaining))
                                 if est_initial_shown is None and est_measured:
                                     est_initial_shown = remaining + (now_t - t0)
                                     self.initial_estimate.emit(float(est_initial_shown))
@@ -1436,6 +1515,7 @@ class CleanerWorker(QThread):
                                 overall_pct = int(((i + batch_pct) / n_batches) * 100)
                                 overall_pct = max(0, min(99, overall_pct))
                                 self.progress.emit(overall_pct, 100, fmt_estimate(remaining))
+                                self.remaining_estimate.emit(float(remaining))
                                 if est_initial_shown is None and est_measured:
                                     est_initial_shown = remaining + (now_t - t0)
                                     self.initial_estimate.emit(float(est_initial_shown))
@@ -1445,7 +1525,12 @@ class CleanerWorker(QThread):
                         elif cur_step == 0:
                             self.step_detail.emit(proc_line)
 
-                    _add_log(f"  {proc_line}")
+                    # Never surface raw engine warnings/errors/tracebacks in the
+                    # user-facing Star Log -- they read as "the app is broken".
+                    # The raw line is still captured in proc_stdout_lines above
+                    # (crash report) and the on-disk run log for debugging.
+                    if not _is_engine_noise(proc_line):
+                        _add_log(f"  {proc_line}")
 
                 self._proc.wait()
                 if self._cancelled:
@@ -1538,6 +1623,47 @@ class CleanerWorker(QThread):
             if est_initial_shown is not None:
                 self.timing_stats.emit(float(est_initial_shown),
                                        float(time.time() - t0))
+
+            # ── Anonymous usage report (opt-in). Wrapped so telemetry can NEVER
+            #    affect a real run; sent only if the user consented. ──
+            try:
+                if SETTINGS.value("crash_reporting_enabled", False, type=bool):
+                    import platform as _uplat
+                    _usys = _uplat.system()
+                    try:
+                        from modules.user_folder import get_installed_model_version as _umv
+                        _umodel = _umv() or None
+                    except Exception:
+                        _umodel = None
+                    try:
+                        _ugpu = _best_device() in ("mps", "cuda")
+                    except Exception:
+                        _ugpu = None
+                    _ufacts = {
+                        "app_version": VERSION,
+                        "platform": _usys.lower(),
+                        "platform_arch": _uplat.machine(),
+                        "os_version": (_windows_release_label() if _usys == "Windows"
+                                       else _uplat.release()),
+                        "model": _umodel,
+                        "trails": int(total_trails_run),
+                        "frames": int(total_frames_run or total),
+                        "run_seconds": int(time.time() - t0),
+                        "outcome": "finished",
+                        "input_format": est_format_key,
+                        "output_format": self.output_format,
+                        "bit_depth": getattr(self, "_dominant_bitdepth", None),
+                        "megapixels": round(megapixels, 1),
+                        "width": int(dominant[0]),
+                        "height": int(dominant[1]),
+                    }
+                    if _ugpu is not None:
+                        _ufacts["gpu"] = _ugpu
+                    _ufacts.update(_leader_gear_exif(frames))
+                    from modules import usage_report
+                    usage_report.send(_ufacts)
+            except Exception:
+                pass
 
             # Persist sec-per-frame for next run's estimator seed
             if est_processing_start_t is not None and est_batches_done_frames > 0:
@@ -2085,28 +2211,36 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(500, self._maybe_ask_crash_reporting)
 
     def _maybe_ask_crash_reporting(self):
-        """First-run crash-reporting opt-in. Fires once after the main window
-        is visible so it never blocks startup. Only shown in CI builds where
-        the Sentry DSN is present."""
-        if not _SENTRY_DSN:
+        """First-run / upgrade consent for anonymous crash reports + usage data.
+        Fires once after the window is visible so it never blocks startup. Shown
+        when reporting is available (a build with the Sentry DSN and/or the
+        usage-data key). Re-shown once to existing users when usage data was
+        added, so the scope they agreed to matches what is actually sent."""
+        try:
+            from modules.usage_report import _get_secret as _usage_secret
+            _have_usage = bool(_usage_secret())
+        except Exception:
+            _have_usage = False
+        if not _SENTRY_DSN and not _have_usage:
             return
-        if SETTINGS.contains("crash_reporting_choice_made"):
+        if SETTINGS.contains("usage_consent_v2_made"):
             return
+        prior = SETTINGS.value("crash_reporting_enabled", None)
         prompt = QMessageBox(self)
-        prompt.setWindowTitle("Star Trail CleanR")
+        prompt.setWindowTitle("Crash reports and usage data")
         prompt.setIcon(QMessageBox.Question)
-        prompt.setText("Help improve Star Trail CleanR by sending anonymous crash reports?")
+        prompt.setText("Help improve Star Trail CleanR by sending anonymous data?")
         prompt.setInformativeText(
-            "If the app ever crashes, an automatic error report is sent so the bug "
-            "can be fixed.\n\nThe report contains a stack trace, your operating "
-            "system, and the app version. No images, no folder paths, no personal "
-            "information."
+            "Sent anonymously to improve the app and power the totals on "
+            "startrailcleanr.com. Never your images or personal info."
         )
         prompt.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
-        prompt.setDefaultButton(QMessageBox.Yes)
+        # Preserve a prior choice on the one-time re-prompt; default Yes for new users.
+        prompt.setDefaultButton(QMessageBox.No if prior is False else QMessageBox.Yes)
         choice = prompt.exec()
         SETTINGS.setValue("crash_reporting_enabled", choice == QMessageBox.Yes)
         SETTINGS.setValue("crash_reporting_choice_made", True)
+        SETTINGS.setValue("usage_consent_v2_made", True)
         _maybe_init_sentry()
 
     def _lock_min_height(self):
@@ -2434,12 +2568,12 @@ class MainWindow(QMainWindow):
 
         layout.addSpacing(SECTION_GAP_PX)
 
-        layout.addWidget(make_section_heading("Crash Reporting"))
+        layout.addWidget(make_section_heading("Crash reports and usage data"))
         layout.addSpacing(HEADING_BODY_GAP_PX)
         layout.addWidget(make_body_text(
-            "Sends anonymous crash reports to help find and fix bugs. Reports contain technical details like error messages and basic image dimensions."))
+            "Sent anonymously to improve the app and power the totals on startrailcleanr.com. Never your images or personal info."))
 
-        crash_chk = QCheckBox("Send anonymous crash reports")
+        crash_chk = QCheckBox("Send anonymous data")
         crash_chk.setStyleSheet(f"QCheckBox {{ font-size: 14px; color: {BROWSER_TEXT}; margin-left: 16px; }}")
         crash_chk.setChecked(SETTINGS.value("crash_reporting_enabled", False, type=bool))
 
@@ -3961,6 +4095,11 @@ class MainWindow(QMainWindow):
         self._time_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         time_row.addWidget(self._time_label)
         time_row.addStretch()
+        self._updated_est_label = QLabel("")
+        self._updated_est_label.setStyleSheet(f"font-size: 14px; color: {MUTED_TEXT};")
+        self._updated_est_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        time_row.addWidget(self._updated_est_label)
+        time_row.addSpacing(20)
         self._elapsed_label = QLabel("")
         self._elapsed_label.setStyleSheet(f"font-size: 14px; color: {MUTED_TEXT};")
         self._elapsed_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -4814,9 +4953,12 @@ class MainWindow(QMainWindow):
             "x1:0, y1:0, x2:1, y2:0, stop:0 #4a9eff, stop:1 #66b3ff); border-radius: 9px; }"
         )
         self._frame_counter.setText("Scrubbing the stars\u2026")
-        self._initial_est_label.setText("Estimated Time: estimating\u2026")
+        self._initial_est_label.setText("Initial Estimate: estimating\u2026")
         self._time_label.setText("")
+        self._updated_est_label.setText("")
         self._elapsed_label.setText("")
+        self._has_estimate = False
+        self._last_remaining_sec = None
         self._run_stats_label.setText("")
         self._stats_frames_done = 0
         self._batch_label.setText("")
@@ -4899,6 +5041,7 @@ class MainWindow(QMainWindow):
         self.worker.stats_ready.connect(self._on_stats_ready)
         self.worker.timing_stats.connect(self._on_timing_stats)
         self.worker.initial_estimate.connect(self._on_initial_estimate)
+        self.worker.remaining_estimate.connect(self._on_remaining_estimate)
         self.worker.error.connect(self._on_error)
         self.worker.done.connect(self._on_done)
         self.worker.finished.connect(self._on_finished)
@@ -4977,6 +5120,13 @@ class MainWindow(QMainWindow):
         start = getattr(self, '_run_start_time', None)
         elapsed = (time.time() - start.timestamp()) if start is not None else 0
         self._elapsed_label.setText(f"{ch}  Elapsed: {fmt_estimate(elapsed)}")
+        # Live "Updated Estimate" = elapsed + remaining (the realistic current
+        # total). Always >= remaining, so it never contradicts the live numbers
+        # the way the frozen Initial Estimate could.
+        rem = getattr(self, '_last_remaining_sec', None)
+        if getattr(self, '_has_estimate', False) and rem is not None:
+            self._updated_est_label.setText(
+                f"Updated Estimate: {fmt_estimate(elapsed + rem)}")
         if hasattr(self, '_star_log_title'):
             self._star_log_title.setText(f"Star Log  {ch}")
         if hasattr(self, '_header_spinner'):
@@ -5126,16 +5276,23 @@ class MainWindow(QMainWindow):
         self._stats_frames_done = current
 
     def _on_initial_estimate(self, seconds):
-        """Worker signal carrying the first measured total-time estimate.
-        Locks it into the "Estimated Time: ..." label (formatted compactly).
-        Emitted once, only when the estimate is based on real measured speed."""
+        """Worker signal carrying the up-front total-time estimate. Locks it
+        into the frozen "Initial Estimate: ..." label (the line-in-the-sand
+        opening guess, set once and never moved). The live "Updated Estimate"
+        below the bar tracks elapsed + remaining separately."""
         secs = int(round(seconds))
         if secs < 60:
-            self._initial_est_label.setText(f"Estimated Time: {secs}s")
+            self._initial_est_label.setText(f"Initial Estimate: {secs}s")
         else:
             # Hour-aware (1h 7m 50s, or 7m 50s under an hour) -- matches the
             # live "remaining" line instead of running minutes past 60.
-            self._initial_est_label.setText(f"Estimated Time: {fmt_estimate(secs)}")
+            self._initial_est_label.setText(f"Initial Estimate: {fmt_estimate(secs)}")
+
+    def _on_remaining_estimate(self, seconds):
+        """Worker signal: live seconds-left. Stored so _update_spinner can show
+        a live 'Updated Estimate' = elapsed + remaining (the realistic current
+        total), distinct from the frozen up-front 'Initial Estimate'."""
+        self._last_remaining_sec = float(seconds)
 
     def _on_format_changed(self, text):
         """Step 5 output-format change handler. Enable the JPEG-quality spinbox
@@ -5453,6 +5610,7 @@ class MainWindow(QMainWindow):
             "x1:0, y1:0, x2:1, y2:0, stop:0 #34c759, stop:1 #5dd87a); border-radius: 9px; }"
         )
         self._time_label.setText("")
+        self._updated_est_label.setText("")
         self._batch_label.setText(getattr(self, '_batch_text', ''))
         self._done_output_folder = output_folder
         self._update_open_btn_state()

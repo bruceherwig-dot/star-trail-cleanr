@@ -32,6 +32,10 @@ astro_clean_v3.py
 # Absent in dev so Sentry stays inactive when running from source.
 _sentry_config.py
 
+# Usage-report shared secret (baked in by CI from GitHub Secret STC_COLLECT_SECRET).
+# Absent in dev, where modules/usage_report falls back to the local secret file.
+_collect_config.py
+
 # Python / PyInstaller
 __pycache__/
 *.pyc
