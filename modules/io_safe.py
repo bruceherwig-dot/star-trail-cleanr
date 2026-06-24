@@ -421,6 +421,50 @@ def image_size(path: Union[str, Path]) -> Optional[Tuple[int, int]]:
     return None
 
 
+def capture_time(path: Union[str, Path]):
+    """Return the photo's capture time (EXIF DateTimeOriginal, else DateTime) as
+    a datetime, or None if unavailable. Used to order frames by true shooting
+    order, so a camera file-number rollover or a two-card merge can't scramble
+    the sequence. RAW reads the time from its embedded preview (PIL can't open a
+    RAW directly); everything else reads it straight. Never raises.
+    """
+    from datetime import datetime
+    p = str(path)
+    ext = Path(p).suffix.lower()
+    raw_s = None
+    try:
+        if ext in RAW_EXTS:
+            import io as _io
+            import rawpy
+            from PIL import Image
+            with rawpy.imread(p) as raw:
+                thumb = raw.extract_thumb()
+            if getattr(thumb, "format", None) == rawpy.ThumbFormat.JPEG:
+                ex = Image.open(_io.BytesIO(thumb.data)).getexif()
+                try:
+                    sub = ex.get_ifd(0x8769)
+                except Exception:
+                    sub = {}
+                raw_s = sub.get(0x9003) or ex.get(0x0132)
+        else:
+            from PIL import Image
+            with Image.open(p) as im:
+                ex = im.getexif()
+                try:
+                    sub = ex.get_ifd(0x8769)
+                except Exception:
+                    sub = {}
+                raw_s = sub.get(0x9003) or ex.get(0x0132)
+    except Exception:
+        return None
+    if not raw_s:
+        return None
+    try:
+        return datetime.strptime(str(raw_s).strip(), "%Y:%m:%d %H:%M:%S")
+    except Exception:
+        return None
+
+
 # Pillow modes that carry more than 8 bits per sample. Everything else
 # ('L', 'P', 'RGB', 'RGBA', 'CMYK', 'YCbCr', '1', ...) is 8-bit. 'I' (32-bit
 # int) and 'F' (32-bit float) are bucketed as 16 because the pipeline only

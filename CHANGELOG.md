@@ -2,6 +2,10 @@
 
 ---
 
+## v2.63-beta
+- **Frames are now ordered by their actual capture time, not their file names.** If your camera's file numbers rolled over mid-shoot (for example IMG_9999 wrapping back to IMG_0001), or you combined frames from two memory cards, the old name-based order could put a jump in the middle of your star trail and make the cleanup borrow from the wrong neighboring frames. The app now reads each photo's timestamp and processes them in true shooting order. If a folder's photos don't carry timestamps, it falls back to the old name order, so nothing changes for those.
+- **Smoke tests:** 216 passing.
+
 ## v2.62-beta
 - **The time estimate is clearer.** The number up top is now labeled "Initial Estimate," the single best guess made when a run starts, and it stays put. A new "Updated Estimate" sits next to the elapsed and remaining times and refreshes as the run goes, so the figures never contradict each other on a long job.
 - **The Star Log stays clean.** Technical warnings from the detection engine no longer appear in the run log on screen, where they looked alarming but meant nothing you needed to do. Only plain, readable status shows now. The full technical detail is still written to the saved log file for troubleshooting.

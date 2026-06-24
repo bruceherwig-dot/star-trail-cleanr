@@ -401,18 +401,26 @@ def load_frame_files(frame_dir: Path, start: int, batch: int,
 def load_with_neighbors(frame_dir: Path, start: int, batch: int,
                         expected_width: int = None,
                         expected_height: int = None,
-                        prefer_raw: bool = True):
+                        prefer_raw: bool = True,
+                        ordered_files=None):
     """Load batch frames plus one neighbor on each side for repair context.
 
     Returns (all_files, core_start, core_end) where all_files includes
     up to one extra frame before and after, and core_start/core_end
     mark the indices of the actual batch frames within all_files.
+
+    When `ordered_files` is given (the GUI's per-run frame manifest), it is the
+    canonical de-duped, capture-time-ordered list and is used verbatim, so the
+    worker never re-derives order and the two sides cannot disagree.
     """
-    all_sorted = sorted((p for p in frame_dir.iterdir() if p.suffix.lower() in IMAGE_EXTS),
-                        key=natural_key)
-    # Drop twins on the FULL list before slicing/indexing, so frame numbers
-    # match the GUI's batch plan (which dedups identically, same preference, up front).
-    all_sorted = dedupe_frames(all_sorted, prefer_raw=prefer_raw)
+    if ordered_files is not None:
+        all_sorted = [Path(p) for p in ordered_files]
+    else:
+        all_sorted = sorted((p for p in frame_dir.iterdir() if p.suffix.lower() in IMAGE_EXTS),
+                            key=natural_key)
+        # Drop twins on the FULL list before slicing/indexing, so frame numbers
+        # match the GUI's batch plan (which dedups identically, same preference, up front).
+        all_sorted = dedupe_frames(all_sorted, prefer_raw=prefer_raw)
     total = len(all_sorted)
 
     end = start + batch if batch > 0 else total
@@ -828,6 +836,11 @@ def main():
     parser.add_argument("--model", required=True, help="Path to YOLO .pt model")
     parser.add_argument("--start", type=int, default=0)
     parser.add_argument("--batch", type=int, default=20)
+    parser.add_argument("--frame-manifest", default=None,
+                        help="Path to a file listing the exact ordered frame "
+                             "paths (one per line) the GUI planned. When given, "
+                             "the worker uses this order verbatim instead of "
+                             "re-listing the folder, so the two stay in lockstep.")
     parser.add_argument("--confidence", type=float, default=0.25)
     parser.add_argument("--tile-size", type=int, default=640)
     parser.add_argument("--overlap", type=float, default=0.2)
@@ -1041,10 +1054,15 @@ def main():
             print(f"  Applying sky mask")
 
     # ── Load frames ───────────────────────────────────────────────────────
+    _ordered = None
+    if args.frame_manifest:
+        from modules.frame_list import read_manifest
+        _ordered = read_manifest(args.frame_manifest)
     frame_files_all, core_start, core_end = load_with_neighbors(
         input_dir, args.start, args.batch,
         args.expected_width, args.expected_height,
-        prefer_raw=(args.twin_prefer == "raw"))
+        prefer_raw=(args.twin_prefer == "raw"),
+        ordered_files=_ordered)
     frame_files = frame_files_all[core_start:core_end]  # core batch files
     n = len(frame_files)
     n_all = len(frame_files_all)

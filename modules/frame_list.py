@@ -220,3 +220,36 @@ def gather_frames(folder):
             if os.path.isfile(full):
                 out.append(full)
     return sorted(out, key=natural_key)
+
+
+def order_by_capture_time(paths, times):
+    """Return `paths` reordered by true capture time when EVERY path has a
+    timestamp in `times` (a dict path -> datetime or None); otherwise return
+    `paths` unchanged (it is assumed already natural_key-sorted). This
+    all-or-nothing rule per folder avoids mixing two ordering schemes. Ties
+    (same-second frames) break by natural_key. Fixes filename orders that no
+    longer match shooting order -- a camera file-number rollover (IMG_9999 ->
+    IMG_0001 mid-shoot) or frames merged from two cards."""
+    paths = list(paths)
+    if not paths:
+        return paths
+    if any(times.get(p) is None for p in paths):
+        return paths
+    return sorted(paths, key=lambda p: (times[p], natural_key(p)))
+
+
+def write_manifest(manifest_path, ordered_paths):
+    """Write the canonical ordered frame list (one absolute path per line) so
+    the worker can use the GUI's exact order instead of re-deriving it. This
+    keeps the two sides in perfect lockstep and means the worker never re-reads
+    every frame's timestamp on every batch."""
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        for p in ordered_paths:
+            f.write(str(p) + "\n")
+
+
+def read_manifest(manifest_path):
+    """Read a frame manifest written by write_manifest: the ordered list of
+    path strings (blank lines ignored)."""
+    with open(manifest_path, encoding="utf-8") as f:
+        return [line.rstrip("\n") for line in f if line.strip()]

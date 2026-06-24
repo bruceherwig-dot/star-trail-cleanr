@@ -925,6 +925,30 @@ class CleanerWorker(QThread):
             frames = dedupe_frames(frames, prefer_raw=(self.twin_prefer == "raw"))
             self._deduped_pairs_count = _pre_dedup - len(frames)
 
+            # Order frames by TRUE capture time, not filename. A camera's file
+            # numbers can roll over mid-shoot (IMG_9999 -> IMG_0001) or frames
+            # can be merged from two cards, and then filename order no longer
+            # matches shooting order -- which puts a jump in the stack and makes
+            # the repair borrow from the wrong neighbors. All-or-nothing: only
+            # reorder when EVERY frame carries a timestamp, else keep filename
+            # order. Read the times once here and hand the engine this exact
+            # order via a manifest, so it never re-derives order (fast on big
+            # sets + the GUI and engine can never disagree).
+            self._frame_manifest = None
+            try:
+                from modules.io_safe import capture_time as _cap_time
+                from modules.frame_list import order_by_capture_time, write_manifest
+                _times = {f: _cap_time(f) for f in frames}
+                frames = order_by_capture_time(frames, _times)
+                import tempfile as _tf
+                _mf = _tf.NamedTemporaryFile(
+                    prefix="stc_frames_", suffix=".txt", delete=False)
+                write_manifest(_mf.name, frames)
+                _mf.close()
+                self._frame_manifest = _mf.name
+            except Exception:
+                self._frame_manifest = None  # fall back to the worker's own listing
+
             if self.frame_end > 0:
                 frames = frames[self.frame_start : self.frame_end + 1]
             elif self.frame_start > 0:
@@ -1345,6 +1369,9 @@ class CleanerWorker(QThread):
                            "-o", output_folder, "--model", get_model_path(),
                            "--start", str(abs_start), "--batch", str(this_batch)]
                 cmd.extend(["--run-log-ts", _run_log_ts])  # one log file per run
+                if getattr(self, "_frame_manifest", None):
+                    # Hand the engine the exact capture-time order (see above).
+                    cmd.extend(["--frame-manifest", self._frame_manifest])
 
                 if self.mask_path:
                     cmd.extend(["--foreground-mask", self.mask_path])
@@ -1684,6 +1711,13 @@ class CleanerWorker(QThread):
 
             if self.mask_path:
                 _cleanup_hot_map()
+
+            # Remove the per-run frame manifest temp file (best effort).
+            try:
+                if getattr(self, "_frame_manifest", None):
+                    os.remove(self._frame_manifest)
+            except OSError:
+                pass
 
             self.done.emit(output_folder)
 
