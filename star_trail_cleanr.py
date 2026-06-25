@@ -2156,6 +2156,8 @@ class MainWindow(QMainWindow):
     The bulk of this class is _build_* methods that construct each piece of
     UI and _on_* methods that handle button clicks and worker signals.
     """
+    update_failed = Signal()  # WinSparkle reported a failed user-initiated check
+
     def __init__(self):
         """Build the whole window: restore saved geometry (or open at a
         sensible first-launch size), assemble the banner + tabs + setup and
@@ -2784,6 +2786,36 @@ class MainWindow(QMainWindow):
             "now.")
         import webbrowser
         webbrowser.open("https://startrailcleanr.com")
+
+    def _on_update_failed(self):
+        """Fires (via the update_failed signal) when WinSparkle reports a failed
+        user-initiated update -- it loaded fine but couldn't retrieve the update,
+        usually a security suite, VPN, or firewall blocking its networking on this
+        machine. The native engine shows its own terse error; this adds the part
+        that actually helps: a plain explanation and a one-click manual download.
+        Additive only -- it never touches the working install path."""
+        try:
+            from PySide6.QtCore import QUrl
+            from PySide6.QtGui import QDesktopServices
+            from modules.update_check import get_download_url
+            box = QMessageBox(self)
+            box.setWindowTitle("Couldn't install the update")
+            box.setIcon(QMessageBox.Warning)
+            box.setText("Star Trail CleanR couldn't install the update automatically.")
+            box.setInformativeText(
+                "This is almost always something on your computer blocking the "
+                "updater, a security suite, VPN, or firewall, not a problem with "
+                "your install or our servers.\n\n"
+                "You can download the latest version directly and install it right "
+                "over your current one. Your settings and folders are kept.")
+            dl = box.addButton("Download Latest", QMessageBox.AcceptRole)
+            box.addButton("Close", QMessageBox.RejectRole)
+            box.setDefaultButton(dl)
+            box.exec()
+            if box.clickedButton() is dl:
+                QDesktopServices.openUrl(QUrl(get_download_url()))
+        except Exception:
+            pass
 
     def _on_check_for_updates(self):
         """Settings tab "Check for Updates" button. In a frozen build, trigger
@@ -7089,6 +7121,19 @@ if __name__ == '__main__':
     except Exception as _launch_exc:
         _handle_launch_failure(_launch_exc)
         sys.exit(1)
+
+    # Windows: route a failed user-initiated WinSparkle update (its appcast fetch
+    # blocked by a security suite/proxy on this machine) to a helpful manual-
+    # download dialog. Additive -- the one-click install path is untouched; this
+    # only fires on the error callback. The signal marshals the WinSparkle-thread
+    # callback safely onto the UI thread.
+    if sys.platform == "win32" and getattr(sys, "frozen", False):
+        try:
+            from modules.winsparkle_updater import set_error_handler
+            window.update_failed.connect(window._on_update_failed)
+            set_error_handler(window.update_failed.emit)
+        except Exception:
+            pass
 
     # Mac location guard: if the app is running off the mounted disk image or
     # from the quarantine sandbox ("App Translocation"), macOS silently

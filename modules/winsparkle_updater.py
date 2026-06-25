@@ -37,6 +37,43 @@ import sys
 # the whole module becomes a harmless no-op on Mac, Linux, and dev launches.
 _dll = None
 
+# WinSparkle's error callback type: void (*)(void). Defined once at module scope.
+_WIN_SPARKLE_ERROR_CB = ctypes.CFUNCTYPE(None)
+
+# True only between a USER-initiated check (Settings button / banner) and its
+# result. The silent per-launch background check clears it. The error callback
+# below surfaces a fallback ONLY when the user themselves triggered the check,
+# so a quietly failing background check never pops a dialog every launch.
+_user_initiated = False
+
+# _error_cb is kept at module scope so the ctypes callback object is not garbage
+# collected while WinSparkle holds a pointer to it. _error_handler is the
+# no-argument Python callable the GUI registers via set_error_handler().
+_error_cb = None
+_error_handler = None
+
+
+def _on_winsparkle_error():
+    """Called by WinSparkle, on ITS thread, when an update operation fails
+    (e.g. the appcast can't be retrieved -- the "error retrieving update
+    information" case). Surfaces the fallback only when the user just triggered
+    the check and a handler is registered. Must never raise."""
+    global _user_initiated
+    try:
+        if _user_initiated and _error_handler is not None:
+            _error_handler()
+    except Exception:
+        pass
+    _user_initiated = False
+
+
+def set_error_handler(fn):
+    """Register a no-argument callable invoked when a user-initiated WinSparkle
+    update fails. It runs on WinSparkle's thread, so it must be thread-safe; the
+    GUI passes a Qt signal's .emit, which marshals safely to the UI thread."""
+    global _error_handler
+    _error_handler = fn
+
 
 def _find_winsparkle_dll():
     """Return absolute path to WinSparkle.dll inside the frozen bundle, or
@@ -94,6 +131,17 @@ def init_winsparkle(appcast_url, app_name, app_version, company_name="Star Trail
         _dll.win_sparkle_set_appcast_url(appcast_url)
         _dll.win_sparkle_set_app_details(company_name, app_name, app_version)
         _dll.win_sparkle_set_automatic_check_for_updates(1)
+        # Register an error callback so a failed user-initiated update (e.g. the
+        # appcast can't be fetched on a machine where a security suite or proxy
+        # blocks WinSparkle's networking) can surface a helpful manual-download
+        # fallback. Guarded: older WinSparkle DLLs may not export this symbol.
+        global _error_cb
+        try:
+            _dll.win_sparkle_set_error_callback.argtypes = [_WIN_SPARKLE_ERROR_CB]
+            _error_cb = _WIN_SPARKLE_ERROR_CB(_on_winsparkle_error)
+            _dll.win_sparkle_set_error_callback(_error_cb)
+        except Exception:
+            pass
         _dll.win_sparkle_init()
     except Exception:
         import traceback
@@ -119,6 +167,8 @@ def check_for_updates():
     if _dll is None:
         return False
     try:
+        global _user_initiated
+        _user_initiated = True   # so a failure surfaces the manual-download fallback
         _dll.win_sparkle_check_update_with_ui()
         return True
     except Exception:
@@ -141,6 +191,8 @@ def check_for_updates_in_background():
     win_sparkle_init(); it returns immediately and runs on its own thread."""
     if _dll is None:
         return
+    global _user_initiated
+    _user_initiated = False   # a silent background failure must not pop a dialog
     _dll.win_sparkle_check_update_without_ui()
 
 
