@@ -96,7 +96,7 @@
   .about-grid{display:grid;grid-template-columns:1fr 300px;gap:48px;align-items:start}
   .about-photo img{width:100%;border-radius:14px;display:block}
   @media(max-width:720px){.about-grid{grid-template-columns:1fr}.about-photo img{max-width:300px}}
-  .ff-diagram{width:100%;max-width:820px;height:auto;display:block;margin:0 auto 32px}
+  .ff-img{width:100%;height:auto;display:block;margin-bottom:16px}
   .findfix{display:grid;grid-template-columns:1fr 1fr;gap:32px;max-width:900px}
   .findfix .ff h3{font-size:19px;color:var(--navy);font-weight:600;margin-bottom:8px}
   .findfix .ff p{color:var(--muted);font-size:15px}
@@ -207,33 +207,34 @@
       <div class="kicker">Research &amp; approach</div>
       <h2>How it finds and fixes the trails</h2>
     </div>
-    <svg viewBox="0 0 820 220" class="ff-diagram" role="img" aria-label="The AI finds the trail, then Star Bridge rebuilds the sky behind it">
-      <rect x="6" y="8" width="360" height="190" rx="12" fill="#0a1e3f"/>
-      <g stroke="#9fb6d6" stroke-width="1.2" fill="none" opacity="0.5">
-        <path d="M28 170 Q188 56 352 66"/>
-        <path d="M28 146 Q188 48 352 48"/>
-        <path d="M44 188 Q204 92 356 114"/>
-        <path d="M70 192 Q214 124 352 152"/>
-      </g>
-      <line x1="64" y1="58" x2="300" y2="168" stroke="#f3d08a" stroke-width="2.6"/>
-      <polygon points="50,68 301,185 314,158 63,41" fill="none" stroke="#2f86e6" stroke-width="2" stroke-dasharray="6 5"/>
-      <text x="186" y="34" text-anchor="middle" fill="#a8c0e0" font-size="13" font-weight="600" font-family="sans-serif">AI FINDS THE TRAIL</text>
-      <path d="M384 103 L432 103 M424 96 L434 103 L424 110" fill="none" stroke="#5b6b82" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
-      <rect x="454" y="8" width="360" height="190" rx="12" fill="#0a1e3f"/>
-      <g stroke="#9fb6d6" stroke-width="1.2" fill="none" opacity="0.5">
-        <path d="M476 170 Q636 56 800 66"/>
-        <path d="M476 146 Q636 48 800 48"/>
-        <path d="M492 188 Q652 92 804 114"/>
-        <path d="M518 192 Q662 124 800 152"/>
-      </g>
-      <text x="634" y="34" text-anchor="middle" fill="#a8c0e0" font-size="13" font-weight="600" font-family="sans-serif">TRAIL REMOVED</text>
-    </svg>
     <div class="findfix">
       <div class="ff">
+        <svg viewBox="0 0 372 206" class="ff-img" role="img" aria-label="The AI finds the trail">
+          <rect x="6" y="8" width="360" height="190" rx="12" fill="#0a1e3f"/>
+          <g stroke="#9fb6d6" stroke-width="1.2" fill="none" opacity="0.5">
+            <path d="M28 170 Q188 56 352 66"/>
+            <path d="M28 146 Q188 48 352 48"/>
+            <path d="M44 188 Q204 92 356 114"/>
+            <path d="M70 192 Q214 124 352 152"/>
+          </g>
+          <line x1="64" y1="58" x2="300" y2="168" stroke="#f3d08a" stroke-width="2.6"/>
+          <polygon points="50,68 301,185 314,158 63,41" fill="none" stroke="#2f86e6" stroke-width="2" stroke-dasharray="6 5"/>
+          <text x="186" y="34" text-anchor="middle" fill="#a8c0e0" font-size="13" font-weight="600" font-family="sans-serif">AI FINDS THE TRAIL</text>
+        </svg>
         <h3>Finding every streak</h3>
         <p>Each frame is run through an AI YOLO segmentation model trained on thousands of manually labeled airplane and satellite trails across many cameras, lenses, and sky conditions. The model traces a mask over the trails it finds before we apply the repair.</p>
       </div>
       <div class="ff">
+        <svg viewBox="0 0 372 206" class="ff-img" role="img" aria-label="The trail removed, sky rebuilt">
+          <rect x="6" y="8" width="360" height="190" rx="12" fill="#0a1e3f"/>
+          <g stroke="#9fb6d6" stroke-width="1.2" fill="none" opacity="0.5">
+            <path d="M28 170 Q188 56 352 66"/>
+            <path d="M28 146 Q188 48 352 48"/>
+            <path d="M44 188 Q204 92 356 114"/>
+            <path d="M70 192 Q214 124 352 152"/>
+          </g>
+          <text x="186" y="34" text-anchor="middle" fill="#a8c0e0" font-size="13" font-weight="600" font-family="sans-serif">TRAIL REMOVED</text>
+        </svg>
         <h3>Star Bridge repair</h3>
         <p>For each trail, Star Trail CleanR looks at the frames just before and after, picks the neighbor whose sky best matches, and shifts it so the stars line up exactly with the frame being repaired. Every borrowed pixel is color-corrected to the local sky before it is laid over the trail, so the real stars underneath come back at full brightness and the repair blends invisibly, even against twilight gradients or a glowing horizon. We call this technique Star Bridge. No smudges, no blank patches.</p>
       </div>
