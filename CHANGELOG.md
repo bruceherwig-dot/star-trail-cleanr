@@ -2,6 +2,11 @@
 
 ---
 
+## v2.65-beta
+- **Windows: a way out when the in-app updater is blocked.** On some Windows machines a security suite, VPN, or firewall blocks the updater's connection, so "Check for Updates" failed with a brief error and left you with no obvious next step. Now, when that happens, Star Trail CleanR explains the likely cause in plain language and gives you a one-click "Download Latest" that opens the right installer in your browser, so a blocked update is never a dead end. The normal one-click update is unchanged for everyone else.
+- **Special Thanks now lives on startrailcleanr.com.** The About tab's contributor link and a new FAQ entry, "Who helped make Star Trail CleanR?", open the Special Thanks section on the new website.
+- **Smoke tests:** 228 passing.
+
 ## v2.64-beta
 - **New: turn your frames into a timelapse video.** A "Create a Timelapse Video" checkbox on the main screen pops a Timelapse window at the end of a run, and a new "Create Timelapse" button lets you make one any time a folder already has cleaned frames, no re-cleaning needed. You choose the source (your cleaned frames or the original ones), the size (4K, 2K, or 1080p), the frame rate (12 to 60 fps), and the format (.mp4 or .mov). It shows a size estimate and a free-space check, renders with a live progress bar, and the Render button turns into Stop so you can cancel mid-render. Videos use the same grain-and-bitrate recipe as the before/after share clip, so they hold up if you upload them to Facebook or YouTube. Output lands in the STC Extras folder.
 - **Mixed portrait and landscape frames are caught before a run starts.** If a folder had some sideways shots mixed in with level ones, the app used to run a long way in and then stop with an error. It now spots the mismatch up front and tells you plainly how many frames are portrait, so you can pull them out or continue with just the matching ones. (Portrait and landscape each need their own foreground mask, so they have to be cleaned as separate folders.)
