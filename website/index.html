@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Star Trail CleanR - Remove the Trails. Keep the Stars.</title>
+<style>
+  :root{
+    --navy:#0a1e3f; --navy2:#0c2c5c; --blue:#1a6fc4; --blue-h:#1580e0;
+    --sub:#a8c0e0; --star:#f3d08a;
+    --bg:#ffffff; --bg2:#f4f7fb; --text:#16263f; --muted:#5b6b82; --line:#e3e9f2;
+    --maxw:1080px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;line-height:1.6;-webkit-font-smoothing:antialiased}
+  a{color:inherit;text-decoration:none}
+  .wrap{max-width:var(--maxw);margin:0 auto;padding:0 24px}
+  section{padding:48px 0}
+
+  /* nav - app navy header */
+  header{position:sticky;top:0;z-index:50;background:var(--navy);border-bottom:1px solid rgba(255,255,255,.08)}
+  nav{display:flex;align-items:center;justify-content:space-between;height:66px;max-width:var(--maxw);margin:0 auto;padding:0 24px}
+  .brand{display:flex;align-items:center;gap:11px;font-weight:600;font-size:18px;color:#fff;letter-spacing:.2px}
+  .brand .logotile{width:40px;height:40px;border-radius:10px;background:#fff;display:flex;align-items:center;justify-content:center;flex:none}
+  .brand .logotile img{width:34px;height:34px;border-radius:7px;display:block}
+  .navlinks{display:flex;gap:26px;align-items:center;font-size:15px;color:var(--sub)}
+  .navlinks a:hover{color:#fff}
+  .btn{display:inline-block;background:var(--blue);color:#fff;font-weight:600;padding:11px 20px;border-radius:8px;font-size:15px;border:none;cursor:pointer;transition:background .15s}
+  .btn:hover{background:var(--blue-h)}
+  .btn.ghost{background:transparent;border:1px solid var(--line);color:var(--blue)}
+  .btn.ghost:hover{border-color:var(--blue);background:var(--bg2)}
+  .btn.on-navy.ghost{border-color:rgba(255,255,255,.3);color:#fff}
+  .btn.on-navy.ghost:hover{border-color:#fff;background:rgba(255,255,255,.08)}
+  @media(max-width:720px){.navlinks{display:none}}
+
+  /* hero - navy night-sky band */
+  .hero{position:relative;background:var(--navy);color:#fff;overflow:hidden;border-bottom:1px solid var(--line)}
+  #trails{position:absolute;inset:0;width:100%;height:100%;display:block}
+  .hero .veil{position:absolute;inset:0;background:radial-gradient(120% 100% at 75% 10%,rgba(10,30,63,0),rgba(10,30,63,.7) 70%,var(--navy) 100%)}
+  .hero .inner{position:relative;z-index:2;padding:24px 0 28px}
+  .eyebrow{color:var(--sub);font-weight:600;letter-spacing:2px;text-transform:uppercase;font-size:13px;margin-bottom:18px}
+  .hero h1{font-size:62px;line-height:1.04;font-weight:700;letter-spacing:-1px}
+  .hero .tag{font-size:24px;margin-top:8px;font-weight:500;color:#eaf1fb}
+  .hero p.sub{color:var(--sub);font-size:18px;margin-top:22px;max-width:54ch}
+  .hero .cta{margin-top:34px;display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+  .hero .free{color:var(--sub);font-size:14px}
+  @media(max-width:720px){.hero h1{font-size:42px}.hero .tag{font-size:20px}}
+
+  /* counter - light */
+  .counter{background:var(--bg2);border-bottom:1px solid var(--line)}
+  .counter .grid{display:grid;grid-template-columns:repeat(2,1fr);gap:24px;text-align:center;max-width:680px;margin:0 auto}
+  .stat .num{font-size:52px;font-weight:700;letter-spacing:-1px;color:var(--navy);font-variant-numeric:tabular-nums}
+  .stat .lbl{color:var(--muted);font-size:15px;margin-top:6px}
+  .counter .note{text-align:center;color:var(--muted);font-size:13px;margin-top:30px}
+  @media(max-width:720px){.counter .grid{grid-template-columns:1fr;gap:32px}.stat .num{font-size:42px}}
+
+  .head{max-width:640px;margin-bottom:44px}
+  .head .kicker{color:var(--blue);font-weight:600;font-size:14px;letter-spacing:1px;text-transform:uppercase}
+  .head h2{font-size:36px;font-weight:700;letter-spacing:-.5px;margin-top:10px;color:var(--navy)}
+  .head p{color:var(--muted);font-size:17px;margin-top:12px}
+
+  /* before/after (photos stay dark) */
+  .ba{position:relative;width:100%;max-width:100%;margin:0 auto;border-radius:14px;overflow:hidden;border:1px solid var(--line);user-select:none}
+  .ba .layer{position:absolute;inset:0;background-size:cover;background-position:center}
+  .ba .before{background:#0a1426 center/cover no-repeat}
+  .ba .after{background:#0a1426 center/cover no-repeat;clip-path:inset(0 0 0 50%)}
+  .ba-arrow{position:absolute;top:50%;transform:translateY(-50%);z-index:6;width:42px;height:42px;border-radius:50%;border:none;background:rgba(10,30,63,.6);color:#fff;font-size:24px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center}
+  .ba-arrow:hover{background:rgba(26,111,196,.9)}
+  .ba-arrow.left{left:12px}.ba-arrow.right{right:12px}
+  .ba-credit{color:var(--muted);font-size:13px;margin-top:12px;text-align:center}
+  .ba .streak{position:absolute;height:2px;background:linear-gradient(90deg,transparent,rgba(255,255,255,.9),transparent);border-radius:2px}
+  .ba .tagb,.ba .taga{position:absolute;top:14px;font-size:12px;font-weight:600;letter-spacing:1px;padding:5px 10px;border-radius:6px;background:rgba(5,8,15,.55);border:1px solid rgba(255,255,255,.18);color:#fff}
+  .ba .tagb{left:14px}.ba .taga{right:14px}
+  .ba .handle{position:absolute;top:0;bottom:0;left:50%;width:2px;background:#fff;cursor:ew-resize;z-index:5}
+  .ba .grip{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:38px;height:38px;border-radius:50%;background:#fff;color:#0a1426;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:700}
+
+  .steps{display:grid;grid-template-columns:repeat(3,1fr);gap:20px}
+  .card{background:var(--bg);border:1px solid var(--line);border-radius:14px;padding:26px}
+  .card .n{color:var(--blue);font-weight:700;font-size:14px;letter-spacing:1px}
+  .card h3{font-size:19px;margin:10px 0 8px;font-weight:600;color:var(--navy)}
+  .card p{color:var(--muted);font-size:15px}
+  @media(max-width:720px){.steps{grid-template-columns:1fr}}
+
+  .downloads{display:grid;grid-template-columns:repeat(2,1fr);gap:16px;max-width:760px}
+  .dl{display:flex;align-items:center;justify-content:space-between;background:var(--bg);border:1px solid var(--line);border-radius:12px;padding:18px 22px}
+  .dl .os{font-weight:600;color:var(--navy)}.dl .meta{color:var(--muted);font-size:13px}
+  .verline{display:inline-flex;align-items:center;gap:8px;background:#eaf2fc;color:var(--blue);font-weight:600;font-size:14px;padding:6px 14px;border-radius:20px;margin-top:4px}
+  .verline .dotpulse{width:8px;height:8px;border-radius:50%;background:var(--blue)}
+  @media(max-width:720px){.downloads{grid-template-columns:1fr}}
+
+  .thanks{max-width:760px}
+  .thanks p{color:var(--text);font-size:16px;margin-bottom:18px}
+  .thanks a{color:var(--blue);font-weight:600}
+  .thanks a:hover{text-decoration:underline}
+  .about-grid{display:grid;grid-template-columns:1fr 300px;gap:48px;align-items:start}
+  .about-photo img{width:100%;border-radius:14px;display:block}
+  @media(max-width:720px){.about-grid{grid-template-columns:1fr}.about-photo img{max-width:300px}}
+  .ff-diagram{width:100%;max-width:820px;height:auto;display:block;margin:0 auto 32px}
+  .findfix{display:grid;grid-template-columns:1fr 1fr;gap:32px;max-width:900px}
+  .findfix .ff h3{font-size:19px;color:var(--navy);font-weight:600;margin-bottom:8px}
+  .findfix .ff p{color:var(--muted);font-size:15px}
+  @media(max-width:720px){.findfix{grid-template-columns:1fr;gap:24px}}
+  .alt{background:var(--bg2);border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+  footer{background:var(--navy);color:var(--sub);padding:38px 0;font-size:14px}
+  footer .wrap{display:flex;justify-content:space-between;flex-wrap:wrap;gap:14px}
+  footer .brandf{color:#fff;font-weight:600}
+</style>
+</head>
+<body>
+
+<header>
+  <nav>
+    <div class="brand"><span class="logotile"><img src="logo.png" alt="Star Trail CleanR logo"></span> Star Trail CleanR</div>
+    <div class="navlinks">
+      <a href="#how">How it works</a>
+      <a href="#gallery">Gallery</a>
+      <a href="#approach">Approach</a>
+      <a href="#download">Download</a>
+      <a href="#thanks">Thanks</a>
+      <a href="#about">About</a>
+    </div>
+    <a class="btn" href="#download">Download free</a>
+  </nav>
+</header>
+
+<section class="hero">
+  <canvas id="trails"></canvas>
+  <div class="veil"></div>
+  <div class="wrap inner">
+    <div class="eyebrow">Free for Mac, Windows &amp; Linux</div>
+    <h1>Star Trail CleanR</h1>
+    <div class="tag">Remove the Trails. Keep the Stars.</div>
+    <p class="sub">You spent hours under the sky and shot hundreds of frames. Then an airplane or satellite sliced right through them. Star Trail CleanR finds and erases those streaks automatically, frame by frame, before you stack, so the stars are all that's left.</p>
+    <div class="cta">
+      <a class="btn" href="#download">Download free</a>
+      <a class="btn on-navy ghost" href="#how">See how it works</a>
+      <span class="free">Open beta. No account, no cost.</span>
+    </div>
+  </div>
+</section>
+
+<section class="counter">
+  <div class="wrap">
+    <div class="grid">
+      <div class="stat"><div class="num" id="s-trails">0</div><div class="lbl">Trails cleaned</div></div>
+      <div class="stat"><div class="num" id="s-hours">0</div><div class="lbl">Hours of editing saved</div></div>
+    </div>
+    <div class="note">Live totals from photographers who opted in to share anonymous usage.</div>
+  </div>
+</section>
+
+<section id="gallery">
+  <div class="wrap">
+    <div class="head">
+      <div class="kicker">Before / After</div>
+      <h2>Drag to see the trails disappear</h2>
+      <p>Real runs shared by photographers, before and after Star Trail CleanR erased the airplane and satellite streaks. Drag the handle to wipe between them, and use the arrows to see more.</p>
+    </div>
+    <div class="ba" id="ba">
+      <div class="layer before" id="ba-before"></div>
+      <div class="layer after" id="ba-after"></div>
+      <div class="tagb">BEFORE</div>
+      <div class="taga">AFTER</div>
+      <div class="handle" id="ba-handle"><div class="grip">&#8596;</div></div>
+      <button class="ba-arrow left" id="ba-prev" aria-label="Previous example">&#8249;</button>
+      <button class="ba-arrow right" id="ba-next" aria-label="Next example">&#8250;</button>
+    </div>
+    <p class="ba-credit" id="ba-credit"></p>
+  </div>
+</section>
+
+<section id="how" class="alt">
+  <div class="wrap">
+    <div class="head">
+      <div class="kicker">How it works</div>
+      <h2>Point it at your frames. Stack the clean ones.</h2>
+    </div>
+    <div class="steps">
+      <div class="card"><div class="n">01</div><h3>Pick your folder</h3><p>Choose the sequence of frames on your drive. We can process RAW, TIFF, or JPEG images.</p></div>
+      <div class="card"><div class="n">02</div><h3>It finds the streaks</h3><p>An AI detector trained on real airplane and satellite trails marks them in every frame, while leaving the stars and your foreground untouched.</p></div>
+      <div class="card"><div class="n">03</div><h3>Stack the result</h3><p>The cleaned frames drop into your stacker as usual. An optional before/after clip and a timelapse come out the other side.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="download" class="alt">
+  <div class="wrap">
+    <div class="head">
+      <div class="kicker">Download</div>
+      <h2>It's free. Go get it.</h2>
+      <p>Always the latest beta. First-launch tips are included for macOS Gatekeeper and Windows SmartScreen.</p>
+      <div class="verline"><span class="dotpulse"></span> Latest version: <span id="ver">checking…</span></div>
+    </div>
+    <div class="downloads">
+      <a class="dl" href="https://github.com/bruceherwig-dot/star-trail-cleanr/releases/latest/download/StarTrailCleanR-Mac-AppleSilicon.dmg"><span><div class="os">macOS - Apple Silicon</div><div class="meta">M1/M2/M3/M4 · .dmg</div></span><span class="btn">Download</span></a>
+      <a class="dl" href="https://github.com/bruceherwig-dot/star-trail-cleanr/releases/latest/download/StarTrailCleanR-Mac-Intel.dmg"><span><div class="os">macOS - Intel</div><div class="meta">Intel Macs · .dmg</div></span><span class="btn">Download</span></a>
+      <a class="dl" href="https://github.com/bruceherwig-dot/star-trail-cleanr/releases/latest/download/StarTrailCleanRSetup.zip"><span><div class="os">Windows</div><div class="meta">Windows 10/11 · 64-bit</div></span><span class="btn">Download</span></a>
+      <a class="dl" href="https://github.com/bruceherwig-dot/star-trail-cleanr/releases/latest/download/StarTrailCleanR-Linux-x86_64.tar.gz"><span><div class="os">Linux</div><div class="meta">x86_64 · Ubuntu/Debian/Fedora</div></span><span class="btn">Download</span></a>
+    </div>
+  </div>
+</section>
+
+<section id="approach">
+  <div class="wrap">
+    <div class="head">
+      <div class="kicker">Research &amp; approach</div>
+      <h2>How it finds and fixes the trails</h2>
+    </div>
+    <svg viewBox="0 0 820 220" class="ff-diagram" role="img" aria-label="The AI finds the trail, then Star Bridge rebuilds the sky behind it">
+      <rect x="6" y="8" width="360" height="190" rx="12" fill="#0a1e3f"/>
+      <g stroke="#9fb6d6" stroke-width="1.2" fill="none" opacity="0.5">
+        <path d="M28 170 Q188 56 352 66"/>
+        <path d="M28 146 Q188 48 352 48"/>
+        <path d="M44 188 Q204 92 356 114"/>
+        <path d="M70 192 Q214 124 352 152"/>
+      </g>
+      <line x1="64" y1="58" x2="300" y2="168" stroke="#f3d08a" stroke-width="2.6"/>
+      <polygon points="50,68 301,185 314,158 63,41" fill="none" stroke="#2f86e6" stroke-width="2" stroke-dasharray="6 5"/>
+      <text x="186" y="34" text-anchor="middle" fill="#a8c0e0" font-size="13" font-weight="600" font-family="sans-serif">AI FINDS THE TRAIL</text>
+      <path d="M384 103 L432 103 M424 96 L434 103 L424 110" fill="none" stroke="#5b6b82" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+      <rect x="454" y="8" width="360" height="190" rx="12" fill="#0a1e3f"/>
+      <g stroke="#9fb6d6" stroke-width="1.2" fill="none" opacity="0.5">
+        <path d="M476 170 Q636 56 800 66"/>
+        <path d="M476 146 Q636 48 800 48"/>
+        <path d="M492 188 Q652 92 804 114"/>
+        <path d="M518 192 Q662 124 800 152"/>
+      </g>
+      <text x="634" y="34" text-anchor="middle" fill="#a8c0e0" font-size="13" font-weight="600" font-family="sans-serif">TRAIL REMOVED</text>
+    </svg>
+    <div class="findfix">
+      <div class="ff">
+        <h3>Finding every streak</h3>
+        <p>Each frame is run through an AI YOLO segmentation model trained on thousands of manually labeled airplane and satellite trails across many cameras, lenses, and sky conditions. The model traces a mask over the trails it finds before we apply the repair.</p>
+      </div>
+      <div class="ff">
+        <h3>Star Bridge repair</h3>
+        <p>For each trail, Star Trail CleanR looks at the frames just before and after, picks the neighbor whose sky best matches, and shifts it so the stars line up exactly with the frame being repaired. Every borrowed pixel is color-corrected to the local sky before it is laid over the trail, so the real stars underneath come back at full brightness and the repair blends invisibly, even against twilight gradients or a glowing horizon. We call this technique Star Bridge. No smudges, no blank patches.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="about">
+  <div class="wrap about-grid">
+    <div>
+      <div class="head">
+        <div class="kicker">About</div>
+        <h2>Made by an astrophotographer, for astrophotographers</h2>
+        <p>Star Trail CleanR is a free tool built by Bruce Herwig to solve a problem every star-trail shooter hits. It keeps getting better with feedback and shared frames from the community.</p>
+      </div>
+      <a class="btn ghost" href="mailto:bruceherwig+startrailcleanr@gmail.com">Get in touch</a>
+    </div>
+    <div class="about-photo"><img src="bruce.jpg" alt="Bruce Herwig under the night sky"></div>
+  </div>
+</section>
+
+<section id="thanks" class="alt">
+  <div class="wrap">
+    <div class="head">
+      <div class="kicker">Special thanks</div>
+      <h2>Inspired by the astro community</h2>
+    </div>
+    <div class="thanks">
+      <p><a href="https://www.lincolnharrison.com/startrails" target="_blank" rel="noopener">Lincoln Harrison</a>, whose all-night star trail images changed the way I think about this art form. Before discovering his work, I thought 30 minutes to an hour was enough for a star trail. Lincoln's commitment to shooting through the entire night, and the breathtaking results that follow, inspired me to do the same.</p>
+      <p><a href="https://markus-enzweiler.de/software/starstax/" target="_blank" rel="noopener">Markus Enzweiler</a>, creator of StarStaX, the stacking software I have relied on for over a decade. StarStaX is the definition of software done right: simple, reliable, and free to the community with both Mac and PC versions. It just works. Star Trail CleanR is built to hand off directly to StarStaX: clean your frames first, stack with StarStaX, and edit to taste.</p>
+      <p><a href="https://silvanadellacamera.com/" target="_blank" rel="noopener">Silvana Della Camera</a>, for her inspiring timelapse work and for helping test Star Trail CleanR on the PC. Silvana's approach to the night sky opened my eyes to a question I hadn't considered: why shoot for one image when your frames give you three? A single night session with Star Trail CleanR can produce a cleaned star trail stack, a timelapse, and a single long-exposure equivalent. Three finished images from one night's work.</p>
+      <p><b>Additional acknowledgments:</b> Austin Werk for being a great sounding board and cheerleader in helping me learn coding with AI. <a href="https://www.instagram.com/roycebairphoto/" target="_blank" rel="noopener">Royce Bair</a>, <a href="https://alynwallacephotography.com/" target="_blank" rel="noopener">Alyn Wallace</a> (gone before his time), and so many others for their generous contributions to the astro community.</p>
+      <p><a href="https://github.com/gkyle/startrails/blob/main/README.md" target="_blank" rel="noopener">gkyle</a>, whose open-source StarTrails AI project and publicly shared training dataset helped jump-start Star Trail CleanR's detection model.</p>
+      <p><b>Star trail sequences used for AI training, generously provided by:</b> Ajay Talwar, Cheryl Wilcox, Greg Meyer, Jeff Fishman, Jon Bertsch, Kajan Gnanasakthy, <a href="https://www.instagram.com/redheadkatrina/" target="_blank" rel="noopener">Katrina Brown</a>, <a href="https://www.sean-parker.com/Workshops" target="_blank" rel="noopener">Sean Parker</a>, <a href="https://silvanadellacamera.com/" target="_blank" rel="noopener">Silvana Della Camera</a>, Shiu Wan, Thomas Jackson, and Warren Hatch.</p>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div><span class="brandf">Star Trail CleanR</span> - Remove the Trails. Keep the Stars.</div>
+    <div>Free beta · #StarTrailCleanR · @bruceherwig</div>
+  </div>
+</footer>
+
+<script>
+(function(){
+  var c=document.getElementById('trails'),x=c.getContext('2d'),W,H,arcs=[];
+  function build(){
+    W=c.width=c.offsetWidth; H=c.height=c.offsetHeight; arcs=[];
+    var cx=W*0.84, cy=H*0.12;
+    for(var i=0;i<150;i++){
+      var r=40+i*Math.max(W,H)*0.0055 + (i%7)*6;
+      var a0=Math.PI*0.55 + (i%13)*0.04;
+      var a1=a0+0.7+ (i%5)*0.12;
+      var br=i%9===0?0.55:(0.1+ (i%4)*0.05);
+      arcs.push({cx:cx,cy:cy,r:r,a0:a0,a1:a1,br:br,w:i%9===0?0.8:0.4,warm:i%17===0});
+    }
+  }
+  function draw(){
+    x.clearRect(0,0,W,H);
+    for(var i=0;i<arcs.length;i++){var s=arcs[i];
+      x.beginPath();x.arc(s.cx,s.cy,s.r,s.a0,s.a1);
+      x.strokeStyle=s.warm?'rgba(243,208,138,'+s.br+')':'rgba('+(170+(i%9===0?70:0))+',200,240,'+s.br+')';
+      x.lineWidth=s.w;x.stroke();
+    }
+  }
+  function init(){build();draw();}
+  window.addEventListener('resize',init);init();
+})();
+
+(function(){
+  var GALLERY=[
+    {name:"Sean Parker", ratio:1.5, before:"ba-seanparker-before.jpg", after:"ba-seanparker-after.jpg"},
+    {name:"Silvana Della Camera", ratio:0.667, before:"ba-lighthouse-before.jpg", after:"ba-lighthouse-after.jpg"},
+    {name:"Glenn Tetley", ratio:1.5, before:"ba-glenn-before.jpg", after:"ba-glenn-after.jpg"},
+    {name:"Shiu Wan", ratio:1.5, before:"ba-sompting-before.jpg", after:"ba-sompting-after.jpg"},
+    {name:"Jeff Fishman", ratio:1.5, before:"ba-jeff-before.jpg", after:"ba-jeff-after.jpg"}
+  ];
+  var idx=0;
+  var ba=document.getElementById('ba'),beforeEl=document.getElementById('ba-before'),
+      afterEl=document.getElementById('ba-after'),handle=document.getElementById('ba-handle'),
+      credit=document.getElementById('ba-credit'),drag=false;
+  function setWipe(p){p=Math.max(0,Math.min(1,p));afterEl.style.clipPath='inset(0 0 0 '+(p*100)+'%)';handle.style.left=(p*100)+'%';}
+  function render(){var g=GALLERY[idx];
+    if(g.ratio>=1){ba.style.width='100%';ba.style.height='';}
+    else{ba.style.width='auto';ba.style.height='78vh';}
+    ba.style.aspectRatio=String(g.ratio);
+    beforeEl.style.backgroundImage="url('"+g.before+"')";
+    afterEl.style.backgroundImage="url('"+g.after+"')";
+    credit.textContent="Star Trail Sequence Provided by "+g.name;
+    setWipe(0.5);}
+  function fromX(px){var r=ba.getBoundingClientRect();setWipe((px-r.left)/r.width);}
+  ba.addEventListener('mousedown',function(e){if(e.target.closest('.ba-arrow'))return;drag=true;fromX(e.clientX)});
+  window.addEventListener('mousemove',function(e){if(drag)fromX(e.clientX)});
+  window.addEventListener('mouseup',function(){drag=false});
+  ba.addEventListener('touchmove',function(e){fromX(e.touches[0].clientX)},{passive:true});
+  document.getElementById('ba-prev').onclick=function(){idx=(idx-1+GALLERY.length)%GALLERY.length;render();};
+  document.getElementById('ba-next').onclick=function(){idx=(idx+1)%GALLERY.length;render();};
+  render();
+})();
+
+(function(){
+  function animate(el,target){var t=Math.round(target||0),d=1200,t0=null;
+    function step(ts){if(!t0)t0=ts;var p=Math.min(1,(ts-t0)/d);
+      el.textContent=Math.round(t*(1-Math.pow(1-p,3))).toLocaleString();
+      if(p<1)requestAnimationFrame(step);}
+    requestAnimationFrame(step);}
+  fetch('https://api.startrailcleanr.com/stats.php',{cache:'no-store'})
+    .then(function(r){return r.json()})
+    .then(function(d){animate(document.getElementById('s-trails'),d.trails_cleaned);
+      animate(document.getElementById('s-hours'),d.hours_saved);})
+    .catch(function(){animate(document.getElementById('s-trails'),0);
+      animate(document.getElementById('s-hours'),0);});
+})();
+
+(function(){
+  fetch('https://api.github.com/repos/bruceherwig-dot/star-trail-cleanr/releases/latest')
+    .then(function(r){return r.json()})
+    .then(function(d){if(d&&d.tag_name)document.getElementById('ver').textContent=d.tag_name;})
+    .catch(function(){document.getElementById('ver').textContent='see releases';});
+})();
+</script>
+</body>
+</html>

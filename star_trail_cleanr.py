@@ -2400,6 +2400,12 @@ class MainWindow(QMainWindow):
         right, it's a fraction of the time you used to spend.</li>
         </ul>
 
+        <h2 style='color:{BRAND_HEADING_BLUE}; margin-bottom:2px;'>Who helped make Star Trail CleanR?</h2>
+        <p style='margin-top:2px;'>So many people: the photographers who shared sequences for
+        training, the software and open-source projects it stands on, and the friends and mentors
+        who inspired it. See the full
+        <a href='https://startrailcleanr.com/#thanks'>Special Thanks</a> on startrailcleanr.com.</p>
+
         <p style='color:{HINT_TEXT}; margin-top:24px;'>Star Trail CleanR is free and offered as
         a gift to the astrophotography community.
         <a href='mailto:bruceherwig+startrailcleanr@gmail.com?subject=Star%20Trail%20CleanR%20feedback'>Feedback welcome.</a></p>
@@ -2862,8 +2868,8 @@ class MainWindow(QMainWindow):
         <p style='margin-top:2px;'>Star Trail CleanR exists because of the generosity of fellow astrophotographers
         who shared their image sequences for AI training, tested early builds, and offered
         feedback. Thank you, all.</p>
-        <p><a href='https://bruceherwig.wordpress.com/star-trail-cleanr/#Thanks'>See the
-        full list of contributors &rarr;</a></p>
+        <p><a href='https://startrailcleanr.com/#thanks'>See the
+        full list of contributors</a></p>
 
         <h2 style='color:{BRAND_HEADING_BLUE}; margin:{SECTION_GAP_PX}px 0 {HEADING_BODY_GAP_PX}px 0;'>Version History</h2>
         <p style='margin-top:2px;'>See the full <a href='https://github.com/bruceherwig-dot/star-trail-cleanr/blob/main/CHANGELOG.md'>version history on GitHub</a>.</p>
