@@ -2,6 +2,13 @@
 
 ---
 
+## v2.64-beta
+- **New: turn your frames into a timelapse video.** A "Create a Timelapse Video" checkbox on the main screen pops a Timelapse window at the end of a run, and a new "Create Timelapse" button lets you make one any time a folder already has cleaned frames, no re-cleaning needed. You choose the source (your cleaned frames or the original ones), the size (4K, 2K, or 1080p), the frame rate (12 to 60 fps), and the format (.mp4 or .mov). It shows a size estimate and a free-space check, renders with a live progress bar, and the Render button turns into Stop so you can cancel mid-render. Videos use the same grain-and-bitrate recipe as the before/after share clip, so they hold up if you upload them to Facebook or YouTube. Output lands in the STC Extras folder.
+- **Mixed portrait and landscape frames are caught before a run starts.** If a folder had some sideways shots mixed in with level ones, the app used to run a long way in and then stop with an error. It now spots the mismatch up front and tells you plainly how many frames are portrait, so you can pull them out or continue with just the matching ones. (Portrait and landscape each need their own foreground mask, so they have to be cleaned as separate folders.)
+- **Renamed the shared outputs** for clarity: the cleaned star trail, the before/after video, and the red trail map now start with "STC_".
+- **Anonymous usage data** (opt-in, same toggle) now also notes timelapse settings like size and frame rate, so community stats can include timelapse use. Never your images, file names, or any personal info.
+- **Smoke tests:** 228 passing.
+
 ## v2.63-beta
 - **Frames are now ordered by their actual capture time, not their file names.** If your camera's file numbers rolled over mid-shoot (for example IMG_9999 wrapping back to IMG_0001), or you combined frames from two memory cards, the old name-based order could put a jump in the middle of your star trail and make the cleanup borrow from the wrong neighboring frames. The app now reads each photo's timestamp and processes them in true shooting order. If a folder's photos don't carry timestamps, it falls back to the old name order, so nothing changes for those.
 - **Smoke tests:** 216 passing.
