@@ -385,6 +385,12 @@ def robust_imread(
 def image_size(path: Union[str, Path]) -> Optional[Tuple[int, int]]:
     """Return (width, height) for an image without a full decode where possible.
 
+    Dimensions are UPRIGHT: a frame shot sideways (RAW rotate flag, or EXIF
+    orientation 5-8) reports its rotated width/height, matching the shape the
+    worker actually loads. This is what lets the pre-run scan tell portrait from
+    landscape -- their stored sensor sizes are identical and only diverge once
+    rotated upright.
+
     Handles RAW via rawpy (.sizes). For everything else it tries Pillow first;
     if Pillow fails on a TIFF it falls back to tifffile. Mirrors the reader's
     format coverage so the GUI's pre-flight scan never rejects a file the worker
@@ -399,14 +405,27 @@ def image_size(path: Union[str, Path]) -> Optional[Tuple[int, int]]:
             import rawpy
             with rawpy.imread(p) as raw:
                 s = raw.sizes
-                return (int(s.width), int(s.height))
+                w, h = int(s.width), int(s.height)
+                # rawpy/libraw flip 5 (90 deg CCW) and 6 (90 deg CW) turn the
+                # frame a quarter turn, so the upright image swaps width/height.
+                # The worker loads RAW upright (rawpy applies the flip), so report
+                # upright dims here too -- otherwise a portrait and a landscape
+                # shot read as the same size and the pre-run check can't tell them
+                # apart; they only diverge once the frame is rotated upright.
+                return (h, w) if s.flip in (5, 6) else (w, h)
         except Exception:
             return None
 
     try:
         from PIL import Image
         with Image.open(p) as im:
-            return (int(im.size[0]), int(im.size[1]))
+            w, h = int(im.size[0]), int(im.size[1])
+            ex = im.getexif()
+            orient = int(ex.get(0x0112, 1)) if ex else 1
+        # EXIF orientation 5-8 rotate the frame a quarter turn; the worker turns
+        # such frames upright on load (via exif_orientation), so report the
+        # upright (swapped) dims to match.
+        return (h, w) if orient in (5, 6, 7, 8) else (w, h)
     except Exception:
         pass
 
@@ -415,7 +434,9 @@ def image_size(path: Union[str, Path]) -> Optional[Tuple[int, int]]:
             import tifffile
             with tifffile.TiffFile(p) as tf:
                 page = tf.pages[0]
-                return (int(page.imagewidth), int(page.imagelength))
+                w, h = int(page.imagewidth), int(page.imagelength)
+            # Match the worker, which orients non-RAW frames via exif_orientation.
+            return (h, w) if exif_orientation(p) in (5, 6, 7, 8) else (w, h)
         except Exception:
             return None
     return None

@@ -111,10 +111,10 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QComboBox, QProgressBar,
     QTextEdit, QFileDialog, QStackedWidget, QCheckBox, QFrame,
-    QSpinBox, QTabWidget, QTextBrowser, QScrollArea, QMessageBox,
+    QSpinBox, QTabWidget, QTextBrowser, QScrollArea, QMessageBox, QDialog,
 )
 import queue
-from PySide6.QtCore import Qt, QThread, Signal, QSettings, QTimer
+from PySide6.QtCore import Qt, QThread, Signal, QSettings, QTimer, QProcess
 from PySide6.QtGui import QFont, QPixmap, QIcon, QPalette, QColor, QPainter, QIntValidator
 
 from mask_painter import MaskPainterWidget
@@ -1010,6 +1010,20 @@ class CleanerWorker(QThread):
                         "is_dominant": is_dominant,
                     })
 
+                # Spot the "some frames are sideways" case so the modal can say
+                # so plainly instead of listing generic causes: a skipped size
+                # that is the width/height swap of the dominant size is the
+                # opposite orientation, not a different camera or RAW conversion.
+                dw, dh = dominant
+                _swapped = (dh, dw)
+                orientation_skipped = sum(
+                    1 for f in mismatched if readable[f] == _swapped
+                )
+                dominant_orientation = "landscape" if dw >= dh else "portrait"
+                skipped_orientation = (
+                    "portrait" if dominant_orientation == "landscape" else "landscape"
+                )
+
                 self._frames_filter_response = None
                 self._frames_filter_event.clear()
                 self.frames_filter_prompt.emit({
@@ -1021,6 +1035,9 @@ class CleanerWorker(QThread):
                     "breakdown": breakdown,
                     "mismatched_sample": [os.path.basename(p) for p in mismatched[:5]],
                     "unreadable_sample": [os.path.basename(p) for p in unreadable_sorted[:5]],
+                    "orientation_skipped": orientation_skipped,
+                    "dominant_orientation": dominant_orientation,
+                    "skipped_orientation": skipped_orientation,
                 })
                 self._frames_filter_event.wait(timeout=300)
                 if self._frames_filter_response != "CONTINUE" or self._cancelled:
@@ -1667,6 +1684,7 @@ class CleanerWorker(QThread):
                     except Exception:
                         _ugpu = None
                     _ufacts = {
+                        "type": "run",
                         "app_version": VERSION,
                         "platform": _usys.lower(),
                         "platform_arch": _uplat.machine(),
@@ -2078,8 +2096,8 @@ class ShareStackThread(QThread):
                     break
             if self._aborted:
                 return
-            star = os.path.join(self._ws_dir, "cleaned_star_trail.jpg")
-            vid = os.path.join(self._ws_dir, "share_clip.mp4")
+            star = os.path.join(self._ws_dir, "STC_cleaned_star_trail.jpg")
+            vid = os.path.join(self._ws_dir, "STC_share_video.mp4")
             result = self._stacker.finalize(star_out=star, video_out=vid,
                                             should_abort=self._abort_check)
             if not self._aborted:
@@ -3953,6 +3971,16 @@ class MainWindow(QMainWindow):
         self._make_video_chk.toggled.connect(
             lambda v: SETTINGS.setValue("make_video_enabled", v))
         share_row.addWidget(self._make_video_chk)
+        share_row.addSpacing(40)
+        # Timelapse: opt-in (default OFF -- a full render the user configures in
+        # its own window at run end). Opens the Timelapse window (v1.0 module).
+        self._make_timelapse_chk = QCheckBox("Create a Timelapse Video")
+        self._make_timelapse_chk.setFont(step_font)
+        self._make_timelapse_chk.setChecked(
+            SETTINGS.value("make_timelapse_enabled", False, type=bool))
+        self._make_timelapse_chk.toggled.connect(
+            lambda v: SETTINGS.setValue("make_timelapse_enabled", v))
+        share_row.addWidget(self._make_timelapse_chk)
         share_row.addStretch(1)
         layout.addLayout(share_row)
         # (No caption here any more: the star trail + video now build DURING the run
@@ -3999,6 +4027,18 @@ class MainWindow(QMainWindow):
         self._setup_open_btn.setEnabled(False)
         self._setup_open_btn.clicked.connect(self._open_output_from_setup)
         btn_row.addWidget(self._setup_open_btn, 1)
+
+        self._setup_timelapse_btn = QPushButton("Create Timelapse")
+        self._setup_timelapse_btn.setFixedHeight(48)
+        self._setup_timelapse_btn.setStyleSheet(
+            f"QPushButton {{ background-color: {BRAND_HEADING_BLUE}; color: white; font-size: 22px; "
+            f"font-weight: bold; border-radius: 6px; border: none; }}"
+            f"QPushButton:hover {{ background-color: {BRAND_HEADING_HOVER}; }}"
+            f"QPushButton:disabled {{ background-color: {DISABLED_BTN_BG}; }}"
+        )
+        self._setup_timelapse_btn.setEnabled(False)
+        self._setup_timelapse_btn.clicked.connect(self._open_timelapse_from_setup)
+        btn_row.addWidget(self._setup_timelapse_btn, 1)
         layout.addLayout(btn_row)
 
         scroll = QScrollArea()
@@ -4605,6 +4645,35 @@ class MainWindow(QMainWindow):
             self._mask_btn.setText("Create Mask\u2026")
 
     # ── Mask editor ──────────────────────────────────────────────────────────
+
+    def _open_timelapse_window(self, cleaned_folder, original_folder=None):
+        """Open the Timelapse window on the just-cleaned frames. Held on self so
+        it isn't garbage-collected while the user configures and renders. The
+        original (input) folder is offered as an alternate frame source."""
+        if original_folder is None:
+            original_folder = self._folder_input.text().strip() or None
+        self._timelapse_window = TimelapseWindow(cleaned_folder, original_folder, self)
+        win = self._timelapse_window
+        win.show()
+
+        def _place():
+            # Sit over the Finish Summary but shifted right (left edge near the
+            # window's horizontal center) and up toward the top, so the estimate,
+            # Star Log link and timing on the left stay visible. Deferred so the
+            # dialog reports its real size; clamped so it never leaves the screen.
+            pf = self.frameGeometry()
+            if not (pf.isValid() and pf.width() > 0):
+                return
+            x = pf.x() + pf.width() // 2
+            y = pf.y() + 80
+            scr = win.screen()
+            if scr is not None:
+                ag = scr.availableGeometry()
+                x = max(ag.x(), min(x, ag.x() + ag.width() - win.width()))
+                y = max(ag.y(), min(y, ag.y() + ag.height() - win.height()))
+            win.move(x, y)
+
+        QTimer.singleShot(0, _place)
 
     def _open_mask_editor(self):
         """Step 3 Create/Edit Mask button. Open the separate MaskEditorWindow
@@ -5547,6 +5616,9 @@ class MainWindow(QMainWindow):
         breakdown = info.get("breakdown", [])
         mismatched_sample = info.get("mismatched_sample", [])
         unreadable_sample = info.get("unreadable_sample", [])
+        orientation_skipped = info.get("orientation_skipped", 0)
+        dominant_orientation = info.get("dominant_orientation", "")
+        skipped_orientation = info.get("skipped_orientation", "")
 
         # Build the body in plain English.
         parts = [
@@ -5576,13 +5648,31 @@ class MainWindow(QMainWindow):
             parts.append("<p>Examples of skipped frames: " +
                          ", ".join(f"<code>{n}</code>" for n in mismatched_sample) +
                          "</p>")
-        parts.append(
-            "<p>Common causes: some frames are portrait-orientation "
-            "(rotated 90&deg;), some came from a different camera, or "
-            "the RAW converter produced different sizes. Cancel if you "
-            "want to check the folder first; Continue to process the "
-            f"{matching} matching frame(s) only.</p>"
-        )
+        if orientation_skipped > 0:
+            other_skipped = (n_mismatched + n_unreadable) - orientation_skipped
+            parts.append(
+                f"<p><b>Why:</b> {orientation_skipped} of the skipped frame(s) "
+                f"are <b>{skipped_orientation}</b> (shot sideways, rotated "
+                f"90&deg;). Portrait and landscape frames each need their own "
+                f"foreground mask, so they have to be cleaned as separate "
+                f"folders. Cancel to move the {skipped_orientation} frames into "
+                f"their own folder, or Continue to process the {matching} "
+                f"{dominant_orientation} frame(s) only.</p>"
+            )
+            if other_skipped > 0:
+                parts.append(
+                    f"<p>The other {other_skipped} skipped frame(s) are a "
+                    "different size, likely a different camera or RAW "
+                    "conversion.</p>"
+                )
+        else:
+            parts.append(
+                "<p>Common causes: some frames are portrait-orientation "
+                "(rotated 90&deg;), some came from a different camera, or "
+                "the RAW converter produced different sizes. Cancel if you "
+                "want to check the folder first; Continue to process the "
+                f"{matching} matching frame(s) only.</p>"
+            )
 
         msg = QMessageBox(self)
         msg.setIcon(QMessageBox.Warning)
@@ -5650,6 +5740,13 @@ class MainWindow(QMainWindow):
         self._done_output_folder = output_folder
         self._update_open_btn_state()
         self._switch_to_back_btn()
+        # Timelapse: open its own window on the cleaned frames if the user enabled it.
+        if (getattr(self, "_make_timelapse_chk", None) is not None
+                and self._make_timelapse_chk.isChecked()):
+            try:
+                self._open_timelapse_window(output_folder)
+            except Exception:
+                pass
         # Finalize the share outputs: the in-run stacker renders the star trail + video
         # from the stacks it built DURING the run; the dev red map renders too.
         self._maybe_start_share_render(output_folder)
@@ -5807,7 +5904,7 @@ class MainWindow(QMainWindow):
                 or not cleaned_folder or not os.path.isdir(cleaned_folder):
             return
         ws_dir = output_workspace(cleaned_folder, create=True)
-        red = os.path.join(ws_dir, "red_trail_map.jpg")
+        red = os.path.join(ws_dir, "STC_red_trail_map.jpg")
         red_args = ["--red-map", "--original", original_dir, "--out", red,
                     "--masks-dir", os.path.join(ws_dir, "masks")]
         fg = getattr(self, "_mask_path", None)
@@ -6287,6 +6384,7 @@ class MainWindow(QMainWindow):
         if folder and os.path.isdir(folder):
             has_files = any(os.scandir(folder))
         self._setup_open_btn.setEnabled(has_files)
+        self._setup_timelapse_btn.setEnabled(has_files)
 
     def _open_output_from_setup(self):
         """Setup page "Open Cleaned Folder" button. Open the output folder
@@ -6302,6 +6400,18 @@ class MainWindow(QMainWindow):
             self._error_label.setText(f"Output folder doesn\u2019t exist yet. Run cleaning first.")
             return
         _open_folder_in_file_manager(folder)
+
+    def _open_timelapse_from_setup(self):
+        """Setup page "Create Timelapse" button. Open the Timelapse window on the
+        output folder's cleaned frames (falling back to the last completed run),
+        so a timelapse can be built from any past run without re-cleaning."""
+        folder = self._output_input.text().strip()
+        if not folder:
+            folder = getattr(self, '_done_output_folder', None)
+        if not folder or not os.path.isdir(folder):
+            self._error_label.setText("No cleaned frames yet. Run cleaning first.")
+            return
+        self._open_timelapse_window(folder)
 
     def _open_output_folder(self):
         """Processing page / run-complete dialog "Open Cleaned Folder" button.
@@ -6382,6 +6492,289 @@ class MainWindow(QMainWindow):
                     t.wait(500)
 
         event.accept()
+
+
+class TimelapseWindow(QDialog):
+    """Timelapse Maker -- its own versioned window, opened at run end on the
+    cleaned frames. Pick source (cleaned/original) / size / fps / format, see an
+    estimated size and a free-space check, and render via the timelapse_maker.py
+    engine (a subprocess) with a live progress bar; the Render button doubles as
+    Stop while running. Choices are remembered for next time."""
+
+    def __init__(self, cleaned_folder, original_folder=None, parent=None):
+        super().__init__(parent)
+        from timelapse_maker import TIMELAPSE_VERSION
+        self._cleaned = cleaned_folder
+        self._original = original_folder
+        self._proc = None
+        self._out_path = None
+        self._render_cancelled = False
+        self.setWindowTitle(f"Star Trail CleanR Timelapse  v{TIMELAPSE_VERSION}")
+        self.setMinimumWidth(460)
+
+        # Frames are loaded by _reload_frames() once the controls exist, so the
+        # source (Cleaned / Original) dropdown can swap them on the fly.
+        self._frames = []
+        self._n_frames = 0
+        self._nw = self._nh = 0
+
+        lay = QVBoxLayout(self)
+        _title = QLabel("Create Timelapse")
+        _f = QFont()
+        _f.setPointSize(20)
+        _f.setBold(True)
+        _title.setFont(_f)
+        lay.addWidget(_title)
+
+        def _row(text, combo):
+            r = QHBoxLayout()
+            _l = QLabel(text)
+            _l.setFixedWidth(90)
+            r.addWidget(_l)
+            r.addWidget(combo, 1)
+            lay.addLayout(r)
+
+        # Source: cleaned frames (default) or the original, uncleaned frames.
+        # "Original" is only offered when we actually have that folder.
+        self._source_cb = QComboBox()
+        self._source_cb.addItem("Cleaned", "cleaned")
+        if original_folder and os.path.isdir(original_folder):
+            self._source_cb.addItem("Original", "original")
+        _row("Source", self._source_cb)
+
+        self._size_cb = QComboBox()
+        # No "Full resolution" option: H.264 (and QuickTime) won't play frames
+        # wider than ~4K, and full-frame sources (5000-6000px) are over that
+        # ceiling -- the file renders but the player shows one frame and freezes.
+        # Each preset is an UPPER bound; target_size() never upscales, so on a
+        # sub-4K source "4K" simply yields the native size, which plays fine.
+        # 4K is first, so it is the default.
+        for key, label in (("4k", "4K"), ("2k", "2K"), ("1080p", "1080p")):
+            self._size_cb.addItem(label, key)
+        _row("Size", self._size_cb)
+
+        self._fps_cb = QComboBox()
+        for v in (12, 15, 24, 30, 60):
+            self._fps_cb.addItem(f"{v} fps", v)
+        self._fps_cb.setCurrentIndex(self._fps_cb.findData(24))  # default 24; _restore_choices overrides if saved
+        _row("Frame rate", self._fps_cb)
+
+        self._fmt_cb = QComboBox()
+        self._fmt_cb.addItem(".mp4", "mp4")
+        self._fmt_cb.addItem(".mov", "mov")
+        _row("Format", self._fmt_cb)
+
+        self._restore_choices()
+
+        self._estimate_lbl = QLabel("")
+        self._estimate_lbl.setStyleSheet(f"color: {MUTED_TEXT};")
+        lay.addWidget(self._estimate_lbl)
+        self._bar = QProgressBar()
+        self._bar.setRange(0, 100)
+        self._bar.setValue(0)
+        self._bar.setVisible(False)
+        lay.addWidget(self._bar)
+        self._status_lbl = QLabel("")
+        lay.addWidget(self._status_lbl)
+
+        _btns = QHBoxLayout()
+        _btns.addStretch(1)
+        self._close_btn = QPushButton("Close")
+        self._close_btn.clicked.connect(self.close)
+        self._render_btn = QPushButton("Render")
+        self._render_btn.setDefault(True)
+        self._render_btn.clicked.connect(self._toggle_render)
+        _btns.addWidget(self._close_btn)
+        _btns.addWidget(self._render_btn)
+        lay.addLayout(_btns)
+
+        for cb in (self._size_cb, self._fps_cb, self._fmt_cb):
+            cb.currentIndexChanged.connect(self._update_estimate)
+        self._source_cb.currentIndexChanged.connect(self._reload_frames)
+        self._reload_frames()   # load the (default Cleaned) frames + fill the estimate
+
+    def _restore_choices(self):
+        for cb, key, is_int in ((self._source_cb, "timelapse_source", False),
+                                (self._size_cb, "timelapse_size", False),
+                                (self._fps_cb, "timelapse_fps", True),
+                                (self._fmt_cb, "timelapse_format", False)):
+            v = SETTINGS.value(key)
+            if v is None:
+                continue
+            try:
+                idx = cb.findData(int(v) if is_int else v)
+            except (ValueError, TypeError):
+                idx = -1
+            if idx >= 0:
+                cb.setCurrentIndex(idx)
+
+    def _save_choices(self):
+        SETTINGS.setValue("timelapse_source", self._source_cb.currentData())
+        SETTINGS.setValue("timelapse_size", self._size_cb.currentData())
+        SETTINGS.setValue("timelapse_fps", self._fps_cb.currentData())
+        SETTINGS.setValue("timelapse_format", self._fmt_cb.currentData())
+
+    def _current_folder(self):
+        """The frame folder for the selected source (Cleaned by default)."""
+        if self._source_cb.currentData() == "original" and self._original:
+            return self._original
+        return self._cleaned
+
+    def _reload_frames(self):
+        """Load the frame list for the current source and refresh the estimate.
+        Called on open and whenever the Cleaned/Original choice changes."""
+        from modules.frame_list import gather_frames
+        from modules.io_safe import image_size
+        self._frames = gather_frames(self._current_folder())
+        self._n_frames = len(self._frames)
+        self._nw = self._nh = 0
+        if self._frames:
+            sz = image_size(self._frames[0])
+            if sz:
+                self._nw, self._nh = sz
+        self._update_estimate()
+
+    def _calc(self):
+        from timelapse_maker import target_size, estimate_output_bytes
+        size_key = self._size_cb.currentData() or "4k"
+        fps = int(self._fps_cb.currentData() or 30)
+        if self._nw and self._nh:
+            tw, th = target_size(self._nw, self._nh, size_key)
+        else:
+            tw, th = 1920, 1080
+        est = estimate_output_bytes(self._n_frames, fps, tw, th)
+        import shutil
+        try:
+            free = shutil.disk_usage(self._cleaned).free
+        except Exception:
+            free = 0
+        return size_key, fps, tw, th, est, free
+
+    def _update_estimate(self):
+        self._save_choices()
+        size_key, fps, tw, th, est, free = self._calc()
+        self._estimate_lbl.setText(
+            f"{self._n_frames} frames → {tw} x {th} @ {fps}fps    |    "
+            f"estimated ~{est / 1e6:.0f} MB    |    free {free / 1e9:.1f} GB")
+
+    def _toggle_render(self):
+        """The Render button doubles as Stop while a render is running."""
+        if self._proc is not None and self._proc.state() != QProcess.NotRunning:
+            self._stop_render()
+        else:
+            self._start_render()
+
+    def _stop_render(self):
+        """Cancel an in-progress render. Killing the encoder fires the finished
+        signal, where _on_proc_finished resets the UI and drops the partial file."""
+        if self._proc is not None and self._proc.state() != QProcess.NotRunning:
+            self._render_cancelled = True
+            self._status_lbl.setText("Stopping…")
+            self._proc.kill()
+
+    def _start_render(self):
+        if self._n_frames < 2:
+            self._status_lbl.setText("Need at least 2 frames.")
+            return
+        size_key, fps, tw, th, est, free = self._calc()
+        if free and free < est * 1.2:
+            if QMessageBox.warning(
+                    self, "Low disk space",
+                    f"This timelapse is estimated at about {est / 1e6:.0f} MB, but only "
+                    f"{free / 1e9:.1f} GB is free. Render anyway?",
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+                return
+        src = self._source_cb.currentData() or "cleaned"
+        frames_dir = self._current_folder()
+        ext = self._fmt_cb.currentData() or "mp4"
+        tag = "original_" if src == "original" else ""
+        # Output always lands in the cleaned folder's STC Extras workspace; the
+        # source tag keeps a Cleaned and an Original timelapse from colliding.
+        self._out_path = workspace_path(self._cleaned, f"STC_timelapse_{tag}{size_key}.{ext}")
+        script = os.path.join(_base, "timelapse_maker.py")
+        args = [frames_dir, "-o", self._out_path, "--size", size_key,
+                "--fps", str(fps), "--style", "blended"]
+        if getattr(sys, "frozen", False):
+            pargs = ["--cleanr-worker", script] + args
+        else:
+            pargs = ["-u", script] + args
+        # Anonymous usage facts for this render, sent only if it finishes and the
+        # user opted in (see _on_proc_finished). No paths, no file names.
+        self._render_facts = {
+            "type": "timelapse",
+            "app_version": VERSION,
+            "source": src,
+            "size": size_key,
+            "fps": fps,
+            "format": ext,
+            "frames": self._n_frames,
+            "width": tw,
+            "height": th,
+        }
+        self._render_cancelled = False
+        self._render_btn.setText("Stop")
+        self._bar.setVisible(True)
+        self._bar.setValue(0)
+        self._status_lbl.setText("Rendering…")
+        self._proc = QProcess(self)
+        self._proc.setProcessChannelMode(QProcess.MergedChannels)
+        self._proc.readyReadStandardOutput.connect(self._on_proc_output)
+        self._proc.finished.connect(self._on_proc_finished)
+        self._proc.start(sys.executable, pargs)
+
+    def _on_proc_output(self):
+        data = bytes(self._proc.readAllStandardOutput()).decode("utf-8", "replace")
+        for line in data.splitlines():
+            if line.startswith("TIMELAPSE_PROGRESS:"):
+                try:
+                    i, n = line.split(":", 1)[1].strip().split("/")
+                    self._bar.setValue(int(int(i) * 100 / max(1, int(n))))
+                except Exception:
+                    pass
+
+    def _on_proc_finished(self, code, _status):
+        self._render_btn.setText("Render")
+        self._render_btn.setEnabled(True)
+        if self._render_cancelled:
+            self._bar.setVisible(False)
+            self._status_lbl.setText("Render cancelled.")
+            self._remove_partial()
+            return
+        if code == 0 and self._out_path and os.path.exists(self._out_path):
+            self._bar.setValue(100)
+            self._status_lbl.setText(f"Done: {os.path.basename(self._out_path)}")
+            _open_folder_in_file_manager(os.path.dirname(self._out_path))
+            if SETTINGS.value("crash_reporting_enabled", False, type=bool):
+                try:
+                    from modules import usage_report
+                    usage_report.send(getattr(self, "_render_facts", {"type": "timelapse"}))
+                except Exception:
+                    pass
+        else:
+            self._bar.setVisible(False)
+            self._status_lbl.setText("The timelapse didn't finish. The run log has the detail.")
+
+    def _remove_partial(self):
+        """Delete a half-written output file left by a cancelled/failed render."""
+        try:
+            if self._out_path and os.path.exists(self._out_path):
+                os.remove(self._out_path)
+        except OSError:
+            pass
+
+    def closeEvent(self, event):
+        """Stop a render in progress so closing the window never leaves an orphan
+        encoder running, and drop the half-written file."""
+        if self._proc is not None and self._proc.state() != QProcess.NotRunning:
+            self._render_cancelled = True
+            try:
+                self._proc.finished.disconnect(self._on_proc_finished)
+            except (TypeError, RuntimeError):
+                pass
+            self._proc.kill()
+            self._proc.waitForFinished(2000)
+            self._remove_partial()
+        super().closeEvent(event)
 
 
 class MaskEditorWindow(QMainWindow):

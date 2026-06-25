@@ -129,7 +129,7 @@ except Exception:
 
 # Always include the algorithm script, the version file, and the
 # modules/ and assets/ folders.
-add_data = [f'astro_clean_v5.py{sep}.', f'make_share_clip.py{sep}.', f'version.txt{sep}.',
+add_data = [f'astro_clean_v5.py{sep}.', f'make_share_clip.py{sep}.', f'timelapse_maker.py{sep}.', f'version.txt{sep}.',
             f'modules{sep}modules', f'assets{sep}assets']
 seen = set()
 

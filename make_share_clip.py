@@ -496,7 +496,7 @@ def make_share_clip(original_dir, cleaned_dir=None, out_path=None,
     lw = max(2, int(cw * 0.0035))     # divider line half-width
 
     if out_path is None:
-        out_path = os.path.join(original_dir, "share_clip.mp4")
+        out_path = os.path.join(original_dir, "STC_share_video.mp4")
     writer = _open_writer(out_path, cw, ch)
     print(f"  encoder: {writer.backend}", flush=True)
 
@@ -609,7 +609,7 @@ def make_red_trail_map(original_dir, out_path=None, masks_dir=None,
     if out_path is None:
         from modules.workspace import find_workspace
         ws = find_workspace(original_dir) or os.path.join(original_dir, "cleanr_workspace")
-        out_path = os.path.join(ws, "red_trail_map.jpg")
+        out_path = os.path.join(ws, "STC_red_trail_map.jpg")
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     cv2.imwrite(out_path, overlay, [cv2.IMWRITE_JPEG_QUALITY, 95])
     pct = 100.0 * (red > 0).mean()
@@ -648,7 +648,7 @@ def make_star_trail(cleaned_dir, out_path=None, stack=None):
         if stack is None:
             raise SystemExit(f"stacking failed (cleaned dir = {cleaned_dir})")
     if out_path is None:
-        out_path = os.path.join(cleaned_dir, "cleaned_star_trail.jpg")
+        out_path = os.path.join(cleaned_dir, "STC_cleaned_star_trail.jpg")
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     ok = cv2.imwrite(out_path, stack, [cv2.IMWRITE_JPEG_QUALITY, 95])
     if not ok:
