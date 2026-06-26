@@ -127,6 +127,11 @@
 
 <script>
 function fmtNum(n){return (n==null?0:n).toLocaleString();}
+function animate(el,target){var t=Math.round(target||0),d=1200,t0=null;
+  function step(ts){if(!t0)t0=ts;var p=Math.min(1,(ts-t0)/d);
+    el.textContent=Math.round(t*(1-Math.pow(1-p,3))).toLocaleString();
+    if(p<1)requestAnimationFrame(step);}
+  requestAnimationFrame(step);}
 function esc(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML;}
 function bars(id, items, unit){
   var el=document.getElementById(id);
@@ -150,11 +155,11 @@ document.addEventListener('click',function(e){
 fetch('https://api.startrailcleanr.com/stats.php',{cache:'no-store'})
   .then(function(r){return r.json();})
   .then(function(d){
-    document.getElementById('t-trails').textContent=fmtNum(d.trails_cleaned);
-    document.getElementById('t-hours').textContent=fmtNum(d.hours_saved);
-    document.getElementById('t-downloads').textContent=fmtNum(d.downloads_total);
-    document.getElementById('t-users').textContent=fmtNum(d.photographers!=null?d.photographers:d.users);
-    document.getElementById('t-countries').textContent=fmtNum(d.countries_count);
+    animate(document.getElementById('t-trails'),d.trails_cleaned);
+    animate(document.getElementById('t-hours'),d.hours_saved);
+    animate(document.getElementById('t-downloads'),d.downloads_total);
+    animate(document.getElementById('t-users'),d.photographers!=null?d.photographers:d.users);
+    animate(document.getElementById('t-countries'),d.countries_count);
     document.getElementById('t-countries').nextElementSibling.textContent=(d.countries_count===1?'Country':'Countries');
     bars('c-platforms', d.downloads_by_platform, 'pct');
     bars('c-formats', d.formats, 'pct');
