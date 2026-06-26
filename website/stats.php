@@ -103,7 +103,8 @@ function github_downloads($cache, $ttl) {
     return array('total' => 0, 'by_platform' => array());
 }
 
-$trails = 0; $frames_sum = 0; $runs = 0; $timelapses = 0; $gpu_runs = 0; $no_exif = 0;
+$trails = 0; $runs = 0; $timelapses = 0; $no_exif = 0;
+$real_runs = 0; $real_frames = 0; $real_trails = 0; $real_gpu = 0;  // runs over 20 frames only
 $users = array();
 $fmt = array();
 $cam = array(); $lens = array(); $focal = array(); $country = array();
@@ -124,9 +125,19 @@ if (is_readable($REPORTS)) {
             $type = isset($r['type']) ? $r['type'] : 'run';
             if ($type === 'timelapse') { $timelapses++; continue; }
             $runs++;
-            $trails     += isset($r['trails']) ? (int) $r['trails'] : 0;
-            $frames_sum += isset($r['frames']) ? (int) $r['frames'] : 0;
-            if (isset($r['gpu']) && $r['gpu'] === true) $gpu_runs++;
+            $tr = isset($r['trails']) ? (int) $r['trails'] : 0;
+            $fr = isset($r['frames']) ? (int) $r['frames'] : 0;
+            $trails += $tr;
+            // Short test batches (20 frames or fewer -- the app tells people to
+            // run a short batch before the full job) would skew the typical-run
+            // facts, so exclude them from those averages. Trails still count in
+            // the headline total above.
+            if ($fr > 20) {
+                $real_runs++;
+                $real_frames += $fr;
+                $real_trails += $tr;
+                if (isset($r['gpu']) && $r['gpu'] === true) $real_gpu++;
+            }
             $f = isset($r['input_format']) ? strtolower($r['input_format']) : '';
             if ($f !== '') { $L = format_label($f); $fmt[$L] = (isset($fmt[$L]) ? $fmt[$L] : 0) + 1; }
             if (empty($r['camera'])) $no_exif++;
@@ -162,10 +173,10 @@ echo json_encode(array(
     'cameras'               => ranked($cam),
     'lenses'                => ranked($lens),
     'focal_lengths'         => ranked($focal),
-    'runs'                  => $runs,
-    'avg_frames'            => $runs ? (int) round($frames_sum / $runs) : 0,
-    'trails_per_frame'      => $frames_sum ? round($trails / $frames_sum, 1) : 0,
-    'gpu_pct'               => $runs ? (int) round($gpu_runs * 100 / $runs) : 0,
+    'runs'                  => $real_runs,
+    'avg_frames'            => $real_runs ? (int) round($real_frames / $real_runs) : 0,
+    'trails_per_frame'      => $real_frames ? round($real_trails / $real_frames, 1) : 0,
+    'gpu_pct'               => $real_runs ? (int) round($real_gpu * 100 / $real_runs) : 0,
     'timelapses'            => $timelapses,
     'generated'             => gmdate('c'),
 ));
