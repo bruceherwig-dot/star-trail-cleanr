@@ -4684,34 +4684,74 @@ class MainWindow(QMainWindow):
 
     # ── Mask editor ──────────────────────────────────────────────────────────
 
-    def _open_timelapse_window(self, cleaned_folder, original_folder=None):
+    def _open_timelapse_window(self, cleaned_folder, original_folder=None,
+                               expect_summary=False):
         """Open the Timelapse window on the just-cleaned frames. Held on self so
         it isn't garbage-collected while the user configures and renders. The
-        original (input) folder is offered as an alternate frame source."""
+        original (input) folder is offered as an alternate frame source.
+
+        expect_summary=True (called at run end) means the Run Complete summary
+        will appear next to it, so the two are laid out side by side; False (the
+        Create Timelapse button, no run) centers the timelapse on the main window."""
         if original_folder is None:
             original_folder = self._folder_input.text().strip() or None
         self._timelapse_window = TimelapseWindow(cleaned_folder, original_folder, self)
         win = self._timelapse_window
+        # When it closes, drop the reference and re-place whatever is left (so a
+        # still-open summary re-centers).
+        win.finished.connect(
+            lambda *_: (setattr(self, "_timelapse_window", None),
+                        self._arrange_post_run()))
         win.show()
+        # Placed once it reports its real size (deferred), see _arrange_post_run.
+        QTimer.singleShot(0, lambda: self._arrange_post_run(expect_summary=expect_summary))
 
-        def _place():
-            # Sit over the Finish Summary but shifted right (left edge near the
-            # window's horizontal center) and up toward the top, so the estimate,
-            # Star Log link and timing on the left stay visible. Deferred so the
-            # dialog reports its real size; clamped so it never leaves the screen.
-            pf = self.frameGeometry()
-            if not (pf.isValid() and pf.width() > 0):
-                return
-            x = pf.x() + pf.width() // 2
-            y = pf.y() + 80
-            scr = win.screen()
-            if scr is not None:
-                ag = scr.availableGeometry()
-                x = max(ag.x(), min(x, ag.x() + ag.width() - win.width()))
-                y = max(ag.y(), min(y, ag.y() + ag.height() - win.height()))
-            win.move(x, y)
+    def _arrange_post_run(self, expect_summary=False):
+        """Place the post-run summary dialog and the timelapse window relative to the
+        main (STC) window:
 
-        QTimer.singleShot(0, _place)
+          * one of them alone  -> centered on the main window;
+          * both present       -> side by side over the main window, summary on the
+            LEFT and timelapse on the RIGHT, a 50px gap between, each centered
+            top-to-bottom, never overlapping. If the pair is wider than the screen
+            it is centered together and clamped on screen.
+
+        The main window itself is never moved. expect_summary reserves the left slot
+        for the summary that is about to appear at run end, so the timelapse opens in
+        its final right-hand spot instead of centering first and then jumping."""
+        GAP = 50
+        summ = getattr(self, "_run_complete_dlg", None)
+        summ = summ if (summ is not None and summ.isVisible()) else None
+        tl = getattr(self, "_timelapse_window", None)
+        tl = tl if (tl is not None and tl.isVisible()) else None
+        pf = self.frameGeometry()
+        if not (pf.isValid() and pf.width() > 0):
+            return
+        scr = self.screen()
+        ag = scr.availableGeometry() if scr is not None else pf
+
+        def _clampx(x, w):
+            return max(ag.x(), min(x, ag.x() + ag.width() - w))
+
+        def _vcenter(win):
+            return max(ag.y(), min(pf.y() + (pf.height() - win.height()) // 2,
+                                   ag.y() + ag.height() - win.height()))
+
+        def _center(win):
+            win.move(_clampx(pf.x() + (pf.width() - win.width()) // 2, win.width()),
+                     _vcenter(win))
+
+        summ_w = summ.width() if summ is not None else (560 if expect_summary else 0)
+        if (summ is not None or (expect_summary and summ_w)) and tl is not None:
+            total = summ_w + GAP + tl.width()
+            left = _clampx(pf.x() + (pf.width() - total) // 2, total)
+            if summ is not None:
+                summ.move(left, _vcenter(summ))
+            tl.move(left + summ_w + GAP, _vcenter(tl))
+        elif summ is not None:
+            _center(summ)
+        elif tl is not None:
+            _center(tl)
 
     def _open_mask_editor(self):
         """Step 3 Create/Edit Mask button. Open the separate MaskEditorWindow
@@ -5782,7 +5822,7 @@ class MainWindow(QMainWindow):
         if (getattr(self, "_make_timelapse_chk", None) is not None
                 and self._make_timelapse_chk.isChecked()):
             try:
-                self._open_timelapse_window(output_folder)
+                self._open_timelapse_window(output_folder, expect_summary=True)
             except Exception:
                 pass
         # Finalize the share outputs: the in-run stacker renders the star trail + video
@@ -6010,8 +6050,14 @@ class MainWindow(QMainWindow):
         from PySide6.QtWidgets import QDialog
         dlg = QDialog(self)
         dlg.setWindowTitle("Run Complete")
-        dlg.setModal(True)
+        # Non-modal: it no longer locks the app, so a timelapse window beside it
+        # stays usable while the summary is open.
+        dlg.setModal(False)
         dlg.setMinimumWidth(560)
+        self._run_complete_dlg = dlg
+        dlg.finished.connect(
+            lambda *_: (setattr(self, "_run_complete_dlg", None),
+                        self._arrange_post_run()))
         dlg.setStyleSheet(f"QDialog {{ background-color: {LIGHT_PANEL_BG}; }}")
 
         v = QVBoxLayout(dlg)
@@ -6081,26 +6127,12 @@ class MainWindow(QMainWindow):
         btn_row.addWidget(close_btn)
         v.addLayout(btn_row)
 
-        # Center over the main window. The centering must run AFTER the
-        # dialog's layout has fully rendered — adjustSize() before exec()
-        # under-reports height when the body has wrapped text or a newly
-        # added section, so we use a deferred QTimer.singleShot(0, ...)
-        # which fires once the dialog is on screen and dlg.size() returns
-        # real values. frameGeometry() on the parent includes the title
-        # bar so the vertical math is what the user actually sees.
-        def _center_dialog():
-            """Move the run-complete dialog to the center of the main window.
-            Deferred via QTimer so it runs after the dialog is on screen and
-            reports real width/height (see the comment above)."""
-            parent_frame = self.frameGeometry()
-            if not (parent_frame.isValid() and parent_frame.width() > 0):
-                return
-            dx = parent_frame.x() + (parent_frame.width() - dlg.width()) // 2
-            dy = parent_frame.y() + (parent_frame.height() - dlg.height()) // 2
-            dlg.move(dx, dy)
-
-        QTimer.singleShot(0, _center_dialog)
-        dlg.exec()
+        # Show non-modal and place it: alone -> centered on the main window; with a
+        # timelapse window open -> side by side (summary left, timelapse right). The
+        # placement is deferred via QTimer so it runs once the dialog is on screen and
+        # reports its real size (adjustSize() under-reports a wrapped body before show).
+        dlg.show()
+        QTimer.singleShot(0, self._arrange_post_run)
 
     def _write_run_summary(self):
         """Write a plain-text run summary into <output>/STC Extras/."""
