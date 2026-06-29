@@ -45,3 +45,10 @@ venv/
 build/
 dist/
 *.spec
+
+# Scratch / backups (kept on disk, not committed)
+archive/
+ci_watch_*.log
+viz_*_out.txt
+*_backup*.pt
+*_backup*.py
