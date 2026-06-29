@@ -27,10 +27,17 @@ function add_user(&$map, $key, $id) {
     $map[$key][$id] = true;
 }
 
-function ranked($map) {
+function ranked($map, $tiebreak = 'alpha') {
+    // Rank by unique-user count (descending). Break ties so the order is stable
+    // and sensible: 'numeric' for focal lengths ("14 mm" -> 14, ascending, so 6
+    // sorts before 10), 'alpha' (default) for names (cameras, lenses, countries).
     $out = array();
     foreach ($map as $k => $set) $out[] = array('name' => $k, 'count' => count($set));
-    usort($out, function ($a, $b) { return $b['count'] - $a['count']; });
+    usort($out, function ($a, $b) use ($tiebreak) {
+        if ($a['count'] !== $b['count']) return $b['count'] - $a['count'];
+        if ($tiebreak === 'numeric') return ((int) $a['name']) - ((int) $b['name']);
+        return strcasecmp($a['name'], $b['name']);
+    });
     return $out;
 }
 
@@ -44,6 +51,34 @@ function clean_camera($s) {
     }
     if ($out) $out[0] = ucfirst(strtolower($out[0]));   // tidy the brand, keep model codes as-is
     return implode(' ', $out);
+}
+
+function country_name($code) {
+    // Turn a 2-letter ISO country code into a full name for the stats page.
+    // Uses PHP intl for complete coverage when it's available; otherwise a
+    // common-country table; and falls back to the raw code for anything unmapped.
+    $code = strtoupper(trim((string) $code));
+    if ($code === '') return $code;
+    if (class_exists('Locale')) {
+        $n = @Locale::getDisplayRegion('-' . $code, 'en');
+        if (is_string($n) && $n !== '' && strtoupper($n) !== $code) return $n;
+    }
+    static $N = array(
+        'US'=>'United States','CA'=>'Canada','MX'=>'Mexico','GB'=>'United Kingdom','IE'=>'Ireland',
+        'FR'=>'France','DE'=>'Germany','AT'=>'Austria','CH'=>'Switzerland','NL'=>'Netherlands',
+        'BE'=>'Belgium','LU'=>'Luxembourg','ES'=>'Spain','PT'=>'Portugal','IT'=>'Italy',
+        'GR'=>'Greece','SE'=>'Sweden','NO'=>'Norway','DK'=>'Denmark','FI'=>'Finland',
+        'IS'=>'Iceland','PL'=>'Poland','CZ'=>'Czechia','SK'=>'Slovakia','HU'=>'Hungary',
+        'RO'=>'Romania','BG'=>'Bulgaria','HR'=>'Croatia','SI'=>'Slovenia','RS'=>'Serbia',
+        'UA'=>'Ukraine','RU'=>'Russia','EE'=>'Estonia','LV'=>'Latvia','LT'=>'Lithuania',
+        'TR'=>'Turkey','IL'=>'Israel','AE'=>'United Arab Emirates','SA'=>'Saudi Arabia',
+        'IN'=>'India','PK'=>'Pakistan','CN'=>'China','HK'=>'Hong Kong','TW'=>'Taiwan',
+        'JP'=>'Japan','KR'=>'South Korea','TH'=>'Thailand','VN'=>'Vietnam','PH'=>'Philippines',
+        'MY'=>'Malaysia','SG'=>'Singapore','ID'=>'Indonesia','AU'=>'Australia','NZ'=>'New Zealand',
+        'BR'=>'Brazil','AR'=>'Argentina','CL'=>'Chile','CO'=>'Colombia','PE'=>'Peru',
+        'ZA'=>'South Africa','EG'=>'Egypt','MA'=>'Morocco','NG'=>'Nigeria','KE'=>'Kenya',
+    );
+    return isset($N[$code]) ? $N[$code] : $code;
 }
 
 function format_label($k) {
@@ -147,7 +182,7 @@ if (is_readable($REPORTS)) {
                 if ($ln !== '' && !preg_match('/^0+(\.0+)?\s*mm/i', $ln) && stripos($ln, 'f/0') === false) add_user($lens, $ln, $id);
             }
             if (isset($r['focal_length'])) add_user($focal, ((int) round($r['focal_length'])) . ' mm', $id);
-            if ($ctry !== '') add_user($country, $ctry, $id);
+            if ($ctry !== '') add_user($country, country_name($ctry), $id);
         }
         fclose($fh);
     }
@@ -159,6 +194,17 @@ $fmt_list = array();
 foreach ($fmt as $k => $n) $fmt_list[] = array('name' => $k, 'count' => $n);
 usort($fmt_list, function ($a, $b) { return $b['count'] - $a['count']; });
 
+// Photographers whose country couldn't be determined (reported before GeoIP went
+// live, or the lookup failed; the IP is discarded so it can't be backfilled).
+// Shown as an "Unknown" row pinned to the bottom so the country breakdown
+// reconciles with the photographer count, but NOT counted as a country.
+$located = array();
+foreach ($country as $set) { foreach ($set as $uid => $_) $located[$uid] = true; }
+$unknown_users = 0;
+foreach ($users as $uid => $_) { if (!isset($located[$uid])) $unknown_users++; }
+$countries_list = ranked($country);
+if ($unknown_users > 0) $countries_list[] = array('name' => 'Unknown', 'count' => $unknown_users);
+
 echo json_encode(array(
     'trails_cleaned'        => $BASELINE_TRAILS + $trails,
     'hours_saved'           => $BASELINE_HOURS + (int) round($trails * 30 / 3600),
@@ -167,12 +213,12 @@ echo json_encode(array(
     'downloads_total'       => $gh['total'],
     'downloads_by_platform' => $gh['by_platform'],
     'countries_count'       => count($country),
-    'countries'             => ranked($country),
+    'countries'             => $countries_list,
     'formats'               => $fmt_list,
     'no_exif_pct'           => $runs ? (int) round($no_exif * 100 / $runs) : 0,
     'cameras'               => ranked($cam),
     'lenses'                => ranked($lens),
-    'focal_lengths'         => ranked($focal),
+    'focal_lengths'         => ranked($focal, 'numeric'),
     'runs'                  => $real_runs,
     'avg_frames'            => $real_runs ? (int) round($real_frames / $real_runs) : 0,
     'trails_per_frame'      => $real_frames ? round($real_trails / $real_frames, 1) : 0,
