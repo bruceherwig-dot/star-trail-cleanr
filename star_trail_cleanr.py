@@ -4366,6 +4366,20 @@ class MainWindow(QMainWindow):
         self._open_folder_btn.clicked.connect(self._open_output_folder)
         btn_row.addWidget(self._open_folder_btn, 1)
 
+        # Same blue "Create Timelapse" as the Setup page. Hidden during the run;
+        # shown after it ends only when the cleaned output has frames to build
+        # from (see _switch_to_back_btn / _output_has_frames).
+        self._run_timelapse_btn = QPushButton("Create Timelapse")
+        self._run_timelapse_btn.setFixedHeight(48)
+        self._run_timelapse_btn.setStyleSheet(
+            f"QPushButton {{ background-color: {BRAND_HEADING_BLUE}; color: white; font-size: 22px; "
+            f"font-weight: bold; border-radius: 6px; border: none; }}"
+            f"QPushButton:hover {{ background-color: {BRAND_HEADING_HOVER}; }}"
+        )
+        self._run_timelapse_btn.clicked.connect(self._open_timelapse_from_run)
+        self._run_timelapse_btn.setVisible(False)
+        btn_row.addWidget(self._run_timelapse_btn, 1)
+
         layout.addLayout(btn_row)
 
         self._stack.addWidget(page)
@@ -5162,6 +5176,7 @@ class MainWindow(QMainWindow):
             pass
         self._cancel_btn.clicked.connect(self._cancel_run)
         self._cancel_btn.show()
+        self._run_timelapse_btn.setVisible(False)   # reappears post-run if frames exist
         self._stack.setCurrentIndex(1)
         self._header_spinner.setVisible(True)
 
@@ -5586,6 +5601,9 @@ class MainWindow(QMainWindow):
         except RuntimeError:
             pass
         self._cancel_btn.clicked.connect(self._go_to_setup)
+        # Reveal the run-page "Create Timelapse" button when the cleaned output has
+        # frames to build from, so both blue buttons are available post-run.
+        self._run_timelapse_btn.setVisible(self._output_has_frames())
 
     def _on_error(self, msg):
         """Worker error signal. Stop the timers, append the error plus an
@@ -6482,6 +6500,28 @@ class MainWindow(QMainWindow):
             self._error_label.setText("No cleaned frames yet. Run cleaning first.")
             return
         self._open_timelapse_window(folder)
+
+    def _output_has_frames(self):
+        """True when this run's output folder holds at least one cleaned image
+        frame (so a timelapse can be built from it). Drives whether the run page's
+        Create Timelapse button is shown."""
+        folder = getattr(self, '_done_output_folder', None)
+        if not folder or not os.path.isdir(folder):
+            return False
+        try:
+            return any(e.is_file() and e.name.lower().endswith(
+                ('.jpg', '.jpeg', '.png', '.tif', '.tiff'))
+                for e in os.scandir(folder))
+        except OSError:
+            return False
+
+    def _open_timelapse_from_run(self):
+        """Run page "Create Timelapse" button. Open the Timelapse window on this
+        run's just-cleaned frames; it places itself beside the summary if that is
+        still open, otherwise centered (see _arrange_post_run)."""
+        folder = getattr(self, '_done_output_folder', None)
+        if folder and os.path.isdir(folder):
+            self._open_timelapse_window(folder)
 
     def _open_output_folder(self):
         """Processing page / run-complete dialog "Open Cleaned Folder" button.
