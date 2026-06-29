@@ -1,5 +1,6 @@
 """
-Trail repair — Star Bridge: per-trail sparse optical flow morph from N-1/N+1.
+Trail repair (Star Bridge): fill a trail's pixels from neighbors N-1/N+1 -- slide the
+sky to follow star motion, but keep the static foreground exactly in place.
 
 THE CORE PROBLEM
 ----------------
@@ -10,26 +11,33 @@ position (x, y) in frame N-1 will be at a slightly different position in frame N
 Copying neighbor pixels directly without accounting for that motion would smear every
 star in the repaired region.
 
-HOW STAR BRIDGE WORKS
-----------------------
-For each detected trail, Star Bridge measures the local star motion at that specific
-region of the frame using sparse Lucas-Kanade optical flow:
+HOW IT WORKS
+------------
+1. MEASURE the local star motion (dx,dy) from N-1 to N+1 with a cascade (see
+   _detect_shift / _phase_shift / _track_stars): detect-and-measure votes on the common
+   shift of the star streaks, phase correlation measures it on the whole patch, and the
+   shift is trusted only when the two AGREE (or one is strongly confident). This works in
+   low-feature regions where the old corner-tracking (Lucas-Kanade) failed.
 
-1. Find bright corner features (stars) in the prev frame (N-1) within a padded
-   bounding box around the trail. Mask out the trail pixels so the tracker only
-   latches onto real stars, not the trail itself.
+2. ROUTE each gap pixel by MOTION, not brightness (the still-vs-moving split):
+   - Where the two clean neighbors AGREE, the scene did not move between them
+     (foreground, ground, still sky) -> keep it UNSHIFTED, so a horizon or foreground
+     line stays exactly put (the slide would step it). Foreground-agnostic: a light rock
+     or building is kept the same as a dark hill.
+   - Where they DIFFER, something moved (a star) -> use the SLID neighbor so the star
+     lands at its frame-N position. Shipped combine is "single_shift" (shift the
+     colour-closest neighbor); "average" blends both shifted neighbors.
+   - Small bright blobs the slide adds over a still background are protected as stars;
+     larger bright regions (glow slid over foreground) are not.
 
-2. Track those star points forward to the next frame (N+1). Discard any tracked
-   points with implausible displacements (too small = not moving stars, too large =
-   tracking noise). The median displacement of the surviving points is the local
-   star motion vector (dx, dy) from N-1 to N+1.
+3. LEVEL brightness. Each borrowed pixel is pre-levelled to this frame's local sky colour
+   (per-source). A final ring-levelling absorbs the small frame-to-frame sky drift, but
+   CAPPED to the drift actually measured per-source (plus a small margin), so it can never
+   crush a fill to black or blow it out bright by matching a collar that is not the same
+   content as the patch (a trail crossing dark foreground).
 
-3. Shift the prev frame (N-1) FORWARD by half that motion (dx/2, dy/2), and shift
-   the next frame (N+1) BACKWARD by half that motion (-dx/2, -dy/2). Both neighbors
-   now have their stars aligned to where they would be in frame N.
-
-4. Average the two shifted neighbors. Paste the averaged pixels into frame N at the
-   trail mask locations only. The rest of frame N is untouched.
+4. CLEAN UP isolated near-black dots left at sharp foreground edges (where the edge
+   jittered between neighbors) by replacing them with their local median.
 
 WHY THE GIVE-UP FILL IS SAFE
 ----------------------------
@@ -55,16 +63,15 @@ estimate for the whole trail.
 
 FALLBACKS IN ORDER
 ------------------
-1. Star Bridge (two neighbors, LK tracking succeeds)  -> shift both neighbors to
-   frame N's moment and blend / per-pixel-select (best quality).
-2. Two neighbors, LK tracking fails                   -> keep the original pixels
-   (so stars in the fat part of the mask survive) and sky-color-fill just the
-   bright streak.
-3. Single neighbor (first or last frame of batch)     -> plain copy of that
-   neighbor's patch, no tracking and no shift.
-4. No usable neighbor / crossing where both neighbors are dirty / a borrowed pixel
-   that still looks like trail -> sky-color give-up fill (local sky + grain),
-   falling back to pure black only when there is too little sky to sample.
+1. Two neighbors, shift measured -> still-vs-moving routed fill (best quality).
+2. Two neighbors, shift NOT measured -> paste the colour-closest neighbor (raw_clean).
+3. Single neighbor (first/last frame) -> shift that one neighbor onto frame N, or a
+   plain levelled copy if the shift can't be measured.
+4. Crossing where both neighbors carry the trail -> paint local sky colour + grain (the
+   "crayon" _sky_fill), falling back to black only when there is too little sky to sample.
+
+NOTE: the old warm-pixel cleanup (overwrite "warm + bright-red" pixels as leftover trail)
+is DISABLED -- a warm star read identically, so it deleted stars.
 """
 import math
 import time
@@ -92,6 +99,24 @@ MAX_DISP  = 60.0  # maximum plausible star displacement N-1 to N+1 (px)
 MIN_STARS = 5     # minimum tracked stars needed to trust the shift
 TRAIL_WARM_MARGIN   = 20  # how much warmer than local sky R-B counts as a trail remnant
 TRAIL_BRIGHT_THRESH = 50  # minimum R value to be considered trail-bright
+# Ring-levelling cap: the final ring-levelling nudges the filled patch to match a thin collar
+# around the trail, to absorb small frame-to-frame SKY drift. Where the trail crosses dark
+# foreground (branch, horizon, rock, building) that collar is NOT sky, and an uncapped match
+# crushed the fill to BLACK (or blew it out bright). Cap the nudge to the drift we already
+# MEASURED per-source (same spot, this frame vs neighbor) plus a small margin -- it adapts to
+# each scene and refuses any larger match (a content mismatch, not drift), keeping the fill.
+_RING_DRIFT_MARGIN   = 3   # levels the ring may add beyond the measured per-source drift
+_RING_OFF_CAP        = 6   # fallback cap when no per-source drift was measurable
+# Still-vs-moving routing: judge each gap pixel by MOTION, not brightness. Where the two clean
+# neighbors agree, the scene did not move (ground/hill/trunk/still sky) -> keep it unshifted so
+# the foreground stays exactly put; where they differ, a star moved -> keep the slid fill.
+_STILL_ROUTING       = True  # master switch for the motion-based fill routing
+_STILL_TOL           = 18    # neighbors agree within this (max-channel) = "still" (didn't move)
+_STAR_MARGIN         = 15    # slid fill this much brighter than the still scene = an added star
+_STAR_MAX_AREA       = 500   # a protected slid star blob is at most this big (px); larger bright
+                             # regions are glow slid over foreground -> still routed to unshifted
+_SPECKLE_DARK        = 25    # a patch pixel below this max-channel may be edge-speckle residue
+_SPECKLE_MARGIN      = 30    # ...cleaned only if its local median is this much brighter (isolated)
 # Collar for the ring-levelling step: the repaired patch is brightness-matched to
 # the sky in a thin ring hugging the trail (dilate by 15 px, minus the trail
 # itself). Local on purpose -- a whole-window match drags warm twilight fills gray.
@@ -236,52 +261,83 @@ def _trail_streak(region, comp_mask):
 # Failure reasons: too few feature points found, too few tracked, or all
 # displacements outside [MIN_DISP, MAX_DISP]. Log field: seg.n_stars.
 
-def _track_stars(prev: np.ndarray, nxt: np.ndarray, trail_mask=None):
-    """Track stars from prev to nxt. Returns (dx, dy, success, n_stars_tracked).
+def _detect_shift(gp, gn):
+    """Local star motion by DETECTING the star streaks as objects and voting on their
+    shared displacement. A long-exposure star is a smooth streak with no corner for
+    Lucas-Kanade to grab, but it is a distinct bright blob whose centre moves by the
+    inter-frame motion -- so even one clean star yields the shift, and many vote for a
+    robust common shift. The lone trail streak is outvoted by the stars.
 
-    trail_mask: boolean array same shape as patch. When provided, those pixels
-    are zeroed in the search image so the tracker ignores trail features and
-    finds only stars.
+    gp, gn: 8-bit grayscale patches (prev, next). Returns ((dx,dy) or None, n_agreeing).
     """
-    g_prev = cv2.cvtColor(_to_8bit(prev), cv2.COLOR_BGR2GRAY)
-    g_next = cv2.cvtColor(_to_8bit(nxt),  cv2.COLOR_BGR2GRAY)
+    def streaks(g):
+        sky = np.median(g)
+        thr = max(sky + 22, np.percentile(g, 92))
+        b = cv2.morphologyEx((g > thr).astype(np.uint8), cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+        n, lab, st, _ = cv2.connectedComponentsWithStats(b, 8)
+        out = []
+        for k in range(1, n):
+            if st[k, 4] < 6 or st[k, 4] > 4000:
+                continue
+            ys, xs = np.where(lab == k)
+            w = g[ys, xs].astype(np.float64)
+            out.append((float((xs * w).sum() / w.sum()),
+                        float((ys * w).sum() / w.sum()), float(w.sum())))
+        return out
+    sp, sn = streaks(gp), streaks(gn)
+    cands = []
+    for px, py, pw in sp:
+        for nx, ny, nw in sn:
+            dx, dy = nx - px, ny - py
+            if MIN_DISP <= (dx * dx + dy * dy) ** 0.5 <= MAX_DISP:
+                cands.append((dx, dy, min(pw, nw)))
+    if not cands:
+        return None, 0
+    best = None
+    for dx, dy, _ in cands:
+        v = [c for c in cands if (c[0] - dx) ** 2 + (c[1] - dy) ** 2 <= 16]
+        s = sum(c[2] for c in v)
+        if best is None or s > best[0]:
+            best = (s, np.average([c[0] for c in v], weights=[c[2] for c in v]),
+                       np.average([c[1] for c in v], weights=[c[2] for c in v]), len(v))
+    return (best[1], best[2]), best[3]
 
-    if trail_mask is not None and trail_mask.any():
-        g_search = g_prev.copy()
-        g_search[trail_mask] = 0
-    else:
-        g_search = g_prev
 
-    # Find up to 500 bright corner features (stars). qualityLevel 0.005 is deliberately
-    # low so faint stars still qualify; minDistance 5 keeps picks from clustering on one
-    # bright star. Fewer than MIN_STARS features = not enough to trust a motion estimate.
-    pts = cv2.goodFeaturesToTrack(
-        g_search, maxCorners=500, qualityLevel=0.005,
-        minDistance=5, blockSize=7
-    )
-    if pts is None or len(pts) < MIN_STARS:
-        return 0.0, 0.0, False, 0
+def _phase_shift(gp, gn):
+    """Local star motion via phase correlation (FFT, sub-pixel). Reads the whole patch's
+    frequency pattern rather than tracking points, so it stays accurate on streaky horizon
+    stars where corner tracking returns garbage. Returns ((dx,dy) or None, response 0..~1).
+    """
+    h, w = gp.shape
+    if h < 24 or w < 24:
+        return None, 0.0
+    win = cv2.createHanningWindow((w, h), cv2.CV_32F)
+    (dx, dy), resp = cv2.phaseCorrelate(gp.astype(np.float32), gn.astype(np.float32), win)
+    if not (MIN_DISP <= (dx * dx + dy * dy) ** 0.5 <= MAX_DISP):
+        return None, resp
+    return (dx, dy), resp
 
-    # Track each feature from prev to next. status==1 marks the points LK could follow.
-    pts1, status, _ = cv2.calcOpticalFlowPyrLK(g_prev, g_next, pts, None, **_LK_PARAMS)
-    good = (status.ravel() == 1)
-    if good.sum() < MIN_STARS:
-        return 0.0, 0.0, False, int(good.sum())
 
-    # Keep only displacements in the plausible star-motion band. Too small = a point
-    # that did not really move (noise, hot pixel); too large = a mistracked feature.
-    disp = (pts1[good] - pts[good]).reshape(-1, 2)
-    mag  = np.linalg.norm(disp, axis=1)
-    valid = (mag >= MIN_DISP) & (mag <= MAX_DISP)
-    if valid.sum() < MIN_STARS:
-        return 0.0, 0.0, False, int(valid.sum())
-
-    # Median (not mean) of the surviving displacements -> robust to any stray outlier
-    # that slipped through the band. This is the local prev->next star motion vector.
-    return (float(np.median(disp[valid, 0])),
-            float(np.median(disp[valid, 1])),
-            True,
-            int(valid.sum()))
+def _track_stars(prev: np.ndarray, nxt: np.ndarray, trail_mask=None):
+    """Local star motion prev->next as (dx, dy, success, n_stars). Cascade of two methods
+    that do NOT need trackable corners (unlike the old Lucas-Kanade tracker, which slid off
+    streaky horizon stars and mis-placed them): detect-and-measure and phase correlation.
+    The shift is trusted only when the two AGREE (within a few px), or when one is strongly
+    confident on its own; otherwise success is False and the caller falls back to a plain
+    neighbor paste rather than sliding the wrong way. trail_mask is accepted for signature
+    compatibility -- the detect vote ignores the lone trail streak, so it isn't masked here.
+    """
+    gp = cv2.cvtColor(_to_8bit(prev), cv2.COLOR_BGR2GRAY)
+    gn = cv2.cvtColor(_to_8bit(nxt),  cv2.COLOR_BGR2GRAY)
+    Sd, votes = _detect_shift(gp, gn)
+    Sp, resp = _phase_shift(gp, gn)
+    if Sd is not None and Sp is not None and (Sd[0] - Sp[0]) ** 2 + (Sd[1] - Sp[1]) ** 2 <= 25:
+        return (Sd[0] + Sp[0]) / 2.0, (Sd[1] + Sp[1]) / 2.0, True, int(votes)   # both agree
+    if Sp is not None and resp >= 0.6:
+        return float(Sp[0]), float(Sp[1]), True, 1                              # phase strong alone
+    if Sd is not None and votes >= 4:
+        return float(Sd[0]), float(Sd[1]), True, int(votes)                     # many stars agree
+    return 0.0, 0.0, False, int(votes)                                          # not confident -> paste
 
 
 # ── Component splitting (long trails into sub-segments) ───────────────────────
@@ -716,6 +772,31 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                     synth = _level(patch_next, _off_n)
                     _method = "next_only"
 
+            # ── Still-vs-moving routing: where the two CLEAN neighbors AGREE, the scene did
+            # not move between them (ground, hill, trunk, still sky) -- keep it UNSHIFTED so the
+            # foreground stays exactly put (the slide would displace it, stepping a horizon line).
+            # Where they differ, something moved (a star) -- keep the slid fill so it lands right.
+            # Judges by motion, not brightness, so light foreground is kept like dark.
+            if (_STILL_ROUTING and _rp is not None and _rn is not None
+                    and raw_clean is not None):
+                _still = ((~_pdirty) & (~_ndirty) &
+                          (np.abs(_rp.max(axis=2).astype(np.int16) -
+                                  _rn.max(axis=2).astype(np.int16)) < _STILL_TOL))
+                # Protect slid stars: a small bright blob the slide adds over the still
+                # background is a star at its correct (slid) position, so DON'T overwrite it
+                # with the star-free unshifted scene. Large bright regions (glow slid over
+                # foreground) are not stars and stay routed.
+                _extra = (_still & ((synth.max(axis=2).astype(np.int16) -
+                                     raw_clean.max(axis=2).astype(np.int16)) > _STAR_MARGIN))
+                if _extra.any():
+                    _nl, _lab, _st, _ = cv2.connectedComponentsWithStats(
+                        _extra.astype(np.uint8), 8)
+                    for _k in range(1, _nl):
+                        if _st[_k, cv2.CC_STAT_AREA] <= _STAR_MAX_AREA:
+                            _still[_lab == _k] = False        # keep this slid star
+                if _still.any():
+                    synth[_still] = raw_clean[_still]
+
             _tp = time.perf_counter()
             # Paste the borrowed neighbor sky as-is. Brightness is corrected AFTER
             # all the fills below, in one ring-levelling step (see end of this loop)
@@ -724,34 +805,16 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
             # toward gray (the neighbor sky read red ~200 but shipped ~138 gray).
             result[y0:y1, x0:x1][comp_mask] = synth[comp_mask]
 
-            # ── Warm-pixel cleanup (still-trail remnants after warp) ──────────
-            # Airplane/satellite trails read warm: red channel noticeably above blue.
-            # Measure this region's own sky baseline (median red-minus-blue of the
-            # surrounding background) so the gate adapts to warm-toned skies and
-            # twilight gradients instead of using one fixed colour everywhere.
-            bg_pixels = frame[y0:y1, x0:x1][~comp_mask].astype(np.int32)
-            if len(bg_pixels) >= 10:
-                bg_rb = float(np.median(bg_pixels[:, 2] - bg_pixels[:, 0]))
-            else:
-                bg_rb = 0.0
-            warm_thresh = bg_rb + TRAIL_WARM_MARGIN
-
-            # A repaired pixel is still trail if it is both warmer than the local sky
-            # baseline (by TRAIL_WARM_MARGIN) AND bright enough in red. Channel index 2
-            # is red, index 0 is blue (OpenCV stores images as BGR).
-            filled = result[y0:y1, x0:x1].astype(np.int32)
-            still_trail = (comp_mask &
-                           (filled[..., 2] - filled[..., 0] > warm_thresh) &
-                           (filled[..., 2] > TRAIL_BRIGHT_THRESH))
-            # Borrowed pixel still looks like trail -> the neighbor we borrowed from
-            # had the trail here too. Crayon v2: paste the cleaner raw neighbor (native
-            # brightness) instead of a synthetic sky-color patch.
-            if still_trail.any():
-                if raw_clean is not None:
-                    result[y0:y1, x0:x1][still_trail] = raw_clean[still_trail]
-                else:
-                    _sky_fill(result[y0:y1, x0:x1], still_trail, comp_mask)
-            _still_trail_px = int(still_trail.sum())
+            # ── Warm-pixel cleanup: DISABLED (it was deleting stars) ──────────
+            # This step flagged "warm + bright-red" repaired pixels as leftover trail and
+            # overwrote them. A warm/pink STAR reads identically, so wherever a trail crossed
+            # a star it deleted the star. Measured on a full set: ~98% of what it removed was a
+            # star the slide had placed correctly; only ~1.6% was genuine trail with no clean
+            # source. Disabling it restores those stars -- the visible breaks in bright arcs,
+            # and the black/holed notches in single frames that hurt timelapse. Genuine
+            # both-dirty crossings are still handled by the AND-union block below.
+            still_trail = np.zeros(comp_mask.shape, dtype=bool)
+            _still_trail_px = 0
 
             # ── AND union mask: BOTH neighbors have the trail here (the crossing) ──
             # Pixels in only one neighbor's trail are already repaired above. Where both
@@ -792,9 +855,40 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
             if _ring_px.shape[0] >= 20 and _patch.shape[0] >= 20:
                 _off = (np.median(_ring_px, axis=0).astype(np.float32) -
                         np.median(_patch, axis=0).astype(np.float32))
+                # Cap the nudge to the frame-to-frame drift we ALREADY measured per-source
+                # (the same spot, this frame vs the neighbor), plus a small margin. That drift is
+                # the only legitimate correction and it ADAPTS to the scene (bright twilight vs
+                # dark night). A large ring offset with ~0 measured drift means the collar is not
+                # the same content as the patch -- a trail crossing dark foreground (branch,
+                # horizon, rock, building) -- so it is refused and the already-correct fill is
+                # kept: no black crush, no bright blow-out. _RING_OFF_CAP is the fallback only
+                # when no per-source drift was measurable (too little collar to compare).
+                _base_off = _off_n if _next_closer else _off_p
+                if _base_off is None:
+                    _base_off = _off_p if _off_p is not None else _off_n
+                if _base_off is not None:
+                    _cap = np.abs(_base_off) + _RING_DRIFT_MARGIN
+                else:
+                    _cap = float(_RING_OFF_CAP)
+                _off = np.clip(_off, -_cap, _cap)
                 result[y0:y1, x0:x1][comp_mask] = np.clip(
                     _patch.astype(np.float32) + _off, 0, _maxv).astype(frame.dtype)
                 _ring_off = [round(float(v), 1) for v in _off]
+
+            # ── Edge-speckle cleanup: isolated near-black dots left where a sharp foreground
+            # edge jittered between neighbors (those pixels weren't "still", so they kept the dark
+            # slid value). Where a patch pixel is near-black AND its local median is much brighter
+            # (an isolated dot in bright surroundings), replace it with that median. Safe: a real
+            # dark region medians dark (untouched); a star is bright (untouched). medianBlur ksize
+            # 5 supports 8- and 16-bit, so it works on TIFFs too.
+            _res = result[y0:y1, x0:x1]
+            _rmax = _res.max(axis=2).astype(np.int16)
+            _spk = comp_mask & (_rmax < _SPECKLE_DARK)
+            if _spk.any():
+                _med = cv2.medianBlur(_res, 5)
+                _spk &= (_med.max(axis=2).astype(np.int16) - _rmax > _SPECKLE_MARGIN)
+                if _spk.any():
+                    _res[_spk] = _med[_spk]
             _addt("paste_s", time.perf_counter() - _tp)
 
             if seg_info is not None:
