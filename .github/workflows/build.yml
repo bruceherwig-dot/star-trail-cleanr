@@ -40,7 +40,11 @@ jobs:
       - name: Install CPU-only PyTorch
         run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
       - name: Install dependencies
-        run: pip install pyinstaller opencv-python-headless 'numpy<2' pillow PySide6 ultralytics sahi nvidia-ml-py sentry-sdk tifffile scikit-image pyobjc-core rawpy
+        run: |
+          pip install pyinstaller 'numpy<2' pillow PySide6 ultralytics sahi nvidia-ml-py sentry-sdk tifffile scikit-image pyobjc-core rawpy
+          pip uninstall -y opencv-python opencv-python-headless opencv-contrib-python opencv-contrib-python-headless || true
+          pip install opencv-contrib-python-headless
+          python -c "import cv2,sys; print('cv2',cv2.__version__,'xphoto' if hasattr(cv2,'xphoto') else 'NO-XPHOTO'); sys.exit(0 if hasattr(cv2,'xphoto') else 1)"
       - name: Bake Sentry DSN
         env:
           SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
@@ -108,7 +112,11 @@ jobs:
       - name: Install CPU-only PyTorch
         run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
       - name: Install dependencies
-        run: pip install pyinstaller opencv-python-headless 'numpy<2' pillow PySide6 ultralytics sahi nvidia-ml-py sentry-sdk tifffile scikit-image pyobjc-core 'rawpy==0.25.1'
+        run: |
+          pip install pyinstaller 'numpy<2' pillow PySide6 ultralytics sahi nvidia-ml-py sentry-sdk tifffile scikit-image pyobjc-core 'rawpy==0.25.1'
+          pip uninstall -y opencv-python opencv-python-headless opencv-contrib-python opencv-contrib-python-headless || true
+          pip install opencv-contrib-python-headless
+          python -c "import cv2,sys; print('cv2',cv2.__version__,'xphoto' if hasattr(cv2,'xphoto') else 'NO-XPHOTO'); sys.exit(0 if hasattr(cv2,'xphoto') else 1)"
       - name: Bake Sentry DSN
         env:
           SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
@@ -161,7 +169,11 @@ jobs:
         # modules/gpu_pack.py _KNOWN_GOOD_CU128).
         run: pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cpu
       - name: Install dependencies
-        run: pip install pyinstaller opencv-python-headless 'numpy<2' pillow PySide6 ultralytics sahi nvidia-ml-py sentry-sdk tifffile scikit-image rawpy
+        run: |
+          pip install pyinstaller 'numpy<2' pillow PySide6 ultralytics sahi nvidia-ml-py sentry-sdk tifffile scikit-image rawpy
+          pip uninstall -y opencv-python opencv-python-headless opencv-contrib-python opencv-contrib-python-headless || true
+          pip install opencv-contrib-python-headless
+          python -c "import cv2,sys; print('cv2',cv2.__version__,'xphoto' if hasattr(cv2,'xphoto') else 'NO-XPHOTO'); sys.exit(0 if hasattr(cv2,'xphoto') else 1)"
       - name: GPU wheel gate
         # Prove the in-app GPU installer's download links actually resolve for the
         # torch version this build ships, using the app's own URL builder so it
@@ -244,7 +256,11 @@ jobs:
       - name: Install CPU-only PyTorch
         run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
       - name: Install dependencies
-        run: pip install pyinstaller opencv-python-headless 'numpy<2' pillow PySide6 ultralytics sahi nvidia-ml-py sentry-sdk tifffile scikit-image rawpy
+        run: |
+          pip install pyinstaller 'numpy<2' pillow PySide6 ultralytics sahi nvidia-ml-py sentry-sdk tifffile scikit-image rawpy
+          pip uninstall -y opencv-python opencv-python-headless opencv-contrib-python opencv-contrib-python-headless || true
+          pip install opencv-contrib-python-headless
+          python -c "import cv2,sys; print('cv2',cv2.__version__,'xphoto' if hasattr(cv2,'xphoto') else 'NO-XPHOTO'); sys.exit(0 if hasattr(cv2,'xphoto') else 1)"
       - name: Bake Sentry DSN
         env:
           SENTRY_DSN: ${{ secrets.SENTRY_DSN }}

@@ -209,3 +209,54 @@ def fix_hot_pixels(frames: List[np.ndarray], threshold: float = 2.0,
     # the Navier-Stokes algorithm.
     dilated = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (13, 13)))
     return [cv2.inpaint(f, dilated, 3, cv2.INPAINT_NS) for f in frames]
+
+
+def content_aware_fill(img, fill_mask, pad=40):
+    """Replace the white areas of ``fill_mask`` in ``img`` with a content-aware
+    fill that CONTINUES surrounding structure instead of smearing it.
+
+    This is for SKY stuck pixels. A plain inpaint diffuses inward from the edge,
+    which smears the thin star trails into a grey blob; a content-aware
+    (exemplar) fill reconstructs the local pattern, so a trail running past the
+    defect stays continuous and a dark gap stays dark.
+
+    Uses OpenCV-contrib's ``cv2.xphoto`` inpaint (Frequency-Selective
+    Reconstruction) when present, working on a small crop around each defect so
+    it stays fast. If the contrib build is ever missing it falls back to a plain
+    Navier-Stokes inpaint, so a missing dependency degrades gracefully and can
+    never crash a run.
+
+    Parameters
+    ----------
+    img
+        BGR 8-bit image. Returned cleaned; only masked pixels change.
+    fill_mask
+        8-bit mask, non-zero where pixels should be replaced.
+    pad
+        Pixels of surrounding context given to the fill around each defect.
+    """
+    if fill_mask is None or not np.any(fill_mask):
+        return img
+    out = img.copy()
+    has_xphoto = hasattr(cv2, "xphoto")
+    h, w = img.shape[:2]
+    n, _, stats, _ = cv2.connectedComponentsWithStats((fill_mask > 0).astype(np.uint8), 8)
+    for k in range(1, n):
+        x, y, bw, bh, _ = stats[k]
+        x0, y0 = max(x-pad, 0), max(y-pad, 0)
+        x1, y1 = min(x+bw+pad, w), min(y+bh+pad, h)
+        crop = out[y0:y1, x0:x1]
+        m = fill_mask[y0:y1, x0:x1]
+        try:
+            if has_xphoto:
+                # xphoto convention: non-zero = KNOWN (keep), zero = inpaint.
+                dst = crop.copy()
+                cv2.xphoto.inpaint(crop, cv2.bitwise_not(m), dst, cv2.xphoto.INPAINT_FSR_BEST)
+                crop[m > 0] = dst[m > 0]
+            else:
+                rep = cv2.inpaint(crop, m, 3, cv2.INPAINT_NS)
+                crop[m > 0] = rep[m > 0]
+        except Exception:
+            rep = cv2.inpaint(crop, m, 3, cv2.INPAINT_NS)
+            crop[m > 0] = rep[m > 0]
+    return out

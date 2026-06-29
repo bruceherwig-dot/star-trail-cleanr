@@ -7,7 +7,9 @@ import numpy as np
 REPO = Path(__file__).parent.parent
 sys.path.insert(0, str(REPO))
 
-from modules.hot_pixels import build_hot_pixel_map, fix_hot_pixels
+import cv2
+
+from modules.hot_pixels import build_hot_pixel_map, fix_hot_pixels, content_aware_fill
 
 
 def _synthetic_frames(n=5, shape=(128, 128), hot_coord=(40, 60), background=15):
@@ -49,3 +51,24 @@ def test_fix_hot_pixels_repairs_planted_defect():
     for f in repaired:
         red_at_defect = int(f[40, 60, 2])
         assert red_at_defect < 100, f"hot pixel not repaired, red={red_at_defect}"
+
+
+def test_content_aware_fill_removes_dot_and_keeps_trail():
+    """The sky fill clears a stuck pixel, leaves a nearby trail line intact, and
+    never touches unmasked pixels. Works with or without OpenCV-contrib."""
+    img = np.zeros((120, 120, 3), dtype=np.uint8)
+    cv2.line(img, (10, 60), (110, 60), (200, 200, 200), 2)   # a star trail
+    img[30, 30] = (0, 0, 255)                                 # a red stuck pixel off the trail
+    img[31, 30] = (0, 0, 255)
+    mask = np.zeros((120, 120), dtype=np.uint8)
+    mask[28:34, 28:33] = 255
+    out = content_aware_fill(img, mask)
+    assert int(out[30, 30, 2]) < 100, "stuck pixel not removed"
+    assert int(out[60, 60].mean()) > 150, "trail line was damaged"
+    assert (out[100, 100] == img[100, 100]).all(), "unmasked pixel changed"
+
+
+def test_content_aware_fill_noop_on_empty_mask():
+    img = np.full((40, 40, 3), 12, dtype=np.uint8)
+    out = content_aware_fill(img, np.zeros((40, 40), dtype=np.uint8))
+    assert (out == img).all()

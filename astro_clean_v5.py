@@ -1402,15 +1402,23 @@ def main():
     if fg_mask is not None:
         from modules.hot_pixels import build_hot_pixel_map
 
-        hot_map = None
+        # Build THIS batch's stuck-pixel map, then accumulate it into the shared
+        # map file so detections build up across batches instead of freezing on
+        # batch 1 (a stuck pixel that only shows up later still gets caught).
+        hot_map = build_hot_pixel_map(frames_8bit)
         if args.hot_pixel_map and os.path.isfile(args.hot_pixel_map):
-            hot_map = robust_imread(args.hot_pixel_map, cv2.IMREAD_GRAYSCALE)
-        if hot_map is None:
-            hot_map = build_hot_pixel_map(frames_8bit)
-            n_defective = int((hot_map > 0).sum())
-            if args.hot_pixel_map and n_defective > 0:
-                robust_imwrite(args.hot_pixel_map, hot_map)
+            prev = robust_imread(args.hot_pixel_map, cv2.IMREAD_GRAYSCALE)
+            if prev is not None and prev.shape[:2] == hot_map.shape[:2]:
+                hot_map = cv2.bitwise_or(hot_map, prev)
+        if args.hot_pixel_map and int((hot_map > 0).sum()) > 0:
+            robust_imwrite(args.hot_pixel_map, hot_map)
 
+        # Foreground (ground) stuck pixels are repaired here, per frame, with the
+        # plain inpaint (the textured ground hides it). SKY stuck pixels are NOT
+        # touched here -- they are cleaned once, at the end, on the finished
+        # star-trail stack (make_star_trail), and only when the user asked for a
+        # star trail. The map saved above is the running union so that end step
+        # has the complete set of stuck-pixel locations.
         if hot_map.max() > 0:
             dilated = cv2.dilate(hot_map,
                 cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (13, 13)))

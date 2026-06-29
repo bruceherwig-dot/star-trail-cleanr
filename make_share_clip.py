@@ -647,6 +647,35 @@ def make_star_trail(cleaned_dir, out_path=None, stack=None):
         stack = _stack_fullres(cleaned_dir, names, "star trail")
         if stack is None:
             raise SystemExit(f"stacking failed (cleaned dir = {cleaned_dir})")
+
+    # Clean SKY stuck pixels ONCE, here, on the finished star trail (only runs
+    # because a star trail was requested). Reuses the stuck-pixel map and
+    # foreground mask the run already produced; fills sky defects with the
+    # content-aware fill so the thin trails are not smeared. Ground stuck pixels
+    # were already handled per-frame during cleaning. Skipped silently if the map
+    # or mask is missing (e.g. no foreground was painted).
+    try:
+        from modules.workspace import find_workspace
+        from modules.hot_pixels import content_aware_fill
+        ws = find_workspace(cleaned_dir)
+        if ws:
+            hp = os.path.join(ws, "hot_pixel_map.png")
+            fgp = os.path.join(ws, "foreground_mask.png")
+            if os.path.isfile(hp) and os.path.isfile(fgp):
+                hot = cv2.imread(hp, cv2.IMREAD_GRAYSCALE)
+                fg = cv2.imread(fgp, cv2.IMREAD_GRAYSCALE)
+                if (hot is not None and fg is not None
+                        and hot.shape[:2] == stack.shape[:2] and fg.shape[:2] == stack.shape[:2]):
+                    sky_stuck = cv2.bitwise_and(
+                        cv2.dilate(hot, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (13, 13))),
+                        cv2.bitwise_not(fg))
+                    n_sky = int((sky_stuck > 0).sum())
+                    if n_sky > 0:
+                        stack = content_aware_fill(stack, sky_stuck)
+                        print(f"cleaned sky stuck pixels on the star trail ({n_sky} px)", flush=True)
+    except Exception as e:
+        print(f"sky stuck-pixel cleanup skipped: {e}", flush=True)
+
     if out_path is None:
         out_path = os.path.join(cleaned_dir, "STC_cleaned_star_trail.jpg")
     os.makedirs(os.path.dirname(out_path), exist_ok=True)

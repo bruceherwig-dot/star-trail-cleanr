@@ -2,6 +2,11 @@
 
 ---
 
+## v2.66-beta
+- **Cleaner repair where a trail crosses your foreground.** When a plane or satellite trail passed in front of a tree, a hill, a building, or right along the horizon, the old repair could leave a dark notch, a bright smudge, or a small step in the silhouette edge. The repair was rebuilt to handle these crossings far better: it keeps the still parts of your scene (the ground and foreground) exactly in place and slides only the sky to follow the stars, so foreground edges stay clean and the stars stay where they belong. Black holes and bright patches at foreground crossings are gone, and it works the same whether your foreground is dark or bright.
+- **Better stuck-pixel cleanup.** Hot or stuck sensor pixels are now caught even when they first show up partway through a sequence, the app builds the list up across the whole run instead of locking it in on the first batch. Ground stuck pixels are patched as it goes, and sky stuck pixels are cleaned once at the end on the finished star trail, with a fill that won't smear your thin trails.
+- **Smoke tests:** 230 passing.
+
 ## v2.65-beta
 - **Windows: a way out when the in-app updater is blocked.** On some Windows machines a security suite, VPN, or firewall blocks the updater's connection, so "Check for Updates" failed with a brief error and left you with no obvious next step. Now, when that happens, Star Trail CleanR explains the likely cause in plain language and gives you a one-click "Download Latest" that opens the right installer in your browser, so a blocked update is never a dead end. The normal one-click update is unchanged for everyone else.
 - **Special Thanks now lives on startrailcleanr.com.** The About tab's contributor link and a new FAQ entry, "Who helped make Star Trail CleanR?", open the Special Thanks section on the new website.
