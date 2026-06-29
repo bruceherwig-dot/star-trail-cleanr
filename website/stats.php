@@ -249,6 +249,7 @@ echo json_encode(array(
     'runs'                  => $real_runs,
     'avg_frames'            => $real_runs ? (int) round($real_frames / $real_runs) : 0,
     'trails_per_frame'      => $real_frames ? round($real_trails / $real_frames, 1) : 0,
+    'avg_time_saved_sec'    => $real_runs ? (int) round($real_trails * 30 / $real_runs) : 0,
     'gpu_pct'               => $real_runs ? (int) round($real_gpu * 100 / $real_runs) : 0,
     'gpu_user_pct'          => $gpu_user_pct,
     'timelapses'            => $timelapses,

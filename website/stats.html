@@ -94,8 +94,8 @@
     <div class="tile"><div class="num" id="t-hours">…</div><div class="lbl">Hours saved</div></div>
     <div class="tile"><div class="num" id="t-downloads">…</div><div class="lbl">Downloads</div></div>
     <div class="tile"><div class="num" id="t-users">…</div><div class="lbl">Active photographers</div></div>
-    <div class="tile"><div class="num" id="t-gpu">…</div><div class="lbl">Photographers with a GPU</div></div>
     <div class="tile"><div class="num" id="t-countries">…</div><div class="lbl">Countries</div></div>
+    <div class="tile"><div class="num" id="t-gpu">…</div><div class="lbl">Photographers with a GPU</div></div>
     <div class="tile"><div class="num" id="t-tl">…</div><div class="lbl">Timelapse videos created</div></div>
   </div>
 
@@ -109,10 +109,11 @@
     <div class="card"><h3>Most-used shutter speed</h3><div id="c-shutter"><div class="empty">Loading…</div></div></div>
     <div class="card"><h3>Most-used aperture</h3><div id="c-aperture"><div class="empty">Loading…</div></div></div>
     <div class="card"><h3>Where in the world</h3><div id="c-countries"><div class="empty">Loading…</div></div></div>
-    <div class="card" style="grid-column:1/-1"><h3>On a typical run</h3>
+    <div class="card" style="grid-column:1/-1"><h3>On an average run</h3>
       <div class="facts">
         <div class="fact"><div class="fnum" id="f-frames">…</div><div class="flbl">Frames per run, average</div></div>
         <div class="fact"><div class="fnum" id="f-tpf">…</div><div class="flbl">Trails removed per frame</div></div>
+        <div class="fact"><div class="fnum" id="f-saved">…</div><div class="flbl">Time saved per run</div></div>
       </div>
     </div>
   </div>
@@ -130,6 +131,7 @@
 
 <script>
 function fmtNum(n){return (n==null?0:n).toLocaleString();}
+function fmtDur(sec){sec=Math.round(sec||0);var h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60),s=sec%60;if(h>0)return h+'h '+m+'m';if(m>0)return m+'m '+s+'s';return s+'s';}
 function animate(el,target,suffix){var t=Math.round(target||0),d=1200,t0=null,sfx=suffix||'';
   function step(ts){if(!t0)t0=ts;var p=Math.min(1,(ts-t0)/d);
     el.textContent=Math.round(t*(1-Math.pow(1-p,3))).toLocaleString()+sfx;
@@ -177,6 +179,7 @@ fetch('https://api.startrailcleanr.com/stats.php',{cache:'no-store'})
     bars('c-countries', d.countries, 'count');
     document.getElementById('f-frames').textContent=fmtNum(d.avg_frames);
     document.getElementById('f-tpf').textContent=(d.trails_per_frame!=null?d.trails_per_frame:0);
+    document.getElementById('f-saved').textContent=fmtDur(d.avg_time_saved_sec);
   })
   .catch(function(){
     document.querySelectorAll('.tile .num').forEach(function(n){if(n.textContent==='…')n.textContent='—';});
