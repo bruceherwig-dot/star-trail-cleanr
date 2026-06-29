@@ -94,12 +94,14 @@
     <div class="tile"><div class="num" id="t-hours">…</div><div class="lbl">Hours saved</div></div>
     <div class="tile"><div class="num" id="t-downloads">…</div><div class="lbl">Downloads</div></div>
     <div class="tile"><div class="num" id="t-users">…</div><div class="lbl">Active photographers</div></div>
+    <div class="tile"><div class="num" id="t-gpu">…</div><div class="lbl">Photographers with a GPU</div></div>
     <div class="tile"><div class="num" id="t-countries">…</div><div class="lbl">Countries</div></div>
+    <div class="tile"><div class="num" id="t-tl">…</div><div class="lbl">Timelapse videos created</div></div>
   </div>
 
   <div class="cards">
     <div class="card"><h3>Downloads by platform</h3><div id="c-platforms"><div class="empty">Loading…</div></div></div>
-    <div class="card"><h3>Source files</h3><div id="c-formats"><div class="empty">Loading…</div></div><div id="c-noexif"></div></div>
+    <div class="card"><h3>Source files</h3><div id="c-formats"><div class="empty">Loading…</div></div></div>
     <div class="card"><h3>Most-used cameras</h3><div id="c-cameras"><div class="empty">Loading…</div></div></div>
     <div class="card"><h3>Most-used lenses</h3><div id="c-lenses"><div class="empty">Loading…</div></div></div>
     <div class="card"><h3>Most-used focal lengths</h3><div id="c-focal"><div class="empty">Loading…</div></div></div>
@@ -108,8 +110,6 @@
       <div class="facts">
         <div class="fact"><div class="fnum" id="f-frames">…</div><div class="flbl">Frames per run, average</div></div>
         <div class="fact"><div class="fnum" id="f-tpf">…</div><div class="flbl">Trails removed per frame</div></div>
-        <div class="fact"><div class="fnum" id="f-gpu">…</div><div class="flbl">Runs using GPU acceleration</div></div>
-        <div class="fact"><div class="fnum" id="f-tl">…</div><div class="flbl">Timelapse videos created</div></div>
       </div>
     </div>
   </div>
@@ -127,9 +127,9 @@
 
 <script>
 function fmtNum(n){return (n==null?0:n).toLocaleString();}
-function animate(el,target){var t=Math.round(target||0),d=1200,t0=null;
+function animate(el,target,suffix){var t=Math.round(target||0),d=1200,t0=null,sfx=suffix||'';
   function step(ts){if(!t0)t0=ts;var p=Math.min(1,(ts-t0)/d);
-    el.textContent=Math.round(t*(1-Math.pow(1-p,3))).toLocaleString();
+    el.textContent=Math.round(t*(1-Math.pow(1-p,3))).toLocaleString()+sfx;
     if(p<1)requestAnimationFrame(step);}
   requestAnimationFrame(step);}
 function esc(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML;}
@@ -161,17 +161,16 @@ fetch('https://api.startrailcleanr.com/stats.php',{cache:'no-store'})
     animate(document.getElementById('t-users'),d.photographers!=null?d.photographers:d.users);
     animate(document.getElementById('t-countries'),d.countries_count);
     document.getElementById('t-countries').nextElementSibling.textContent=(d.countries_count===1?'Country':'Countries');
+    animate(document.getElementById('t-gpu'),d.gpu_user_pct,'%');
+    animate(document.getElementById('t-tl'),d.timelapses);
     bars('c-platforms', d.downloads_by_platform, 'pct');
     bars('c-formats', d.formats, 'pct');
-    document.getElementById('c-noexif').innerHTML='<div class="row" style="margin-top:16px;border-top:1px solid var(--line);padding-top:16px"><span class="name">No EXIF data</span><span class="track"><span class="fill" style="width:'+(d.no_exif_pct||0)+'%;background:var(--muted)"></span></span><span class="val">'+(d.no_exif_pct||0)+'%</span></div>';
     bars('c-cameras', d.cameras, 'count');
     bars('c-lenses', d.lenses, 'count');
     bars('c-focal', d.focal_lengths, 'count');
     bars('c-countries', d.countries, 'count');
     document.getElementById('f-frames').textContent=fmtNum(d.avg_frames);
     document.getElementById('f-tpf').textContent=(d.trails_per_frame!=null?d.trails_per_frame:0);
-    document.getElementById('f-gpu').textContent=(d.gpu_pct||0)+'%';
-    document.getElementById('f-tl').textContent=fmtNum(d.timelapses);
   })
   .catch(function(){
     document.querySelectorAll('.tile .num').forEach(function(n){if(n.textContent==='…')n.textContent='—';});

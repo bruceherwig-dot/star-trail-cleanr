@@ -141,6 +141,7 @@ function github_downloads($cache, $ttl) {
 $trails = 0; $runs = 0; $timelapses = 0; $no_exif = 0;
 $real_runs = 0; $real_frames = 0; $real_trails = 0; $real_gpu = 0;  // runs over 20 frames only
 $users = array();
+$gpu_users = array();   // photographers with >=1 GPU run (for "% of photographers with a GPU")
 $fmt = array();
 $cam = array(); $lens = array(); $focal = array(); $country = array();
 
@@ -160,6 +161,8 @@ if (is_readable($REPORTS)) {
             $type = isset($r['type']) ? $r['type'] : 'run';
             if ($type === 'timelapse') { $timelapses++; continue; }
             $runs++;
+            // A photographer "has a GPU" if any of their runs (any length) used it.
+            if ($id !== '' && isset($r['gpu']) && $r['gpu'] === true) $gpu_users[$id] = true;
             $tr = isset($r['trails']) ? (int) $r['trails'] : 0;
             $fr = isset($r['frames']) ? (int) $r['frames'] : 0;
             $trails += $tr;
@@ -205,6 +208,9 @@ foreach ($users as $uid => $_) { if (!isset($located[$uid])) $unknown_users++; }
 $countries_list = ranked($country);
 if ($unknown_users > 0) $countries_list[] = array('name' => 'Unknown', 'count' => $unknown_users);
 
+// Share of photographers (not runs) who have a GPU.
+$gpu_user_pct = count($users) ? (int) round(count($gpu_users) * 100 / count($users)) : 0;
+
 echo json_encode(array(
     'trails_cleaned'        => $BASELINE_TRAILS + $trails,
     'hours_saved'           => $BASELINE_HOURS + (int) round($trails * 30 / 3600),
@@ -223,6 +229,7 @@ echo json_encode(array(
     'avg_frames'            => $real_runs ? (int) round($real_frames / $real_runs) : 0,
     'trails_per_frame'      => $real_frames ? round($real_trails / $real_frames, 1) : 0,
     'gpu_pct'               => $real_runs ? (int) round($real_gpu * 100 / $real_runs) : 0,
+    'gpu_user_pct'          => $gpu_user_pct,
     'timelapses'            => $timelapses,
     'generated'             => gmdate('c'),
 ));
