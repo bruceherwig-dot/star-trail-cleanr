@@ -84,8 +84,8 @@ import numpy as np
 # MIN_AREA: components smaller than this (px) are skipped -- likely noise.
 # MAX_SEG_LENGTH: long components are split into segments of this max length.
 # MIN_DISP/MAX_DISP: plausible star displacement range N-1 to N+1 in pixels.
-# MIN_STARS: minimum tracked stars needed to trust the shift estimate.
-# TRAIL_WARM_MARGIN/TRAIL_BRIGHT_THRESH: warm-pixel cleanup gate after warp.
+# TRAIL_WARM_MARGIN/TRAIL_BRIGHT_THRESH: warm+bright gate for the no-masks
+#   contamination check (is the trail also crossing here in a neighbor?).
 # Log fields: seg.method reflects which of these paths fired per segment.
 
 PAD            = 120   # pixels around each trail bbox for feature search
@@ -96,7 +96,6 @@ MAX_SEG_LENGTH = 500   # reference segment length at full-frame resolution; scal
 _REF_FRAME_PX  = 6000 * 4000  # reference resolution the 500px value is calibrated for
 MIN_DISP  = 1.0   # minimum plausible star displacement N-1 to N+1 (px)
 MAX_DISP  = 60.0  # maximum plausible star displacement N-1 to N+1 (px)
-MIN_STARS = 5     # minimum tracked stars needed to trust the shift
 TRAIL_WARM_MARGIN   = 20  # how much warmer than local sky R-B counts as a trail remnant
 TRAIL_BRIGHT_THRESH = 50  # minimum R value to be considered trail-bright
 # Ring-levelling cap: the final ring-levelling nudges the filled patch to match a thin collar
@@ -122,22 +121,16 @@ _SPECKLE_MARGIN      = 30    # ...cleaned only if its local median is this much 
 # itself). Local on purpose -- a whole-window match drags warm twilight fills gray.
 _RING_KERNEL = np.ones((31, 31), np.uint8)
 
-_LK_PARAMS = dict(
-    winSize=(21, 21),
-    maxLevel=3,
-    criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01)
-)
-
 
 # ── Image helpers ─────────────────────────────────────────────────────────────
-# _to_8bit: converts 16-bit frames to 8-bit for Lucas-Kanade (LK requires uint8).
+# _to_8bit: converts 16-bit frames to 8-bit for the cascade tracker (needs uint8).
 # _shift_image: applies a fractional-pixel translation via warpAffine with reflect
 #   border padding so stars near the trail edge are not blacked out by the warp.
 
 def _to_8bit(img: np.ndarray) -> np.ndarray:
     """Down-convert a 16-bit image to 8-bit, pass an 8-bit image through unchanged.
 
-    Lucas-Kanade tracking (OpenCV) only accepts 8-bit grayscale, so 16-bit frames
+    The cascade tracker (OpenCV) only accepts 8-bit grayscale, so 16-bit frames
     must be scaled down before they go to the tracker. 257 is the exact divisor that
     maps the full 16-bit range (0..65535) onto the full 8-bit range (0..255), since
     65535 / 255 = 257. This is used only for the tracking math, not for the final
@@ -253,13 +246,14 @@ def _trail_streak(region, comp_mask):
     return streak
 
 
-# ── Star feature tracking (Lucas-Kanade sparse optical flow) ──────────────────
-# Finds bright corners in the prev patch (masking trail pixels), tracks them to
-# the next patch with LK pyramidal optical flow, and returns the median shift.
-# Returns (dx, dy, success, n_stars_tracked). n_stars_tracked is the count of
-# valid tracked points that passed the displacement plausibility gate.
-# Failure reasons: too few feature points found, too few tracked, or all
-# displacements outside [MIN_DISP, MAX_DISP]. Log field: seg.n_stars.
+# ── Local star motion: the cascade ───────────────────────────────────────────
+# Three helpers measure the prev->next star shift for a trail patch WITHOUT needing
+# trackable corners (the old Lucas-Kanade tracker slid off streaky horizon stars and
+# mis-placed them). _detect_shift finds the star streaks as blobs and votes on their
+# common shift; _phase_shift reads the whole patch's frequency pattern (FFT, sub-pixel)
+# and returns a confidence; _track_stars runs both and trusts the shift only when they
+# agree (or one is strongly confident), else reports failure so the caller pastes the
+# unshifted neighbor instead of sliding the wrong way. Log field: seg.n_stars.
 
 def _detect_shift(gp, gn):
     """Local star motion by DETECTING the star streaks as objects and voting on their
@@ -643,7 +637,7 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                 raw_clean = None
 
             if use_prev and use_next:
-                # ── Star feature tracking (Lucas-Kanade sparse optical flow) ──
+                # ── Local star motion: the cascade (detect-and-measure + phase correlation) ──
                 patch_prev = neighbor_frames[prev_idx][y0:y1, x0:x1]
                 patch_next = neighbor_frames[next_idx][y0:y1, x0:x1]
                 _ts = time.perf_counter()
