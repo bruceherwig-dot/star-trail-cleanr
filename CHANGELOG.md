@@ -2,6 +2,11 @@
 
 ---
 
+## v2.67-beta
+- **A cleaner finish to every run.** The run summary and the timelapse window now lay themselves out neatly: each one centers on its own, and when both are open they sit side by side instead of overlapping.
+- **Create a timelapse right from the run page.** A new "Create Timelapse" button now appears on the run page whenever cleaned frames are available, so you can jump straight to a timelapse without going back to the main screen.
+- **Smoke tests:** 230 passing.
+
 ## v2.66-beta
 - **Cleaner repair where a trail crosses your foreground.** When a plane or satellite trail passed in front of a tree, a hill, a building, or right along the horizon, the old repair could leave a dark notch, a bright smudge, or a small step in the silhouette edge. The repair was rebuilt to handle these crossings far better: it keeps the still parts of your scene (the ground and foreground) exactly in place and slides only the sky to follow the stars, so foreground edges stay clean and the stars stay where they belong. Black holes and bright patches at foreground crossings are gone, and it works the same whether your foreground is dark or bright.
 - **Better stuck-pixel cleanup.** Hot or stuck sensor pixels are now caught even when they first show up partway through a sequence, the app builds the list up across the whole run instead of locking it in on the first batch. Ground stuck pixels are patched as it goes, and sky stuck pixels are cleaned once at the end on the finished star trail, with a fill that won't smear your thin trails.
