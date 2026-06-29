@@ -105,6 +105,9 @@
     <div class="card"><h3>Most-used cameras</h3><div id="c-cameras"><div class="empty">Loading…</div></div></div>
     <div class="card"><h3>Most-used lenses</h3><div id="c-lenses"><div class="empty">Loading…</div></div></div>
     <div class="card"><h3>Most-used focal lengths</h3><div id="c-focal"><div class="empty">Loading…</div></div></div>
+    <div class="card"><h3>Most-used ISO</h3><div id="c-iso"><div class="empty">Loading…</div></div></div>
+    <div class="card"><h3>Most-used shutter speed</h3><div id="c-shutter"><div class="empty">Loading…</div></div></div>
+    <div class="card"><h3>Most-used aperture</h3><div id="c-aperture"><div class="empty">Loading…</div></div></div>
     <div class="card"><h3>Where in the world</h3><div id="c-countries"><div class="empty">Loading…</div></div></div>
     <div class="card" style="grid-column:1/-1"><h3>On a typical run</h3>
       <div class="facts">
@@ -168,6 +171,9 @@ fetch('https://api.startrailcleanr.com/stats.php',{cache:'no-store'})
     bars('c-cameras', d.cameras, 'count');
     bars('c-lenses', d.lenses, 'count');
     bars('c-focal', d.focal_lengths, 'count');
+    bars('c-iso', d.iso, 'count');
+    bars('c-shutter', d.shutter, 'count');
+    bars('c-aperture', d.aperture, 'count');
     bars('c-countries', d.countries, 'count');
     document.getElementById('f-frames').textContent=fmtNum(d.avg_frames);
     document.getElementById('f-tpf').textContent=(d.trails_per_frame!=null?d.trails_per_frame:0);

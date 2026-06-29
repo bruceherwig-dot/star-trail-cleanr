@@ -86,6 +86,20 @@ function format_label($k) {
     return isset($lab[$k]) ? $lab[$k] : strtoupper($k);
 }
 
+function shutter_label($v) {
+    // Exposure time -> a readable label. Star-trail exposures are whole seconds
+    // ("30s"); anything under a second becomes a fraction ("1/200").
+    $v = (float) $v;
+    if ($v <= 0) return '';
+    if ($v >= 1) return round($v) . 's';
+    return '1/' . round(1 / $v);
+}
+
+function aperture_label($v) {
+    // f-number -> "f/2.8", dropping any trailing .0 ("f/2", not "f/2.0").
+    return 'f/' . rtrim(rtrim(sprintf('%.1f', (float) $v), '0'), '.');
+}
+
 function fetch_github_downloads() {
     $ctx = stream_context_create(array(
         'http'  => array('timeout' => 6, 'header' => "User-Agent: StarTrailCleanR\r\nAccept: application/vnd.github+json\r\n"),
@@ -144,6 +158,7 @@ $users = array();
 $gpu_users = array();   // photographers with >=1 GPU run (for "% of photographers with a GPU")
 $fmt = array();
 $cam = array(); $lens = array(); $focal = array(); $country = array();
+$iso = array(); $shutter = array(); $aperture = array();   // EXIF exposure settings
 
 if (is_readable($REPORTS)) {
     $fh = fopen($REPORTS, 'r');
@@ -185,6 +200,9 @@ if (is_readable($REPORTS)) {
                 if ($ln !== '' && !preg_match('/^0+(\.0+)?\s*mm/i', $ln) && stripos($ln, 'f/0') === false) add_user($lens, $ln, $id);
             }
             if (isset($r['focal_length'])) add_user($focal, ((int) round($r['focal_length'])) . ' mm', $id);
+            if (!empty($r['iso']))          add_user($iso, (string) (int) $r['iso'], $id);
+            if (!empty($r['exposure_sec']) && shutter_label($r['exposure_sec']) !== '') add_user($shutter, shutter_label($r['exposure_sec']), $id);
+            if (!empty($r['aperture']))     add_user($aperture, aperture_label($r['aperture']), $id);
             if ($ctry !== '') add_user($country, country_name($ctry), $id);
         }
         fclose($fh);
@@ -225,6 +243,9 @@ echo json_encode(array(
     'cameras'               => ranked($cam),
     'lenses'                => ranked($lens),
     'focal_lengths'         => ranked($focal, 'numeric'),
+    'iso'                   => ranked($iso, 'numeric'),
+    'shutter'               => ranked($shutter, 'numeric'),
+    'aperture'              => ranked($aperture),
     'runs'                  => $real_runs,
     'avg_frames'            => $real_runs ? (int) round($real_frames / $real_runs) : 0,
     'trails_per_frame'      => $real_frames ? round($real_trails / $real_frames, 1) : 0,
