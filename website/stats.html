@@ -91,6 +91,7 @@
 <div class="wrap">
 
   <div class="tiles">
+    <div class="tile"><div class="num" id="t-runs">…</div><div class="lbl">Times run</div></div>
     <div class="tile"><div class="num" id="t-trails">…</div><div class="lbl">Trails cleaned</div></div>
     <div class="tile"><div class="num" id="t-hours">…</div><div class="lbl">Hours saved</div></div>
     <div class="tile"><div class="num" id="t-downloads">…</div><div class="lbl">Downloads</div></div>
@@ -162,6 +163,7 @@ document.addEventListener('click',function(e){
 fetch('https://api.startrailcleanr.com/stats.php',{cache:'no-store'})
   .then(function(r){return r.json();})
   .then(function(d){
+    animate(document.getElementById('t-runs'),d.runs);
     animate(document.getElementById('t-trails'),d.trails_cleaned);
     animate(document.getElementById('t-hours'),d.hours_saved);
     animate(document.getElementById('t-downloads'),d.downloads_total);
