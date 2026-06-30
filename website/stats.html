@@ -95,12 +95,12 @@
     <div class="tile"><div class="num" id="t-downloads">…</div><div class="lbl">Downloads</div></div>
     <div class="tile"><div class="num" id="t-users">…</div><div class="lbl">Active photographers</div></div>
     <div class="tile"><div class="num" id="t-countries">…</div><div class="lbl">Countries</div></div>
-    <div class="tile"><div class="num" id="t-gpu">…</div><div class="lbl">Photographers with a GPU</div></div>
+    <div class="tile"><div class="num" id="t-gpu">…</div><div class="lbl">Windows users on the GPU</div></div>
     <div class="tile"><div class="num" id="t-tl">…</div><div class="lbl">Timelapse videos created</div></div>
   </div>
 
   <div class="cards">
-    <div class="card"><h3>Downloads by platform</h3><div id="c-platforms"><div class="empty">Loading…</div></div></div>
+    <div class="card"><h3>Platforms</h3><div id="c-platforms"><div class="empty">Loading…</div></div></div>
     <div class="card"><h3>Source files</h3><div id="c-formats"><div class="empty">Loading…</div></div></div>
     <div class="card"><h3>Most-used cameras</h3><div id="c-cameras"><div class="empty">Loading…</div></div></div>
     <div class="card"><h3>Most-used lenses</h3><div id="c-lenses"><div class="empty">Loading…</div></div></div>
@@ -166,9 +166,9 @@ fetch('https://api.startrailcleanr.com/stats.php',{cache:'no-store'})
     animate(document.getElementById('t-users'),d.photographers!=null?d.photographers:d.users);
     animate(document.getElementById('t-countries'),d.countries_count);
     document.getElementById('t-countries').nextElementSibling.textContent=(d.countries_count===1?'Country':'Countries');
-    animate(document.getElementById('t-gpu'),d.gpu_user_pct,'%');
+    animate(document.getElementById('t-gpu'),d.windows_gpu);
     animate(document.getElementById('t-tl'),d.timelapses);
-    bars('c-platforms', d.downloads_by_platform, 'pct');
+    bars('c-platforms', d.platforms, 'pct');
     bars('c-formats', d.formats, 'pct');
     bars('c-cameras', d.cameras, 'count');
     bars('c-lenses', d.lenses, 'count');

@@ -13,17 +13,17 @@ header('Access-Control-Allow-Origin: *');
 header('Cache-Control: public, max-age=300');
 
 $REPORTS  = '/home/dh_bmigjp/stc_data/reports.jsonl';
-$GH_CACHE = '/home/dh_bmigjp/stc_data/gh_downloads.json';
-$GH_TTL   = 21600;  // refresh GitHub download totals at most every 6 hours
 
 // Community-impact seed (estimated usage across everyone who's downloaded,
 // set 2026-06-25). Measured opted-in counts climb on top of it.
 $BASELINE_TRAILS = 224003;
 $BASELINE_HOURS  = 1872;
-// Conservative estimate of individual users. GitHub's total file-download count
-// overcounts badly (updates + re-downloads across every version), so we show a
-// hand-set figure and count up from here as real people are identified.
-$BASELINE_DOWNLOADS = 354;
+// Downloads = a seed for everyone we can't see, plus the count of real people we
+// CAN see (opted-in install IDs). The GitHub download feed was dropped: it counts
+// every installer download across all versions (updates + re-downloads), which
+// wildly overcounts individuals. Seed chosen so the live total reads 354 today;
+// it climbs by one per newly identified person.
+$BASELINE_DOWNLOADS = 340;
 
 function add_user(&$map, $key, $id) {
     if ($key === '' || $key === null || $id === '') return;
@@ -104,56 +104,15 @@ function aperture_label($v) {
     return 'f/' . rtrim(rtrim(sprintf('%.1f', (float) $v), '0'), '.');
 }
 
-function fetch_github_downloads() {
-    $ctx = stream_context_create(array(
-        'http'  => array('timeout' => 6, 'header' => "User-Agent: StarTrailCleanR\r\nAccept: application/vnd.github+json\r\n"),
-        'https' => array('timeout' => 6, 'header' => "User-Agent: StarTrailCleanR\r\nAccept: application/vnd.github+json\r\n"),
-    ));
-    $total = 0;
-    $plat = array('Windows' => 0, 'macOS' => 0, 'Linux' => 0);
-    $got = false;
-    for ($page = 1; $page <= 3; $page++) {
-        $url = 'https://api.github.com/repos/bruceherwig-dot/star-trail-cleanr/releases?per_page=100&page=' . $page;
-        $raw = @file_get_contents($url, false, $ctx);
-        if ($raw === false) break;
-        $rel = json_decode($raw, true);
-        if (!is_array($rel) || count($rel) === 0) break;
-        $got = true;
-        foreach ($rel as $r) {
-            if (empty($r['assets']) || !is_array($r['assets'])) continue;
-            foreach ($r['assets'] as $a) {
-                $n  = strtolower($a['name']);
-                $dc = (int) $a['download_count'];
-                if (strpos($n, 'best.pt') !== false || strpos($n, 'model') !== false) continue;
-                if (preg_match('/\.(delta|sig|sha\d*|json|xml|txt|zsync|appcast)$/', $n)) continue;
-                // Match current names (.dmg / Setup.zip / .tar.gz) AND legacy .zip
-                // installers (StarTrailCleanR-Mac-*.zip, -Windows.zip) from old releases.
-                if (substr($n, -4) === '.dmg' || strpos($n, 'mac') !== false)          { $plat['macOS']   += $dc; $total += $dc; }
-                elseif (substr($n, -7) === '.tar.gz' || strpos($n, 'linux') !== false) { $plat['Linux']   += $dc; $total += $dc; }
-                elseif (strpos($n, 'setup') !== false || substr($n, -4) === '.exe' || strpos($n, 'windows') !== false || substr($n, -4) === '.zip') { $plat['Windows'] += $dc; $total += $dc; }
-            }
-        }
-        if (count($rel) < 100) break;
-    }
-    if (!$got) return null;
-    $by = array();
-    foreach ($plat as $k => $v) if ($v > 0) $by[] = array('name' => $k, 'count' => $v);
-    usort($by, function ($a, $b) { return $b['count'] - $a['count']; });
-    return array('total' => $total, 'by_platform' => $by);
-}
-
-function github_downloads($cache, $ttl) {
-    if (is_readable($cache) && (time() - filemtime($cache) < $ttl)) {
-        $c = json_decode(@file_get_contents($cache), true);
-        if (is_array($c)) return $c;
-    }
-    $res = fetch_github_downloads();
-    if ($res !== null) { @file_put_contents($cache, json_encode($res), LOCK_EX); return $res; }
-    if (is_readable($cache)) {  // fetch failed -> serve the last good cache if any
-        $c = json_decode(@file_get_contents($cache), true);
-        if (is_array($c)) return $c;
-    }
-    return array('total' => 0, 'by_platform' => array());
+function platform_label($platform, $arch) {
+    // Map the telemetry platform + arch to a friendly OS bucket. Apple Silicon
+    // (arm64) vs Intel Mac (x86_64) matters because Silicon has the GPU built in
+    // and Intel does not; Windows GPU is a separate CUDA download.
+    $p = strtolower((string) $platform); $a = strtolower((string) $arch);
+    if ($p === 'darwin')  return ($a === 'arm64') ? 'Apple Silicon' : 'Intel Mac';
+    if ($p === 'windows') return 'Windows';
+    if ($p === 'linux')   return 'Linux';
+    return $p !== '' ? ucfirst($p) : '';
 }
 
 $trails = 0; $runs = 0; $timelapses = 0; $no_exif = 0;
@@ -163,6 +122,7 @@ $gpu_users = array();   // photographers with >=1 GPU run (for "% of photographe
 $fmt = array();
 $cam = array(); $lens = array(); $focal = array(); $country = array();
 $iso = array(); $shutter = array(); $aperture = array();   // EXIF exposure settings
+$user_plat = array();   // install_id -> OS bucket (Apple Silicon / Intel Mac / Windows)
 
 if (is_readable($REPORTS)) {
     $fh = fopen($REPORTS, 'r');
@@ -176,6 +136,7 @@ if (is_readable($REPORTS)) {
             if (isset($r['dev']) && $r['dev'] === true) continue;
             $id = isset($r['install_id']) ? $r['install_id'] : '';
             if ($id !== '') $users[$id] = true;
+            if ($id !== '' && !empty($r['platform'])) $user_plat[$id] = platform_label($r['platform'], isset($r['platform_arch']) ? $r['platform_arch'] : '');
             $ctry = isset($rec['country']) ? $rec['country'] : '';
             $type = isset($r['type']) ? $r['type'] : 'run';
             if ($type === 'timelapse') { $timelapses++; continue; }
@@ -213,8 +174,6 @@ if (is_readable($REPORTS)) {
     }
 }
 
-$gh = github_downloads($GH_CACHE, $GH_TTL);
-
 $fmt_list = array();
 foreach ($fmt as $k => $n) $fmt_list[] = array('name' => $k, 'count' => $n);
 usort($fmt_list, function ($a, $b) { return $b['count'] - $a['count']; });
@@ -230,16 +189,24 @@ foreach ($users as $uid => $_) { if (!isset($located[$uid])) $unknown_users++; }
 $countries_list = ranked($country);
 if ($unknown_users > 0) $countries_list[] = array('name' => 'Unknown', 'count' => $unknown_users);
 
-// Share of photographers (not runs) who have a GPU.
-$gpu_user_pct = count($users) ? (int) round(count($gpu_users) * 100 / count($users)) : 0;
+// Identified users by OS bucket (Apple Silicon / Intel Mac / Windows), from the
+// telemetry rather than the GitHub feed. Shown as a percentage split.
+$plat_map = array();
+foreach ($user_plat as $uid => $lab) { if ($lab !== '') $plat_map[$lab][$uid] = true; }
+$platform_list = ranked($plat_map);
+
+// Windows users who pulled the GPU (CUDA) package: a Windows install with >=1 GPU
+// run. Mac's GPU is built in (not a download), so this is Windows-only.
+$windows_gpu = 0;
+foreach ($user_plat as $uid => $lab) { if ($lab === 'Windows' && isset($gpu_users[$uid])) $windows_gpu++; }
 
 echo json_encode(array(
     'trails_cleaned'        => $BASELINE_TRAILS + $trails,
     'hours_saved'           => $BASELINE_HOURS + (int) round($trails * 30 / 3600),
     'users'                 => count($users),
     'photographers'         => count($users),
-    'downloads_total'       => $BASELINE_DOWNLOADS,
-    'downloads_by_platform' => $gh['by_platform'],
+    'downloads_total'       => $BASELINE_DOWNLOADS + count($users),
+    'platforms'             => $platform_list,
     'countries_count'       => count($country),
     'countries'             => $countries_list,
     'formats'               => $fmt_list,
@@ -254,8 +221,7 @@ echo json_encode(array(
     'avg_frames'            => $real_runs ? (int) round($real_frames / $real_runs) : 0,
     'trails_per_frame'      => $real_frames ? round($real_trails / $real_frames, 1) : 0,
     'avg_time_saved_sec'    => $real_runs ? (int) round($real_trails * 30 / $real_runs) : 0,
-    'gpu_pct'               => $real_runs ? (int) round($real_gpu * 100 / $real_runs) : 0,
-    'gpu_user_pct'          => $gpu_user_pct,
+    'windows_gpu'           => $windows_gpu,
     'timelapses'            => $timelapses,
     'generated'             => gmdate('c'),
 ));
