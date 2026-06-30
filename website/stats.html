@@ -45,7 +45,7 @@
   .showall{display:inline-block;margin-top:14px;color:var(--blue);font-weight:600;font-size:14px;cursor:pointer}
   .showall:hover{text-decoration:underline}
   .empty{color:var(--muted);font-size:14px;padding:4px 0}
-  .facts{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+  .facts{display:grid;grid-template-columns:repeat(4,1fr);gap:18px}
   .fact .fnum{font-size:26px;font-weight:700;color:var(--navy);font-variant-numeric:tabular-nums}
   .fact .flbl{font-size:13px;color:var(--muted)}
   .note{text-align:center;color:var(--muted);font-size:13px;margin:8px 0 50px}
@@ -56,6 +56,7 @@
   @media(max-width:760px){
     .navlinks{display:none}
     .tiles{grid-template-columns:repeat(2,1fr)}
+    .facts{grid-template-columns:repeat(2,1fr)}
     .cards{grid-template-columns:1fr}
     .pagehead h1{font-size:30px}
     .row .name{width:120px}
@@ -112,6 +113,7 @@
     <div class="card" style="grid-column:1/-1"><h3>On an average run</h3>
       <div class="facts">
         <div class="fact"><div class="fnum" id="f-frames">…</div><div class="flbl">Frames per run, average</div></div>
+        <div class="fact"><div class="fnum" id="f-trails">…</div><div class="flbl">Trails found per run</div></div>
         <div class="fact"><div class="fnum" id="f-tpf">…</div><div class="flbl">Trails removed per frame</div></div>
         <div class="fact"><div class="fnum" id="f-saved">…</div><div class="flbl">Time saved per run</div></div>
       </div>
@@ -178,6 +180,7 @@ fetch('https://api.startrailcleanr.com/stats.php',{cache:'no-store'})
     bars('c-aperture', d.aperture, 'count');
     bars('c-countries', d.countries, 'count');
     document.getElementById('f-frames').textContent=fmtNum(d.avg_frames);
+    document.getElementById('f-trails').textContent=fmtNum(d.avg_trails_per_run);
     document.getElementById('f-tpf').textContent=(d.trails_per_frame!=null?d.trails_per_frame:0);
     document.getElementById('f-saved').textContent=fmtDur(d.avg_time_saved_sec);
   })
