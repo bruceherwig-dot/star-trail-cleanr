@@ -20,6 +20,10 @@ $GH_TTL   = 21600;  // refresh GitHub download totals at most every 6 hours
 // set 2026-06-25). Measured opted-in counts climb on top of it.
 $BASELINE_TRAILS = 224003;
 $BASELINE_HOURS  = 1872;
+// Conservative estimate of individual users. GitHub's total file-download count
+// overcounts badly (updates + re-downloads across every version), so we show a
+// hand-set figure and count up from here as real people are identified.
+$BASELINE_DOWNLOADS = 354;
 
 function add_user(&$map, $key, $id) {
     if ($key === '' || $key === null || $id === '') return;
@@ -234,7 +238,7 @@ echo json_encode(array(
     'hours_saved'           => $BASELINE_HOURS + (int) round($trails * 30 / 3600),
     'users'                 => count($users),
     'photographers'         => count($users),
-    'downloads_total'       => $gh['total'],
+    'downloads_total'       => $BASELINE_DOWNLOADS,
     'downloads_by_platform' => $gh['by_platform'],
     'countries_count'       => count($country),
     'countries'             => $countries_list,
