@@ -2,8 +2,13 @@
 
 ---
 
+## v2.70-beta
+- **Timelapse: choose your own smoothing.** The Create Timelapse window has a new Smoothing pulldown: None, 2, 3, 4, or 5 frames (it was previously fixed at 3). Smoothing blends each movie frame with the previous ones; higher values smooth out flicker, but stretch each star into a slightly longer streak. A caption in the window explains this, and your choice is remembered for next time.
+- **Timelapse window polish.** The progress bar now clears when a render finishes instead of sitting at 100%, the headline uses the app's blue, and the row titles are bold and right-justified. The Timelapse window's own version is now 1.1.
+- **Smoke tests:** 238 passing.
+
 ## v2.69-beta
-- **Cleaner repair on the first and last photos of a run.** Those two photos only have a neighbor on one side, and until now a trail crossing a tree, rock, or building there could leave a small light notch on the object's edge, one that survives into the final star trail. The repair now checks a second nearby frame and keeps anything that isn't moving exactly in place, and it always leaves dark foreground silhouettes untouched (on a tripod, they never move). Middle frames were already protected and are unchanged.
+- **Cleaner repair on the first and last photos of a run.** Those two photos only have a neighbor on one side, and until now a trail crossing a tree, rock, or building there could smear the object's edge in both directions: a small light notch bitten out of the object, or a dark smudge pushed onto the sky right beside it. The repair now checks a second nearby frame and keeps everything that isn't moving exactly in place, and it always leaves dark foreground silhouettes untouched (on a tripod, they never move). Middle frames were already protected and are unchanged.
 - **Better run diagnostics behind the scenes.** The developer run log now records exactly how every single trail was repaired, so problems like the one above can be found and fixed from the log alone.
 - **Smoke tests:** 238 passing.
 
