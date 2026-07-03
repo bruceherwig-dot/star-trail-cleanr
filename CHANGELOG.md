@@ -2,6 +2,11 @@
 
 ---
 
+## v2.69-beta
+- **Cleaner repair on the first and last photos of a run.** Those two photos only have a neighbor on one side, and until now a trail crossing a tree, rock, or building there could leave a small light notch on the object's edge, one that survives into the final star trail. The repair now checks a second nearby frame and keeps anything that isn't moving exactly in place, and it always leaves dark foreground silhouettes untouched (on a tripod, they never move). Middle frames were already protected and are unchanged.
+- **Better run diagnostics behind the scenes.** The developer run log now records exactly how every single trail was repaired, so problems like the one above can be found and fixed from the log alone.
+- **Smoke tests:** 238 passing.
+
 ## v2.68-beta
 - **Update checks are steadier, and they never crash.** In rare cases a connection that dropped partway through checking for a new version could crash the app. That is fixed: a failed check now quietly does nothing.
 - **A backup way to find updates when GitHub is blocked.** In some countries and on some networks, GitHub (where the app is hosted) is blocked, which used to leave the app unable to check for or download updates at all. Now, if it cannot reach GitHub, the app checks our own server instead. If a newer version is waiting, it lets you know and points you to startrailcleanr.com to download it by hand. Your photos, settings, and folders are all kept.
