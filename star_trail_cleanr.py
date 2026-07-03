@@ -6683,12 +6683,17 @@ class TimelapseWindow(QDialog):
         _f.setPointSize(20)
         _f.setBold(True)
         _title.setFont(_f)
+        _title.setStyleSheet(f"color: {BRAND_HEADING_BLUE};")
         lay.addWidget(_title)
 
         def _row(text, combo):
             r = QHBoxLayout()
             _l = QLabel(text)
             _l.setFixedWidth(90)
+            _l.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            _lf = _l.font()
+            _lf.setBold(True)
+            _l.setFont(_lf)
             r.addWidget(_l)
             r.addWidget(combo, 1)
             lay.addLayout(r)
@@ -6717,6 +6722,24 @@ class TimelapseWindow(QDialog):
             self._fps_cb.addItem(f"{v} fps", v)
         self._fps_cb.setCurrentIndex(self._fps_cb.findData(24))  # default 24; _restore_choices overrides if saved
         _row("Frame rate", self._fps_cb)
+
+        # Smoothing: each movie frame is a Lighten (brightest-pixel) stack of
+        # the last N frames -- smooths flicker at the cost of the stars
+        # trailing slightly. None means one cleaned frame per movie frame (the
+        # engine's "plain" style; a window of 1 would be the same thing, so it
+        # isn't offered separately).
+        self._blend_cb = QComboBox()
+        self._blend_cb.addItem("None", 0)
+        for v in (2, 3, 4, 5):
+            self._blend_cb.addItem(f"{v} frames", v)
+        self._blend_cb.setCurrentIndex(self._blend_cb.findData(3))  # default 3; _restore_choices overrides if saved
+        _row("Smoothing", self._blend_cb)
+        _blend_hint = QLabel("Blends each movie frame with the previous ones. "
+                             "Higher values smooth out flicker, but stretch "
+                             "each star into a slightly longer streak.")
+        _blend_hint.setStyleSheet(f"color: {MUTED_TEXT};")
+        _blend_hint.setWordWrap(True)
+        lay.addWidget(_blend_hint)
 
         self._fmt_cb = QComboBox()
         self._fmt_cb.addItem(".mp4", "mp4")
@@ -6747,7 +6770,7 @@ class TimelapseWindow(QDialog):
         _btns.addWidget(self._render_btn)
         lay.addLayout(_btns)
 
-        for cb in (self._size_cb, self._fps_cb, self._fmt_cb):
+        for cb in (self._size_cb, self._fps_cb, self._blend_cb, self._fmt_cb):
             cb.currentIndexChanged.connect(self._update_estimate)
         self._source_cb.currentIndexChanged.connect(self._reload_frames)
         self._reload_frames()   # load the (default Cleaned) frames + fill the estimate
@@ -6756,6 +6779,7 @@ class TimelapseWindow(QDialog):
         for cb, key, is_int in ((self._source_cb, "timelapse_source", False),
                                 (self._size_cb, "timelapse_size", False),
                                 (self._fps_cb, "timelapse_fps", True),
+                                (self._blend_cb, "timelapse_blend", True),
                                 (self._fmt_cb, "timelapse_format", False)):
             v = SETTINGS.value(key)
             if v is None:
@@ -6771,6 +6795,7 @@ class TimelapseWindow(QDialog):
         SETTINGS.setValue("timelapse_source", self._source_cb.currentData())
         SETTINGS.setValue("timelapse_size", self._size_cb.currentData())
         SETTINGS.setValue("timelapse_fps", self._fps_cb.currentData())
+        SETTINGS.setValue("timelapse_blend", self._blend_cb.currentData())
         SETTINGS.setValue("timelapse_format", self._fmt_cb.currentData())
 
     def _current_folder(self):
@@ -6851,8 +6876,13 @@ class TimelapseWindow(QDialog):
         # source tag keeps a Cleaned and an Original timelapse from colliding.
         self._out_path = workspace_path(self._cleaned, f"STC_timelapse_{tag}{size_key}.{ext}")
         script = os.path.join(_base, "timelapse_maker.py")
+        blend = int(self._blend_cb.currentData() or 0)
         args = [frames_dir, "-o", self._out_path, "--size", size_key,
-                "--fps", str(fps), "--style", "blended"]
+                "--fps", str(fps)]
+        if blend >= 2:
+            args += ["--style", "blended", "--blend-window", str(blend)]
+        else:
+            args += ["--style", "plain"]
         if getattr(sys, "frozen", False):
             pargs = ["--cleanr-worker", script] + args
         else:
@@ -6865,6 +6895,7 @@ class TimelapseWindow(QDialog):
             "source": src,
             "size": size_key,
             "fps": fps,
+            "blend": blend,
             "format": ext,
             "frames": self._n_frames,
             "width": tw,
@@ -6900,7 +6931,7 @@ class TimelapseWindow(QDialog):
             self._remove_partial()
             return
         if code == 0 and self._out_path and os.path.exists(self._out_path):
-            self._bar.setValue(100)
+            self._bar.setVisible(False)
             self._status_lbl.setText(f"Done: {os.path.basename(self._out_path)}")
             _open_folder_in_file_manager(os.path.dirname(self._out_path))
             if SETTINGS.value("crash_reporting_enabled", False, type=bool):

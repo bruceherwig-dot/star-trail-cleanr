@@ -41,5 +41,6 @@ def test_estimate_is_resolution_independent():
     assert hd == uhd
 
 
-def test_version_starts_at_1_0():
-    assert TIMELAPSE_VERSION == "1.0"
+def test_version_is_current():
+    # Bumped to 1.1 when the Blend pulldown was added (2026-07-03).
+    assert TIMELAPSE_VERSION == "1.1"

@@ -14,9 +14,11 @@ Styles
 ------
 plain    -- one cleaned frame per movie frame (a straight timelapse).
 blended  -- each movie frame is a Lighten (brightest-pixel) stack of the last
-            N frames (default 3), the same blend used stacking a star-trail
-            still. Smooths per-frame artifacts and flicker at the cost of the
-            stars trailing slightly.
+            N frames, the same blend used stacking a star-trail still. Smooths
+            per-frame artifacts and flicker at the cost of the stars trailing
+            slightly. N comes from --blend-window (default 3) and is exposed
+            in the app's Blend pulldown (None / 2 / 3 / 4 / 5, where None
+            means the plain style).
 
 Frames always play in TRUE capture order (EXIF time, with filename fallback),
 matching the cleaning pipeline, so a camera file-number rollover can't scramble
@@ -37,7 +39,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from modules.io_safe import robust_imread, image_size, capture_time
 from modules.frame_list import IMAGE_EXTS, order_by_capture_time, natural_key
 
-TIMELAPSE_VERSION = "1.0"
+TIMELAPSE_VERSION = "1.1"
 
 # Target LONG-EDGE pixel counts for each preset. "full" keeps the native size.
 # We never upscale: a preset bigger than the source falls back to full.
