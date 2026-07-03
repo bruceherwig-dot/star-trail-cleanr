@@ -66,7 +66,9 @@ FALLBACKS IN ORDER
 1. Two neighbors, shift measured -> still-vs-moving routed fill (best quality).
 2. Two neighbors, shift NOT measured -> paste the colour-closest neighbor (raw_clean).
 3. Single neighbor (first/last frame) -> shift that one neighbor onto frame N, or a
-   plain levelled copy if the shift can't be measured.
+   plain levelled copy if the shift can't be measured. THEN edge-frame foreground
+   protection: reach to the SECOND same-side neighbor and keep any static object (an
+   unmasked trunk/rock) UNSHIFTED, so the single-neighbor slide doesn't nick its edge.
 4. Crossing where both neighbors carry the trail -> paint local sky colour + grain (the
    "crayon" _sky_fill), falling back to black only when there is too little sky to sample.
 
@@ -313,7 +315,7 @@ def _phase_shift(gp, gn):
 
 
 def _track_stars(prev: np.ndarray, nxt: np.ndarray, trail_mask=None):
-    """Local star motion prev->next as (dx, dy, success, n_stars). Cascade of two methods
+    """Local star motion prev->next as (dx, dy, success, n_stars, cascade_tier). Cascade of two methods
     that do NOT need trackable corners (unlike the old Lucas-Kanade tracker, which slid off
     streaky horizon stars and mis-placed them): detect-and-measure and phase correlation.
     The shift is trusted only when the two AGREE (within a few px), or when one is strongly
@@ -325,13 +327,14 @@ def _track_stars(prev: np.ndarray, nxt: np.ndarray, trail_mask=None):
     gn = cv2.cvtColor(_to_8bit(nxt),  cv2.COLOR_BGR2GRAY)
     Sd, votes = _detect_shift(gp, gn)
     Sp, resp = _phase_shift(gp, gn)
+    # The 5th return value names WHICH branch produced the shift, for the run log.
     if Sd is not None and Sp is not None and (Sd[0] - Sp[0]) ** 2 + (Sd[1] - Sp[1]) ** 2 <= 25:
-        return (Sd[0] + Sp[0]) / 2.0, (Sd[1] + Sp[1]) / 2.0, True, int(votes)   # both agree
+        return (Sd[0] + Sp[0]) / 2.0, (Sd[1] + Sp[1]) / 2.0, True, int(votes), "agree"   # both agreed
     if Sp is not None and resp >= 0.6:
-        return float(Sp[0]), float(Sp[1]), True, 1                              # phase strong alone
+        return float(Sp[0]), float(Sp[1]), True, 1, "phase"                     # phase confident alone
     if Sd is not None and votes >= 4:
-        return float(Sd[0]), float(Sd[1]), True, int(votes)                     # many stars agree
-    return 0.0, 0.0, False, int(votes)                                          # not confident -> paste
+        return float(Sd[0]), float(Sd[1]), True, int(votes), "detect"           # enough star votes alone
+    return 0.0, 0.0, False, int(votes), "fail"                                  # neither confident -> paste
 
 
 # ── Component splitting (long trails into sub-segments) ───────────────────────
@@ -458,12 +461,24 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
     # Each recursive call processes one narrow polygon with its own Star Bridge
     # pass. No connectedComponentsWithStats -- each polygon is already one unit.
     if polygon_segs is not None and len(polygon_segs) > 0:
-        for seg_mask in polygon_segs:
+        if debug_out is not None:
+            debug_out["components"] = []
+        for _poly_i, seg_mask in enumerate(polygon_segs, start=1):
             if not (seg_mask > 0).any():
                 continue
+            # Thread a debug dict into each per-polygon pass and collect its one
+            # component, so the run log records the fill method + cascade for EVERY
+            # trail. This path used to drop all of it and log only timing (the reason
+            # the logs couldn't say which method or cascade tier fired -- 2026-07-02).
+            _sub_dbg = {} if debug_out is not None else None
             result = repair_frame(result, seg_mask, frame_idx, neighbor_frames,
                                   neighbor_masks=neighbor_masks, combine=combine,
+                                  debug_out=_sub_dbg,
                                   _timing_acc=_timing_acc, _single_component=True)
+            if _sub_dbg is not None:
+                for _comp in _sub_dbg.get("components", []):
+                    _comp["polygon"] = _poly_i   # which detected polygon/arm this was
+                    debug_out["components"].append(_comp)
         if debug_out is not None:
             debug_out["timing"] = {k: round(v, 3) for k, v in _timing_acc.items()}
         return result
@@ -552,7 +567,11 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                 _target = _streak if _streak.any() else comp_mask
                 _filled = _sky_fill(_win, _target, comp_mask)
                 if seg_info is not None:
-                    seg_info.update({"method": "sky_fill_no_neighbors",
+                    # _filled>0 = the crayon sky-fill painted; _filled==0 = the RARE pure-black
+                    # fallback (no neighbor AND too little surrounding sky to sample a colour).
+                    seg_info.update({"method": ("crayon_sky_no_neighbors" if _filled > 0
+                                                else "black_no_sky"),
+                                     "cascade": "no_neighbors",
                                      "tracking_ok": False, "dx": 0.0, "dy": 0.0,
                                      "n_stars": 0, "still_trail_px": 0,
                                      "union_zeroed_px": 0, "sky_filled_px": int(_filled)})
@@ -564,6 +583,8 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
             _dy = 0.0
             _ok = False
             _n_stars = 0
+            _cascade = "none"
+            _edge_still_px = 0
 
             # ── Per-neighbor colour fit, measured on a local sky collar ──────────
             # The collar is a thin ring hugging the trail (minus every trail pixel
@@ -641,10 +662,10 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                 patch_prev = neighbor_frames[prev_idx][y0:y1, x0:x1]
                 patch_next = neighbor_frames[next_idx][y0:y1, x0:x1]
                 _ts = time.perf_counter()
-                dx, dy, ok, n_stars = _track_stars(patch_prev, patch_next,
-                                                   trail_mask=comp_mask)
+                dx, dy, ok, n_stars, tier = _track_stars(patch_prev, patch_next,
+                                                         trail_mask=comp_mask)
                 _addt("track_s", time.perf_counter() - _ts)
-                _dx, _dy, _ok, _n_stars = dx, dy, ok, n_stars
+                _dx, _dy, _ok, _n_stars, _cascade = dx, dy, ok, n_stars, tier
 
                 if ok:
                     # ── Warp synthesis ────────────────────────────────────────
@@ -738,7 +759,7 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                 # pasting it in flat. Falls back to a flat copy only if there are too
                 # few stars to track reliably, so it never makes a frame worse.
                 patch_prev = neighbor_frames[prev_idx][y0:y1, x0:x1]
-                _dx, _dy, _ok, _n_stars = _track_stars(
+                _dx, _dy, _ok, _n_stars, _cascade = _track_stars(
                     patch_prev, frame[y0:y1, x0:x1], trail_mask=comp_mask)
                 if _ok:
                     # prev's stars sit at p; in THIS frame they are at p+(dx,dy).
@@ -755,7 +776,7 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                 # frame and next and shift next BACK onto this frame's positions.
                 # Falls back to a flat copy only if tracking is unreliable.
                 patch_next = neighbor_frames[next_idx][y0:y1, x0:x1]
-                _dx, _dy, _ok, _n_stars = _track_stars(
+                _dx, _dy, _ok, _n_stars, _cascade = _track_stars(
                     frame[y0:y1, x0:x1], patch_next, trail_mask=comp_mask)
                 if _ok:
                     # next's stars sit at p+(dx,dy) relative to THIS frame's p.
@@ -765,6 +786,66 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                 else:
                     synth = _level(patch_next, _off_n)
                     _method = "next_only"
+
+            # ── Edge-frame foreground protection (the FIRST or LAST frame of the set) ──
+            # An edge frame has only ONE neighbor, so the two-neighbor still-vs-moving routing
+            # below cannot run. With no foreground mask, an unmasked STATIC object (a tree
+            # trunk, a rock) then gets SLID by the single-neighbor shift, nicking its edge -- a
+            # light notch that survives the lighten-max stack (found on IMG_2946, the first JT
+            # frame, 2026-07-02). Fix: reach to the SECOND neighbor on the SAME side (N+1,N+2
+            # for the first frame; N-1,N-2 for the last). By the second frame the trail has
+            # moved off this spot, so both are clean here; a static object is identical in both,
+            # so where they AGREE we keep the pixel UNSHIFTED from the nearer neighbor (the
+            # object stays put) while moving sky still slides. Same star-protect rule as the
+            # two-neighbor routing. Interior frames (both neighbors) skip this and use the block
+            # below unchanged.
+            if _STILL_ROUTING and (use_prev != use_next):     # exactly one neighbor = edge frame
+                if use_next:
+                    _near_idx, _far_idx, _near_off = next_idx, next_idx + 1, _off_n
+                else:
+                    _near_idx, _far_idx, _near_off = prev_idx, prev_idx - 1, _off_p
+                if 0 <= _far_idx < N:
+                    _near = neighbor_frames[_near_idx][y0:y1, x0:x1]
+                    _far  = neighbor_frames[_far_idx][y0:y1, x0:x1]
+                    _nd = ((neighbor_masks[_near_idx][y0:y1, x0:x1] > 0)
+                           if (neighbor_masks is not None and neighbor_masks[_near_idx] is not None)
+                           else np.zeros(comp_mask.shape, dtype=bool))
+                    _fd = ((neighbor_masks[_far_idx][y0:y1, x0:x1] > 0)
+                           if (neighbor_masks is not None and neighbor_masks[_far_idx] is not None)
+                           else np.zeros(comp_mask.shape, dtype=bool))
+                    _unshift = _level(_near, _near_off)
+                    # Local sky brightness (the collar), to tell DARK foreground from sky.
+                    _cpx = frame[y0:y1, x0:x1][_collar]
+                    _sky_lvl = float(np.median(_cpx.max(axis=1))) if _cpx.shape[0] >= 20 else 128.0
+                    # Static where BOTH same-side neighbors are clean AND agree in brightness.
+                    _still_e = ((~_nd) & (~_fd) &
+                                (np.abs(_near.max(axis=2).astype(np.int16) -
+                                        _far.max(axis=2).astype(np.int16)) < _STILL_TOL))
+                    # ALSO static: dark silhouette foreground in the near neighbor. Every user
+                    # shoots on a fixed tripod, so opaque foreground (trunk, rock, building) is
+                    # pixel-identical in every frame, and no trail or star is ever IN FRONT of
+                    # it. A pixel far darker than the local sky is that silhouette even when a
+                    # FAT trail mask claims the spot is dirty (the mask overhangs clean trunk --
+                    # that veto is what left the poly-3 trunk notch: f2's mask covered the trunk
+                    # edge, blocked the still test, and the slid fill nicked it). Dark = keep put.
+                    _still_e |= (_near.max(axis=2).astype(np.int16) < 0.5 * _sky_lvl)
+                    # Protect a slid star -- BUT only where it sits over SKY. A real star is
+                    # never in front of the opaque trunk/rock, so a small bright patch over DARK
+                    # foreground is sky slid over a foreground edge and MUST stay unshifted, not
+                    # be rescued (that was the poly-3 notch: a bright sliver at a thin branch tip).
+                    _extra_e = (_still_e
+                                & ((synth.max(axis=2).astype(np.int16) -
+                                    _unshift.max(axis=2).astype(np.int16)) > _STAR_MARGIN)
+                                & (_unshift.max(axis=2).astype(np.int16) > 0.5 * _sky_lvl))
+                    if _extra_e.any():
+                        _nl, _lab, _st, _ = cv2.connectedComponentsWithStats(
+                            _extra_e.astype(np.uint8), 8)
+                        for _k in range(1, _nl):
+                            if _st[_k, cv2.CC_STAT_AREA] <= _STAR_MAX_AREA:
+                                _still_e[_lab == _k] = False
+                    if _still_e.any():
+                        synth[_still_e] = _unshift[_still_e]
+                        _edge_still_px = int((_still_e & comp_mask).sum())
 
             # ── Still-vs-moving routing: where the two CLEAN neighbors AGREE, the scene did
             # not move between them (ground, hill, trunk, still sky) -- keep it UNSHIFTED so the
@@ -888,11 +969,13 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
             if seg_info is not None:
                 seg_info.update({
                     "tracking_ok":     _ok,
+                    "cascade":         _cascade,
                     "dx":              round(_dx, 2),
                     "dy":              round(_dy, 2),
                     "n_stars":         _n_stars,
                     "method":          _method,
                     "still_trail_px":  _still_trail_px,
+                    "edge_still_px":   _edge_still_px,
                     "union_zeroed_px": _union_zeroed_px,
                     "ring_off":        _ring_off,
                     "base":            "next" if _next_closer else "prev",

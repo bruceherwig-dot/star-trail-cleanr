@@ -59,6 +59,47 @@ LOG_LEGEND = {
         "phantoms_pruned": "Count bookkeeping for the phantom-prune stage.",
         "kept_would_fail_fat_blob": "Informational only; the fat-blob gate is off.",
     },
+    "key_repair_fields": {
+        "_structure": "A 'repair' record has a 'components' list, one entry per trail blob repaired "
+            "on this frame. Each component has 'id', 'polygon' (which detected polygon/arm it came "
+            "from), 'area' (px), 'bbox', 'split_into' (a long trail is cut into this many shorter "
+            "segments so star motion is measured locally), and a 'segments' list. Each segment is one "
+            "piece actually filled, described by the fields below. An EMPTY 'components' list means no "
+            "trail was repaired on this frame.",
+        "method": "HOW this piece was filled. 'blend' = borrowed BOTH neighbor frames (each shifted to "
+            "follow the stars) and averaged them. 'single_shift' = borrowed ONE neighbor, shifted into "
+            "place (keeps faint stars at full brightness). 'prev_shift'/'next_shift' = an edge frame "
+            "(first/last of the run) with only one neighbor, shifted onto this frame. "
+            "'prev_only'/'next_only' = a neighbor copied without a reliable shift. "
+            "'raw_clean_track_failed' = star tracking failed, so a raw neighbor was pasted un-shifted. "
+            "'crayon_sky_no_neighbors' = no neighbor to borrow, so painted with local sky colour + grain "
+            "(the 'crayon' fill). 'black_no_sky' = the RARE last resort: no neighbor AND too little "
+            "surrounding sky to sample, so pixels were set to black. Seeing 'black_no_sky' at all is "
+            "notable and should essentially never happen.",
+        "cascade": "WHICH tracker measured the star motion for this piece. 'agree' = star-detection and "
+            "phase-correlation agreed (most trusted). 'phase' = phase-correlation confident on its own. "
+            "'detect' = enough star votes on their own. 'fail' = neither confident, so no shift was used "
+            "(the fill fell back to a raw neighbor paste). 'no_neighbors' = an edge frame with nothing to "
+            "track against. 'none' = tracking was not run for this piece.",
+        "tracking_ok": "True if a reliable star shift was measured; False = tracking failed and the sky "
+            "was not slid.",
+        "n_stars": "How many star streaks agreed on the measured shift (more = more trustworthy).",
+        "dx / dy": "The measured star shift in pixels between the previous and next frame.",
+        "still_trail_px": "Always 0 now (the old warm-pixel scrub that used this is disabled).",
+        "edge_still_px": "First/last frame of the set only: pixels the edge-frame foreground "
+            "protection kept UNSHIFTED (a static object like a tree trunk, detected by reaching "
+            "to the second same-side neighbor because the normal two-neighbor routing can't run "
+            "on an edge frame). >0 here means the fix spared foreground that would otherwise have "
+            "been nicked by the single-neighbor slide. 0 on all interior frames.",
+        "union_zeroed_px": "Pixels where BOTH neighbors carried the trail (a crossing), so there was "
+            "nothing clean to borrow; these were filled from the colour-closest raw neighbor (crayon).",
+        "ring_off": "The final per-channel [B,G,R] brightness nudge applied to match the patch to the sky "
+            "right beside it (absorbs small frame-to-frame sky drift). null if it could not be measured.",
+        "sky_filled_px": "No-neighbor case only: pixels the crayon sky-fill painted. 0 together with "
+            "method 'black_no_sky' means the pure-black fallback fired.",
+        "base": "Which neighbor's sky colour was the closer match here and was borrowed from ('prev' or "
+            "'next').",
+    },
 }
 
 
