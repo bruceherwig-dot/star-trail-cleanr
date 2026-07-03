@@ -20,6 +20,7 @@ Why it never raises:
   An update check is a nice-to-have, never a reason to block or crash startup,
   so every failure path returns None and the caller simply skips the banner.
 """
+import http.client
 import json
 import os
 import platform
@@ -73,6 +74,12 @@ REPO = "bruceherwig-dot/star-trail-cleanr"
 # published as prereleases — otherwise they would show up here and the app
 # would offer a model file as if it were an app update.)
 API_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
+# Self-hosted failsafe on our own domain (website/latest.php). Consulted only when
+# GitHub is unreachable (offline, firewall, or GitHub blocked at the country
+# level) -- our server proxies + caches the GitHub release info, and the app can
+# reach our domain even where it cannot reach GitHub. Layer 1 of the update
+# failsafe design (project_update_failsafe_design).
+FAILSAFE_URL = "https://api.startrailcleanr.com/latest.php"
 # Default network timeout, in seconds, for the GitHub request. Kept short so a
 # slow or dead network never noticeably delays the app.
 TIMEOUT_S = 5
@@ -161,6 +168,43 @@ def get_download_url() -> str:
     return f"{base}/{_detect_asset()}"
 
 
+def _platform_key() -> str:
+    """The latest.php download key that matches this OS + CPU, mirroring
+    _detect_asset()'s platform logic (Apple Silicon vs Intel vs Windows vs Linux)."""
+    if sys.platform == "darwin":
+        machine = (platform.machine() or "").lower()
+        if machine in ("x86_64", "amd64", "i386", "i686"):
+            return "mac-intel"
+        return "mac-as"
+    if sys.platform.startswith("linux"):
+        return "linux"
+    return "windows"
+
+
+def _failsafe_download_url(app: dict) -> Optional[str]:
+    """The failsafe payload's download URL for this platform, or None if absent."""
+    downloads = (app or {}).get("downloads") or {}
+    url = downloads.get(_platform_key())
+    return url if isinstance(url, str) and url else None
+
+
+def _fetch_failsafe(timeout_s: float) -> Optional[dict]:
+    """Fetch our self-hosted failsafe endpoint (website/latest.php), used only when
+    GitHub is unreachable. Returns the parsed dict or None on ANY failure (a failure
+    just means "show nothing"). The read is guarded exactly like the GitHub call, so
+    a truncated response can never crash the banner check."""
+    try:
+        req = urllib.request.Request(
+            FAILSAFE_URL, headers={"User-Agent": "StarTrailCleanR-Failsafe"})
+        with urllib.request.urlopen(req, timeout=timeout_s,
+                                    context=_verified_ssl_context()) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        return data if isinstance(data, dict) else None
+    except (urllib.error.URLError, http.client.HTTPException, TimeoutError,
+            json.JSONDecodeError, OSError, ValueError):
+        return None
+
+
 def check_for_update(local_version_str: str, timeout_s: float = TIMEOUT_S,
                      retries: int = 1) -> Optional[dict]:
     """Ask GitHub for the latest release and compare.
@@ -194,14 +238,33 @@ def check_for_update(local_version_str: str, timeout_s: float = TIMEOUT_S,
                                         context=_verified_ssl_context()) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
             break
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError, ValueError):
+        except (urllib.error.URLError, http.client.HTTPException, TimeoutError,
+                json.JSONDecodeError, OSError, ValueError):
+            # http.client.HTTPException covers IncompleteRead (a truncated chunked
+            # response) and siblings, which are not OSError/URLError -- otherwise a
+            # cut-off read escapes this guard and crashes (Sentry 2026-07-02).
             _log(f"check attempt {attempt}/{attempts} FAILED "
                  f"(local={local_version_str}):\n{traceback.format_exc()}")
             if attempt < attempts:
                 time.sleep(min(2.0 * attempt, 5.0))   # brief backoff before retry
-            else:
-                return None
-    tag = data.get("tag_name")
+            # else: leave data as None and fall through to the failsafe below.
+    # data holds the GitHub payload, or None if every attempt failed -- offline, or
+    # GitHub blocked at the network/country level. In the None case, ask our own
+    # endpoint, which the app can still reach when GitHub cannot.
+    if data is not None:
+        tag = data.get("tag_name")
+        download_url = get_download_url()
+        via_failsafe = False
+    else:
+        fb = _fetch_failsafe(timeout_s)
+        app = (fb or {}).get("app") or {}
+        tag = app.get("tag")
+        # Prefer the failsafe's own download URL (Layer 2 will point this at our
+        # mirror for blocked users); fall back to the GitHub URL otherwise.
+        download_url = _failsafe_download_url(app) or get_download_url()
+        via_failsafe = True   # GitHub was unreachable; this came from our server
+        if tag:
+            _log(f"check: GitHub unreachable, using failsafe -> latest={tag}")
     remote = parse_tag(tag)
     # Only surface an update when the remote version is STRICTLY greater than the
     # local one. Equal versions (user is current) and unparseable tags both fall
@@ -210,4 +273,7 @@ def check_for_update(local_version_str: str, timeout_s: float = TIMEOUT_S,
         _log(f"check: local={local_version_str} latest={tag} -> current, no banner")
         return None
     _log(f"check: local={local_version_str} latest={tag} -> UPDATE, banner should show")
-    return {"tag": tag, "download_url": get_download_url()}
+    # via_failsafe=True means GitHub was blocked/unreachable and this update was
+    # confirmed via our own server -- the GUI then offers a manual download from
+    # the website instead of the (unreachable) one-click updater.
+    return {"tag": tag, "download_url": download_url, "via_failsafe": via_failsafe}

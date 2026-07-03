@@ -425,3 +425,32 @@ jobs:
             git commit -m "Sync CHANGELOG.md to main for ${GITHUB_REF_NAME}"
             git push origin main
           fi
+
+  mirror-installers:
+    # Layer 2 of the update failsafe: copy the four installers to our own
+    # DreamHost mirror (https://api.startrailcleanr.com/downloads/) so a user who
+    # cannot reach github.com (GitHub blocked in-country) can still download.
+    # website/latest.php serves the mirror URL when the file is present, else the
+    # GitHub URL, so this step "lights up" the mirror each release. Independent
+    # job (nothing needs it) + continue-on-error + a no-op when the DREAMHOST
+    # secret is unset, so a mirror hiccup can NEVER block the release or the
+    # auto-update feeds that actually reach users.
+    needs: [build-mac, build-mac-intel, build-windows, build-linux]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install paramiko
+        run: pip install paramiko
+      - name: Download built installers
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Upload installers to the DreamHost failsafe mirror
+        env:
+          DREAMHOST_PASSWORD: ${{ secrets.DREAMHOST_PASSWORD }}
+        run: python3 scripts/mirror_upload.py artifacts

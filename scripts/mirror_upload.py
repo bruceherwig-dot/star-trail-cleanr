@@ -1,0 +1,107 @@
+"""Upload the built installers to the DreamHost failsafe mirror.
+
+Layer 2 of the update failsafe (see project_update_failsafe_design / AUTO_UPDATE):
+users who cannot reach github.com (GitHub blocked at the country level) need a
+non-GitHub place to download the app. website/latest.php serves the mirror URL for
+any installer that is present on our server, else the GitHub URL -- so this upload
+is what "lights up" the mirror for each release.
+
+Runs in CI (the mirror-installers job in build.yml) after the four build jobs.
+Also runnable locally against a folder of installers.
+
+Usage:  python3 scripts/mirror_upload.py <artifacts_dir>
+    <artifacts_dir> is searched recursively for each expected installer filename.
+
+Credentials: the SFTP password comes from the DREAMHOST_PASSWORD environment
+variable (a GitHub Actions secret in CI). If it is unset/empty, this exits 0
+without doing anything, so the mirror step is a no-op until the secret is added --
+it can never block a release. The host/user are not secret.
+
+Never prints the password. Never fails the build: a missing file is reported (not
+silently skipped) and the script still exits 0 -- the latest.php fallback means a
+miss just serves the GitHub URL for that platform.
+"""
+import glob
+import os
+import sys
+
+HOST = "pdx1-shared-a4-09.dreamhost.com"
+PORT = 22
+USER = "dh_bmigjp"
+DL_DIR = "/home/dh_bmigjp/api.startrailcleanr.com/downloads"
+CACHE = "/home/dh_bmigjp/stc_data/latest_cache.json"
+
+# Stable, version-less installer filenames -- must match website/latest.php's
+# platform_files() and the app's asset constants in modules/update_check.py.
+EXPECTED = [
+    "StarTrailCleanR-Mac-AppleSilicon.dmg",
+    "StarTrailCleanR-Mac-Intel.dmg",
+    "StarTrailCleanRSetup.zip",
+    "StarTrailCleanR-Linux-x86_64.tar.gz",
+]
+
+
+def main() -> int:
+    if len(sys.argv) < 2:
+        print("usage: mirror_upload.py <artifacts_dir>")
+        return 0  # never fail the build on a usage slip
+    artifacts_dir = sys.argv[1]
+
+    password = os.environ.get("DREAMHOST_PASSWORD", "").strip()
+    if not password:
+        print("DREAMHOST_PASSWORD not set -- skipping mirror upload (no-op). "
+              "Add the GitHub secret to enable it.")
+        return 0
+
+    # Locate each expected installer anywhere under the artifacts dir (the CI
+    # download-artifact step nests each in its own subfolder).
+    found = {}
+    for name in EXPECTED:
+        hits = glob.glob(os.path.join(artifacts_dir, "**", name), recursive=True)
+        if hits:
+            found[name] = hits[0]
+        else:
+            print(f"WARNING: {name} not found under {artifacts_dir} -- "
+                  f"latest.php will serve the GitHub URL for it this release")
+
+    if not found:
+        print("No installers found to mirror; nothing uploaded.")
+        return 0
+
+    import paramiko
+    t = paramiko.Transport((HOST, PORT))
+    t.connect(username=USER, password=password)
+    sftp = paramiko.SFTPClient.from_transport(t)
+
+    # Make sure the mirror folder exists.
+    try:
+        sftp.stat(DL_DIR)
+    except IOError:
+        sftp.mkdir(DL_DIR)
+        sftp.chmod(DL_DIR, 0o755)
+
+    uploaded = 0
+    for name, local_path in found.items():
+        remote = f"{DL_DIR}/{name}"
+        sftp.put(local_path, remote)
+        sftp.chmod(remote, 0o644)
+        size = sftp.stat(remote).st_size
+        print(f"uploaded {name} -> {remote} ({size} bytes)")
+        uploaded += 1
+
+    # Clear the endpoint's cache so latest.php recomputes with the new files now.
+    try:
+        sftp.remove(CACHE)
+        print("cleared latest.php cache")
+    except IOError:
+        pass
+
+    sftp.close()
+    t.close()
+    print(f"mirror upload complete: {uploaded}/{len(EXPECTED)} installers "
+          f"({len(EXPECTED) - len(found)} missing this release)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

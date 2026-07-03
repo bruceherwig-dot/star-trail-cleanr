@@ -32,6 +32,7 @@ malformed JSON -- is swallowed and turned into a None return. An update check is
 a "nice to have," so it must never raise an error or interrupt the user. The
 caller treats None as "show nothing."
 """
+import http.client
 import json
 import re
 import ssl
@@ -60,6 +61,12 @@ REPO = "bruceherwig-dot/star-trail-cleanr"
 # model-only releases are published) rather than just the default first page --
 # important because the newest model could be buried below newer app releases.
 RELEASES_URL = f"https://api.github.com/repos/{REPO}/releases?per_page=100"
+# Self-hosted failsafe on our own domain (see website/latest.php). Reached only
+# when GitHub itself is unreachable (offline, firewall, or GitHub blocked at the
+# country level) -- the app can still reach our server, which proxies + caches the
+# GitHub release info. Returns the same model fields, so a blocked user still
+# learns a newer model exists. Layer 1 of project_update_failsafe_design.
+FAILSAFE_URL = "https://api.startrailcleanr.com/latest.php"
 # How long (seconds) to wait for GitHub before giving up. Kept short so a slow
 # or unreachable network never stalls the app.
 TIMEOUT_S = 5
@@ -186,6 +193,25 @@ def local_model_version() -> str:
     return installed if installed else BUNDLED_MODEL_VERSION
 
 
+def _fetch_failsafe() -> Optional[dict]:
+    """Fetch our self-hosted failsafe endpoint (website/latest.php on our own
+    domain), used only when GitHub is unreachable. Returns the parsed dict or
+    None on ANY failure -- like the rest of this module, a failure just means
+    "show nothing." The read is guarded the same way as the GitHub call so a
+    truncated response can never crash the app.
+    """
+    try:
+        req = urllib.request.Request(
+            FAILSAFE_URL, headers={"User-Agent": "StarTrailCleanR-Failsafe"})
+        with urllib.request.urlopen(req, timeout=TIMEOUT_S,
+                                    context=_verified_ssl_context()) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        return data if isinstance(data, dict) else None
+    except (urllib.error.URLError, http.client.HTTPException, TimeoutError,
+            json.JSONDecodeError, OSError, ValueError):
+        return None
+
+
 def check_for_model_update() -> Optional[dict]:
     """The one public entry point: is there a newer AI model to offer the user?
 
@@ -228,8 +254,30 @@ def check_for_model_update() -> Optional[dict]:
         with urllib.request.urlopen(req, timeout=TIMEOUT_S,
                                     context=_verified_ssl_context()) as resp:
             releases = json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError, ValueError):
-        return None
+    except (urllib.error.URLError, http.client.HTTPException, TimeoutError,
+            json.JSONDecodeError, OSError, ValueError):
+        # http.client.HTTPException covers IncompleteRead (a truncated/chunked
+        # response cut off mid-read) and its siblings -- these are NOT OSError or
+        # URLError subclasses, so without this the read could raise past the guard
+        # and crash the app (Sentry 2026-07-02, IncompleteRead on the releases list).
+        releases = None
+    # GitHub unreachable (offline, firewall, or blocked at the country level) ->
+    # try our self-hosted failsafe, which the app can still reach. It already
+    # distilled the newest model release for us, so compare + return directly.
+    if releases is None:
+        fb = _fetch_failsafe()
+        m = (fb or {}).get("model") or {}
+        num = parse_model_tag(m.get("tag"))
+        if num is None or num <= local_num:
+            return None
+        if not m.get("download_url"):
+            return None
+        return {
+            "tag": m.get("tag"),
+            "summary": m.get("summary", ""),
+            "credits": m.get("credits", ""),
+            "download_url": m.get("download_url"),
+        }
     if not isinstance(releases, list):
         return None
     # Step 3: scan all releases and keep the model release with the highest

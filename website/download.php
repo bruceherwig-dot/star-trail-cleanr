@@ -60,5 +60,15 @@ if (!$is_bot) {
     }
 }
 
-header('Location: ' . $BASE . '/' . $ASSETS[$os], true, 302);
+// Prefer our own mirror when the file is present on this server, so a user who
+// cannot reach github.com (GitHub blocked in-country) still gets the download.
+// Falls back to the GitHub release asset when the mirror copy is not there yet.
+$MIRROR_DIR  = '/home/dh_bmigjp/api.startrailcleanr.com/downloads';
+$MIRROR_BASE = 'https://api.startrailcleanr.com/downloads';
+$file = $ASSETS[$os];
+if (is_readable($MIRROR_DIR . '/' . $file)) {
+    header('Location: ' . $MIRROR_BASE . '/' . $file, true, 302);
+} else {
+    header('Location: ' . $BASE . '/' . $file, true, 302);
+}
 exit;

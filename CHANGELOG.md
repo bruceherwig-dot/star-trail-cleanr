@@ -2,6 +2,11 @@
 
 ---
 
+## v2.68-beta
+- **Update checks are steadier, and they never crash.** In rare cases a connection that dropped partway through checking for a new version could crash the app. That is fixed: a failed check now quietly does nothing.
+- **A backup way to find updates when GitHub is blocked.** In some countries and on some networks, GitHub (where the app is hosted) is blocked, which used to leave the app unable to check for or download updates at all. Now, if it cannot reach GitHub, the app checks our own server instead. If a newer version is waiting, it lets you know and points you to startrailcleanr.com to download it by hand. Your photos, settings, and folders are all kept.
+- **Smoke tests:** 235 passing.
+
 ## v2.67-beta
 - **A cleaner finish to every run.** The run summary and the timelapse window now lay themselves out neatly: each one centers on its own, and when both are open they sit side by side instead of overlapping.
 - **Create a timelapse right from the run page.** A new "Create Timelapse" button now appears on the run page whenever cleaned frames are available, so you can jump straight to a timelapse without going back to the main screen.

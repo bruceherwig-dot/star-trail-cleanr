@@ -3086,16 +3086,27 @@ class MainWindow(QMainWindow):
         self._update_banner = banner
         self._update_download_url = None
         self._update_banner_tag = ""
+        self._update_via_failsafe = False
         return banner
 
-    def _reveal_update_banner(self, tag, download_url):
+    def _reveal_update_banner(self, tag, download_url, via_failsafe=False):
         """Show the amber update banner for `tag`. Shared by the live check
         (_on_update_result) and the optimistic startup path (_start_update_check),
         so a known update is shown even if a given launch's live check is slow or
-        fails. Pure UI -- callers handle the dismissed-tag gating."""
+        fails. Pure UI -- callers handle the dismissed-tag gating.
+
+        via_failsafe=True means the update was confirmed via our own server because
+        GitHub was unreachable (blocked). The banner then says to download from the
+        website, and the Download button offers a manual download instead of the
+        one-click updater (which reads a GitHub feed that would also be blocked)."""
         self._update_banner_tag = tag
         self._update_download_url = download_url
-        self._update_label.setText(f"New version available: {tag}")
+        self._update_via_failsafe = via_failsafe
+        if via_failsafe:
+            self._update_label.setText(
+                f"Update available: {tag}. Download it from our website.")
+        else:
+            self._update_label.setText(f"New version available: {tag}")
         self._update_banner.setVisible(True)
         # App update takes priority over the model card: hide it so the user never
         # sees two stacked orange Download prompts. The app update bundles the latest
@@ -3152,7 +3163,8 @@ class MainWindow(QMainWindow):
         # Remember it: a later launch shows the banner instantly even if that
         # launch's GitHub check is slow or fails -- never a silent miss.
         SETTINGS.setValue("last_seen_update_tag", tag)
-        self._reveal_update_banner(tag, result.get("download_url"))
+        self._reveal_update_banner(tag, result.get("download_url"),
+                                   result.get("via_failsafe", False))
 
     def _on_update_banner_dismissed(self):
         """Hide the banner and remember the user's dismissal so we don't show
@@ -3170,6 +3182,13 @@ class MainWindow(QMainWindow):
         no manual download, no reinstall. Only on Linux, which has no built-in
         in-place updater, does this fall back to opening the GitHub download
         page in the browser."""
+        # If this update was found via our own server because GitHub was
+        # unreachable (a country/network block), the one-click updater (Sparkle/
+        # WinSparkle) reads a GitHub-hosted feed too and would just fail. Skip it
+        # and offer a manual download from the website, which the user can reach.
+        if getattr(self, "_update_via_failsafe", False):
+            self._show_manual_update_dialog(self._update_banner_tag)
+            return
         if sys.platform == "darwin":
             from modules.sparkle_updater import check_for_updates
             if not check_for_updates():
@@ -3182,6 +3201,36 @@ class MainWindow(QMainWindow):
             from PySide6.QtCore import QUrl
             from PySide6.QtGui import QDesktopServices
             QDesktopServices.openUrl(QUrl(self._update_download_url))
+
+    def _show_manual_update_dialog(self, tag):
+        """Shown when the automatic update path (GitHub) was unreachable but our
+        own server confirmed a newer version exists. Explains, without alarm, that
+        we can't update automatically and points to the website to download it by
+        hand -- a link that loads even where GitHub is blocked."""
+        try:
+            from PySide6.QtCore import QUrl
+            from PySide6.QtGui import QDesktopServices
+            box = QMessageBox(self)
+            box.setWindowTitle("Download the update")
+            box.setIcon(QMessageBox.Information)
+            box.setText(
+                f"A newer version of Star Trail CleanR ({tag}) is available.")
+            box.setInformativeText(
+                "We couldn't update the app automatically. Something on your "
+                "network is blocking our update service, so this isn't a problem "
+                "with your computer or your files.\n\n"
+                "You can download the latest version from our website and install "
+                "it right over your current one. Your photos, settings, and "
+                "folders are all kept.")
+            openb = box.addButton("Open startrailcleanr.com", QMessageBox.AcceptRole)
+            box.addButton("Close", QMessageBox.RejectRole)
+            box.setDefaultButton(openb)
+            box.exec()
+            if box.clickedButton() is openb:
+                QDesktopServices.openUrl(
+                    QUrl("https://startrailcleanr.com/index.html#download"))
+        except Exception:
+            pass
 
     # ── Model update card (shows when GitHub has a newer trail detector) ─────
 
