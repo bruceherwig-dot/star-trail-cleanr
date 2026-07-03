@@ -197,8 +197,19 @@ $platform_list = ranked($plat_map);
 
 // Windows users who pulled the GPU (CUDA) package: a Windows install with >=1 GPU
 // run. Mac's GPU is built in (not a download), so this is Windows-only.
-$windows_gpu = 0;
-foreach ($user_plat as $uid => $lab) { if ($lab === 'Windows' && isset($gpu_users[$uid])) $windows_gpu++; }
+// Also counted: total photographers running on ANY GPU = those Windows GPU users
+// plus every Apple Silicon Mac (its GPU is built in), as a share of all
+// identified photographers.
+$windows_gpu = 0; $windows_users = 0; $apple_silicon = 0;
+foreach ($user_plat as $uid => $lab) {
+    if ($lab === 'Windows') {
+        $windows_users++;
+        if (isset($gpu_users[$uid])) $windows_gpu++;
+    } elseif ($lab === 'Apple Silicon') {
+        $apple_silicon++;
+    }
+}
+$gpu_total = $windows_gpu + $apple_silicon;
 
 echo json_encode(array(
     'trails_cleaned'        => $BASELINE_TRAILS + $trails,
@@ -223,6 +234,9 @@ echo json_encode(array(
     'avg_trails_per_run'    => $real_runs ? (int) round($real_trails / $real_runs) : 0,
     'avg_time_saved_sec'    => $real_runs ? (int) round($real_trails * 30 / $real_runs) : 0,
     'windows_gpu'           => $windows_gpu,
+    'windows_gpu_pct'       => $windows_users ? (int) round($windows_gpu * 100 / $windows_users) : 0,
+    'gpu_total'             => $gpu_total,
+    'gpu_total_pct'         => count($users) ? (int) round($gpu_total * 100 / count($users)) : 0,
     'timelapses'            => $timelapses,
     'generated'             => gmdate('c'),
 ));

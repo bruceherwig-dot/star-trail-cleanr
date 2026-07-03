@@ -30,6 +30,7 @@
   .pagehead h1{font-size:40px;letter-spacing:-1px;color:var(--navy);margin:10px 0 8px}
   .pagehead p{color:var(--muted);font-size:16px;max-width:620px}
   .tiles{display:grid;grid-template-columns:repeat(5,1fr);gap:18px;margin:44px 0 8px}
+  .tiles.bottom{grid-template-columns:repeat(4,1fr)}
   .tile{background:var(--bg2);border:1px solid var(--line);border-radius:14px;padding:22px 18px;text-align:center}
   .tile .num{font-size:40px;font-weight:700;letter-spacing:-1px;color:var(--navy);font-variant-numeric:tabular-nums;line-height:1}
   .tile .lbl{color:var(--muted);font-size:14px;margin-top:10px}
@@ -56,6 +57,7 @@
   @media(max-width:760px){
     .navlinks{display:none}
     .tiles{grid-template-columns:repeat(2,1fr)}
+    .tiles.bottom{grid-template-columns:repeat(2,1fr)}
     .facts{grid-template-columns:repeat(2,1fr)}
     .cards{grid-template-columns:1fr}
     .pagehead h1{font-size:30px}
@@ -94,7 +96,7 @@
     <div class="tile"><div class="num" id="t-trails">…</div><div class="lbl">Trails cleaned</div></div>
     <div class="tile"><div class="num" id="t-hours">…</div><div class="lbl">Hours saved</div></div>
     <div class="tile"><div class="num" id="t-downloads">…</div><div class="lbl">Downloads</div></div>
-    <div class="tile"><div class="num" id="t-users">…</div><div class="lbl">Active photographers</div></div>
+    <div class="tile"><div class="num" id="t-users">…</div><div class="lbl">Verified users since June 24, 2026</div></div>
     <div class="tile"><div class="num" id="t-countries">…</div><div class="lbl">Countries</div></div>
   </div>
 
@@ -118,9 +120,10 @@
     </div>
   </div>
 
-  <div class="tiles" style="grid-template-columns:repeat(3,1fr)">
+  <div class="tiles bottom">
     <div class="tile"><div class="num" id="t-runs">…</div><div class="lbl">Times run</div></div>
     <div class="tile"><div class="num" id="t-gpu">…</div><div class="lbl">Windows users on the GPU</div></div>
+    <div class="tile"><div class="num" id="t-gpuall">…</div><div class="lbl">Running on a GPU (Windows + Apple Silicon)</div></div>
     <div class="tile"><div class="num" id="t-tl">…</div><div class="lbl">Timelapse videos created</div></div>
   </div>
 
@@ -173,7 +176,8 @@ fetch('https://api.startrailcleanr.com/stats.php',{cache:'no-store'})
     animate(document.getElementById('t-users'),d.photographers!=null?d.photographers:d.users);
     animate(document.getElementById('t-countries'),d.countries_count);
     document.getElementById('t-countries').nextElementSibling.textContent=(d.countries_count===1?'Country':'Countries');
-    animate(document.getElementById('t-gpu'),d.windows_gpu);
+    animate(document.getElementById('t-gpu'),d.windows_gpu,d.windows_gpu_pct!=null?' ('+d.windows_gpu_pct+'%)':'');
+    animate(document.getElementById('t-gpuall'),d.gpu_total,d.gpu_total_pct!=null?' ('+d.gpu_total_pct+'%)':'');
     animate(document.getElementById('t-tl'),d.timelapses);
     bars('c-platforms', d.platforms, 'pct');
     bars('c-formats', d.formats, 'pct');
