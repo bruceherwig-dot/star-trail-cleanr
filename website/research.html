@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Star Trail CleanR · Research</title>
+<style>
+  :root{
+    --navy:#0a1e3f; --navy2:#0c2c5c; --blue:#1a6fc4; --blue-h:#1580e0;
+    --sub:#a8c0e0; --star:#f3d08a;
+    --bg:#ffffff; --bg2:#f4f7fb; --text:#16263f; --muted:#5b6b82; --line:#e3e9f2;
+    --maxw:1080px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;line-height:1.6;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:var(--maxw);margin:0 auto;padding:0 24px}
+  a{color:inherit;text-decoration:none}
+  header{position:sticky;top:0;z-index:50;background:var(--navy);border-bottom:1px solid rgba(255,255,255,.08)}
+  nav{max-width:var(--maxw);margin:0 auto;padding:14px 24px;display:flex;align-items:center;justify-content:space-between;gap:18px}
+  .brand{display:flex;align-items:center;gap:11px;font-weight:600;font-size:18px;color:#fff;letter-spacing:.2px}
+  .brand .logotile{width:40px;height:40px;border-radius:10px;background:#fff;display:flex;align-items:center;justify-content:center;flex:none}
+  .brand .logotile img{width:34px;height:34px;border-radius:7px}
+  .navlinks{display:flex;gap:22px;font-size:15px}
+  .navlinks a{color:var(--sub)}
+  .navlinks a:hover,.navlinks a.on{color:#fff}
+  .btn{display:inline-block;background:var(--blue);color:#fff;font-weight:600;padding:11px 20px;border-radius:8px;font-size:15px}
+  .btn:hover{background:var(--blue-h)}
+  .pagehead{background:var(--bg2);border-bottom:1px solid var(--line);padding:54px 0 44px}
+  .kicker{color:var(--blue);font-weight:600;font-size:14px;letter-spacing:1px;text-transform:uppercase}
+  .pagehead h1{font-size:40px;letter-spacing:-1px;color:var(--navy);margin:10px 0 8px}
+  .pagehead p{color:var(--muted);font-size:16px;max-width:640px}
+  .papers{margin:44px 0 8px;display:flex;flex-direction:column;gap:20px}
+  .paper{display:flex;gap:26px;align-items:center;background:var(--bg);border:1px solid var(--line);border-radius:14px;padding:22px 24px;transition:border-color .15s,box-shadow .15s,transform .15s}
+  .paper:hover{border-color:var(--blue);box-shadow:0 6px 24px rgba(26,111,196,.10);transform:translateY(-1px)}
+  .paper .thumb{flex:none;width:248px;aspect-ratio:3/2;object-fit:cover;border-radius:10px;border:1px solid var(--line);display:block;background:var(--bg2)}
+  .paper .body{flex:1;min-width:0}
+  .paper .eyebrow{color:var(--blue);font-weight:600;font-size:12.5px;letter-spacing:.12em;text-transform:uppercase;margin-bottom:10px}
+  .paper h2{font-size:23px;letter-spacing:-.4px;color:var(--navy);margin-bottom:10px}
+  .paper p{color:var(--muted);font-size:15.5px;max-width:76ch}
+  .paper .read{display:inline-block;margin-top:16px;color:var(--blue);font-weight:600;font-size:15px}
+  .paper:hover .read{color:var(--blue-h)}
+  .note{text-align:center;color:var(--muted);font-size:13px;margin:14px 0 60px}
+  footer{background:var(--navy);color:var(--sub);padding:38px 0;font-size:14px}
+  footer .wrap{display:flex;justify-content:space-between;flex-wrap:wrap;gap:14px}
+  footer .brandf{color:#fff;font-weight:600}
+  footer a{color:#fff;text-decoration:underline}
+  @media(max-width:760px){
+    .navlinks{display:none}
+    .pagehead h1{font-size:30px}
+    .paper{flex-direction:column;align-items:stretch;gap:16px;padding:18px}
+    .paper .thumb{width:100%}
+    .paper h2{font-size:20px}
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <nav>
+    <a class="brand" href="index.html"><span class="logotile"><img src="logo.png" alt="Star Trail CleanR logo"></span> Star Trail CleanR</a>
+    <div class="navlinks">
+      <a href="index.html#how">How it works</a>
+      <a href="index.html#gallery">Gallery</a>
+      <a href="index.html#download">Download</a>
+      <a href="index.html#approach">Approach</a>
+      <a class="on" href="research.html">Research</a>
+      <a href="index.html#thanks">Thanks</a>
+      <a href="stats.html">Stats</a>
+    </div>
+    <a class="btn" href="index.html#download">Download free</a>
+  </nav>
+</header>
+
+<section class="pagehead">
+  <div class="wrap">
+    <div class="kicker">Research</div>
+    <h1>Technical write-ups</h1>
+    <p>Plain-English notes on how Star Trail CleanR finds and repairs airplane and satellite trails. Not formal papers, just honest write-ups with real before-and-after results, for anyone who wants to pick up where we left off.</p>
+  </div>
+</section>
+
+<div class="wrap">
+  <div class="papers">
+
+    <a class="paper" href="starbridge.html">
+      <img class="thumb" src="starbridge-thumb.jpg" alt="A repaired star trail stack with the aircraft and satellite trails removed">
+      <div class="body">
+        <div class="eyebrow">Technical Notes &middot; No. 1 &middot; Repair</div>
+        <h2>Star Bridge: repairing trails by borrowing the sky next door</h2>
+        <p>How we rebuild the sky under a removed trail by shifting in the neighboring frame so the stars line up exactly, then color-correcting every borrowed pixel to the local sky. The road there ran through a few dead ends: optical flow that drifted, a warm-pixel scrub that quietly deleted real stars, and a ring-leveling step that turned out to be the real cause of the black holes.</p>
+        <span class="read">Read the write-up &rarr;</span>
+      </div>
+    </a>
+
+  </div>
+  <div class="note">More write-ups are on the way as we document them.</div>
+</div>
+
+<footer>
+  <div class="wrap">
+    <div><span class="brandf">Star Trail CleanR</span> &middot; Remove the Trails. Keep the Stars.</div>
+    <div>Free beta &middot; <a href="stats.html">Stats</a> &middot; <a href="https://www.instagram.com/bruceherwig" target="_blank" rel="noopener">@bruceherwig</a></div>
+  </div>
+</footer>
+
+</body>
+</html>

@@ -118,9 +118,11 @@ function platform_label($platform, $arch) {
 $trails = 0; $runs = 0; $timelapses = 0; $no_exif = 0;
 $real_runs = 0; $real_frames = 0; $real_trails = 0; $real_gpu = 0;  // runs over 20 frames only
 $users = array();
-$gpu_users = array();   // photographers with >=1 GPU run (for "% of photographers with a GPU")
+$gpu_users = array();   // photographers with >=1 GPU run (for the Windows-GPU tile)
 $fmt = array();
-$cam = array(); $lens = array(); $focal = array(); $country = array();
+$orient = array('Landscape' => 0, 'Portrait' => 0);   // per-run framing, by width vs height
+$gpu_cpu = array('GPU' => 0, 'CPU' => 0);   // per-run compute device
+$cam = array(); $brand = array(); $lens = array(); $focal = array(); $country = array();
 $iso = array(); $shutter = array(); $aperture = array();   // EXIF exposure settings
 $user_plat = array();   // install_id -> OS bucket (Apple Silicon / Intel Mac / Windows)
 
@@ -158,8 +160,26 @@ if (is_readable($REPORTS)) {
             }
             $f = isset($r['input_format']) ? strtolower($r['input_format']) : '';
             if ($f !== '') { $L = format_label($f); $fmt[$L] = (isset($fmt[$L]) ? $fmt[$L] : 0) + 1; }
+            // Orientation: one vote per run. Wider than tall = landscape, taller
+            // than wide = portrait; square or missing dims are skipped.
+            $w = isset($r['width'])  ? (int) $r['width']  : 0;
+            $h = isset($r['height']) ? (int) $r['height'] : 0;
+            if ($w > 0 && $h > 0) {
+                if ($w > $h)      $orient['Landscape']++;
+                elseif ($h > $w)  $orient['Portrait']++;
+            }
+            // GPU vs CPU: one vote per run.
+            if (isset($r['gpu'])) $gpu_cpu[$r['gpu'] === true ? 'GPU' : 'CPU']++;
             if (empty($r['camera'])) $no_exif++;
-            else add_user($cam, clean_camera($r['camera']), $id);
+            else {
+                $cc = clean_camera($r['camera']);
+                add_user($cam, $cc, $id);
+                // Brand = the first word of the tidied camera name (Canon, Nikon,
+                // Fujifilm...). One photographer can appear under more than one
+                // brand if they've run different makes -- same as the cameras list.
+                $bn = explode(' ', $cc)[0];
+                if ($bn !== '') add_user($brand, $bn, $id);
+            }
             if (!empty($r['lens'])) {
                 $ln = trim($r['lens']);
                 if ($ln !== '' && !preg_match('/^0+(\.0+)?\s*mm/i', $ln) && stripos($ln, 'f/0') === false) add_user($lens, $ln, $id);
@@ -177,6 +197,14 @@ if (is_readable($REPORTS)) {
 $fmt_list = array();
 foreach ($fmt as $k => $n) $fmt_list[] = array('name' => $k, 'count' => $n);
 usort($fmt_list, function ($a, $b) { return $b['count'] - $a['count']; });
+
+$orient_list = array();
+foreach ($orient as $k => $n) if ($n > 0) $orient_list[] = array('name' => $k, 'count' => $n);
+usort($orient_list, function ($a, $b) { return $b['count'] - $a['count']; });
+
+$gpu_cpu_list = array();
+foreach ($gpu_cpu as $k => $n) if ($n > 0) $gpu_cpu_list[] = array('name' => $k, 'count' => $n);
+usort($gpu_cpu_list, function ($a, $b) { return $b['count'] - $a['count']; });
 
 // Photographers whose country couldn't be determined (reported before GeoIP went
 // live, or the lookup failed; the IP is discarded so it can't be backfilled).
@@ -197,19 +225,13 @@ $platform_list = ranked($plat_map);
 
 // Windows users who pulled the GPU (CUDA) package: a Windows install with >=1 GPU
 // run. Mac's GPU is built in (not a download), so this is Windows-only.
-// Also counted: total photographers running on ANY GPU = those Windows GPU users
-// plus every Apple Silicon Mac (its GPU is built in), as a share of all
-// identified photographers.
-$windows_gpu = 0; $windows_users = 0; $apple_silicon = 0;
+$windows_gpu = 0; $windows_users = 0;
 foreach ($user_plat as $uid => $lab) {
     if ($lab === 'Windows') {
         $windows_users++;
         if (isset($gpu_users[$uid])) $windows_gpu++;
-    } elseif ($lab === 'Apple Silicon') {
-        $apple_silicon++;
     }
 }
-$gpu_total = $windows_gpu + $apple_silicon;
 
 echo json_encode(array(
     'trails_cleaned'        => $BASELINE_TRAILS + $trails,
@@ -221,8 +243,10 @@ echo json_encode(array(
     'countries_count'       => count($country),
     'countries'             => $countries_list,
     'formats'               => $fmt_list,
+    'orientation'           => $orient_list,
     'no_exif_pct'           => $runs ? (int) round($no_exif * 100 / $runs) : 0,
     'cameras'               => ranked($cam),
+    'camera_brands'         => ranked($brand),
     'lenses'                => ranked($lens),
     'focal_lengths'         => ranked($focal, 'numeric'),
     'iso'                   => ranked($iso, 'numeric'),
@@ -233,10 +257,9 @@ echo json_encode(array(
     'trails_per_frame'      => $real_frames ? round($real_trails / $real_frames, 1) : 0,
     'avg_trails_per_run'    => $real_runs ? (int) round($real_trails / $real_runs) : 0,
     'avg_time_saved_sec'    => $real_runs ? (int) round($real_trails * 30 / $real_runs) : 0,
+    'gpu_vs_cpu'            => $gpu_cpu_list,
     'windows_gpu'           => $windows_gpu,
     'windows_gpu_pct'       => $windows_users ? (int) round($windows_gpu * 100 / $windows_users) : 0,
-    'gpu_total'             => $gpu_total,
-    'gpu_total_pct'         => count($users) ? (int) round($gpu_total * 100 / count($users)) : 0,
     'timelapses'            => $timelapses,
     'generated'             => gmdate('c'),
 ));
