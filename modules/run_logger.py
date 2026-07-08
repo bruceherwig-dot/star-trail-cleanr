@@ -91,6 +91,12 @@ LOG_LEGEND = {
             "to the second same-side neighbor because the normal two-neighbor routing can't run "
             "on an edge frame). >0 here means the fix spared foreground that would otherwise have "
             "been nicked by the single-neighbor slide. 0 on all interior frames.",
+        "fg_darken_px": "Pixels of dark STATIC foreground (a tree spike, branch, rock, rooftop) that the "
+            "trail crossed and that were restored by a darken (min) blend across a few neighbor frames, "
+            "instead of being erased by the sky slide. On a fixed tripod that foreground is the same dark "
+            "pixel every frame while the trail is bright, so the per-pixel minimum recovers it. Only pixels "
+            "darker than a fraction of the local sky are touched; sky pixels keep the Star Bridge slide so "
+            "moving stars stay put. >0 means foreground was saved on this frame.",
         "union_zeroed_px": "Pixels where BOTH neighbors carried the trail (a crossing), so there was "
             "nothing clean to borrow; these were filled from the colour-closest raw neighbor (crayon).",
         "ring_off": "The final per-channel [B,G,R] brightness nudge applied to match the patch to the sky "

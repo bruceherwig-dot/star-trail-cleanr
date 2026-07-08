@@ -122,6 +122,23 @@ _SPECKLE_MARGIN      = 30    # ...cleaned only if its local median is this much 
 # the sky in a thin ring hugging the trail (dilate by 15 px, minus the trail
 # itself). Local on purpose -- a whole-window match drags warm twilight fills gray.
 _RING_KERNEL = np.ones((31, 31), np.uint8)
+# Darken-foreground restore: a trail crossing dark STATIC foreground (a Joshua-tree spike,
+# a branch, a rock, a rooftop) cannot be rebuilt by sliding a neighbor -- the neighbor's sky
+# slides OVER the foreground and erases it, because the fill routes by star motion and the
+# foreground has none to borrow. But on a fixed tripod that foreground is the SAME dark pixel
+# in every frame, and the trail is bright, so the per-pixel MINIMUM (a darken blend) across a
+# few neighbor frames is the true foreground with the bright trail rejected -- as long as one
+# frame in the window is clear of that spot, which holds because the trail moves. Applied only
+# to masked pixels darker than a fraction of the LOCAL sky (measured in the same collar the
+# ring-levelling uses); those pixels are REPLACED outright with the darken value. A feather was
+# tried and dropped -- blending the clean darken against the already-erased repair underneath
+# reintroduced the mangled edge; a hard replace gives crisp spikes (verified on IMG_2971,
+# 2026-07-06). Brighter/sky pixels are left to the Star Bridge slide so the moving stars stay
+# correct. Even a +/-1 window recovers a spike (it is dark in every frame); the wider window is
+# margin against a slow trail that lingers on a pixel for several frames.
+_DARKEN_FOREGROUND   = True
+_DARKEN_WINDOW       = 3     # reach +/-N neighbor frames for the darken(min); clamped at set ends
+_DARKEN_FG_FRAC      = 0.72  # a masked pixel darker than this * local sky is dark foreground
 
 
 # ── Image helpers ─────────────────────────────────────────────────────────────
@@ -395,6 +412,43 @@ def _split_component(comp_full: np.ndarray) -> list:
     return result if result else [np.uint8(comp_full) * 255]
 
 
+def _darken_fill(patch_now, dmin, comp_mask, collar, maxv, dt):
+    """Restore dark static foreground under a trail with a darken (min) replace.
+
+    On a fixed tripod a spike/trunk/rock is the same dark pixel in every frame, and a
+    trail is bright, so the per-pixel min across neighbor frames (`dmin`) is that
+    foreground with the bright trail rejected. The masked pixels darker than
+    `_DARKEN_FG_FRAC` * local sky are REPLACED with the min -- a hard replace, not a
+    blend: mixing the clean darken with the already-erased repair underneath just
+    reintroduced the mangled edge. Sky pixels (brighter) are left untouched so the Star
+    Bridge slide keeps the moving stars. Local sky is the median max-channel of `collar`.
+
+    patch_now: the already-repaired patch (BGR, this frame's dtype).
+    dmin: per-pixel min of the neighbor window over the same window, same shape/dtype.
+    comp_mask: bool mask of the trail pixels in this window.
+    collar: bool mask of the local sky ring (dilated trail minus the trail).
+    maxv, dt: value ceiling and dtype (unused by the replace, kept for signature parity).
+    Returns (repaired_patch, foreground_px_filled, local_sky_level or None).
+    """
+    cpx = patch_now[collar]
+    if cpx.shape[0] < 20:
+        return patch_now, 0, None
+    # 70th percentile, NOT the median: a segment hugging a dark tree has a collar that is
+    # mostly foreground, so the median collapses toward black (measured sky=5 next to a
+    # Joshua tree), the threshold drops to ~zero and every spike is missed. The sky pixels
+    # are the brighter part of even a tree-heavy collar, so a high percentile reads the true
+    # sky level (~37) and the threshold lands right. Verified on IMG_2971, 2026-07-06.
+    sky = float(np.percentile(cpx.max(axis=1), 70))
+    if sky <= 0:
+        return patch_now, 0, None
+    fg = comp_mask & (dmin.max(axis=2).astype(np.float32) < _DARKEN_FG_FRAC * sky)
+    if not fg.any():
+        return patch_now, 0, sky
+    out = patch_now.copy()
+    out[fg] = dmin[fg]
+    return out, int(fg.sum()), sky
+
+
 def repair_frame(frame: np.ndarray, mask: np.ndarray,
                  frame_idx: int,
                  neighbor_frames: list,
@@ -432,6 +486,8 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
         debug_out (dict, optional): filled with a "components" list. Each entry
             has id, area, bbox, split_into, and a "segments" list. Each segment
             has tracking_ok, dx, dy, n_stars, method, still_trail_px,
+            edge_still_px, fg_darken_px (dark static foreground pixels restored by
+            the darken-min blend instead of being erased by the sky slide),
             union_zeroed_px, ring_off (the per-channel B,G,R brightness nudge
             the final ring-levelling step applied, or None if it could not
             measure), and base ("prev" or "next" -- which neighbor's sky colour
@@ -966,6 +1022,24 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                     _res[_spk] = _med[_spk]
             _addt("paste_s", time.perf_counter() - _tp)
 
+            # ── Darken restore of dark static foreground (spikes, trunks, rocks) ──
+            # Where the trail crosses dark foreground, the slide fill above borrows sky and
+            # erases it. On a fixed tripod that foreground is the same dark pixel in every frame
+            # and the trail is bright, so the per-pixel MIN across a +/-window of neighbors is the
+            # true foreground with the trail rejected. _darken_fill pulls only the masked pixels
+            # darker than a fraction of the local sky toward that min (feathered at the edge);
+            # brighter sky pixels keep the slide so moving stars stay put.
+            _fg_darken_px, _fg_sky = 0, None
+            if _DARKEN_FOREGROUND and N > 1:
+                _w0 = max(0, frame_idx - _DARKEN_WINDOW)
+                _w1 = min(N, frame_idx + _DARKEN_WINDOW + 1)
+                if _w1 - _w0 >= 2:
+                    _dmin = np.min(np.stack([neighbor_frames[_k][y0:y1, x0:x1]
+                                             for _k in range(_w0, _w1)]), axis=0)
+                    _res_d, _fg_darken_px, _fg_sky = _darken_fill(
+                        result[y0:y1, x0:x1], _dmin, comp_mask, _collar, _maxv, frame.dtype)
+                    result[y0:y1, x0:x1] = _res_d
+
             if seg_info is not None:
                 seg_info.update({
                     "tracking_ok":     _ok,
@@ -976,6 +1050,7 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                     "method":          _method,
                     "still_trail_px":  _still_trail_px,
                     "edge_still_px":   _edge_still_px,
+                    "fg_darken_px":    _fg_darken_px,
                     "union_zeroed_px": _union_zeroed_px,
                     "ring_off":        _ring_off,
                     "base":            "next" if _next_closer else "prev",

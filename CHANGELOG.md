@@ -2,6 +2,10 @@
 
 ---
 
+## v2.71-beta
+- **Trees, rocks, and rooflines survive a trail crossing.** When an airplane or satellite trail crossed a dark foreground shape — a Joshua tree spike, a branch, the edge of a building — the repair could erase part of that shape along with the trail, leaving a chewed-up edge. Now the repair takes advantage of the fact that your foreground sits at the exact same spot in every photo (you're on a tripod) while the trail is bright and moving from frame to frame: it rebuilds those dark shapes from the darkest version of each pixel across nearby frames, so the trail disappears and the silhouette comes back sharp. The sky and stars around it are handled exactly as before.
+- **Smoke tests:** 241 passing.
+
 ## v2.70-beta
 - **Timelapse: choose your own smoothing.** The Create Timelapse window has a new Smoothing pulldown: None, 2, 3, 4, or 5 frames (it was previously fixed at 3). Smoothing blends each movie frame with the previous ones; higher values smooth out flicker, but stretch each star into a slightly longer streak. A caption in the window explains this, and your choice is remembered for next time.
 - **Timelapse window polish.** The progress bar now clears when a render finishes instead of sitting at 100%, the headline uses the app's blue, and the row titles are bold and right-justified. The Timelapse window's own version is now 1.1.
