@@ -6718,7 +6718,7 @@ class TimelapseWindow(QDialog):
         _row("Size", self._size_cb)
 
         self._fps_cb = QComboBox()
-        for v in (12, 15, 24, 30, 60):
+        for v in (6, 12, 15, 24, 30, 60):
             self._fps_cb.addItem(f"{v} fps", v)
         self._fps_cb.setCurrentIndex(self._fps_cb.findData(24))  # default 24; _restore_choices overrides if saved
         _row("Frame rate", self._fps_cb)
