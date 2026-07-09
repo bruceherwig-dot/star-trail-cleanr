@@ -171,7 +171,7 @@
 <p>Color needs its own care. Sky color genuinely changes between frames: twilight fades, light pollution pulses, smoke and airglow drift. Borrowing a patch without correcting for this produced visibly two-toned repairs. Every borrowed pixel is therefore pre-leveled: we measure the median color of a thin collar of sky hugging the trail in frame N and in each neighbor (excluding every masked pixel), and nudge each neighbor's contribution onto frame N's local sky before it is pasted. A final ring-leveling pass then matches the finished patch to the sky immediately beside it, and absorbs the small frame-to-frame drift that remains.</p>
 <p>Each neighbor also carries its own trail mask, so contaminated pixels are handled per pixel: where only one neighbor is dirty, the other supplies the fill; where both are dirty (a crossing), there is nothing clean to borrow and the color-closest raw neighbor is pasted, pre-leveled, rather than synthesizing anything.</p>
 
-<h2><span class="no">6</span>The ground must not move</h2>
+<h2><span class="no">6</span>Keeping the foreground still</h2>
 <p>Everything above treats the window as sky. Real trails cross tree trunks, ridgelines, and buildings, and the slide that aligns the stars displaces the foreground by the same amount. The result was a family of artifacts: stepped horizon lines, bright wedges, and dark smudges wherever a repair window touched the ground.</p>
 <p>The fix that finally worked judges each pixel by motion, not by brightness or by any mask. The two clean neighbors are compared directly: where they agree within a small tolerance, nothing moved there between the frames, so the scene is still (ground, trunk, deep sky) and the pixel is kept unshifted, exactly in place. Where they differ, something moved (a star), and the slid fill is kept so the star lands correctly. Because the test is motion, it protects light-colored rocks and buildings exactly as well as black silhouettes, with no foreground mask required. One guard rides on top: a small bright blob that the slide adds over a still background is a real star at its correct position and is not overwritten; large bright regions are sky glow dragged over the foreground and are routed back to still.</p>
 
@@ -195,7 +195,7 @@
   <figcaption><span class="fno">Figure 3.</span> A trail crossing the thin spines of a Joshua tree. Drag the handle to wipe between the original and the repair: the trail is gone and the spines are back, sharp, not redrawn but recovered from the frames themselves, as described below.</figcaption>
 </figure>
 
-<h2><span class="no">7</span>The black rectangle hunt</h2>
+<h2><span class="no">7</span>The black rectangle bug</h2>
 <p>One artifact resisted every explanation for weeks: occasional solid black patches, sharp-edged, near foreground crossings. The natural suspects, in order, were the fill source, the shift measurement, and the masks. All innocent. The cause was the most benign-looking step in the pipeline: the final ring-leveling.</p>
 <p>Ring-leveling matches the finished patch to the sky in a thin collar around the trail. When the trail crosses dark foreground, part of that collar is not sky at all; it is trunk. The measured "difference" between patch and collar was then enormous, and the leveling obediently dragged the whole repair down toward black (or, with a bright collar, blew it out white). The step was doing its job perfectly against the wrong reference.</p>
 
@@ -226,7 +226,7 @@
 </ol>
 <p>The history matters for anyone building a similar system. Black fill was originally the <i>correct</i> choice, for the stack-transparency reason in Section 2, and it was replaced not because it stopped working but because what the app produced changed: timelapse and single-frame output made individual frames visible for the first time. How you should repair a frame depends on what the result will be used for.</p>
 
-<h2><span class="no">10</span>The last two frames</h2>
+<h2><span class="no">10</span>The first and last frame</h2>
 <p>Days before this draft, a fresh review of a cleaned sequence found two small light notches bitten into a Joshua tree trunk, on the first frame of the set. The run log identified both within minutes: two trail repairs whose fill windows touched the trunk, both on frame zero. The cause was structural. The still-versus-moving routing of Section 6 compares the two neighbors, and the first and last frames of a sequence only have one. On those two frames the routing silently could not run, and the single-neighbor slide nicked any foreground it touched. Because the notch is lighter than the silhouette it damages, the lighten-max stack keeps it: a two-frame defect survives into the final image.</p>
 
 <figure>
@@ -247,7 +247,7 @@
   <figcaption><span class="fno">Figure 7.</span> The same trunk after the fix: the edge is a clean silhouette top to bottom, the trail is gone, and the real star beside the branch survives. The run log for this frame records the protection keeping roughly 3,500 pixels of foreground in place on this trail, and about 70,000 pixels across the ten trails crossing this frame.</figcaption>
 </figure>
 
-<h2><span class="no">11</span>Measure everything, or you are guessing</h2>
+<h2><span class="no">11</span>Logging every repair</h2>
 <p>The edge-frame defect above was found by eye, but everything after that took minutes instead of days for one reason: by then, the repair logged every decision it made. Each repaired segment records which fill method ran, which measurement tier produced the shift, how many stars agreed, the shift itself, and the brightness corrections applied, with a plain-language legend written into the head of every log so the file explains itself. The same instrumentation settled a question we had been answering from memory: whether the synthetic fills ever actually run. The full distribution from the 89-frame sequence of Figure 1:</p>
 
 <table>
