@@ -209,7 +209,7 @@
 </figure>
 
 <p>Before removing it we measured it. Across a full sequence, roughly 98 percent of what the cleanup removed was a correctly placed star; under 2 percent was genuine trail residue, and that residue is already handled by the per-pixel mask logic of Section 5. The cleanup is now disabled. The general lesson cost us enough to state plainly:</p>
-<div class="callout">Never classify by appearance what you can verify by provenance. The pipeline knows where every filled pixel came from; a color heuristic that second-guesses that knowledge will eventually destroy the thing it was protecting.</div>
+<div class="callout">Don't guess what a pixel is from how it looks when you already know where it came from. The pipeline knows where every filled pixel came from; a color check that overrules that knowledge will eventually destroy the thing it was protecting.</div>
 
 <h2><span class="no">9</span>When there is nothing to borrow</h2>
 <p>Sometimes the bridge has no clean material: the shift measurement failed and both neighbors are contaminated, or a frame simply has no usable neighbor. The give-up ladder, in order:</p>
