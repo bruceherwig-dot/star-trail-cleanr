@@ -2,6 +2,10 @@
 
 ---
 
+## v2.72-beta
+- **Repairs next to a tree, ridge, or building no longer come out slightly dark.** When a trail passed close to a dark shape (a trunk, a Joshua tree, a rooftop, a ridgeline), the repaired patch of sky could end up a few shades darker than the sky around it. The cause: the step that brightness-matches the fill was reading that dark foreground as if it were sky, so it nudged the whole fill darker. It now measures only the sky when matching, so the repaired patch blends into the surrounding sky. Applies to every frame, including the first and last of a sequence.
+- **Smoke tests:** 241 passing.
+
 ## v2.71-beta
 - **Trees, rocks, and rooflines survive a trail crossing.** When an airplane or satellite trail crossed a dark foreground shape — a Joshua tree spike, a branch, the edge of a building — the repair could erase part of that shape along with the trail, leaving a chewed-up edge. Now the repair takes advantage of the fact that your foreground sits at the exact same spot in every photo (you're on a tripod) while the trail is bright and moving from frame to frame: it rebuilds those dark shapes from the darkest version of each pixel across nearby frames, so the trail disappears and the silhouette comes back sharp. The sky and stars around it are handled exactly as before.
 - **Smoke tests:** 241 passing.

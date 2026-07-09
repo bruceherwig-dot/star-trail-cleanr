@@ -122,6 +122,14 @@ _SPECKLE_MARGIN      = 30    # ...cleaned only if its local median is this much 
 # the sky in a thin ring hugging the trail (dilate by 15 px, minus the trail
 # itself). Local on purpose -- a whole-window match drags warm twilight fills gray.
 _RING_KERNEL = np.ones((31, 31), np.uint8)
+# The collar must measure SKY, not foreground. When a trail runs beside a trunk or ridge, the
+# ring of pixels around it includes that dark foreground; an unfiltered median then reads dark,
+# and the ring-levelling drags the whole fill down toward it -- a few levels dark across the
+# entire patch (the subtle, capped cousin of the black-rectangle bug). So drop pixels darker
+# than this fraction of the collar's own sky level (its 70th percentile) before measuring; only
+# sky remains. Measured on IMG_2971: an unfiltered collar left the fill 4 levels dark; filtering
+# lands it on the surrounding sky. Falls back to the unfiltered ring if too little sky is left.
+_COLLAR_SKY_FRAC = 0.5
 # Darken-foreground restore: a trail crossing dark STATIC foreground (a Joshua-tree spike,
 # a branch, a rock, a rooftop) cannot be rebuilt by sliding a neighbor -- the neighbor's sky
 # slides OVER the foreground and erases it, because the fill routes by star motion and the
@@ -661,8 +669,15 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
             _ndirty = ((neighbor_masks[next_idx][y0:y1, x0:x1] > 0)
                        if (has_next and neighbor_masks is not None and neighbor_masks[next_idx] is not None)
                        else np.zeros(comp_mask.shape, dtype=bool))
-            _collar = ((cv2.dilate(comp_mask.astype(np.uint8), _RING_KERNEL) > 0)
-                       & ~trail[y0:y1, x0:x1])
+            _dilc = ((cv2.dilate(comp_mask.astype(np.uint8), _RING_KERNEL) > 0)
+                     & ~trail[y0:y1, x0:x1])
+            _wmax = frame[y0:y1, x0:x1].max(2)
+            if int(_dilc.sum()) >= 20:
+                _sl = np.percentile(_wmax[_dilc], 70)
+                _sky_only = _dilc & (_wmax > _COLLAR_SKY_FRAC * _sl)
+                _collar = _sky_only if int(_sky_only.sum()) >= 20 else _dilc
+            else:
+                _collar = _dilc
             _maxv = 65535 if frame.dtype == np.uint16 else 255
             _off_p = _off_n = None
             _cur_sky = frame[y0:y1, x0:x1][_collar]
