@@ -264,12 +264,11 @@
 <p>Every repaired pixel on this sequence, 1,265 segments across 831 detected trail components, came from a real photograph.</p>
 
 <h2><span class="no">12</span>Limitations and open work</h2>
-<p>No repair is perfect, and this one has known edges. The first two are weak points in the current build; the last two are boundaries built into the method.</p>
+<p>No repair is perfect, and this one has known edges. The first two are weak points in the current build; the last is a hard case it handles gracefully rather than solving outright.</p>
 <ul>
   <li><b>Measurement failures.</b> When the two methods cannot agree on how far the stars moved (the 16 percent from Section 4), the repair plays it safe and pastes the neighbor without sliding. The trail still goes away, but the borrowed stars land a few pixels off from where they belong, so a bright arc can look slightly nudged at that spot. It is safe, not perfect. Pushing that 16 percent lower is open work on the star tracking, not the fill, and we do not have a committed approach for it yet.</li>
   <li><b>Neighbor contamination.</b> The repair borrows sky from the frames on either side and trusts that they are clean. If the detector missed a faint trail in one of those neighbors, the borrow copies that missed trail straight into the repair. We see it on dim satellite passes against near-black sky, where the trail is hardest to detect in the first place. This is a limit of the detector, not of the repair, and it is the strongest reason to keep training the detector on more data.</li>
   <li><b>Crossings.</b> A crossing is where the trail being repaired sits on top of a trail in both neighbor frames at once: two aircraft crossing, or a slow trail that lingers in the same place for several frames. With no clean sky in either neighbor to borrow, the repair pastes the closest-matching neighbor as it is rather than trying to rebuild the spot from scratch, so the stars there land slightly off. It degrades gently rather than failing outright.</li>
-  <li><b>The method assumes a fixed tripod.</b> Everything above assumes the camera never moves, so the foreground sits on the exact same pixels in every frame. That holds for star trails, which are shot on a locked tripod. It does not hold on a tracking mount (a motor that slowly turns the camera to follow the stars, used for pinpoint deep-sky shots): there the ground would shift frame to frame and break every foreground protection here. Tracked-mount sequences are out of scope by design.</li>
 </ul>
 
 <h2><span class="no">13</span>References</h2>
