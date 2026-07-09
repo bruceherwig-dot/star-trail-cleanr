@@ -2,6 +2,10 @@
 
 ---
 
+## v2.73-beta
+- **Crossings now pull in real sky instead of a copy of the crossing trail.** When a trail sits on top of trails in *both* the frame before and the frame after (two trails crossing, or one lingering in the same place for a few frames), there is no clean sky right next door. The repair used to fall back on the nearest neighbor even though it still carried the trail. Now it reaches a frame or two further out, where the trail has usually moved off, and borrows genuinely clean sky, slid so the stars still line up. It falls back to the old behavior only when nothing clean is within reach.
+- **Smoke tests:** 241 passing.
+
 ## v2.72-beta
 - **Repairs next to a tree, ridge, or building no longer come out slightly dark.** When a trail passed close to a dark shape (a trunk, a Joshua tree, a rooftop, a ridgeline), the repaired patch of sky could end up a few shades darker than the sky around it. The cause: the step that brightness-matches the fill was reading that dark foreground as if it were sky, so it nudged the whole fill darker. It now measures only the sky when matching, so the repaired patch blends into the surrounding sky. Applies to every frame, including the first and last of a sequence.
 - **Smoke tests:** 241 passing.
