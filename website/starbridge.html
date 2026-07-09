@@ -96,10 +96,48 @@
   .baf .tgb{left:12px}.baf .tga{right:12px}
   .baf .hdl{position:absolute;top:0;bottom:0;left:50%;width:2px;background:#fff;z-index:5;pointer-events:none}
   .baf .grp{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:34px;height:34px;border-radius:50%;background:#fff;color:#0B1220;display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:700}
+  /* --- site menu (shared with home / research pages) --- */
+  :root{--navy:#0a1e3f;--sub:#a8c0e0;--blue:#1a6fc4;--blue-h:#1580e0;}
+  header.sitenav{position:sticky;top:0;z-index:50;background:var(--navy);border-bottom:1px solid rgba(255,255,255,.08);margin:0 -20px;}
+  header.sitenav nav{max-width:1080px;margin:0 auto;padding:0 24px;height:66px;display:flex;align-items:center;justify-content:space-between;}
+  header.sitenav .brand{display:flex;align-items:center;gap:11px;font-weight:600;font-size:18px;color:#fff;letter-spacing:.2px;text-decoration:none;font-family:ui-sans-serif,system-ui,sans-serif;}
+  header.sitenav .brand .logotile{width:40px;height:40px;border-radius:10px;background:#fff;display:flex;align-items:center;justify-content:center;flex:none;}
+  header.sitenav .brand .logotile img{width:34px;height:34px;border-radius:7px;display:block;}
+  header.sitenav .navlinks{display:flex;gap:26px;align-items:center;font-size:15px;font-family:ui-sans-serif,system-ui,sans-serif;}
+  header.sitenav .navlinks a{color:var(--sub);text-decoration:none;}
+  header.sitenav .navlinks a:hover,header.sitenav .navlinks a.on{color:#fff;}
+  header.sitenav .btn{display:inline-block;background:var(--blue);color:#fff;font-weight:600;padding:11px 20px;border-radius:8px;font-size:15px;text-decoration:none;font-family:ui-sans-serif,system-ui,sans-serif;}
+  header.sitenav .btn:hover{background:var(--blue-h);}
+  @media(max-width:720px){header.sitenav .navlinks{display:none;}}
+  /* --- Section 4 shift-measurement bar --- */
+  .mbar{max-width:68ch;margin:26px auto 30px;font-family:ui-sans-serif,system-ui,sans-serif;}
+  .mbar-track{display:flex;height:44px;border-radius:8px;overflow:hidden;border:1px solid var(--line);}
+  .mseg{display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:600;min-width:0;color:#0B1220;}
+  .mseg.agree{background:#4F8FE0;}.mseg.stars{background:#57BEB2;}.mseg.phase{background:#8FD98C;}.mseg.fail{background:#E0A458;color:#2a1a06;}
+  .mlabels{display:flex;margin-top:8px;font-size:12.5px;color:var(--muted);}
+  .mlabels .mtrust{flex:1061;text-align:left;}.mlabels .mfall{flex:204;text-align:right;}
+  .mlegend{display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:14px;font-size:13px;color:var(--muted);}
+  .mlegend i{display:inline-block;width:11px;height:11px;border-radius:3px;vertical-align:middle;margin-right:6px;}
+  .mlegend .agree{background:#4F8FE0;}.mlegend .stars{background:#57BEB2;}.mlegend .phase{background:#8FD98C;}.mlegend .fail{background:#E0A458;}
+  .mnote{margin-top:14px;font-size:13px;color:var(--muted);font-style:italic;line-height:1.5;}
 </style>
 </head>
 <body>
-<div style="max-width:960px;margin:0 auto;padding:22px 20px 0;font-family:ui-sans-serif,system-ui,-apple-system,sans-serif;font-size:13.5px;"><a href="research.html" style="color:#E0A458;text-decoration:none;">&larr; Star Trail CleanR &middot; Research</a></div>
+<header class="sitenav">
+  <nav>
+    <a class="brand" href="index.html"><span class="logotile"><img src="logo.png" alt="Star Trail CleanR logo"></span> Star Trail CleanR</a>
+    <div class="navlinks">
+      <a href="index.html#how">How it works</a>
+      <a href="index.html#gallery">Gallery</a>
+      <a href="index.html#download">Download</a>
+      <a href="index.html#approach">Approach</a>
+      <a class="on" href="research.html">Research</a>
+      <a href="index.html#thanks">Thanks</a>
+      <a href="index.html#about">About</a>
+    </div>
+    <a class="btn" href="index.html#download">Download free</a>
+  </nav>
+</header>
 
 
 <header class="tt">
@@ -123,8 +161,8 @@
 <div class="prose">
 
 <h2><span class="no">1</span>The problem</h2>
-<p>A star trail image is a time-lapse compressed into a single frame. The photographer locks a camera on a tripod and shoots continuously for one to several hours: hundreds of exposures of ten seconds to a few minutes each. Stacking software then keeps, for every pixel position, the brightest value that ever occurred there. Stars sweep slowly across the sky, so each star paints an arc. This brightest-pixel rule is called a lighten-max stack, and it is the standard method in tools such as StarStaX and Startrails.exe [3, 4].</p>
-<p>The rule has a side effect. Anything bright that crosses even one frame is permanent. An airliner crossing the field for forty seconds leaves a dashed line of strobes and navigation lights. A satellite leaves a thin unbroken pencil stroke. Over a two-hour session near a Southern California flight path it is normal for dozens of frames to carry trails, and every one of them survives into the finished picture. The traditional remedy is manual: open each affected frame and clone the trail out by hand, or exclude whole frames and accept gaps in the arcs. With satellite constellations growing quickly, the manual approach is losing.</p>
+<p>A star trail image is a time-lapse compressed into a single frame. The photographer locks a camera on a tripod and shoots continuously, anywhere from a few minutes to all night: dozens to hundreds of exposures, ten seconds to a few minutes each. Stacking software then keeps, for every pixel position, the brightest value that ever occurred there. Stars sweep slowly across the sky, so each star paints an arc. This brightest-pixel rule is called a lighten-max stack, and it is the standard method in tools such as StarStaX and Startrails.exe [3, 4].</p>
+<p>The rule has a side effect. Anything bright that crosses even one frame is permanent. An airliner crossing the field for forty seconds leaves a dashed line of strobes and navigation lights. A satellite leaves a thin unbroken pencil stroke. Over a two-hour session near a Southern California flight path it is normal for dozens of frames to carry trails, and every one of them survives into the finished picture. The traditional remedy is manual: open each affected frame and clone the trail out by hand, or throw out a whole busy stretch of the session and stack only the clean remainder. Abandon the first hour of a six-hour shoot because it was too busy to clean, and the arcs simply come out shorter. With satellite constellations growing quickly, the manual approach is losing.</p>
 
 <figure>
   <div class="baf" id="baf1">
@@ -156,13 +194,24 @@
   <li><b>Match the whole patch (phase correlation).</b> Instead of picking out individual stars, compare the two patches as a whole and find the single slide that makes them line up, down to a fraction of a pixel, with a score for how sure it is. Because it reads the whole texture rather than points, it still works where there are no clean stars to track, the exact case that defeated Lucas-Kanade. (The Kuglin and Hines frequency-domain method [1], via OpenCV.)</li>
 </ol>
 <p>Each method returns an actual shift: a left-right and up-down amount in pixels. They <i>agree</i> when those two amounts land within a few pixels of each other, and that agreement is what makes the number trustworthy, because two unrelated methods rarely land on the same wrong answer. On one hard patch, following the stars gave (+25, +19) and phase correlation gave (+25.6, +18.6), the same drift measured two ways, so the repair slides by it. A shift is also trusted when just one method is strongly sure on its own (a phase score of at least 0.6, or at least four agreeing stars), and any shift outside a plausible range of 1 to 60 pixels is thrown out.</p>
-<p>When neither test passes, the repair does not guess. It still borrows the same neighbor sky, but drops it in <i>without sliding</i>, an unshifted paste. The borrowed patch is real photographed sky; its stars simply sit a few pixels off from where they belong, a small blur that is far safer than sliding by a wrong amount and smearing the sky sideways. The rule is deliberate: when unsure, do not slide.</p>
+<p>When neither test passes, the repair does not guess. It borrows the same neighbor sky but drops it in <i>without sliding</i>, an unshifted paste. This is safer than it sounds, and the cause of the failure is the reason why: both methods come up empty exactly when there is little to lock onto, which means the patch is nearly featureless sky with few or no stars in it to begin with. In practice these fallbacks cluster low in the frame, near the horizon, where haze and light pollution thin the stars out: in the Figure 1 sequence about two-thirds of them sit in the band just above the foreground. With almost no star structure there, an unshifted paste has almost nothing to misplace; any faint star it holds lands a few pixels off, a small blur far safer than sliding by a wrong amount and smearing the sky sideways. The rule is deliberate: when unsure, do not slide.</p>
 <p>On the 89-frame sequence in Figure 1, the trails were split into 1,265 small segments and the shift was measured for each. Where they landed:</p>
+<div class="mbar">
+  <div class="mbar-track">
+    <div class="mseg agree" style="flex:507">507</div>
+    <div class="mseg stars" style="flex:551">551</div>
+    <div class="mseg phase" style="flex:3"></div>
+    <div class="mseg fail" style="flex:204">204</div>
+  </div>
+  <div class="mlabels"><span class="mtrust">Trusted shift &middot; 1,061 (84%)</span><span class="mfall">Safe fallback &middot; 204 (16%)</span></div>
+  <div class="mlegend"><span><i class="agree"></i>Both methods agreed &middot; 507</span><span><i class="stars"></i>Following the stars alone &middot; 551</span><span><i class="phase"></i>Phase correlation alone &middot; 3</span><span><i class="fail"></i>Unshifted fallback &middot; 204</span></div>
+  <div class="mnote">Measured on the one 89-frame Joshua Tree sequence in Figure 1. A clearer sky pushes more into &ldquo;both agreed&rdquo;; a busy or twilight sky pushes more into the fallback. Other sequences will land differently.</div>
+</div>
 <ul>
   <li>Both methods agreed: <b>507</b></li>
   <li>Following the stars alone was enough: <b>551</b></li>
   <li>Phase correlation alone was enough: <b>3</b></li>
-  <li>Neither was confident, so the neighbor was pasted unshifted, the safe fallback: <b>204</b></li>
+  <li>Too few stars to track and no clear texture to lock onto, so the sky was pasted unshifted: <b>204</b></li>
 </ul>
 <p>That is 1,061 trusted measurements out of 1,265, or 84 percent. The other 204 (16 percent) did not guess; they fell back to a plain unshifted paste.</p>
 
@@ -261,7 +310,7 @@
 </figure>
 
 <h2><span class="no">11</span>Logging every repair</h2>
-<p>The edge-frame defect above was found by eye, but everything after that took minutes instead of days for one reason: by then, the repair logged every decision it made. Each repaired segment records which fill method ran, which measurement tier produced the shift, how many stars agreed, the shift itself, and the brightness corrections applied, with a plain-language legend written into the head of every log so the file explains itself. The same instrumentation settled a question we had been answering from memory: whether the synthetic fills ever actually run. The full distribution from the 89-frame sequence of Figure 1:</p>
+<p>By then the repair logged every decision it made, so when an anomaly turns up, its cause is easy to find: a search of the log pins it down in minutes. Before the log, the only way in was to run the repair, make an educated guess at the cause, change something, and run again; now the answer is in the data, not a hunch. Each repaired segment records which fill method ran, which measurement tier produced the shift, how many stars agreed, the shift itself, and the brightness corrections applied, with a plain-language legend written into the head of every log so the file explains itself. The same instrumentation settled a question we had been answering from memory: whether the synthetic fills ever actually run. The full distribution from the 89-frame sequence of Figure 1:</p>
 
 <table>
   <thead><tr><th>Fill method</th><th class="num">Segments</th><th class="num">Share</th></tr></thead>
