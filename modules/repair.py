@@ -429,7 +429,8 @@ def _darken_fill(patch_now, dmin, comp_mask, collar, maxv, dt):
     `_DARKEN_FG_FRAC` * local sky are REPLACED with the min -- a hard replace, not a
     blend: mixing the clean darken with the already-erased repair underneath just
     reintroduced the mangled edge. Sky pixels (brighter) are left untouched so the Star
-    Bridge slide keeps the moving stars. Local sky is the median max-channel of `collar`.
+    Bridge slide keeps the moving stars. Local sky is a high percentile (the 70th) of the
+    collar's max-channel, which stays right even when the collar straddles dark foreground.
 
     patch_now: the already-repaired patch (BGR, this frame's dtype).
     dmin: per-pixel min of the neighbor window over the same window, same shape/dtype.
@@ -669,12 +670,17 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
             _ndirty = ((neighbor_masks[next_idx][y0:y1, x0:x1] > 0)
                        if (has_next and neighbor_masks is not None and neighbor_masks[next_idx] is not None)
                        else np.zeros(comp_mask.shape, dtype=bool))
+            # Build the levelling collar: the ring of pixels hugging the trail (dilate minus the
+            # trail), then KEEP ONLY THE SKY in it. A trail beside a trunk would otherwise measure
+            # the trunk as if it were sky, and the levelling would drag the whole fill darker toward
+            # it (see _COLLAR_SKY_FRAC). Drop pixels darker than half the collar's own sky level (its
+            # 70th percentile); fall back to the full ring if too little sky is left to measure.
             _dilc = ((cv2.dilate(comp_mask.astype(np.uint8), _RING_KERNEL) > 0)
                      & ~trail[y0:y1, x0:x1])
             _wmax = frame[y0:y1, x0:x1].max(2)
             if int(_dilc.sum()) >= 20:
-                _sl = np.percentile(_wmax[_dilc], 70)
-                _sky_only = _dilc & (_wmax > _COLLAR_SKY_FRAC * _sl)
+                _sl = np.percentile(_wmax[_dilc], 70)                 # the collar's own sky level
+                _sky_only = _dilc & (_wmax > _COLLAR_SKY_FRAC * _sl)  # keep sky, drop dark foreground
                 _collar = _sky_only if int(_sky_only.sum()) >= 20 else _dilc
             else:
                 _collar = _dilc
@@ -1041,8 +1047,8 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
             # Where the trail crosses dark foreground, the slide fill above borrows sky and
             # erases it. On a fixed tripod that foreground is the same dark pixel in every frame
             # and the trail is bright, so the per-pixel MIN across a +/-window of neighbors is the
-            # true foreground with the trail rejected. _darken_fill pulls only the masked pixels
-            # darker than a fraction of the local sky toward that min (feathered at the edge);
+            # true foreground with the trail rejected. _darken_fill replaces only the masked pixels
+            # darker than a fraction of the local sky with that min (a hard replace, no feather);
             # brighter sky pixels keep the slide so moving stars stay put.
             _fg_darken_px, _fg_sky = 0, None
             if _DARKEN_FOREGROUND and N > 1:
