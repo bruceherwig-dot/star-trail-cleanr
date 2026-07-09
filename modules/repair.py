@@ -147,6 +147,15 @@ _COLLAR_SKY_FRAC = 0.5
 _DARKEN_FOREGROUND   = True
 _DARKEN_WINDOW       = 3     # reach +/-N neighbor frames for the darken(min); clamped at set ends
 _DARKEN_FG_FRAC      = 0.72  # a masked pixel darker than this * local sky is dark foreground
+# Reach-further-for-crossings: at a crossing BOTH immediate neighbors carry the trail, so N-1 and
+# N+1 have no clean sky at that spot. But the trail is moving, so by N-2/N+2 (or a little further)
+# it has usually cleared off, leaving real sky to borrow. Rather than paste a still-dirty neighbor,
+# search outward for the first frame that is clean at each crossing pixel and borrow its sky,
+# shifted by the per-frame star motion so the stars land on frame N. Measured on the Joshua Tree
+# set: at IMG_3020 every crossing pixel is clean by +/-2; at IMG_3019 the rest clear by +/-3.
+# Limited to the neighbor frames actually loaded (full +/-4 mid-batch, fewer at a batch edge).
+_CROSS_REACH_ENABLED = True
+_CROSS_REACH         = 4
 
 
 # ── Image helpers ─────────────────────────────────────────────────────────────
@@ -685,7 +694,7 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
             else:
                 _collar = _dilc
             _maxv = 65535 if frame.dtype == np.uint16 else 255
-            _off_p = _off_n = None
+            _off_p = _off_n = _cur_med = None
             _cur_sky = frame[y0:y1, x0:x1][_collar]
             if _cur_sky.shape[0] >= 20:
                 _cur_med = np.median(_cur_sky, axis=0).astype(np.float32)
@@ -973,6 +982,7 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
             # neighbors are dirty there is nothing clean to borrow; these are trail
             # pixels (no star to keep), so paint local sky instead of black.
             _union_zeroed_px = 0
+            _cross_reach_px = 0
             if neighbor_masks is not None:
                 prev_c = (neighbor_masks[prev_idx][y0:y1, x0:x1] > 0
                           if has_prev and neighbor_masks[prev_idx] is not None
@@ -981,14 +991,50 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                           if has_next and neighbor_masks[next_idx] is not None
                           else np.zeros(comp_mask.shape, dtype=bool))
                 union_both = comp_mask & prev_c & next_c
-                if union_both.any():
-                    # Crayon v2: both neighbors dirty here -> paste the colour-
-                    # closest raw neighbor (pre-levelled) instead of a synthetic fill.
-                    if raw_clean is not None:
-                        result[y0:y1, x0:x1][union_both] = raw_clean[union_both]
-                    else:
-                        _sky_fill(result[y0:y1, x0:x1], union_both, comp_mask)
                 _union_zeroed_px = int(union_both.sum())
+                if union_both.any():
+                    # A crossing: both immediate neighbors carry the trail here, so N-1 and N+1 have
+                    # no clean sky to borrow. Reach outward -- by N-2/N+2 (or a little further) the
+                    # trail has usually moved off this spot -- for the first frame that is clean at
+                    # each pixel, and borrow its sky shifted by the per-frame star motion (half the
+                    # measured N-1->N+1 shift, times the distance) so the stars land on frame N.
+                    _remaining = union_both.copy()
+                    if _CROSS_REACH_ENABLED:
+                        for _d in range(2, _CROSS_REACH + 1):
+                            if not _remaining.any():
+                                break
+                            for _sgn in (1, -1):
+                                _k = frame_idx + _sgn * _d
+                                if not (0 <= _k < N):
+                                    continue
+                                _km = ((neighbor_masks[_k][y0:y1, x0:x1] > 0)
+                                       if neighbor_masks[_k] is not None
+                                       else np.zeros(comp_mask.shape, dtype=bool))
+                                _clean = _remaining & ~_km          # frame _k is clean at these px
+                                if not _clean.any():
+                                    continue
+                                _pk = neighbor_frames[_k][y0:y1, x0:x1]
+                                # level frame _k onto this frame's local sky colour
+                                _offk = None
+                                if _cur_med is not None:
+                                    _kc = _pk[_collar]
+                                    if _kc.shape[0] >= 20:
+                                        _offk = _cur_med - np.median(_kc, axis=0).astype(np.float32)
+                                # shift _k's stars onto frame N (per-frame motion = the shift / 2)
+                                _wk = (_shift_image(_pk, -_sgn * _d * (_dx / 2.0),
+                                                         -_sgn * _d * (_dy / 2.0))
+                                       if _ok else _pk)
+                                _wk = _level(_wk, _offk)
+                                result[y0:y1, x0:x1][_clean] = _wk[_clean]
+                                _remaining &= ~_clean
+                                _cross_reach_px += int(_clean.sum())
+                    # Whatever no clean frame was found for falls back to the colour-closest paste
+                    # (or crayon sky-fill) -- a genuinely persistent crossing.
+                    if _remaining.any():
+                        if raw_clean is not None:
+                            result[y0:y1, x0:x1][_remaining] = raw_clean[_remaining]
+                        else:
+                            _sky_fill(result[y0:y1, x0:x1], _remaining, comp_mask)
 
             # ── Ring levelling: match the finished patch to the sky right beside it ──
             # Sky brightness drifts frame to frame (worst at a run's first and last
@@ -1073,6 +1119,7 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                     "edge_still_px":   _edge_still_px,
                     "fg_darken_px":    _fg_darken_px,
                     "union_zeroed_px": _union_zeroed_px,
+                    "cross_reach_px":  _cross_reach_px,
                     "ring_off":        _ring_off,
                     "base":            "next" if _next_closer else "prev",
                 })

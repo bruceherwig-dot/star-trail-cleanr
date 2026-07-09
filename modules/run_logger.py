@@ -97,8 +97,14 @@ LOG_LEGEND = {
             "pixel every frame while the trail is bright, so the per-pixel minimum recovers it. Only pixels "
             "darker than a fraction of the local sky are touched; sky pixels keep the Star Bridge slide so "
             "moving stars stay put. >0 means foreground was saved on this frame.",
-        "union_zeroed_px": "Pixels where BOTH neighbors carried the trail (a crossing), so there was "
-            "nothing clean to borrow; these were filled from the colour-closest raw neighbor (crayon).",
+        "union_zeroed_px": "Pixels where BOTH immediate neighbors (N-1 and N+1) carried the trail (a "
+            "crossing), so there was no clean sky next door. The repair reaches out to farther frames "
+            "for clean sky where it can (see cross_reach_px); any pixels left over are filled from the "
+            "colour-closest raw neighbor (crayon).",
+        "cross_reach_px": "Of the crossing pixels (union_zeroed_px), how many were filled with REAL clean "
+            "sky reached from a farther frame (N-2/N+2 or beyond, shifted to line the stars up on this "
+            "frame) instead of pasting a still-dirty neighbor. Higher = more of the crossing recovered "
+            "with genuine sky; the trail was moving, so a frame or two out is usually clear of it.",
         "ring_off": "The final per-channel [B,G,R] brightness nudge applied to match the patch to the sky "
             "right beside it (absorbs small frame-to-frame sky drift). null if it could not be measured.",
         "sky_filled_px": "No-neighbor case only: pixels the crayon sky-fill painted. 0 together with "
