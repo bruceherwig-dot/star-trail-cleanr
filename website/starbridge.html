@@ -166,7 +166,7 @@
 </ul>
 <p>That is 1,061 trusted measurements out of 1,265, or 84 percent. The other 204 (16 percent) did not guess; they fell back to a plain unshifted paste.</p>
 
-<h2><span class="no">5</span>Borrowing without seams</h2>
+<h2><span class="no">5</span>Making the patch invisible</h2>
 <p>With a trusted shift, both neighbors are warped to meet in the middle: the earlier frame is pushed forward by half the measured motion and the later frame is pulled back by half, so both land on frame N's moment in time. The shipped fill then borrows from one neighbor, the one whose sky color best matches frame N at that spot, rather than averaging both; averaging dims faint stars by half, and keeping them at full brightness matters more than the sub-pixel positional gain.</p>
 <p>Color needs its own care. Sky color genuinely changes between frames: twilight fades, light pollution pulses, smoke and airglow drift. Borrowing a patch without correcting for this produced visibly two-toned repairs. Every borrowed pixel is therefore pre-leveled: we measure the median color of a thin collar of sky hugging the trail in frame N and in each neighbor (excluding every masked pixel), and nudge each neighbor's contribution onto frame N's local sky before it is pasted. A final ring-leveling pass then matches the finished patch to the sky immediately beside it, and absorbs the small frame-to-frame drift that remains.</p>
 <p>Each neighbor also carries its own trail mask, so contaminated pixels are handled per pixel: where only one neighbor is dirty, the other supplies the fill; where both are dirty (a crossing), there is nothing clean to borrow and the color-closest raw neighbor is pasted, pre-leveled, rather than synthesizing anything.</p>
