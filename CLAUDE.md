@@ -66,8 +66,13 @@ Regression safety net for Claude's edits — Bruce does not run these himself.
 
 ## Trained YOLO models
 All trained models live on the **local Mac** at `/Users/bruceherwig/Documents/yolo_runs/` — NOT on T7 Shield. Default ultralytics output path.
-- Shipped in app (Trail DetectoR v3): `trail_detector_v12s_tiled/weights/best.pt` — in `assets/best.pt`
-- Latest trained (Trail DetectoR v4 candidate): `trail_detector_v13s_tiled/weights/best.pt` — mAP50 box 0.859, mask 0.850 (2026-05-19, 80 epochs, broader dataset than v12)
+- **Shipped in app: `trail_detector_v5/run_v14_finetune2` → weights at `trail_detector_v5/weights/best.pt`, copied to `assets/best.pt`.** Verified 2026-07-09 by md5 (`cf1910ab832047577e481542cd453449`, 23,856,820 bytes). A fine-tune from the v4 model (SGD, `lr0=0.001`, mosaic/flipud off), 58 epochs (early stop), peak mAP50 mask **0.8448** (ep 38) / box **0.8524** (ep 55). `_DEV_FALLBACK_MODEL` in `star_trail_cleanr.py` correctly points at it.
+- Previous: `trail_detector_v13s_tiled` (the "v4" model, from scratch, 18 datasets) → `trail_detector_v12s_tiled` before that.
+- **THREE separate numbering schemes exist and they do not line up. Never say "vN" without saying which clock.**
+  1. *Training-run folders* in `~/Documents/yolo_runs/` (`v12s_tiled`, `v13s_tiled`, `trail_detector_v5`) — internal, and the shipped one's subfolder is confusingly named `run_v14_finetune2`.
+  2. *Pipeline version* in the CLAUDE.md history below (v1–v5 = detection-algorithm generations).
+  3. *Public model tags* (`model-vN` GitHub releases → the app's "Trail Detector vN"), which start at v2.
+  The bundled model is currently AHEAD of the public `model-vN` feed (no `model-v5` tag exists). Decide whether to publish one. When writing docs or blog posts, **describe the detector by what it is** (YOLOv8s-seg, 640×640 tiles, fine-tuned from the previous model), not by a version number.
 - If you think a model is "missing" because it's not in `/Volumes/T7 Shield/AI Projects/Star Trail CleanR/models/`, check `~/Documents/yolo_runs/` first before panicking.
 
 ## CVAT setup (annotation review)
