@@ -82,10 +82,20 @@
 <div class="wrap">
   <div class="papers">
 
+    <a class="paper" href="finding-trails.html">
+      <img class="thumb" src="finding-trails-thumb.jpg" alt="A full-resolution star trail frame cut into a grid of tiles, an airplane trail crossing the sky">
+      <div class="body">
+        <div class="eyebrow">Technical Notes &middot; No. 1 &middot; Detection</div>
+        <h2>Finding the trails: detecting streaks one photo at a time</h2>
+        <p>A trail is only a few pixels wide, so shrinking a full-size photo down to fit a neural network erases it before the search even begins. We cut every photo into full-resolution tiles and detect on those instead. This covers how the tiles go back together, why the outline handed to the repair is a rectangle turned to the trail's angle, why an airliner's red navigation lights need a rule of their own, and where the detector still gets it wrong.</p>
+        <span class="read">Read the write-up &rarr;</span>
+      </div>
+    </a>
+
     <a class="paper" href="starbridge.html">
       <img class="thumb" src="starbridge-thumb.jpg" alt="A repaired star trail stack with the aircraft and satellite trails removed">
       <div class="body">
-        <div class="eyebrow">Technical Notes &middot; No. 1 &middot; Repair</div>
+        <div class="eyebrow">Technical Notes &middot; No. 2 &middot; Repair</div>
         <h2>Star Bridge: repairing trails by borrowing the sky next door</h2>
         <p>How we rebuild the sky under a removed trail by shifting in the neighboring frame so the stars line up exactly, then color-correcting every borrowed pixel to the local sky. The road there ran through a few dead ends: optical flow that drifted, a warm-pixel scrub that quietly deleted real stars, and a ring-leveling step that turned out to be the real cause of the black holes.</p>
         <span class="read">Read the write-up &rarr;</span>
