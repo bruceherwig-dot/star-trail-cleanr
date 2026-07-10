@@ -72,7 +72,7 @@ All trained models live on the **local Mac** at `/Users/bruceherwig/Documents/yo
   1. *Training-run folders* in `~/Documents/yolo_runs/` (`v12s_tiled`, `v13s_tiled`, `trail_detector_v5`) — internal, and the shipped one's subfolder is confusingly named `run_v14_finetune2`.
   2. *Pipeline version* in the CLAUDE.md history below (v1–v5 = detection-algorithm generations).
   3. *Public model tags* (`model-vN` GitHub releases → the app's "Trail Detector vN"), which start at v2.
-  The bundled model is currently AHEAD of the public `model-vN` feed (no `model-v5` tag exists). Decide whether to publish one. When writing docs or blog posts, **describe the detector by what it is** (YOLOv8s-seg, 640×640 tiles, fine-tuned from the previous model), not by a version number.
+  The bundled model and the public feed AGREE. Verified 2026-07-09: `model-v5` is published (as a prerelease, per the model-release rule below) and its `best.pt` is byte-identical to `assets/best.pt` (md5 `cf1910ab...`); `BUNDLED_MODEL_VERSION = "model-v5"` in `modules/model_update.py`; the updater only ever offers a strictly-newer tag, so no downgrade is possible. When writing docs or blog posts, **describe the detector by what it is** (YOLOv8s-seg, 640×640 tiles, fine-tuned from the previous model), not by a version number.
 - If you think a model is "missing" because it's not in `/Volumes/T7 Shield/AI Projects/Star Trail CleanR/models/`, check `~/Documents/yolo_runs/` first before panicking.
 
 ## CVAT setup (annotation review)
