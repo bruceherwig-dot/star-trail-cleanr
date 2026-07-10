@@ -174,11 +174,15 @@
 
 <p>At the heart of the detector is a neural network, one of the YOLO family that people use to find things in pictures. A neural network is a program that looks at an image and answers a question about it. Ours answers one question: where are the trails?</p>
 
-<p>It learns by example, and a person checks every example. The detector we already have takes a first pass and outlines what it thinks are trails. Then someone goes through each one: keeping the good outlines, fixing the loose ones, deleting the mistakes, and drawing in the trails it missed. Only what survives that review is used for training. Thousands of trails, every one looked at by a person before the detector ever learned from it.</p>
+<p>It learns by example, and a person checks every example. The detector we already have takes a first pass and outlines what it thinks are trails. Those outlines go into CVAT, an open-source annotation tool we run locally, and someone works through every one: keeping the good outlines, fixing the loose ones, deleting the mistakes, and drawing in the trails it missed. Only what survives that review is used for training. Thousands of trails, every one looked at by a person before the detector ever learned from it.</p>
+
+<p>Two things we learned there, for anyone doing the same. CVAT holds its zoom while you step from photo to photo, which matters a great deal when the thing you're inspecting is three pixels wide. And its default image quality of 70 is too low to review by, because a faint trail simply isn't there at 70. We upload at 95.</p>
 
 <p>It's a loop. Each detector marks up the photos that train the next one, and the next one is better, so there's less to correct. What's left to correct is exactly what it still gets wrong, and those turn out to be the most useful examples we have.</p>
 
-<p>That training happens ahead of time, on a rented graphics card, and we do it again whenever enough new photos come in. What ships inside the app is the finished result, a single file holding everything it learned. When you clean a sequence, that file runs on your own computer, not on a server, and your photos never leave it.</p>
+<p>Some of the photos are ours. Most were shared by other astrophotographers. More than a dozen of them, from Arizona to England to India, sent us their sequences so the detector could learn from more skies and more cameras than we could ever shoot ourselves. The photos here are Greg Meyer's. Star Trail CleanR is free, and it's built on that generosity.</p>
+
+<p>The training itself happens ahead of time, on a rented graphics card, and we do it again whenever enough new photos come in. What ships inside the app is the finished result, a single file holding everything it learned. When you clean a sequence, that file runs on your own computer, not on a server, and your photos never leave it.</p>
 
 <p>The network is only part of the detector. Around it sits the machinery this note is about: the part that cuts each photo into tiles, feeds them in one at a time, puts the answers back together, and throws out the ones that aren't trails.</p>
 
@@ -228,15 +232,13 @@
 
 <p>That last rule would throw away something worth keeping. An airliner's navigation lights are small, separate red flashes, exactly the sort of thing a size filter deletes. So a detection that's distinctly red survives no matter how small it is. The red dashes running down the middle of Figure 1 are there because of that one exception.</p>
 
-<h2><span class="no">6</span>Why the detector stays small</h2>
+<h2><span class="no">6</span>Why we chose the smaller model</h2>
 
 <p>The YOLO design comes in a range of sizes, from nano up to extra-large. They all work the same way. A bigger one just holds more of the internal numbers it adjusts as it learns. That gives it more room to pick up the many ways a trail can look, and it makes the file bigger. Our detector is the small one, about 23 megabytes, and it ships inside the app. The bigger sizes are tempting, because that extra room usually buys more accuracy.</p>
 
 <p>That extra room comes at a cost, and it lands on the person using the app. A bigger detector is a bigger download, it uses more memory while it runs, and it takes longer on every photo. Someone cleaning a four-hundred-photo sequence on a laptop feels all three. What they notice is the download size and the wait.</p>
 
 <p>We stay small because ours hasn't run out of room for improvement. Every time we add photos it gets better. When that stops being true, a bigger one will be worth its cost.</p>
-
-<p>Some of the photos are ours. Most were shared by other astrophotographers. More than a dozen of them, from Arizona to England to India, sent us their sequences so the detector could learn from more skies and more cameras than we could ever shoot ourselves. The photos here are Greg Meyer's. Star Trail CleanR is free, and it's built on that generosity.</p>
 
 <h2><span class="no">7</span>Where it still goes wrong</h2>
 
@@ -258,6 +260,7 @@
 <ol class="refs">
   <li>[1] <b>F. C. Akyon, S. O. Altinuc, and A. Temizel,</b> "Slicing Aided Hyper Inference and Fine-tuning for Small Object Detection," <i>2022 IEEE International Conference on Image Processing (ICIP)</i>, pp. 966&ndash;970, 2022. The tiled-inference method used to run the detector over overlapping crops of a full-size photo.</li>
   <li>[2] <b>G. Jocher, A. Chaurasia, and J. Qiu,</b> Ultralytics YOLO, 2023. The segmentation model the detector is built on. <a href="https://github.com/ultralytics/ultralytics">github.com/ultralytics/ultralytics</a></li>
+  <li>[3] <b>CVAT,</b> the Computer Vision Annotation Tool. Every trail outline in the training set was reviewed in it before training. <a href="https://github.com/cvat-ai/cvat">github.com/cvat-ai/cvat</a></li>
 </ol>
 
 <div class="draftnote">Star Trail CleanR is free software. The detector described here is a small YOLOv8 segmentation network run on overlapping 640-pixel tiles. Every threshold quoted here was read straight from the shipped source. Feedback to the project via startrailcleanr.com.</div>
