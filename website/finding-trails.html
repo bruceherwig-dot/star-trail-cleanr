@@ -176,7 +176,9 @@
 
 <p>It learns by example, and a person checks every example. The detector we already have takes a first pass and outlines what it thinks are trails. Those outlines go into CVAT, an open-source annotation tool we run locally, and someone works through every one: keeping the good outlines, fixing the loose ones, deleting the mistakes, and drawing in the trails it missed. Only what survives that review is used for training. Thousands of trails, every one looked at by a person before the detector ever learned from it.</p>
 
-<p>Two things we learned there, for anyone doing the same. CVAT holds its zoom while you step from photo to photo, which matters a great deal when the thing you're inspecting is three pixels wide. And its default image quality of 70 is too low to review by, because a faint trail simply isn't there at 70. We upload at 95.</p>
+<p>Two things we learned there, for anyone doing the same. We reviewed in LabelMe at first and moved to CVAT for one reason: CVAT lets you zoom into a region and keeps that zoom while you step from photo to photo. LabelMe doesn't, and that matters enormously when the thing you're checking is three pixels wide and you have to follow it across a hundred photos.</p>
+
+<p>The second thing: CVAT's default image quality of 70 is too low to review by. A faint trail simply isn't there at 70, so you sign off on a photo that still has a trail in it. We upload at 95.</p>
 
 <p>It's a loop. Each detector marks up the photos that train the next one, and the next one is better, so there's less to correct. What's left to correct is exactly what it still gets wrong, and those turn out to be the most useful examples we have.</p>
 
