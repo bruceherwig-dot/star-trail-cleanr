@@ -234,7 +234,7 @@
 
 <p>That last rule would throw away something worth keeping. An airliner's navigation lights are small, separate red flashes, exactly the sort of thing a size filter deletes. So a detection that's distinctly red survives no matter how small it is. The red dashes running down the middle of Figure 1 are there because of that one exception.</p>
 
-<h2><span class="no">6</span>Why we chose the smaller model</h2>
+<h2><span class="no">6</span>Why we chose the smaller YOLO model</h2>
 
 <p>The YOLO design comes in a range of sizes, from nano up to extra-large. They all work the same way. A bigger one just holds more of the internal numbers it adjusts as it learns. That gives it more room to pick up the many ways a trail can look, and it makes the file bigger. Our detector is the small one, about 23 megabytes, and it ships inside the app. The bigger sizes are tempting, because that extra room usually buys more accuracy.</p>
 
