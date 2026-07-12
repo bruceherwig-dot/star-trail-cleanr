@@ -172,7 +172,7 @@
 
 <h2><span class="no">2</span>Why you cannot detect on the whole photo</h2>
 
-<p>At the heart of the detector is a neural network from the YOLO family, an open-source object detector built and maintained by <a href="https://github.com/ultralytics/ultralytics">Ultralytics</a>. We chose it because it's free, it runs fast enough to work on an ordinary computer, and it can outline a shape rather than just box it, which is exactly what the repair needs. A neural network is a program that looks at an image and answers a question about it. Ours answers one question: where are the trails?</p>
+<p>At the heart of the detector is a neural network from the YOLO family, an open-source object detector built and maintained by <a href="https://github.com/ultralytics/ultralytics">Ultralytics</a>. We chose it because it's free and open source, because it's quick enough to run the detection on an ordinary computer, and because it marks which pixels are trail, which we turn into a rectangle set at the trail's angle, much tighter than the upright box a plain detector would draw. A neural network is a program that looks at an image and answers a question about it. Ours answers one question: where are the trails?</p>
 
 <p>It learns by example, and a person checks every example. The detector we already have takes a first pass and outlines what it thinks are trails. Those outlines go into CVAT, an open-source annotation tool we run locally, and someone works through every one: keeping the good outlines, fixing the loose ones, deleting the mistakes, and drawing in the trails it missed. Only what survives that review is used for training. Thousands of trails, every one looked at by a person before the detector ever learned from it.</p>
 
