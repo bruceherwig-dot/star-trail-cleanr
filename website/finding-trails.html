@@ -172,7 +172,7 @@
 
 <h2><span class="no">2</span>Why you cannot detect on the whole photo</h2>
 
-<p>At the heart of the detector is a neural network, one of the YOLO family that people use to find things in pictures. A neural network is a program that looks at an image and answers a question about it. Ours answers one question: where are the trails?</p>
+<p>At the heart of the detector is a neural network from the YOLO family, an open-source object detector built and maintained by <a href="https://github.com/ultralytics/ultralytics">Ultralytics</a>. We didn't build it, and none of this would work without it. We chose it because it's free, it runs fast enough to work on an ordinary computer, and it can outline a shape rather than just box it, which is exactly what the repair needs. A neural network is a program that looks at an image and answers a question about it. Ours answers one question: where are the trails?</p>
 
 <p>It learns by example, and a person checks every example. The detector we already have takes a first pass and outlines what it thinks are trails. Those outlines go into CVAT, an open-source annotation tool we run locally, and someone works through every one: keeping the good outlines, fixing the loose ones, deleting the mistakes, and drawing in the trails it missed. Only what survives that review is used for training. Thousands of trails, every one looked at by a person before the detector ever learned from it.</p>
 
@@ -236,7 +236,7 @@
 
 <h2><span class="no">6</span>Why we chose the smaller YOLO model</h2>
 
-<p>YOLO is a ready-made object detector, built and published by other people, and it comes in five sizes, from nano up to extra-large. They all work the same way. A bigger one just holds more of the internal numbers it adjusts as it learns. That gives it more room to pick up the many ways a trail can look, and it makes the file bigger. Our detector is the small one, about 23 megabytes, and it ships inside the app. The bigger sizes are tempting, because that extra room usually buys more accuracy.</p>
+<p>YOLO comes in five sizes, from nano up to extra-large. They all work the same way. A bigger one just holds more of the internal numbers it adjusts as it learns. That gives it more room to pick up the many ways a trail can look, and it makes the file bigger. Our detector is the small one, about 23 megabytes, and it ships inside the app. The bigger sizes are tempting, because that extra room usually buys more accuracy.</p>
 
 <p>That extra room comes at a cost, and it lands on the person using the app. A bigger detector is a bigger download, it uses more memory while it runs, and it takes longer on every photo. Someone cleaning a four-hundred-photo sequence on a laptop feels all three. What they notice is the download size and the wait.</p>
 
@@ -261,7 +261,7 @@
 <h2><span class="no">9</span>References</h2>
 <ol class="refs">
   <li>[1] <b>F. C. Akyon, S. O. Altinuc, and A. Temizel,</b> "Slicing Aided Hyper Inference and Fine-tuning for Small Object Detection," <i>2022 IEEE International Conference on Image Processing (ICIP)</i>, pp. 966&ndash;970, 2022. The tiled-inference method used to run the detector over overlapping crops of a full-size photo.</li>
-  <li>[2] <b>G. Jocher, A. Chaurasia, and J. Qiu,</b> Ultralytics YOLO, 2023. The segmentation model the detector is built on. <a href="https://github.com/ultralytics/ultralytics">github.com/ultralytics/ultralytics</a></li>
+  <li>[2] <b>G. Jocher, A. Chaurasia, and J. Qiu,</b> Ultralytics YOLO, 2023. The open-source object detector our whole detection pipeline is built on. <a href="https://github.com/ultralytics/ultralytics">github.com/ultralytics/ultralytics</a></li>
   <li>[3] <b>CVAT,</b> the Computer Vision Annotation Tool. Every trail outline in the training set was reviewed in it before training. <a href="https://github.com/cvat-ai/cvat">github.com/cvat-ai/cvat</a></li>
 </ol>
 
