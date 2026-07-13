@@ -2846,7 +2846,17 @@ class MainWindow(QMainWindow):
             layout.addLayout(_tail_row)
 
         layout.addStretch()
-        return wrap
+
+        # The Settings content (public sections plus the dev-only tools) can run
+        # taller than the window, so wrap it in a vertical scroll area exactly like
+        # the main page does, with the horizontal bar suppressed.
+        settings_scroll = QScrollArea()
+        settings_scroll.setWidget(wrap)
+        settings_scroll.setWidgetResizable(True)
+        settings_scroll.setFrameShape(QFrame.NoFrame)
+        settings_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        settings_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        return settings_scroll
 
     def _set_updates_run_state(self, running):
         """Enable or disable the Settings controls that must not change mid-run.
