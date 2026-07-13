@@ -39,11 +39,15 @@ class ShareStacker:
     video), so a clean-only run does no work here."""
 
     def __init__(self, original_dir, cleaned_dir, want_star=False, want_video=False,
-                 video_cmd_prefix=None):
+                 video_cmd_prefix=None, comet_tail=0, thicken_px=0):
         self.original_dir = original_dir
         self.cleaned_dir = cleaned_dir
         self.want_star = want_star
         self.want_video = want_video
+        # DEV-ONLY star-trail styling (0 = off): comet_tail fades trails into comet
+        # tails over this many frames; thicken_px widens them. Only the star trail.
+        self.comet_tail = comet_tail
+        self.thicken_px = thicken_px
         # How to invoke make_share_clip.py as a SEPARATE process for the video encode
         # (e.g. [sys.executable, "-u", SHARE_SCRIPT]). The video runs in its own process
         # because ffmpeg-via-imageio stalls inside a Qt background thread; the star trail,
@@ -146,7 +150,8 @@ class ShareStacker:
             self.after_full.report()
             t0 = time.time()
             produced["star_trail"] = msc.make_star_trail(
-                self.cleaned_dir, out_path=star_out, stack=self.after_full.result())
+                self.cleaned_dir, out_path=star_out, stack=self.after_full.result(),
+                comet_tail=self.comet_tail, thicken_px=self.thicken_px)
             timings["star_trail"] = time.time() - t0
         if (self.want_video and video_out and self._video_cmd_prefix
                 and self.before_vid is not None and self.after_vid is not None

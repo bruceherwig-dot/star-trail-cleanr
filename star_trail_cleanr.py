@@ -112,6 +112,7 @@ from PySide6.QtWidgets import (
     QLabel, QLineEdit, QPushButton, QComboBox, QProgressBar,
     QTextEdit, QFileDialog, QStackedWidget, QCheckBox, QFrame,
     QSpinBox, QTabWidget, QTextBrowser, QScrollArea, QMessageBox, QDialog,
+    QSlider,
 )
 import queue
 from PySide6.QtCore import Qt, QThread, Signal, QSettings, QTimer, QProcess
@@ -698,16 +699,29 @@ def _windows_release_label():
 
 
 def _leader_gear_exif(frames):
-    """Best-effort camera + shooting settings from the first source frame's
-    EXIF, for anonymous usage stats. Returns a dict of whatever is present
-    (camera, lens, focal length, exposure, ISO, aperture); empty if none or
-    unreadable (e.g. a RAW, which PIL can't open here). Never raises."""
+    """Best-effort camera, lens, and image facts from the source frames, for
+    anonymous usage stats. Returns a dict of whatever is present: frame_count,
+    file_format, megapixels, camera, lens, lens_make (brand), focal_length,
+    focal_35mm (paired with focal_length to tell crop vs full frame), exposure,
+    aperture, ISO. frame_count and file_format are set even for RAW (which PIL
+    cannot open here); the rest need a readable image with EXIF. Never raises."""
     out = {}
     try:
         if not frames:
             return out
+        import os
+        # frame_count and file_format come from the file list itself, so they
+        # are set even for RAW frames that PIL cannot open below.
+        out["frame_count"] = len(frames)
+        ext = os.path.splitext(frames[0])[1].lstrip(".").lower()
+        if ext:
+            out["file_format"] = ext
         from PIL import Image, ExifTags
         with Image.open(frames[0]) as im:
+            try:
+                out["megapixels"] = round(im.width * im.height / 1_000_000, 1)
+            except Exception:
+                pass
             ex = im.getexif()
             if not ex:
                 return out
@@ -723,8 +737,12 @@ def _leader_gear_exif(frames):
             lens = sub.get(0xA434)            # LensModel
             if lens:
                 out["lens"] = str(lens).strip()
+            lens_make = sub.get(0xA433)       # LensMake (lens brand)
+            if lens_make:
+                out["lens_make"] = str(lens_make).strip()
             for tag, key, conv in (
                 (0x920A, "focal_length", lambda v: round(float(v), 1)),   # FocalLength
+                (0xA405, "focal_35mm",   lambda v: int(round(float(v)))), # FocalLengthIn35mmFilm (crop factor vs focal_length)
                 (0x829A, "exposure_sec", lambda v: round(float(v), 4)),   # ExposureTime
                 (0x829D, "aperture",     lambda v: round(float(v), 1)),   # FNumber
             ):
@@ -2053,11 +2071,12 @@ class ShareStackThread(QThread):
     failed = Signal(str)
 
     def __init__(self, original_dir, cleaned_dir, ws_dir, want_star, want_video,
-                 video_cmd_prefix=None, parent=None):
+                 video_cmd_prefix=None, parent=None, comet_tail=0, thicken_px=0):
         super().__init__(parent)
         from modules.share_stacker import ShareStacker   # lazy: keeps GUI startup light
         self._stacker = ShareStacker(original_dir, cleaned_dir, want_star, want_video,
-                                     video_cmd_prefix=video_cmd_prefix)
+                                     video_cmd_prefix=video_cmd_prefix,
+                                     comet_tail=comet_tail, thicken_px=thicken_px)
         self._ws_dir = ws_dir
         self._q = queue.Queue()
         self._aborted = False
@@ -2752,6 +2771,79 @@ class MainWindow(QMainWindow):
             streak_row.addStretch()
             layout.addSpacing(4)
             layout.addLayout(streak_row)
+
+            # ── Trail look (dev): thickness + comet mode on the star-trail image ──
+            layout.addSpacing(SECTION_GAP_PX)
+            layout.addWidget(make_section_heading("Trail look (dev)"))
+            layout.addSpacing(HEADING_BODY_GAP_PX)
+            layout.addWidget(make_body_text(
+                "Cosmetic styling applied to the finished star-trail image only. "
+                "Thickness widens the trails. Comet mode fades each trail into a "
+                "tail, with the tail length set in frames the way StarStaX does it. "
+                "Dev-only."))
+            _lbl_css = f"QLabel {{ font-size: 14px; color: {BROWSER_TEXT}; }}"
+
+            # Star thickness (0-6 px)
+            self._dev_thick_lbl = QLabel()
+            self._dev_thick_lbl.setStyleSheet(_lbl_css)
+            self._dev_thick_slider = QSlider(Qt.Horizontal)
+            self._dev_thick_slider.setRange(0, 6)
+            self._dev_thick_slider.setFixedWidth(200)
+            self._dev_thick_slider.setValue(SETTINGS.value("dev_trail_thickness", 0, type=int))
+
+            def _dev_upd_thick(v):
+                SETTINGS.setValue("dev_trail_thickness", int(v))
+                self._dev_thick_lbl.setText(f"Star thickness: {int(v)} px")
+            self._dev_thick_slider.valueChanged.connect(_dev_upd_thick)
+            _dev_upd_thick(self._dev_thick_slider.value())
+            _thick_row = QHBoxLayout()
+            _thick_row.setContentsMargins(16, 0, 0, 0)
+            _thick_row.addWidget(self._dev_thick_lbl)
+            _thick_row.addSpacing(10)
+            _thick_row.addWidget(self._dev_thick_slider)
+            _thick_row.addStretch()
+            layout.addSpacing(6)
+            layout.addLayout(_thick_row)
+
+            # Comet mode
+            self._dev_comet_chk = QCheckBox("Comet mode")
+            self._dev_comet_chk.setStyleSheet(f"QCheckBox {{ font-size: 14px; color: {BROWSER_TEXT}; margin-left: 16px; }}")
+            self._dev_comet_chk.setChecked(SETTINGS.value("dev_comet_enabled", False, type=bool))
+            _comet_row = QHBoxLayout()
+            _comet_row.setContentsMargins(16, 0, 0, 0)
+            _comet_row.addWidget(self._dev_comet_chk)
+            _comet_row.addStretch()
+            layout.addSpacing(4)
+            layout.addLayout(_comet_row)
+
+            # Tail length (short <-> long), enabled only when comet mode is on
+            self._dev_tail_lbl = QLabel()
+            self._dev_tail_lbl.setStyleSheet(_lbl_css)
+            self._dev_tail_slider = QSlider(Qt.Horizontal)
+            self._dev_tail_slider.setRange(15, 300)
+            self._dev_tail_slider.setFixedWidth(200)
+            self._dev_tail_slider.setValue(SETTINGS.value("dev_comet_tail", 60, type=int))
+
+            def _dev_upd_tail(v):
+                SETTINGS.setValue("dev_comet_tail", int(v))
+                self._dev_tail_lbl.setText(f"Tail length: {int(v)} frames   (short - long)")
+            self._dev_tail_slider.valueChanged.connect(_dev_upd_tail)
+            _dev_upd_tail(self._dev_tail_slider.value())
+
+            def _dev_upd_comet(on):
+                SETTINGS.setValue("dev_comet_enabled", bool(on))
+                self._dev_tail_slider.setEnabled(bool(on))
+                self._dev_tail_lbl.setEnabled(bool(on))
+            self._dev_comet_chk.toggled.connect(_dev_upd_comet)
+            _dev_upd_comet(self._dev_comet_chk.isChecked())
+            _tail_row = QHBoxLayout()
+            _tail_row.setContentsMargins(16, 0, 0, 0)
+            _tail_row.addWidget(self._dev_tail_lbl)
+            _tail_row.addSpacing(10)
+            _tail_row.addWidget(self._dev_tail_slider)
+            _tail_row.addStretch()
+            layout.addSpacing(4)
+            layout.addLayout(_tail_row)
 
         layout.addStretch()
         return wrap
@@ -5951,6 +6043,11 @@ class MainWindow(QMainWindow):
         want_video = SETTINGS.value("make_video_enabled", True, type=bool)
         if not (want_star or want_video) or not original_dir or not cleaned_dir:
             return
+        # DEV-ONLY star-trail styling: read only when running from source, so the
+        # frozen app never applies them even if the settings key somehow exists.
+        _comet_on = _DEV_SWITCHER_ENABLED and SETTINGS.value("dev_comet_enabled", False, type=bool)
+        comet_tail = SETTINGS.value("dev_comet_tail", 60, type=int) if _comet_on else 0
+        thicken_px = SETTINGS.value("dev_trail_thickness", 0, type=int) if _DEV_SWITCHER_ENABLED else 0
         try:
             ws_dir = output_workspace(cleaned_dir, create=True)
             # How the video encode re-invokes make_share_clip in its OWN process
@@ -5960,7 +6057,8 @@ class MainWindow(QMainWindow):
             else:
                 video_cmd = [sys.executable, "-u", SHARE_SCRIPT]
             t = ShareStackThread(original_dir, cleaned_dir, ws_dir,
-                                 want_star, want_video, video_cmd_prefix=video_cmd, parent=self)
+                                 want_star, want_video, video_cmd_prefix=video_cmd, parent=self,
+                                 comet_tail=comet_tail, thicken_px=thicken_px)
             t.done.connect(self._on_share_stack_done)
             t.failed.connect(self._on_share_stack_failed)
             self._share_stack_thread = t

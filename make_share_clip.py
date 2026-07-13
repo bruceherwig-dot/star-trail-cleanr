@@ -621,7 +621,46 @@ def make_red_trail_map(original_dir, out_path=None, masks_dir=None,
     return out_path
 
 
-def make_star_trail(cleaned_dir, out_path=None, stack=None):
+def _comet_stack_fullres(dirpath, names, tail_frames):
+    """DEV-ONLY comet stack. Like _stack_fullres, but dims the running stack a
+    little before folding each new frame, so every star trail fades into a comet
+    tail. ORDER MATTERS here (unlike order-independent lighten-max), and `names`
+    arrives in true capture order from _list_frames. `tail_frames` is how many
+    frames of star motion stay visible: the per-frame dim factor is chosen so a
+    trail is about 4% bright (near invisible) after that many frames."""
+    fade = 0.04 ** (1.0 / max(int(tail_frames), 1))
+    acc = None
+    used = 0
+    for nm in names:
+        im = robust_imread(os.path.join(dirpath, nm), cv2.IMREAD_COLOR)
+        if im is None:
+            continue
+        f = im.astype(np.float32)
+        if acc is None:
+            acc = f
+        else:
+            if f.shape != acc.shape:
+                f = cv2.resize(f, (acc.shape[1], acc.shape[0]), interpolation=cv2.INTER_AREA)
+            acc *= fade
+            np.maximum(acc, f, out=acc)
+        used += 1
+    if acc is None:
+        return None
+    print(f"  comet star trail: faded-stacked {used} frames "
+          f"(tail {int(tail_frames)} frames, per-frame dim {fade:.3f})", flush=True)
+    return np.clip(acc, 0, 255).astype(np.uint8)
+
+
+def _thicken(img, px):
+    """DEV-ONLY: widen the bright star trails by `px` pixels with a round dilation."""
+    px = int(px)
+    if px <= 0:
+        return img
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * px + 1, 2 * px + 1))
+    return np.maximum(img, cv2.dilate(img, k))
+
+
+def make_star_trail(cleaned_dir, out_path=None, stack=None, comet_tail=0, thicken_px=0):
     """OUTPUT 1 — the quick-and-dirty full-resolution STAR TRAIL (`--star-trail`).
 
     `stack`: optional pre-built full-resolution lighten-max stack from the in-run
@@ -636,7 +675,19 @@ def make_star_trail(cleaned_dir, out_path=None, stack=None):
     STANDALONE: call make_star_trail(cleaned_dir, out_path) from anywhere, or run
         python3 make_share_clip.py --star-trail --cleaned "<cleaned folder>" [--out <file.jpg>]
     """
-    if stack is None:
+    if comet_tail and int(comet_tail) > 0:
+        # DEV-ONLY comet mode is order-dependent, so it cannot reuse the
+        # order-independent lighten-max stack the run already built. Rebuild from
+        # the cleaned folder in true capture order instead.
+        if not os.path.isdir(cleaned_dir):
+            raise SystemExit(f"cleaned folder not found: {cleaned_dir}")
+        names = _list_frames(cleaned_dir)
+        if not names:
+            raise SystemExit(f"no cleaned frames found in {cleaned_dir}")
+        stack = _comet_stack_fullres(cleaned_dir, names, comet_tail)
+        if stack is None:
+            raise SystemExit(f"comet stacking failed (cleaned dir = {cleaned_dir})")
+    elif stack is None:
         if not os.path.isdir(cleaned_dir):
             raise SystemExit(f"cleaned folder not found: {cleaned_dir}")
         names = _list_frames(cleaned_dir)
@@ -675,6 +726,10 @@ def make_star_trail(cleaned_dir, out_path=None, stack=None):
                         print(f"cleaned sky stuck pixels on the star trail ({n_sky} px)", flush=True)
     except Exception as e:
         print(f"sky stuck-pixel cleanup skipped: {e}", flush=True)
+
+    if thicken_px and int(thicken_px) > 0:
+        stack = _thicken(stack, thicken_px)
+        print(f"thickened star trails by {int(thicken_px)} px", flush=True)
 
     if out_path is None:
         out_path = os.path.join(cleaned_dir, "STC_cleaned_star_trail.jpg")
