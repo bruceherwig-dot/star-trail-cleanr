@@ -652,12 +652,26 @@ def _comet_stack_fullres(dirpath, names, tail_frames):
 
 
 def _thicken(img, px):
-    """DEV-ONLY: widen the bright star trails by `px` pixels with a round dilation."""
+    """DEV-ONLY: widen the long star trails by `px` pixels WITHOUT fattening the
+    tiny noise specks. A plain dilation grows every bright pixel, so single-pixel
+    chroma noise and hot pixels balloon into blobs. Instead, only bright shapes
+    long enough to be a trail (>= 12 px on the longer side) are widened; isolated
+    dots are left the size they are."""
     px = int(px)
     if px <= 0:
         return img
-    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * px + 1, 2 * px + 1))
-    return np.maximum(img, cv2.dilate(img, k))
+    bw = (img.max(2) > 24).astype(np.uint8)
+    n, lab, st, _ = cv2.connectedComponentsWithStats(bw, 8)
+    trail = np.zeros_like(bw)
+    for k in range(1, n):
+        if max(int(st[k, cv2.CC_STAT_WIDTH]), int(st[k, cv2.CC_STAT_HEIGHT])) >= 12:
+            trail[lab == k] = 1
+    kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * px + 1, 2 * px + 1))
+    zone = cv2.dilate(trail, kern) > 0            # only around real trails
+    grown = np.maximum(img, cv2.dilate(img, kern))
+    out = img.copy()
+    out[zone] = grown[zone]
+    return out
 
 
 def make_star_trail(cleaned_dir, out_path=None, stack=None, comet_tail=0, thicken_px=0):
