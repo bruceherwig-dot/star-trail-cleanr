@@ -6099,8 +6099,9 @@ class MainWindow(QMainWindow):
     def _on_share_stack_done(self, result):
         """The in-run stacker finished. `result` is {"produced": {kind: path},
         "timings": {kind: seconds}}. Note each output and how long it took, append that
-        to the saved Star Log, open BOTH the cleaned folder and the STC Extras folder
-        where the outputs live, then land the held completion."""
+        to the saved Star Log, then land the held completion. The STC Extras folder is no
+        longer popped open in Finder -- the combined window opens instead, with the outputs
+        on its tabs and an Open Cleaned Folder button for anyone who wants the folder."""
         produced = result.get("produced", {}) if isinstance(result, dict) else {}
         timings = result.get("timings", {}) if isinstance(result, dict) else {}
         lines = []
@@ -6114,14 +6115,9 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         self._append_share_log(lines)
-        # Open ONLY the STC Extras folder (where the star trail + video live), so the
-        # new outputs are obvious. The cleaned frames are one button away in the app, and
-        # not popping that window keeps it clean for bringing into StarStaX.
-        if produced:
-            ws = getattr(self, "_share_stack_ws", None)
-            if ws:
-                _open_folder_in_file_manager(ws)
-        # "done" and the outputs land together.
+        # No longer pops open the STC Extras folder in Finder -- the combined Star Trail &
+        # Timelapse window opens instead, with the outputs on its tabs. "done" and the
+        # outputs land together.
         self._finish_completion()
 
     def _append_share_log(self, lines):
@@ -6153,14 +6149,14 @@ class MainWindow(QMainWindow):
     def _maybe_start_share_render(self, cleaned_folder):
         """At run finish, finalize the share outputs. The star trail and video were
         built DURING the run by the in-run ShareStackThread, so here we just tell it to
-        render them from the finished stacks; it opens the folder when ready. The dev
-        Red Trail Map (if enabled) still renders as its own process. No-op otherwise."""
+        render them from the finished stacks. The dev Red Trail Map (if enabled) still
+        renders as its own process. No-op otherwise."""
         stacker = getattr(self, "_share_stack_thread", None)
         if stacker is not None:
             try:
                 self._status_out.append(
                     "\nFinishing your star trail and video from the stacks built during "
-                    "the run; the folder opens automatically when they're ready.")
+                    "the run.")
             except Exception:
                 pass
             stacker.finish()
@@ -6185,12 +6181,9 @@ class MainWindow(QMainWindow):
         self._start_share_run("red", red_args, red)
         self._share_pending = len(self._share_threads)
         self._share_any_done = False
-        # Red opens the folder only when the in-run stacker isn't the one that will.
-        self._share_ws_dir = None if stacker is not None else ws_dir
         try:
             self._status_out.append(
-                "\nCreating your Red Trail Map in the background; the folder opens when "
-                "it's finished.")
+                "\nCreating your Red Trail Map in the background.")
         except Exception:
             pass
 
@@ -6221,16 +6214,12 @@ class MainWindow(QMainWindow):
         self._share_job_finished()
 
     def _share_job_finished(self):
-        """Called when any share render finishes (success or failure). Opens the
-        workspace folder ONCE -- only after the LAST job is done, and only if at
-        least one job actually produced a file -- so the folder doesn't pop open
-        once per output. Do NOT auto-open the files themselves, matching the
-        on-screen caption ('the folder opens when it's finished')."""
+        """Called when any share render finishes (success or failure). No longer opens
+        the workspace folder in Finder -- the combined window is the post-run surface now.
+        Kept as the completion hook in case per-job bookkeeping is needed later."""
         self._share_pending = getattr(self, "_share_pending", 1) - 1
         if self._share_pending > 0:
             return
-        if getattr(self, "_share_any_done", False) and getattr(self, "_share_ws_dir", None):
-            _open_folder_in_file_manager(self._share_ws_dir)
 
     def _show_run_complete_dialog(self):
         """Centered modal showing run summary. Replaces the old inline card
