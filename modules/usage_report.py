@@ -29,7 +29,7 @@ import urllib.request
 import uuid
 
 ENDPOINT = "https://api.startrailcleanr.com/collect.php"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _TIMEOUT_S = 8
 
 _APP_DIR = os.path.join(os.path.expanduser("~"), ".star_trail_cleanr")

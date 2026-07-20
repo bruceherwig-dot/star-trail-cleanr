@@ -36,7 +36,7 @@ Star Trail CleanR runs in two steps:
 2. **Mask (optional).** Paint over ground, buildings, and rocks so the AI ignores them. Trees can be left unmasked.
 3. **Format.** Pick output format (JPG / TIFF 8-bit / TIFF 16-bit) and JPEG quality.
 4. **Run.** Sit back. Cleaned frames land in a `cleaned/` folder next to your originals.
-5. **Stack.** Load the cleaned frames into your favorite stacker (StarStaX, Sequator, Photoshop) for the final composite.
+5. **Stack.** Build your star trail or timelapse right in the app (the Star Trail & Timelapse window), or load the cleaned frames into your favorite stacker (StarStaX, Sequator, Photoshop, etc.).
 
 ---
 

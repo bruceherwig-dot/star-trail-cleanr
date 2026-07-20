@@ -55,6 +55,7 @@ archive/make_share_clip_crossfade_2026_06_13.py.
 """
 import os
 import sys
+import time
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
@@ -631,7 +632,7 @@ def _comet_stack_fullres(dirpath, names, tail_frames):
     fade = 0.04 ** (1.0 / max(int(tail_frames), 1))
     acc = None
     used = 0
-    for nm in names:
+    for i, nm in enumerate(names):
         im = robust_imread(os.path.join(dirpath, nm), cv2.IMREAD_COLOR)
         if im is None:
             continue
@@ -644,6 +645,9 @@ def _comet_stack_fullres(dirpath, names, tail_frames):
             acc *= fade
             np.maximum(acc, f, out=acc)
         used += 1
+        # Per-frame progress so the Star Trail window's bar moves during a comet
+        # rebuild (parsed as "label: i/n" by the GUI, same as _stack_fullres).
+        print(f"  comet star trail: {i + 1}/{len(names)}", flush=True)
     if acc is None:
         return None
     print(f"  comet star trail: faded-stacked {used} frames "
@@ -651,30 +655,45 @@ def _comet_stack_fullres(dirpath, names, tail_frames):
     return np.clip(acc, 0, 255).astype(np.uint8)
 
 
-def _thicken(img, px):
-    """DEV-ONLY: widen the long star trails by `px` pixels WITHOUT fattening the
-    tiny noise specks. A plain dilation grows every bright pixel, so single-pixel
-    chroma noise and hot pixels balloon into blobs. Instead, only bright shapes
-    long enough to be a trail (>= 12 px on the longer side) are widened; isolated
-    dots are left the size they are."""
+def _thicken(img, px, fg_mask=None):
+    """Widen the long star trails by `px` pixels WITHOUT fattening the tiny noise
+    specks. A plain dilation grows every bright pixel, so single-pixel chroma noise
+    and hot pixels balloon into blobs. Instead, only bright shapes long enough to be
+    a trail (>= 12 px on the longer side) are widened; isolated dots are left as-is.
+
+    fg_mask (grayscale HxW, 255 = foreground) protects the ground: the foreground is
+    never treated as a trail, and its pixels are restored untouched at the end, so a
+    lit building/rock/snow can never be fattened or grown into."""
     px = int(px)
     if px <= 0:
         return img
+    H, W = img.shape[:2]
+    fg = None
+    if fg_mask is not None:
+        fg = fg_mask
+        if fg.shape[:2] != (H, W):
+            fg = cv2.resize(fg, (W, H), interpolation=cv2.INTER_NEAREST)
+        fg = fg > 127
     bw = (img.max(2) > 24).astype(np.uint8)
     n, lab, st, _ = cv2.connectedComponentsWithStats(bw, 8)
     trail = np.zeros_like(bw)
     for k in range(1, n):
         if max(int(st[k, cv2.CC_STAT_WIDTH]), int(st[k, cv2.CC_STAT_HEIGHT])) >= 12:
             trail[lab == k] = 1
+    if fg is not None:
+        trail[fg] = 0                            # never widen the foreground itself
     kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * px + 1, 2 * px + 1))
     zone = cv2.dilate(trail, kern) > 0            # only around real trails
     grown = np.maximum(img, cv2.dilate(img, kern))
     out = img.copy()
     out[zone] = grown[zone]
+    if fg is not None:
+        out[fg] = img[fg]                        # keep the ground exactly as shot
     return out
 
 
-def make_star_trail(cleaned_dir, out_path=None, stack=None, comet_tail=0, thicken_px=0):
+def make_star_trail(cleaned_dir, out_path=None, stack=None, comet_tail=0,
+                    thicken_px=0, remove_hotpix=False, reverse=False):
     """OUTPUT 1 — the quick-and-dirty full-resolution STAR TRAIL (`--star-trail`).
 
     `stack`: optional pre-built full-resolution lighten-max stack from the in-run
@@ -689,16 +708,22 @@ def make_star_trail(cleaned_dir, out_path=None, stack=None, comet_tail=0, thicke
     STANDALONE: call make_star_trail(cleaned_dir, out_path) from anywhere, or run
         python3 make_share_clip.py --star-trail --cleaned "<cleaned folder>" [--out <file.jpg>]
     """
-    if comet_tail and int(comet_tail) > 0:
-        # DEV-ONLY comet mode is order-dependent, so it cannot reuse the
-        # order-independent lighten-max stack the run already built. Rebuild from
-        # the cleaned folder in true capture order instead.
+    _t_stack = time.time()
+    if comet_tail and float(comet_tail) > 0:
+        # Comet mode is order-dependent, so it cannot reuse the order-independent
+        # lighten-max stack the run already built. Rebuild from the cleaned folder
+        # in true capture order instead. comet_tail is a FRACTION of the sequence
+        # (0.5/0.75/1.0), so the tail scales to the frame count.
         if not os.path.isdir(cleaned_dir):
             raise SystemExit(f"cleaned folder not found: {cleaned_dir}")
         names = _list_frames(cleaned_dir)
         if not names:
             raise SystemExit(f"no cleaned frames found in {cleaned_dir}")
-        stack = _comet_stack_fullres(cleaned_dir, names, comet_tail)
+        if reverse:
+            names = names[::-1]      # flip which end of each comet tail fades
+            print("  comet: processing frames in reverse order", flush=True)
+        tail_frames = max(1, int(round(float(comet_tail) * len(names))))
+        stack = _comet_stack_fullres(cleaned_dir, names, tail_frames)
         if stack is None:
             raise SystemExit(f"comet stacking failed (cleaned dir = {cleaned_dir})")
     elif stack is None:
@@ -712,17 +737,47 @@ def make_star_trail(cleaned_dir, out_path=None, stack=None, comet_tail=0, thicke
         stack = _stack_fullres(cleaned_dir, names, "star trail")
         if stack is None:
             raise SystemExit(f"stacking failed (cleaned dir = {cleaned_dir})")
+    print(f"  stack phase: {time.time() - _t_stack:.0f}s", flush=True)
+
+    # Opt-in heavy sky-speck removal (--remove-hotpix): finds hot pixels, cosmic
+    # rays, and Bayer defects and removes them by re-reading every frame. This is
+    # the slow path the Star Trail window's checkbox triggers; it supersedes the
+    # light per-map cleanup below. If the foreground guard trips (specks clumped
+    # into an unmasked landscape) it prints HOTPIX_SKIPPED and keeps the plain trail.
+    if remove_hotpix:
+        try:
+            from modules.workspace import find_workspace
+            from modules.io_safe import robust_imread
+            from modules.sky_dots import remove_specks, SkyDotsBail
+            names = _list_frames(cleaned_dir)
+            fg = None
+            ws = find_workspace(cleaned_dir)
+            if ws:
+                fgp = os.path.join(ws, "foreground_mask.png")
+                if os.path.isfile(fgp):
+                    fg = robust_imread(fgp, cv2.IMREAD_GRAYSCALE)
+            try:
+                _t_hp = time.time()
+                stack = remove_specks(cleaned_dir, names, stack, fg,
+                                      lambda p: robust_imread(p, cv2.IMREAD_COLOR))
+                print(f"  hot-pixel phase: {time.time() - _t_hp:.0f}s", flush=True)
+            except SkyDotsBail as b:
+                print(f"HOTPIX_SKIPPED: {b}", flush=True)
+        except Exception as e:
+            print(f"HOTPIX_SKIPPED: hot-pixel removal failed ({e}); kept the plain trail",
+                  flush=True)
 
     # Clean SKY stuck pixels ONCE, here, on the finished star trail (only runs
     # because a star trail was requested). Reuses the stuck-pixel map and
     # foreground mask the run already produced; fills sky defects with the
     # content-aware fill so the thin trails are not smeared. Ground stuck pixels
     # were already handled per-frame during cleaning. Skipped silently if the map
-    # or mask is missing (e.g. no foreground was painted).
+    # or mask is missing (e.g. no foreground was painted), or if the heavy
+    # remove_hotpix path above already ran.
     try:
         from modules.workspace import find_workspace
         from modules.hot_pixels import content_aware_fill
-        ws = find_workspace(cleaned_dir)
+        ws = None if remove_hotpix else find_workspace(cleaned_dir)
         if ws:
             hp = os.path.join(ws, "hot_pixel_map.png")
             fgp = os.path.join(ws, "foreground_mask.png")
@@ -742,8 +797,22 @@ def make_star_trail(cleaned_dir, out_path=None, stack=None, comet_tail=0, thicke
         print(f"sky stuck-pixel cleanup skipped: {e}", flush=True)
 
     if thicken_px and int(thicken_px) > 0:
-        stack = _thicken(stack, thicken_px)
-        print(f"thickened star trails by {int(thicken_px)} px", flush=True)
+        # Load the foreground mask (if painted) so thickening never fattens the ground.
+        _fg = None
+        try:
+            from modules.workspace import find_workspace
+            from modules.io_safe import robust_imread
+            _ws = find_workspace(cleaned_dir)
+            if _ws:
+                _fgp = os.path.join(_ws, "foreground_mask.png")
+                if os.path.isfile(_fgp):
+                    _fg = robust_imread(_fgp, cv2.IMREAD_GRAYSCALE)
+        except Exception:
+            _fg = None
+        stack = _thicken(stack, thicken_px, _fg)
+        print(f"thickened star trails by {int(thicken_px)} px"
+              + (" (foreground protected)" if _fg is not None else " (no foreground mask)"),
+              flush=True)
 
     if out_path is None:
         out_path = os.path.join(cleaned_dir, "STC_cleaned_star_trail.jpg")
@@ -774,6 +843,15 @@ if __name__ == "__main__":
                     help="make the Red Trail Map image instead of the wipe video")
     ap.add_argument("--star-trail", action="store_true",
                     help="make the full-res cleaned star trail (lighten-max of the cleaned frames)")
+    ap.add_argument("--comet-tail", type=float, default=0.0,
+                    help="star trail: comet tail length as a FRACTION of the sequence "
+                         "(e.g. 0.5/0.75/1.0; 0 = plain trail)")
+    ap.add_argument("--thicken", type=int, default=0,
+                    help="star trail: widen the trails by this many pixels (0 = leave as shot)")
+    ap.add_argument("--remove-hotpix", action="store_true",
+                    help="star trail: remove sky hot pixels / colored specks (re-reads every frame)")
+    ap.add_argument("--reverse", action="store_true",
+                    help="star trail (comet only): process frames in reverse order to flip the tail direction")
     ap.add_argument("--masks-dir", default=None,
                     help="folder of <stem>_polys.json detections (red map; default: resolved)")
     ap.add_argument("--foreground", default=None,
@@ -787,7 +865,9 @@ if __name__ == "__main__":
         st_cleaned = args.cleaned or (os.path.join(args.original, "cleaned") if args.original else None)
         if not st_cleaned:
             ap.error("--star-trail needs --cleaned (or --original to default to <original>/cleaned)")
-        make_star_trail(st_cleaned, args.out)
+        make_star_trail(st_cleaned, args.out, comet_tail=args.comet_tail,
+                        thicken_px=args.thicken, remove_hotpix=args.remove_hotpix,
+                        reverse=args.reverse)
     elif args.red_map:
         if not args.original:
             ap.error("--red-map needs --original")

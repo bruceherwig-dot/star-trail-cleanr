@@ -112,7 +112,6 @@ from PySide6.QtWidgets import (
     QLabel, QLineEdit, QPushButton, QComboBox, QProgressBar,
     QTextEdit, QFileDialog, QStackedWidget, QCheckBox, QFrame,
     QSpinBox, QTabWidget, QTextBrowser, QScrollArea, QMessageBox, QDialog,
-    QSlider,
 )
 import queue
 from PySide6.QtCore import Qt, QThread, Signal, QSettings, QTimer, QProcess
@@ -395,6 +394,58 @@ def _secondary_btn_css():
         f"QPushButton {{ background-color: {SECONDARY_BTN_BG}; color: white; "
         f"font-size: 15px; border-radius: 6px; border: none; padding: 0 8px; }}"
         f"QPushButton:hover {{ background-color: {DISABLED_BTN_HOVER}; }}"
+        f"QPushButton:disabled {{ background-color: {DISABLED_BTN_BG}; color: {MUTED_TEXT}; }}"
+    )
+
+
+def _newest_star_trail(baseline_path, cleaned_folder):
+    """Return the most recent star trail to preview: the run's instant baseline
+    (STC_cleaned_star_trail.jpg) or any Build output (STC_star_trail_*.jpg) in the
+    same workspace, newest by mtime. Falls back to the baseline path."""
+    import glob
+    ws = os.path.dirname(baseline_path) if baseline_path else \
+        os.path.dirname(workspace_path(cleaned_folder, "x")) if cleaned_folder else None
+    cands = []
+    if baseline_path:
+        cands.append(baseline_path)
+    if ws and os.path.isdir(ws):
+        cands += glob.glob(os.path.join(ws, "STC_star_trail_*.jpg"))
+    existing = [c for c in cands if os.path.isfile(c)]
+    if existing:
+        return max(existing, key=os.path.getmtime)
+    return baseline_path
+
+
+def _unique_path(path):
+    """Return `path` if it doesn't exist, otherwise the same name with a _2, _3, ...
+    suffix so a rebuild with identical options never overwrites an earlier one."""
+    if not os.path.exists(path):
+        return path
+    stem, ext = os.path.splitext(path)
+    i = 2
+    while os.path.exists(f"{stem}_{i}{ext}"):
+        i += 1
+    return f"{stem}_{i}{ext}"
+
+
+def _make_labels_selectable(widget):
+    """Make every text QLabel under `widget` copy/paste-able (house rule). Skips
+    labels that hold a pixmap (the preview/poster images) so they keep their
+    click cursor instead of a text I-beam."""
+    from PySide6.QtWidgets import QLabel
+    for lbl in widget.findChildren(QLabel):
+        pm = lbl.pixmap()
+        if pm is None or pm.isNull():
+            lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+
+
+def _hero_btn_css():
+    """Return the stylesheet string for the app's big blue "hero" action button
+    (the Setup page's 'Star Trail & Timelapse' button). Pair with setFixedHeight(48)."""
+    return (
+        f"QPushButton {{ background-color: {BRAND_HEADING_BLUE}; color: white; font-size: 22px; "
+        f"font-weight: bold; border-radius: 6px; border: none; }}"
+        f"QPushButton:hover {{ background-color: {BRAND_HEADING_HOVER}; }}"
         f"QPushButton:disabled {{ background-color: {DISABLED_BTN_BG}; color: {MUTED_TEXT}; }}"
     )
 
@@ -2399,8 +2450,9 @@ class MainWindow(QMainWindow):
         and .JPG compression quality.</li>
         <li><b>Run.</b> Sit back. Cleaned frames land in a <code>cleaned/</code>
         folder next to your originals.</li>
-        <li><b>Stack.</b> Load the cleaned frames into your favorite stacker
-        (StarStaX, Sequator, Photoshop, etc.) for the final composite.</li>
+        <li><b>Stack.</b> Build your star trail or timelapse right in the app
+        (the Star Trail &amp; Timelapse window), or load the cleaned frames into
+        your favorite stacker (StarStaX, Sequator, Photoshop, etc.).</li>
         </ol>
 
         <h2 style='color:{BRAND_HEADING_BLUE}; margin-bottom:2px;'>What are known limitations?</h2>
@@ -2719,7 +2771,7 @@ class MainWindow(QMainWindow):
             # Frame range Start/End (moved from Main page Step 4).
             range_row = QHBoxLayout()
             range_row.setContentsMargins(16, 0, 0, 0)
-            _start_lbl = QLabel("Frame range — Start:")
+            _start_lbl = QLabel("Frame range, Start:")
             _start_lbl.setStyleSheet(f"font-size: 14px; color: {BROWSER_TEXT};")
             range_row.addWidget(_start_lbl)
             self._dev_start_frame = QSpinBox()
@@ -2772,78 +2824,8 @@ class MainWindow(QMainWindow):
             layout.addSpacing(4)
             layout.addLayout(streak_row)
 
-            # ── Trail look (dev): thickness + comet mode on the star-trail image ──
-            layout.addSpacing(SECTION_GAP_PX)
-            layout.addWidget(make_section_heading("Trail look (dev)"))
-            layout.addSpacing(HEADING_BODY_GAP_PX)
-            layout.addWidget(make_body_text(
-                "Cosmetic styling applied to the finished star-trail image only. "
-                "Thickness widens the trails. Comet mode fades each trail into a "
-                "tail, with the tail length set in frames the way StarStaX does it. "
-                "Dev-only."))
-            _lbl_css = f"QLabel {{ font-size: 14px; color: {BROWSER_TEXT}; }}"
-
-            # Star thickness (0-6 px)
-            self._dev_thick_lbl = QLabel()
-            self._dev_thick_lbl.setStyleSheet(_lbl_css)
-            self._dev_thick_slider = QSlider(Qt.Horizontal)
-            self._dev_thick_slider.setRange(0, 6)
-            self._dev_thick_slider.setFixedWidth(200)
-            self._dev_thick_slider.setValue(SETTINGS.value("dev_trail_thickness", 0, type=int))
-
-            def _dev_upd_thick(v):
-                SETTINGS.setValue("dev_trail_thickness", int(v))
-                self._dev_thick_lbl.setText(f"Star thickness: {int(v)} px")
-            self._dev_thick_slider.valueChanged.connect(_dev_upd_thick)
-            _dev_upd_thick(self._dev_thick_slider.value())
-            _thick_row = QHBoxLayout()
-            _thick_row.setContentsMargins(16, 0, 0, 0)
-            _thick_row.addWidget(self._dev_thick_lbl)
-            _thick_row.addSpacing(10)
-            _thick_row.addWidget(self._dev_thick_slider)
-            _thick_row.addStretch()
-            layout.addSpacing(6)
-            layout.addLayout(_thick_row)
-
-            # Comet mode
-            self._dev_comet_chk = QCheckBox("Comet mode")
-            self._dev_comet_chk.setStyleSheet(f"QCheckBox {{ font-size: 14px; color: {BROWSER_TEXT}; margin-left: 16px; }}")
-            self._dev_comet_chk.setChecked(SETTINGS.value("dev_comet_enabled", False, type=bool))
-            _comet_row = QHBoxLayout()
-            _comet_row.setContentsMargins(16, 0, 0, 0)
-            _comet_row.addWidget(self._dev_comet_chk)
-            _comet_row.addStretch()
-            layout.addSpacing(4)
-            layout.addLayout(_comet_row)
-
-            # Tail length (short <-> long), enabled only when comet mode is on
-            self._dev_tail_lbl = QLabel()
-            self._dev_tail_lbl.setStyleSheet(_lbl_css)
-            self._dev_tail_slider = QSlider(Qt.Horizontal)
-            self._dev_tail_slider.setRange(15, 300)
-            self._dev_tail_slider.setFixedWidth(200)
-            self._dev_tail_slider.setValue(SETTINGS.value("dev_comet_tail", 60, type=int))
-
-            def _dev_upd_tail(v):
-                SETTINGS.setValue("dev_comet_tail", int(v))
-                self._dev_tail_lbl.setText(f"Tail length: {int(v)} frames   (short - long)")
-            self._dev_tail_slider.valueChanged.connect(_dev_upd_tail)
-            _dev_upd_tail(self._dev_tail_slider.value())
-
-            def _dev_upd_comet(on):
-                SETTINGS.setValue("dev_comet_enabled", bool(on))
-                self._dev_tail_slider.setEnabled(bool(on))
-                self._dev_tail_lbl.setEnabled(bool(on))
-            self._dev_comet_chk.toggled.connect(_dev_upd_comet)
-            _dev_upd_comet(self._dev_comet_chk.isChecked())
-            _tail_row = QHBoxLayout()
-            _tail_row.setContentsMargins(16, 0, 0, 0)
-            _tail_row.addWidget(self._dev_tail_lbl)
-            _tail_row.addSpacing(10)
-            _tail_row.addWidget(self._dev_tail_slider)
-            _tail_row.addStretch()
-            layout.addSpacing(4)
-            layout.addLayout(_tail_row)
+            # (Trail look controls — thickness + comet mode — moved to the
+            # post-run Star Trail window, applied on demand there.)
 
         layout.addStretch()
 
@@ -4137,44 +4119,20 @@ class MainWindow(QMainWindow):
         layout.addLayout(hp_row)
         layout.addSpacing(6)
 
-        # Share-output toggles on ONE row, spaced apart. Each defaults ON and
-        # remembers its last state. They drive the post-run extras (wired
-        # separately), all saved into STC Extras: a quick full-res star trail, a
-        # shareable before/after wipe video, and a dev-only red trail-map image.
-        # ("&&" renders one literal &.)
-        share_row = QHBoxLayout()
-        # Quick-and-dirty full-res star trail: a lighten-max stack of the CLEANED
-        # frames (trails removed) -> cleaned_star_trail.jpg. Public, default ON.
-        self._star_trail_chk = QCheckBox("Preview Star Trail After Cleaning")
-        self._star_trail_chk.setFont(step_font)
-        self._star_trail_chk.setChecked(
-            SETTINGS.value("make_star_trail_enabled", True, type=bool))
-        self._star_trail_chk.toggled.connect(
-            lambda v: SETTINGS.setValue("make_star_trail_enabled", v))
-        share_row.addWidget(self._star_trail_chk)
-        share_row.addSpacing(40)
-        self._make_video_chk = QCheckBox("10-Second Sharable Before && After Video")
-        self._make_video_chk.setFont(step_font)
-        self._make_video_chk.setChecked(
-            SETTINGS.value("make_video_enabled", True, type=bool))
-        self._make_video_chk.toggled.connect(
-            lambda v: SETTINGS.setValue("make_video_enabled", v))
-        share_row.addWidget(self._make_video_chk)
-        share_row.addSpacing(40)
-        # Timelapse: opt-in (default OFF -- a full render the user configures in
-        # its own window at run end). Opens the Timelapse window (v1.0 module).
-        self._make_timelapse_chk = QCheckBox("Create a Timelapse Video")
-        self._make_timelapse_chk.setFont(step_font)
-        self._make_timelapse_chk.setChecked(
-            SETTINGS.value("make_timelapse_enabled", False, type=bool))
-        self._make_timelapse_chk.toggled.connect(
-            lambda v: SETTINGS.setValue("make_timelapse_enabled", v))
-        share_row.addWidget(self._make_timelapse_chk)
-        share_row.addStretch(1)
-        layout.addLayout(share_row)
-        # (No caption here any more: the star trail + video now build DURING the run
-        # and are ready within a couple of seconds of the finish, so the old "takes a
-        # few extra minutes" warning no longer applies.)
+        # The old per-output checkboxes (star trail / before-after video / timelapse)
+        # were removed. The star trail and the before-after video now ALWAYS build
+        # during the run -- free, because they stack in parallel with the cleaning --
+        # and the combined Star Trail & Timelapse window opens automatically at the
+        # finish, where the user creates the star trail and timelapse videos on demand.
+        # The before-after clip is offered on that window's Summary tab.
+        share_note = QLabel(
+            "When cleaning finishes, the Star Trail & Timelapse window opens "
+            "automatically, where you can create your star trail and timelapse videos.")
+        share_note.setFont(step_font)
+        share_note.setWordWrap(True)
+        share_note.setStyleSheet(f"color: {MUTED_TEXT};")
+        share_note.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(share_note)
         layout.addSpacing(16)
 
         # ── Step 6: Run ──────────────────────────────────────────────────────
@@ -4217,7 +4175,7 @@ class MainWindow(QMainWindow):
         self._setup_open_btn.clicked.connect(self._open_output_from_setup)
         btn_row.addWidget(self._setup_open_btn, 1)
 
-        self._setup_timelapse_btn = QPushButton("Create Timelapse")
+        self._setup_timelapse_btn = QPushButton("Star Trail && Timelapse")
         self._setup_timelapse_btn.setFixedHeight(48)
         self._setup_timelapse_btn.setStyleSheet(
             f"QPushButton {{ background-color: {BRAND_HEADING_BLUE}; color: white; font-size: 22px; "
@@ -4520,7 +4478,7 @@ class MainWindow(QMainWindow):
         # Same blue "Create Timelapse" as the Setup page. Hidden during the run;
         # shown after it ends only when the cleaned output has frames to build
         # from (see _switch_to_back_btn / _output_has_frames).
-        self._run_timelapse_btn = QPushButton("Create Timelapse")
+        self._run_timelapse_btn = QPushButton("Star Trail && Timelapse")
         self._run_timelapse_btn.setFixedHeight(48)
         self._run_timelapse_btn.setStyleSheet(
             f"QPushButton {{ background-color: {BRAND_HEADING_BLUE}; color: white; font-size: 22px; "
@@ -4849,27 +4807,68 @@ class MainWindow(QMainWindow):
 
     # ── Mask editor ──────────────────────────────────────────────────────────
 
-    def _open_timelapse_window(self, cleaned_folder, original_folder=None,
-                               expect_summary=False):
-        """Open the Timelapse window on the just-cleaned frames. Held on self so
-        it isn't garbage-collected while the user configures and renders. The
-        original (input) folder is offered as an alternate frame source.
-
-        expect_summary=True (called at run end) means the Run Complete summary
-        will appear next to it, so the two are laid out side by side; False (the
-        Create Timelapse button, no run) centers the timelapse on the main window."""
+    def _open_creator_window(self, cleaned_folder, star_path, default_tab="summary",
+                             original_folder=None):
+        """Open the combined window (Summary / Star Trail / Timelapse) on the just-
+        cleaned frames, fronting the requested tab. Held on self so it isn't garbage-
+        collected while the user configures and builds/renders. The original (input)
+        folder is offered to the Timelapse tab as an alternate frame source."""
         if original_folder is None:
             original_folder = self._folder_input.text().strip() or None
-        self._timelapse_window = TimelapseWindow(cleaned_folder, original_folder, self)
-        win = self._timelapse_window
-        # When it closes, drop the reference and re-place whatever is left (so a
-        # still-open summary re-centers).
+        # Only ever one creator window at a time: close any existing one first (its
+        # closeEvent stops whatever it was building/rendering).
+        existing = getattr(self, "_creator_window", None)
+        if existing is not None:
+            try:
+                existing.finished.disconnect()
+            except (TypeError, RuntimeError):
+                pass
+            try:
+                existing.close()
+            except Exception:
+                pass
+            self._creator_window = None
+        summary_html = (getattr(self, "_stats_trail_line", "") or "") + \
+                       (getattr(self, "_stats_timing_line", "") or "")
+        # Remember the last run's summary so the Summary tab still shows real numbers
+        # when the window is opened via a button or after an app restart.
+        if summary_html.strip():
+            SETTINGS.setValue("last_run_summary_html", summary_html)
+        else:
+            summary_html = SETTINGS.value("last_run_summary_html", "", type=str)
+        # Open THIS creator's cleaned folder directly (not the main window's
+        # _done_output_folder, which is empty when the summary loads from saved stats).
+        def _open_this_folder(f=cleaned_folder):
+            if f and os.path.isdir(f):
+                _open_folder_in_file_manager(f)
+        self._creator_window = CreatorWindow(
+            cleaned_folder, star_path, original_folder,
+            summary_html=summary_html, on_open_folder=_open_this_folder, parent=self)
+        win = self._creator_window
+        win.select_tab(default_tab)
         win.finished.connect(
-            lambda *_: (setattr(self, "_timelapse_window", None),
-                        self._arrange_post_run()))
+            lambda *_: (setattr(self, "_creator_window", None)
+                        if getattr(self, "_creator_window", None) is win else None))
         win.show()
-        # Placed once it reports its real size (deferred), see _arrange_post_run.
-        QTimer.singleShot(0, lambda: self._arrange_post_run(expect_summary=expect_summary))
+        # Center it on the main window once it reports its real size (deferred).
+        QTimer.singleShot(0, self._center_creator_window)
+
+    def _center_creator_window(self):
+        """Center the creator window on the main window (it is the only post-run
+        window now that the summary is a tab inside it)."""
+        win = getattr(self, "_creator_window", None)
+        if win is None or not win.isVisible():
+            return
+        pf = self.frameGeometry()
+        if not (pf.isValid() and pf.width() > 0):
+            return
+        scr = self.screen()
+        ag = scr.availableGeometry() if scr is not None else pf
+        x = max(ag.x(), min(pf.x() + (pf.width() - win.width()) // 2,
+                            ag.x() + ag.width() - win.width()))
+        y = max(ag.y(), min(pf.y() + (pf.height() - win.height()) // 2,
+                            ag.y() + ag.height() - win.height()))
+        win.move(x, y)
 
     def _arrange_post_run(self, expect_summary=False):
         """Place the post-run summary dialog and the timelapse window relative to the
@@ -4885,9 +4884,11 @@ class MainWindow(QMainWindow):
         for the summary that is about to appear at run end, so the timelapse opens in
         its final right-hand spot instead of centering first and then jumping."""
         GAP = 50
+        # Left slot = the Run Complete summary (shown only when no star trail serves
+        # as the completion UI); right slot = the combined creator window.
         summ = getattr(self, "_run_complete_dlg", None)
         summ = summ if (summ is not None and summ.isVisible()) else None
-        tl = getattr(self, "_timelapse_window", None)
+        tl = getattr(self, "_creator_window", None)
         tl = tl if (tl is not None and tl.isVisible()) else None
         pf = self.frameGeometry()
         if not (pf.isValid() and pf.width() > 0):
@@ -5680,13 +5681,19 @@ class MainWindow(QMainWindow):
         self._trail_counter_label.setStyleSheet(
             f"font-size: 22px; font-weight: bold; color: {color};"
         )
+        # Shared call-to-action so both summary variants stay in step.
+        stack_cta = (
+            "<b>Ready for the fun part!</b><br>"
+            "Create your star trail or timelapse right here on the <b>Star Trail</b> "
+            "and <b>Timelapse</b> tabs above. Prefer to do it yourself? Open the "
+            "Cleaned Folder and load the frames into your favorite stacker "
+            "(StarStaX, Sequator, Photoshop, etc.)."
+        )
         if total_trails <= 0:
             self._stats_trail_line = (
                 f"Sky was clean. No airplane or satellite trails found<br>"
                 f"in your <b>{total_frames:,}</b> frames.<br><br>"
-                f"<b>Time to stack!</b><br>"
-                f"Open the Cleaned Folder, then load the frames into your favorite "
-                f"stacker (StarStaX, Sequator, Photoshop, etc.) for the final composite."
+                + stack_cta
             )
             return
         SECONDS_PER_MANUAL_TRAIL = 30
@@ -5710,9 +5717,8 @@ class MainWindow(QMainWindow):
             f"across <b>{total_frames:,}</b> twinkling frames.<br>"
             f"<i>Based on manual cleanup at 30 seconds per trail.</i><br><br>"
             f"<span style='font-size:20px; font-weight:bold;'>TIME SAVED: {time_saved}</span>"
-            f"<br><br><b>Time to stack!</b><br>"
-            f"Open the Cleaned Folder, then load the frames into your favorite "
-            f"stacker (StarStaX, Sequator, Photoshop, etc.) for the final composite."
+            f"<br><br>"
+            + stack_cta
         )
         # Stats HTML stored on self; the modal dialog renders it on _on_done.
 
@@ -5987,13 +5993,8 @@ class MainWindow(QMainWindow):
         self._done_output_folder = output_folder
         self._update_open_btn_state()
         self._switch_to_back_btn()
-        # Timelapse: open its own window on the cleaned frames if the user enabled it.
-        if (getattr(self, "_make_timelapse_chk", None) is not None
-                and self._make_timelapse_chk.isChecked()):
-            try:
-                self._open_timelapse_window(output_folder, expect_summary=True)
-            except Exception:
-                pass
+        # The Star Trail + Timelapse creator window opens later, in _finish_show,
+        # once the in-run stacker has the star trail ready (so its poster is there).
         # Finalize the share outputs: the in-run stacker renders the star trail + video
         # from the stacks it built DURING the run; the dev red map renders too.
         self._maybe_start_share_render(output_folder)
@@ -6009,7 +6010,7 @@ class MainWindow(QMainWindow):
         else:
             self._complete_pending = False
             self._progress_bar.setFormat("Complete!")
-            self._show_run_complete_dialog()
+            self._finish_show()
 
     def _finish_completion(self):
         """Flip the bar to 'Complete!' and pop the run-complete summary dialog, once the
@@ -6019,7 +6020,22 @@ class MainWindow(QMainWindow):
             return
         self._complete_pending = False
         self._progress_bar.setFormat("Complete!")
-        self._show_run_complete_dialog()
+        self._finish_show()
+
+    def _finish_show(self):
+        """At run end, open the combined window on the SUMMARY tab (always first),
+        with Star Trail and Timelapse behind it. The star trail file is ready by now
+        (the in-run stacker just finished). Falls back to the old standalone summary
+        popup only if the creator window fails to open, so the user is never stranded."""
+        folder = getattr(self, "_done_output_folder", "") or self._output_input.text().strip()
+        star_path = (workspace_path(folder, "STC_cleaned_star_trail.jpg") if folder else "")
+        try:
+            self._open_creator_window(folder, star_path, "summary")
+        except Exception:
+            try:
+                self._show_run_complete_dialog()
+            except Exception:
+                pass
 
     def _stop_share_threads(self):
         """Stop and forget every share-stacker thread started this session -- the
@@ -6041,23 +6057,25 @@ class MainWindow(QMainWindow):
         self._share_stack_thread = None
 
     def _start_share_stacker(self, original_dir, cleaned_dir):
-        """Called at the START of a run. If the star trail or video is enabled, begin
-        building their lighten-max stacks NOW, on a background thread, in parallel with
-        the cleaning -- so they're ready the instant the run finishes instead of after a
-        second full pass over every frame. Not even started when neither is enabled, so
-        a clean-only user pays nothing. The cleaning worker is untouched."""
+        """Called at the START of a run. Begins building the star trail + before-after
+        video lighten-max stacks NOW, on a background thread, in parallel with the
+        cleaning -- so they're ready the instant the run finishes instead of after a
+        second full pass over every frame. Both always build now (the per-output
+        checkboxes were removed): the star trail populates the Star Trail tab and the
+        video is offered on the Summary tab. The cleaning worker is untouched."""
         # Stop any share thread left over from a previous run BEFORE starting a new
         # one, so an orphaned (parked) thread can't survive to crash the app at quit.
         self._stop_share_threads()
-        want_star = SETTINGS.value("make_star_trail_enabled", True, type=bool)
-        want_video = SETTINGS.value("make_video_enabled", True, type=bool)
+        # Always build both -- they run in parallel with the cleaning (no added time).
+        want_star = True
+        want_video = True
         if not (want_star or want_video) or not original_dir or not cleaned_dir:
             return
-        # DEV-ONLY star-trail styling: read only when running from source, so the
-        # frozen app never applies them even if the settings key somehow exists.
-        _comet_on = _DEV_SWITCHER_ENABLED and SETTINGS.value("dev_comet_enabled", False, type=bool)
-        comet_tail = SETTINGS.value("dev_comet_tail", 60, type=int) if _comet_on else 0
-        thicken_px = SETTINGS.value("dev_trail_thickness", 0, type=int) if _DEV_SWITCHER_ENABLED else 0
+        # The in-run stack always builds a PLAIN star trail (instantaneous).
+        # Comet tail and thickness are applied on demand in the post-run Star
+        # Trail window, never during the run.
+        comet_tail = 0
+        thicken_px = 0
         try:
             ws_dir = output_workspace(cleaned_dir, create=True)
             # How the video encode re-invokes make_share_clip in its OWN process
@@ -6647,16 +6665,17 @@ class MainWindow(QMainWindow):
         _open_folder_in_file_manager(folder)
 
     def _open_timelapse_from_setup(self):
-        """Setup page "Create Timelapse" button. Open the Timelapse window on the
-        output folder's cleaned frames (falling back to the last completed run),
-        so a timelapse can be built from any past run without re-cleaning."""
+        """Setup page "Star Trail & Timelapse" button. Open the combined window on the
+        output folder's cleaned frames (falling back to the last completed run), so it
+        can be built from any past run without re-cleaning. Opens the Star Trail tab."""
         folder = self._output_input.text().strip()
         if not folder:
             folder = getattr(self, '_done_output_folder', None)
         if not folder or not os.path.isdir(folder):
             self._error_label.setText("No cleaned frames yet. Run cleaning first.")
             return
-        self._open_timelapse_window(folder)
+        star_path = workspace_path(folder, "STC_cleaned_star_trail.jpg")
+        self._open_creator_window(folder, star_path, "star")
 
     def _output_has_frames(self):
         """True when this run's output folder holds at least one cleaned image
@@ -6673,12 +6692,13 @@ class MainWindow(QMainWindow):
             return False
 
     def _open_timelapse_from_run(self):
-        """Run page "Create Timelapse" button. Open the Timelapse window on this
-        run's just-cleaned frames; it places itself beside the summary if that is
-        still open, otherwise centered (see _arrange_post_run)."""
+        """Run page "Star Trail & Timelapse" button. Open the combined window on this
+        run's just-cleaned frames (Star Trail tab); it places itself beside the summary
+        if that is still open, otherwise centered (see _arrange_post_run)."""
         folder = getattr(self, '_done_output_folder', None)
         if folder and os.path.isdir(folder):
-            self._open_timelapse_window(folder)
+            star_path = workspace_path(folder, "STC_cleaned_star_trail.jpg")
+            self._open_creator_window(folder, star_path, "star")
 
     def _open_output_folder(self):
         """Processing page / run-complete dialog "Open Cleaned Folder" button.
@@ -6761,23 +6781,29 @@ class MainWindow(QMainWindow):
         event.accept()
 
 
-class TimelapseWindow(QDialog):
-    """Timelapse Maker -- its own versioned window, opened at run end on the
-    cleaned frames. Pick source (cleaned/original) / size / fps / format, see an
+# Shared so the two creator tab pages have EXACTLY the same margins and spacing,
+# and the title (and everything below) sits at the same position on both tabs.
+_CREATOR_PANEL_MARGINS = (24, 20, 24, 20)   # left, top, right, bottom
+_CREATOR_PANEL_SPACING = 10
+
+
+class TimelapsePanel(QWidget):
+    """Timelapse Maker -- the Timelapse tab inside CreatorWindow (was its own
+    dialog). Pick source (cleaned/original) / size / fps / format, see an
     estimated size and a free-space check, and render via the timelapse_maker.py
     engine (a subprocess) with a live progress bar; the Render button doubles as
-    Stop while running. Choices are remembered for next time."""
+    Stop while running. Shows a still poster of the result-to-be and a Play video
+    button that opens the finished mp4. Choices are remembered for next time."""
 
-    def __init__(self, cleaned_folder, original_folder=None, parent=None):
+    def __init__(self, cleaned_folder, original_folder=None, star_path=None, parent=None):
         super().__init__(parent)
-        from timelapse_maker import TIMELAPSE_VERSION
         self._cleaned = cleaned_folder
         self._original = original_folder
+        self._star_path = star_path        # star trail image, used as the poster when present
         self._proc = None
         self._out_path = None
+        self._play_path = None             # a rendered timelapse the Play button can open
         self._render_cancelled = False
-        self.setWindowTitle(f"Star Trail CleanR Timelapse  v{TIMELAPSE_VERSION}")
-        self.setMinimumWidth(460)
 
         # Frames are loaded by _reload_frames() once the controls exist, so the
         # source (Cleaned / Original) dropdown can swap them on the fly.
@@ -6786,6 +6812,8 @@ class TimelapseWindow(QDialog):
         self._nw = self._nh = 0
 
         lay = QVBoxLayout(self)
+        lay.setContentsMargins(*_CREATOR_PANEL_MARGINS)
+        lay.setSpacing(_CREATOR_PANEL_SPACING)
         _title = QLabel("Create Timelapse")
         _f = QFont()
         _f.setPointSize(20)
@@ -6793,6 +6821,24 @@ class TimelapseWindow(QDialog):
         _title.setFont(_f)
         _title.setStyleSheet(f"color: {BRAND_HEADING_BLUE};")
         lay.addWidget(_title)
+
+        # Poster: the star trail image if we have one, otherwise the first frame
+        # of the selected source. Once a timelapse is rendered, a white play button
+        # is drawn on it and clicking the poster plays the video in the system player.
+        self._poster = QLabel()
+        self._poster.setAlignment(Qt.AlignCenter)
+        self._poster.mousePressEvent = lambda e: self._play_video()
+        lay.addWidget(self._poster)
+        # Shown in the poster's place before any video is rendered. Real (selectable)
+        # text in a dark video-frame box, sized to match the poster so nothing jumps.
+        self._poster_placeholder = QLabel(
+            "Choose your options below, then click Render to create your timelapse.")
+        self._poster_placeholder.setAlignment(Qt.AlignCenter)
+        self._poster_placeholder.setWordWrap(True)
+        self._poster_placeholder.setFixedWidth(420)
+        self._poster_placeholder.setStyleSheet(
+            "background: #141414; color: #dcdcdc; border-radius: 6px; padding: 16px; font-size: 19px;")
+        lay.addWidget(self._poster_placeholder, 0, Qt.AlignHCenter)
 
         def _row(text, combo):
             r = QHBoxLayout()
@@ -6842,7 +6888,7 @@ class TimelapseWindow(QDialog):
             self._blend_cb.addItem(f"{v} frames", v)
         self._blend_cb.setCurrentIndex(self._blend_cb.findData(3))  # default 3; _restore_choices overrides if saved
         _row("Smoothing", self._blend_cb)
-        _blend_hint = QLabel("Blends each movie frame with the previous ones. "
+        _blend_hint = QLabel("Smooth blends each movie frame with the previous ones. "
                              "Higher values smooth out flicker, but stretch "
                              "each star into a slightly longer streak.")
         _blend_hint.setStyleSheet(f"color: {MUTED_TEXT};")
@@ -6867,21 +6913,111 @@ class TimelapseWindow(QDialog):
         self._status_lbl = QLabel("")
         lay.addWidget(self._status_lbl)
 
-        _btns = QHBoxLayout()
-        _btns.addStretch(1)
-        self._close_btn = QPushButton("Close")
-        self._close_btn.clicked.connect(self.close)
-        self._render_btn = QPushButton("Render")
-        self._render_btn.setDefault(True)
+        # Absorb any leftover vertical space here so the controls above stay packed
+        # to the top identically to the Star Trail tab (the two tabs share a height).
+        lay.addStretch(1)
+        # Render first (full-width blue hero button), then the two grey Open buttons
+        # below it -- mirrors the Star Trail tab's Build + Open row.
+        self._render_btn = QPushButton("Create Timelapse")
+        self._render_btn.setFixedHeight(48)
+        self._render_btn.setStyleSheet(_hero_btn_css())
         self._render_btn.clicked.connect(self._toggle_render)
-        _btns.addWidget(self._close_btn)
-        _btns.addWidget(self._render_btn)
-        lay.addLayout(_btns)
+        lay.addWidget(self._render_btn)
+
+        _open_row = QHBoxLayout()
+        _open_row.addStretch(1)
+        self._open_vid_btn = QPushButton("Open Timelapse Video")
+        self._open_vid_btn.setEnabled(False)
+        self._open_vid_btn.clicked.connect(self._play_video)
+        self._open_dir_btn = QPushButton("Open Saved Folder")
+        self._open_dir_btn.clicked.connect(self._open_saved_folder)
+        for b in (self._open_vid_btn, self._open_dir_btn):
+            b.setFixedHeight(34)
+            b.setStyleSheet(_secondary_btn_css())
+        _open_row.addWidget(self._open_vid_btn)
+        _open_row.addWidget(self._open_dir_btn)
+        _open_row.addStretch(1)
+        lay.addLayout(_open_row)
 
         for cb in (self._size_cb, self._fps_cb, self._blend_cb, self._fmt_cb):
             cb.currentIndexChanged.connect(self._update_estimate)
         self._source_cb.currentIndexChanged.connect(self._reload_frames)
-        self._reload_frames()   # load the (default Cleaned) frames + fill the estimate
+        self._reload_frames()   # load the (default Cleaned) frames + fill the estimate + poster
+        self._refresh_play_state()   # enable Play video if a rendered timelapse already exists
+        _make_labels_selectable(self)   # house rule: all GUI text is copy/paste-able
+
+    def _set_poster(self):
+        """Before a video exists: show the instructional placeholder. Once one does:
+        show a still (star trail image, else first frame) with the white play button,
+        and clicking it plays the video."""
+        path = self._star_path if (self._star_path and os.path.isfile(self._star_path)) else \
+            (self._frames[0] if self._frames else None)
+        pm0 = QPixmap(path) if path else QPixmap()
+        # Height a 420-wide still would be, so the placeholder matches the poster.
+        h = pm0.scaledToWidth(420, Qt.SmoothTransformation).height() if not pm0.isNull() else 260
+        has_video = bool(self._play_path and os.path.isfile(self._play_path))
+        if has_video and not pm0.isNull():
+            pm = pm0.scaledToWidth(420, Qt.SmoothTransformation)
+            self._poster.setFixedHeight(pm.height())   # never let the layout squeeze it
+            self._draw_play_button(pm)
+            self._poster.setPixmap(pm)
+            self._poster.show()
+            self._poster_placeholder.hide()
+        else:
+            self._poster_placeholder.setFixedHeight(h)
+            self._poster_placeholder.show()
+            self._poster.hide()
+
+    def _draw_play_button(self, pm):
+        """Draw a white play button -- circle outline with a filled triangle,
+        centered -- onto the poster. The white sibling of the share clip's grip."""
+        from PySide6.QtGui import QPainter, QPen, QColor, QPolygon, QBrush
+        from PySide6.QtCore import QPoint
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        cx, cy = pm.width() // 2, pm.height() // 2
+        r = max(18, int(min(pm.width(), pm.height()) * 0.14))
+        pen = QPen(QColor(255, 255, 255)); pen.setWidth(max(2, r // 11))
+        p.setPen(pen); p.setBrush(Qt.NoBrush)
+        p.drawEllipse(QPoint(cx, cy), r, r)
+        tw = int(r * 0.62); th = int(r * 0.74); dx = int(r * 0.10)  # nudge right = optically centered
+        tri = QPolygon([QPoint(cx - tw // 2 + dx, cy - th // 2),
+                        QPoint(cx - tw // 2 + dx, cy + th // 2),
+                        QPoint(cx + tw // 2 + dx, cy)])
+        p.setPen(Qt.NoPen); p.setBrush(QBrush(QColor(255, 255, 255)))
+        p.drawPolygon(tri)
+        p.end()
+
+    def _refresh_play_state(self):
+        """Find a rendered timelapse in the workspace (this render, or one from a
+        previous session; newest wins), then redraw the poster with its play button
+        and make it clickable when a video is available."""
+        import glob
+        ws = os.path.dirname(workspace_path(self._cleaned, "STC_timelapse.mp4"))
+        cands = []
+        for ext in ("mp4", "mov"):
+            cands += glob.glob(os.path.join(ws, "STC_timelapse_*." + ext))
+        if cands:
+            cands.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+            self._play_path = cands[0]
+        has = bool(self._play_path and os.path.isfile(self._play_path))
+        self._poster.setCursor(Qt.PointingHandCursor if has else Qt.ArrowCursor)
+        self._poster.setToolTip("Click to play the timelapse video" if has else "")
+        if getattr(self, "_open_vid_btn", None) is not None:
+            self._open_vid_btn.setEnabled(has)
+        self._set_poster()   # redraw with (or without) the play button overlay
+
+    def _open_saved_folder(self):
+        """Open the STC Extras folder where timelapses are saved."""
+        ws = os.path.dirname(workspace_path(self._cleaned, "STC_timelapse.mp4"))
+        if os.path.isdir(ws):
+            _open_folder_in_file_manager(ws)
+
+    def _play_video(self):
+        from PySide6.QtGui import QDesktopServices
+        from PySide6.QtCore import QUrl
+        if self._play_path and os.path.isfile(self._play_path):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(self._play_path))
 
     def _restore_choices(self):
         for cb, key, is_int in ((self._source_cb, "timelapse_source", False),
@@ -6925,6 +7061,7 @@ class TimelapseWindow(QDialog):
             if sz:
                 self._nw, self._nh = sz
         self._update_estimate()
+        self._set_poster()
 
     def _calc(self):
         from timelapse_maker import target_size, estimate_output_bytes
@@ -6956,12 +7093,19 @@ class TimelapseWindow(QDialog):
         else:
             self._start_render()
 
+    def _set_options_enabled(self, enabled):
+        """Grey out (or restore) every option control while a render runs, so the
+        settings can't change mid-encode. The Stop button stays live to cancel."""
+        for cb in (self._source_cb, self._size_cb, self._fps_cb,
+                   self._blend_cb, self._fmt_cb):
+            cb.setEnabled(enabled)
+
     def _stop_render(self):
         """Cancel an in-progress render. Killing the encoder fires the finished
         signal, where _on_proc_finished resets the UI and drops the partial file."""
         if self._proc is not None and self._proc.state() != QProcess.NotRunning:
             self._render_cancelled = True
-            self._status_lbl.setText("Stopping…")
+            self._phase_text = "Stopping…"   # spinner keeps rendering it
             self._proc.kill()
 
     def _start_render(self):
@@ -6979,12 +7123,16 @@ class TimelapseWindow(QDialog):
         src = self._source_cb.currentData() or "cleaned"
         frames_dir = self._current_folder()
         ext = self._fmt_cb.currentData() or "mp4"
-        tag = "original_" if src == "original" else ""
-        # Output always lands in the cleaned folder's STC Extras workspace; the
-        # source tag keeps a Cleaned and an Original timelapse from colliding.
-        self._out_path = workspace_path(self._cleaned, f"STC_timelapse_{tag}{size_key}.{ext}")
-        script = os.path.join(_base, "timelapse_maker.py")
         blend = int(self._blend_cb.currentData() or 0)
+        tag = "original_" if src == "original" else ""
+        # Option-named output in the cleaned folder's STC Extras workspace, so a
+        # re-render keeps its own file instead of overwriting; identical options get a
+        # _2, _3 counter. (source tag + size + fps + smoothing.)
+        _name = f"STC_timelapse_{tag}{size_key}_{fps}fps"
+        if blend >= 2:
+            _name += f"_blend{blend}"
+        self._out_path = _unique_path(workspace_path(self._cleaned, f"{_name}.{ext}"))
+        script = os.path.join(_base, "timelapse_maker.py")
         args = [frames_dir, "-o", self._out_path, "--size", size_key,
                 "--fps", str(fps)]
         if blend >= 2:
@@ -7011,14 +7159,32 @@ class TimelapseWindow(QDialog):
         }
         self._render_cancelled = False
         self._render_btn.setText("Stop")
+        self._set_options_enabled(False)
         self._bar.setVisible(True)
         self._bar.setValue(0)
-        self._status_lbl.setText("Rendering…")
+        # Spinner + counting-up timer to the left of the phase text.
+        self._phase_text = "Rendering…"
+        self._render_started = time.time()
+        self._spin_idx = 0
+        if getattr(self, "_spin_timer", None) is None:
+            self._spin_timer = QTimer(self)
+            self._spin_timer.timeout.connect(self._tick_spinner)
+        self._spin_timer.start(200)
+        self._tick_spinner()
         self._proc = QProcess(self)
         self._proc.setProcessChannelMode(QProcess.MergedChannels)
         self._proc.readyReadStandardOutput.connect(self._on_proc_output)
         self._proc.finished.connect(self._on_proc_finished)
         self._proc.start(sys.executable, pargs)
+
+    def _tick_spinner(self):
+        """Spinning glyph + counting-up elapsed timer to the left of the phase text."""
+        chars = "|/-\\"
+        self._spin_idx = (self._spin_idx + 1) % len(chars)
+        elapsed = int(time.time() - getattr(self, "_render_started", time.time()))
+        t = f"{elapsed // 60}m {elapsed % 60}s" if elapsed >= 60 else f"{elapsed}s"
+        self._status_lbl.setText(
+            f"{chars[self._spin_idx]}  {getattr(self, '_phase_text', 'Rendering…')}  {t}")
 
     def _on_proc_output(self):
         data = bytes(self._proc.readAllStandardOutput()).decode("utf-8", "replace")
@@ -7031,8 +7197,11 @@ class TimelapseWindow(QDialog):
                     pass
 
     def _on_proc_finished(self, code, _status):
-        self._render_btn.setText("Render")
+        if getattr(self, "_spin_timer", None) is not None:
+            self._spin_timer.stop()          # stop the spinner/timer before final status
+        self._render_btn.setText("Create Timelapse")
         self._render_btn.setEnabled(True)
+        self._set_options_enabled(True)
         if self._render_cancelled:
             self._bar.setVisible(False)
             self._status_lbl.setText("Render cancelled.")
@@ -7041,7 +7210,10 @@ class TimelapseWindow(QDialog):
         if code == 0 and self._out_path and os.path.exists(self._out_path):
             self._bar.setVisible(False)
             self._status_lbl.setText(f"Done: {os.path.basename(self._out_path)}")
-            _open_folder_in_file_manager(os.path.dirname(self._out_path))
+            self._play_path = self._out_path
+            self._refresh_play_state()          # light up the play button + Open Video button
+            # No auto-open of the Finder folder -- the user opens the video or folder
+            # via the buttons / play overlay (one screen, on demand).
             if SETTINGS.value("crash_reporting_enabled", False, type=bool):
                 try:
                     from modules import usage_report
@@ -7060,9 +7232,10 @@ class TimelapseWindow(QDialog):
         except OSError:
             pass
 
-    def closeEvent(self, event):
+    def shutdown(self):
         """Stop a render in progress so closing the window never leaves an orphan
-        encoder running, and drop the half-written file."""
+        encoder running, and drop the half-written file. Called by CreatorWindow's
+        closeEvent (this is a tab page now, not a top-level window)."""
         if self._proc is not None and self._proc.state() != QProcess.NotRunning:
             self._render_cancelled = True
             try:
@@ -7072,6 +7245,594 @@ class TimelapseWindow(QDialog):
             self._proc.kill()
             self._proc.waitForFinished(2000)
             self._remove_partial()
+
+
+class StarTrailPanel(QWidget):
+    """Star Trail -- the Star Trail tab inside CreatorWindow (was its own dialog),
+    opened at run end on the cleaned frames when the user asked for a star trail.
+    Shows the instant trail (built during the run) with an Open link, then optional
+    look choices -- comet tail, star size, and hot-pixel/colored-speck removal --
+    that rebuild the trail on demand via make_share_clip.py (a subprocess) with a
+    live progress bar; the Build button doubles as Stop. Only the frame-re-reading
+    options (comet, hot pixels) cost time; a plain trail is already sitting there."""
+
+    def __init__(self, cleaned_folder, star_path, parent=None):
+        super().__init__(parent)
+        self._cleaned = cleaned_folder
+        # Preview the MOST RECENT star trail: the run's instant baseline OR any Build
+        # output (STC_star_trail_*.jpg). Since Build stopped overwriting the baseline
+        # (option-named files now), the newest existing file is the right preview.
+        self._star_path = _newest_star_trail(star_path, cleaned_folder)
+        self._proc = None
+        self._build_cancelled = False
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(*_CREATOR_PANEL_MARGINS)
+        lay.setSpacing(_CREATOR_PANEL_SPACING)
+        _title = QLabel("Create Star Trail")
+        _f = QFont(); _f.setPointSize(20); _f.setBold(True)
+        _title.setFont(_f)
+        _title.setStyleSheet(f"color: {BRAND_HEADING_BLUE};")
+        lay.addWidget(_title)
+
+        # Preview: the newest star trail if one exists, else a placeholder telling the
+        # user how to make one (mirrors the Timelapse tab so the area is never blank).
+        self._thumb = None
+        if self._star_path and os.path.isfile(self._star_path):
+            _pm = QPixmap(self._star_path)
+            if not _pm.isNull():
+                _scaled = _pm.scaledToWidth(420, Qt.SmoothTransformation)
+                self._thumb = QLabel()
+                self._thumb.setPixmap(_scaled)
+                self._thumb.setAlignment(Qt.AlignCenter)
+                # Fixed height so the layout can never squeeze the image to fit other
+                # controls -- keeps the title-to-image spacing identical on both tabs.
+                self._thumb.setFixedHeight(_scaled.height())
+                self._thumb.setCursor(Qt.PointingHandCursor)
+                self._thumb.setToolTip("Click to open the star trail image")
+                self._thumb.mousePressEvent = lambda e: self._open_star()
+                lay.addWidget(self._thumb)
+                _hint_open = QLabel("Click the image to open")
+                _hint_open.setAlignment(Qt.AlignCenter)
+                _hint_open.setStyleSheet(f"color: {MUTED_TEXT};")
+                lay.addWidget(_hint_open)
+        if self._thumb is None:
+            _ph = QLabel("Your star trail will appear here. Choose your options below, "
+                         "then click Create Star Trail.")
+            _ph.setAlignment(Qt.AlignCenter); _ph.setWordWrap(True)
+            _ph.setFixedWidth(420); _ph.setFixedHeight(260)
+            _ph.setStyleSheet("background: #141414; color: #dcdcdc; border-radius: 6px; "
+                              "padding: 16px; font-size: 19px;")
+            lay.addWidget(_ph, 0, Qt.AlignHCenter)
+
+        _LABEL_W = 112     # wide enough for "Trail Thickness"
+
+        def _row(text, w):
+            r = QHBoxLayout()
+            _l = QLabel(text)
+            _l.setFixedWidth(_LABEL_W)
+            _l.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            _lf = _l.font(); _lf.setBold(True); _l.setFont(_lf)
+            r.addWidget(_l)
+            r.addWidget(w, 1)
+            lay.addLayout(r)
+            return _l
+
+        from PySide6.QtWidgets import QRadioButton, QButtonGroup
+        # Blending mode radios, stacked vertically: Normal on top, Comet Mode below.
+        _mode_w = QWidget()
+        _mv = QVBoxLayout(_mode_w); _mv.setContentsMargins(0, 0, 0, 0); _mv.setSpacing(6)
+        self._mode_normal = QRadioButton("Normal (Lighten)")
+        self._mode_comet = QRadioButton("Comet Mode")
+        self._mode_group = QButtonGroup(self)
+        self._mode_group.addButton(self._mode_normal)
+        self._mode_group.addButton(self._mode_comet)
+        self._mode_normal.setChecked(True)
+        _mv.addWidget(self._mode_normal)
+        _mv.addWidget(self._mode_comet)
+        _row("Star Trail Style", _mode_w)
+
+        # Trail Length (Comet's sub-option), indented to the right to read as a child
+        # of Comet Mode. Grayed (control AND label) unless Comet Mode is selected.
+        # Fraction of the sequence (50/75/100%), so the tail scales to the frame count.
+        self._comet_len_cb = QComboBox()
+        for label, frac in (("Short (50%)", 0.5), ("Medium (75%)", 0.75), ("Long (100%)", 1.0)):
+            self._comet_len_cb.addItem(label, frac)
+        self._comet_len_cb.setCurrentIndex(self._comet_len_cb.findData(1.0))   # default Long (100%)
+        _lenrow = QHBoxLayout()
+        _lenrow.addSpacing(36)
+        self._len_label = QLabel("Trail Length")
+        self._len_label.setFixedWidth(_LABEL_W)
+        self._len_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        _llf = self._len_label.font(); _llf.setBold(True); self._len_label.setFont(_llf)
+        _lenrow.addWidget(self._len_label)
+        _lenrow.addWidget(self._comet_len_cb, 1)
+        lay.addLayout(_lenrow)
+
+        # Reverse frame order (comet-only): flips which end of each trail fades, so the
+        # comet tails point the other way. Grayed out unless Comet Mode is selected.
+        _revrow = QHBoxLayout()
+        _revrow.addSpacing(36)
+        self._reverse_chk = QCheckBox("Process images in reverse order")
+        _revrow.addWidget(self._reverse_chk)
+        _revrow.addStretch(1)
+        lay.addLayout(_revrow)
+
+        self._mode_comet.toggled.connect(self._sync_comet_len)
+        self._sync_comet_len()
+
+        # Trail thickness: widen the trails (thicken_px). 0 = leave as shot.
+        self._size_cb = QComboBox()
+        for label, v in (("Normal", 0), ("+1 px", 1), ("+2 px", 2),
+                         ("+3 px", 3), ("+4 px", 4), ("+5 px", 5)):
+            self._size_cb.addItem(label, v)
+        _row("Trail Thickness", self._size_cb)
+
+        # Hot-pixel / colored-speck removal. Composes with Comet mode (the backend runs
+        # speck removal on the comet result), so only grayed while a build is running.
+        self._hotpix_chk = QCheckBox("Remove hot pixels && colored specks (will take extra time)")
+        lay.addWidget(self._hotpix_chk)
+
+        self._bar = QProgressBar()
+        self._bar.setRange(0, 100)
+        self._bar.setValue(0)
+        self._bar.setVisible(False)
+        lay.addWidget(self._bar)
+        self._status_lbl = QLabel("")
+        lay.addWidget(self._status_lbl)
+
+        # Absorb any leftover vertical space here so the controls above stay packed
+        # to the top identically to the Timelapse tab (the two tabs share a height).
+        lay.addStretch(1)
+        # Open actions sit below the progress bar; grayed out while a build runs
+        # so you can't open a half-written file.
+        # Build first (the big blue action button, matching the app's hero button),
+        # then the grey Open buttons below it.
+        self._build_btn = QPushButton("Create Star Trail")
+        self._build_btn.setFixedHeight(48)
+        self._build_btn.setStyleSheet(_hero_btn_css())
+        self._build_btn.clicked.connect(self._toggle_build)
+        lay.addWidget(self._build_btn)
+
+        _open_row = QHBoxLayout()
+        _open_row.addStretch(1)
+        self._open_img_btn = QPushButton("Open Star Trail Image")
+        self._open_img_btn.clicked.connect(self._open_star)
+        self._open_dir_btn = QPushButton("Open Saved Folder")
+        self._open_dir_btn.clicked.connect(self._open_folder)
+        for b in (self._open_img_btn, self._open_dir_btn):
+            b.setFixedHeight(34)
+            b.setStyleSheet(_secondary_btn_css())
+        _open_row.addWidget(self._open_img_btn)
+        _open_row.addWidget(self._open_dir_btn)
+        _open_row.addStretch(1)
+        lay.addLayout(_open_row)
+
+        _make_labels_selectable(self)   # house rule: all GUI text is copy/paste-able
+
+    def _sync_comet_len(self, *_):
+        """Gray out the comet-only controls (Trail Length + label, reverse order)
+        unless Comet Mode is selected."""
+        on = self._mode_comet.isChecked()
+        self._comet_len_cb.setEnabled(on)
+        self._len_label.setEnabled(on)
+        self._reverse_chk.setEnabled(on)
+
+    def _tick_spinner(self):
+        """Update the build status: a spinning glyph, the current phase, and a
+        counting-up elapsed timer to the left of the phase text."""
+        chars = "|/-\\"
+        self._spin_idx = (self._spin_idx + 1) % len(chars)
+        elapsed = int(time.time() - getattr(self, "_build_started", time.time()))
+        t = f"{elapsed // 60}m {elapsed % 60}s" if elapsed >= 60 else f"{elapsed}s"
+        self._status_lbl.setText(
+            f"{chars[self._spin_idx]}  {getattr(self, '_phase_text', 'Building…')}  {t}")
+
+    def _open_star(self):
+        from PySide6.QtGui import QDesktopServices
+        from PySide6.QtCore import QUrl
+        if self._star_path and os.path.isfile(self._star_path):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(self._star_path))
+
+    def _open_folder(self):
+        from PySide6.QtGui import QDesktopServices
+        from PySide6.QtCore import QUrl
+        folder = os.path.dirname(self._star_path) if self._star_path else self._cleaned
+        if folder and os.path.isdir(folder):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
+
+    def _toggle_build(self):
+        """Build doubles as Stop while a rebuild is running."""
+        if self._proc is not None and self._proc.state() != QProcess.NotRunning:
+            self._stop_build()
+        else:
+            self._start_build()
+
+    def _stop_build(self):
+        if self._proc is not None and self._proc.state() != QProcess.NotRunning:
+            self._build_cancelled = True
+            self._phase_text = "Stopping…"   # spinner keeps rendering it
+            self._proc.kill()
+
+    def _build_out_path(self):
+        """A new, option-named output file so each Build keeps its own version instead
+        of overwriting. The run's instant trail (STC_cleaned_star_trail.jpg) is left as
+        the plain baseline. A rebuild with the same options gets a _2, _3 counter."""
+        ws = os.path.dirname(self._star_path) if self._star_path else self._cleaned
+        tokens = []
+        if self._mode_comet.isChecked():
+            length = {0.5: "short", 0.75: "medium", 1.0: "long"}.get(
+                float(self._comet_len_cb.currentData() or 1.0), "long")
+            tokens.append(f"comet-{length}")
+            if self._reverse_chk.isChecked():
+                tokens.append("reverse")
+        else:
+            tokens.append("plain")
+        thick = int(self._size_cb.currentData() or 0)
+        if thick > 0:
+            tokens.append(f"thick{thick}")
+        if self._hotpix_chk.isChecked():
+            tokens.append("despeck")
+        base = os.path.join(ws, "STC_star_trail_" + "_".join(tokens) + ".jpg")
+        return _unique_path(base)
+
+    def _start_build(self):
+        # Comet length is a FRACTION of the frame count (0.5/0.75/1.0); make_share_clip
+        # turns it into a real frame count. 0 = plain trail (Blending Mode = Normal).
+        comet = (float(self._comet_len_cb.currentData() or 0.5)
+                 if self._mode_comet.isChecked() else 0.0)
+        thick = int(self._size_cb.currentData() or 0)
+        self._pending_out = self._build_out_path()   # option-named, never overwrites
+        script = os.path.join(_base, "make_share_clip.py")
+        args = ["--star-trail", "--cleaned", self._cleaned, "--out", self._pending_out,
+                "--comet-tail", str(comet), "--thicken", str(thick)]
+        if self._mode_comet.isChecked() and self._reverse_chk.isChecked():
+            args.append("--reverse")     # flip comet-tail direction (comet only)
+        if self._hotpix_chk.isChecked():
+            args.append("--remove-hotpix")
+        self._skip_msg = ""     # set if the foreground guard bails (HOTPIX_SKIPPED)
+        if getattr(sys, "frozen", False):
+            pargs = ["--cleanr-worker", script] + args
+        else:
+            pargs = ["-u", script] + args
+        # Count frames so the progress bar can size each phase by its real read-work
+        # (stacking reads every frame, finding reads ~40, cleaning reads every frame).
+        try:
+            self._nframes = sum(
+                1 for e in os.scandir(self._cleaned)
+                if e.is_file() and e.name.lower().endswith(
+                    ('.jpg', '.jpeg', '.png', '.tif', '.tiff')))
+        except OSError:
+            self._nframes = 0
+        self._build_cancelled = False
+        self._build_btn.setText("Stop")
+        self._bar.setVisible(True)
+        self._bar.setValue(0)
+        # Spinner + counting-up timer to the left of the phase text.
+        self._phase_text = "Building…"
+        self._build_started = time.time()
+        self._spin_idx = 0
+        if getattr(self, "_spin_timer", None) is None:
+            self._spin_timer = QTimer(self)
+            self._spin_timer.timeout.connect(self._tick_spinner)
+        self._spin_timer.start(200)
+        self._tick_spinner()
+        for w in (self._hotpix_chk, self._mode_normal, self._mode_comet, self._comet_len_cb,
+                  self._reverse_chk, self._size_cb, self._open_img_btn, self._open_dir_btn):
+            w.setEnabled(False)
+        self._proc = QProcess(self)
+        self._proc.setProcessChannelMode(QProcess.MergedChannels)
+        self._proc.readyReadStandardOutput.connect(self._on_proc_output)
+        self._proc.finished.connect(self._on_proc_finished)
+        self._proc.start(sys.executable, pargs)
+
+    def _on_proc_output(self):
+        # make_share_clip prints "<label>: i/n" while stacking (star trail / comet);
+        # sky_dots prints "finding specks: j/n" then "cleaning specks: k/n" during hot-
+        # pixel removal. Size each phase by its real read-work so the bar tracks reality
+        # and adapts to the set size: stacking reads N frames, finding ~40, cleaning N.
+        data = bytes(self._proc.readAllStandardOutput()).decode("utf-8", "replace")
+        hotpix = self._hotpix_chk.isChecked()
+        n = max(1, getattr(self, "_nframes", 0))
+        find_n = min(40, n)
+        total = (n + find_n + n) if hotpix else n
+        b1 = int(n * 100 / total)                 # % at end of stacking
+        b2 = int((n + find_n) * 100 / total)      # % at end of finding
+        for line in data.splitlines():
+            s = line.strip()
+            if s.startswith("HOTPIX_SKIPPED:"):
+                self._skip_msg = s.split(":", 1)[1].strip()
+                continue
+            low = s.lower()
+            tail = s.rsplit(":", 1)[-1].strip() if ":" in s else ""
+            frac = None
+            if "/" in tail:
+                a, b = tail.split("/", 1)
+                if a.strip().isdigit() and b.strip().isdigit():
+                    frac = int(a) / max(1, int(b))
+            if "cleaning specks" in low:          # cleaning pass: b2 -> 100%
+                self._phase_text = "Removing hot pixels…"
+                if frac is not None:
+                    self._bar.setValue(int(b2 + frac * (100 - b2)))
+            elif "finding specks" in low:         # sampling frames: b1 -> b2
+                self._phase_text = "Finding hot pixels…"
+                if frac is not None:
+                    self._bar.setValue(int(b1 + frac * (b2 - b1)))
+            elif "finding hot pixels" in low or low.startswith("removing "):
+                self._phase_text = "Finding hot pixels…"
+                self._bar.setValue(b1)
+            elif frac is not None:                # stacking pass: 0 -> b1
+                self._bar.setValue(int(frac * b1))
+
+    def _on_proc_finished(self, code, _status):
+        if getattr(self, "_spin_timer", None) is not None:
+            self._spin_timer.stop()          # stop the spinner/timer before final status
+        self._build_btn.setText("Create Star Trail")
+        self._build_btn.setEnabled(True)
+        for w in (self._hotpix_chk, self._mode_normal, self._mode_comet, self._comet_len_cb,
+                  self._reverse_chk, self._size_cb, self._open_img_btn, self._open_dir_btn):
+            w.setEnabled(True)
+        self._sync_comet_len()   # re-gray Length if Blending Mode is Normal
+        if self._build_cancelled:
+            self._bar.setVisible(False)
+            self._status_lbl.setText("Build cancelled.")
+            return
+        _out = getattr(self, "_pending_out", self._star_path)
+        if code == 0 and _out and os.path.exists(_out):
+            self._bar.setVisible(False)     # hide the bar on finish, like the Timelapse window
+            self._star_path = _out          # preview + Open now point at the just-built file
+            if getattr(self, "_skip_msg", ""):
+                self._status_lbl.setText("Kept the plain trail. " + self._skip_msg)
+                self._status_lbl.setWordWrap(True)
+            else:
+                self._status_lbl.setText("")   # no "done" text; the trail just updates
+            _pm = QPixmap(self._star_path)
+            if not _pm.isNull() and getattr(self, "_thumb", None) is not None:
+                _scaled = _pm.scaledToWidth(420, Qt.SmoothTransformation)
+                self._thumb.setPixmap(_scaled)
+                self._thumb.setFixedHeight(_scaled.height())
+            self._open_star()               # auto-open the finished star trail
+        else:
+            self._bar.setVisible(False)
+            self._status_lbl.setText("The star trail didn't finish. The run log has the detail.")
+
+    def shutdown(self):
+        """Stop an in-progress rebuild; called by CreatorWindow's closeEvent (this
+        is a tab page now, not a top-level window)."""
+        if self._proc is not None and self._proc.state() != QProcess.NotRunning:
+            self._build_cancelled = True
+            try:
+                self._proc.finished.disconnect(self._on_proc_finished)
+            except (TypeError, RuntimeError):
+                pass
+            self._proc.kill()
+            self._proc.waitForFinished(2000)
+
+
+class SummaryPanel(QWidget):
+    """Run Complete summary -- the first tab of CreatorWindow. Shows the run stats
+    (trails removed, time saved), a share nudge, and an Open Cleaned Folder button.
+    Replaces the old standalone Run Complete popup."""
+
+    def __init__(self, summary_html, on_open_folder, video_path="", parent=None):
+        super().__init__(parent)
+        self._video_path = video_path or ""
+        self._video_lbl = None
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(*_CREATOR_PANEL_MARGINS)
+        lay.setSpacing(_CREATOR_PANEL_SPACING)
+
+        header = QLabel("Your skies are scrubbed!")
+        hf = QFont(); hf.setPointSize(22); hf.setBold(True)
+        header.setFont(hf); header.setAlignment(Qt.AlignCenter)
+        header.setStyleSheet(f"color: {BRAND_HEADING_BLUE};")
+        lay.addWidget(header)
+
+        if summary_html and summary_html.strip():
+            body = QLabel(summary_html)
+            body.setTextFormat(Qt.RichText); body.setWordWrap(True)
+            body.setAlignment(Qt.AlignCenter)
+            body.setStyleSheet(f"color: {CARD_TEXT}; font-size: 17px;")
+            lay.addWidget(body)
+        else:
+            note = QLabel("Your run summary appears here after you clean a set.")
+            note.setWordWrap(True); note.setAlignment(Qt.AlignCenter)
+            note.setStyleSheet(f"color: {MUTED_TEXT}; font-size: 15px;")
+            lay.addWidget(note)
+
+        # Divider between the run summary and the brand block below.
+        _divider = QFrame()
+        _divider.setFrameShape(QFrame.HLine)
+        _divider.setFixedHeight(1)
+        _divider.setStyleSheet(f"color: {CARD_BORDER}; background: {CARD_BORDER}; border: none;")
+        lay.addWidget(_divider)
+
+        # Brand block centered in the empty space: title, then the logo, then the
+        # share nudge underneath.
+        lay.addStretch(1)
+        _brand = QLabel("Star Trail CleanR")
+        _brand.setAlignment(Qt.AlignCenter)
+        # Match the main window's headline size exactly (26px bold).
+        _brand.setStyleSheet(f"color: {CARD_TEXT}; font-size: 26px; font-weight: bold;")
+        lay.addWidget(_brand)
+
+        _logo_path = os.path.join(_base, "assets", "StarTrailCleanR.png")
+        if os.path.isfile(_logo_path):
+            _lpm = QPixmap(_logo_path)
+            if not _lpm.isNull():
+                _logo = QLabel()
+                _logo.setPixmap(_lpm.scaled(80, 80, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                _logo.setAlignment(Qt.AlignCenter)
+                lay.addWidget(_logo)
+
+        # The 10-second before & after clip built automatically during the run. Two
+        # links: open it in the system's default player, or reveal its folder. Only
+        # shown when the clip actually exists on disk (it always does right after a run;
+        # the completion is held until the in-run stacker finishes rendering it). Sits
+        # ABOVE the social-media nudge.
+        if self._video_path and os.path.isfile(self._video_path):
+            vid = QLabel(
+                "Check out this cool before and after clip<br>"
+                f"<a href='video' style='color:{BRAND_HEADING_BLUE};'>Open video</a>"
+                "&nbsp;&nbsp;&middot;&nbsp;&nbsp;"
+                f"<a href='folder' style='color:{BRAND_HEADING_BLUE};'>Open folder</a>")
+            vid.setTextFormat(Qt.RichText); vid.setWordWrap(True)
+            vid.setAlignment(Qt.AlignCenter)
+            vid.setStyleSheet(f"color: {CARD_TEXT}; font-size: 15px; padding: 0px 24px;")
+            vid.setOpenExternalLinks(False)
+            vid.linkActivated.connect(self._open_video_link)
+            self._video_lbl = vid
+            lay.addWidget(vid)
+
+        share = QLabel("Help spread the word! When you share on social media, "
+                       "tag <b>@bruceherwig #StarTrailCleanR</b>")
+        share.setTextFormat(Qt.RichText); share.setWordWrap(True)
+        share.setAlignment(Qt.AlignCenter)
+        share.setStyleSheet(f"color: {CARD_TEXT}; font-size: 15px; padding: 12px 24px;")
+        lay.addWidget(share)
+
+        # Invitation to be featured on the website. First sentence blue + bold, then a
+        # soft return. The website is clickable but styled to look like plain text (no
+        # blue, no underline); the email stays a blue link.
+        self._feature_lbl = QLabel(
+            f"<span style='color:{BRAND_HEADING_BLUE}; font-weight:bold;'>"
+            "Do you have a star trail you're particularly proud of?</span><br>"
+            "For a chance to be featured on <a href='https://startrailcleanr.com' "
+            f"style='color:{CARD_TEXT}; text-decoration:none;'>"
+            f"<span style='color:{CARD_TEXT}; text-decoration:none;'>StarTrailCleanR.com</span></a>, "
+            "send your finished .jpg to <a href='mailto:bruceherwig+startrailcleanr@gmail.com"
+            "?subject=Star%20Trail%20CleanR%20feature' "
+            f"style='color:{BRAND_HEADING_BLUE};'>bruceherwig+startrailcleanr@gmail.com</a>")
+        self._feature_lbl.setTextFormat(Qt.RichText); self._feature_lbl.setWordWrap(True)
+        self._feature_lbl.setAlignment(Qt.AlignCenter)
+        self._feature_lbl.setOpenExternalLinks(True)
+        self._feature_lbl.setStyleSheet(f"color: {CARD_TEXT}; font-size: 15px; padding: 4px 24px;")
+        lay.addWidget(self._feature_lbl)
+        lay.addStretch(1)
+
+        self._open_btn = QPushButton("Open Cleaned Folder")
+        self._open_btn.setFixedHeight(48)
+        self._open_btn.setStyleSheet(_hero_btn_css())
+        if on_open_folder is not None:
+            # clicked emits a `checked` bool; swallow it so on_open_folder runs with NO
+            # args and uses its real folder-path default (passing the bool as the path
+            # made os.path.isdir(False) fail silently -- the button did nothing).
+            self._open_btn.clicked.connect(lambda *_: on_open_folder())
+        lay.addWidget(self._open_btn)
+
+        _make_labels_selectable(self)
+        # Keep the website/email + video links clickable (the selectable pass drops link flags).
+        self._feature_lbl.setTextInteractionFlags(
+            Qt.TextSelectableByMouse | Qt.LinksAccessibleByMouse)
+        if self._video_lbl is not None:
+            self._video_lbl.setTextInteractionFlags(
+                Qt.TextSelectableByMouse | Qt.LinksAccessibleByMouse)
+
+    def _open_video_link(self, href):
+        """Open the before/after clip in the system's default player, or reveal the
+        folder it lives in. Driven by the 'video' / 'folder' hrefs in the label."""
+        path = getattr(self, "_video_path", "") or ""
+        if not path:
+            return
+        if href == "folder":
+            folder = os.path.dirname(path)
+            if folder and os.path.isdir(folder):
+                _open_folder_in_file_manager(folder)
+        elif os.path.isfile(path):
+            from PySide6.QtGui import QDesktopServices
+            from PySide6.QtCore import QUrl
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+    def shutdown(self):
+        """No background job on this tab; here so CreatorWindow can call it uniformly."""
+        pass
+
+
+class CreatorWindow(QDialog):
+    """One window holding the post-run summary and the two makers as tabs: Summary,
+    Star Trail, and Timelapse. Replaces the old separate popups. Each maker tab owns
+    its own build/render job; the red X in the top-right corner stops whichever runs."""
+
+    def __init__(self, cleaned_folder, star_path, original_folder=None,
+                 summary_html="", on_open_folder=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Star Trail CleanR  Star Trail & Timelapse")
+        self.setMinimumWidth(480)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        self._tabs = QTabWidget()
+        # Match the main window's full-width blue/navy tab bar exactly (smaller
+        # min-width than the main window's since this window holds three narrow tabs).
+        self._tabs.tabBar().setExpanding(True)
+        self._tabs.tabBar().setDocumentMode(True)
+        self._tabs.setStyleSheet(
+            f"QTabWidget::pane {{ border: none; background: palette(window); }}"
+            "QTabBar { qproperty-drawBase: 0; }"
+            f"QTabBar::tab {{ background: {BRAND_TAB_INACTIVE_BG}; color: {BRAND_TAB_INACTIVE_FG}; padding: 14px 12px; "
+            "font-size: 19px; font-weight: bold; border: none; min-width: 120px; }}"
+            f"QTabBar::tab:selected {{ background: {BRAND_TAB_ACTIVE_BG}; color: {BRAND_TAB_ACTIVE_FG}; }}"
+            f"QTabBar::tab:hover:!selected {{ background: {BRAND_TAB_HOVER_BG}; color: {BRAND_TAB_ACTIVE_FG}; }}"
+        )
+        # The before/after clip lives in the run's workspace, next to the other share
+        # outputs. Compute its path so the Summary tab can offer Open video / Open folder.
+        _video_path = ""
+        try:
+            if cleaned_folder:
+                _video_path = workspace_path(cleaned_folder, "STC_share_video.mp4")
+        except Exception:
+            _video_path = ""
+        self._summary_panel = SummaryPanel(summary_html, on_open_folder, _video_path, self)
+        self._star_panel = StarTrailPanel(cleaned_folder, star_path, self)
+        self._tl_panel = TimelapsePanel(cleaned_folder, original_folder, star_path, self)
+        self._tabs.addTab(self._summary_panel, "Summary")
+        self._tabs.addTab(self._star_panel, "Star Trail")
+        self._tabs.addTab(self._tl_panel, "Timelapse")
+        lay.addWidget(self._tabs)
+
+        # Red X close in the top-right corner (same style as the main window's Quit
+        # button). A floating child of the window, so it stays put on both tabs.
+        self._close_x = _XCloseButton(self)
+        self._close_x.setFixedSize(32, 32)
+        self._close_x.setStyleSheet(
+            f"QPushButton {{ background-color: {BRAND_QUIT_RED}; "
+            f"border-radius: 4px; border: none; }}"
+            f"QPushButton:hover {{ background-color: {BRAND_QUIT_RED_HOVER}; }}"
+        )
+        self._close_x.setToolTip("Close")
+        self._close_x.clicked.connect(self.close)
+        self._position_close_x()
+
+    def _position_close_x(self):
+        """Park the red X in the top-right of the content area, just below the tab
+        bar, with a small margin. Re-run on resize so it tracks the corner."""
+        m = 12
+        y = self._tabs.tabBar().height() + m
+        self._close_x.move(self.width() - self._close_x.width() - m, y)
+        self._close_x.raise_()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._position_close_x()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._position_close_x()
+
+    def select_tab(self, which):
+        """Front the Summary ('summary'), Star Trail ('star'), or Timelapse
+        ('timelapse') tab."""
+        panel = {"summary": self._summary_panel, "star": self._star_panel,
+                 "timelapse": self._tl_panel}.get(which, self._summary_panel)
+        self._tabs.setCurrentWidget(panel)
+
+    def closeEvent(self, event):
+        # Stop any job running in a maker tab so closing never orphans a subprocess.
+        for panel in (self._summary_panel, self._star_panel, self._tl_panel):
+            try:
+                panel.shutdown()
+            except Exception:
+                pass
         super().closeEvent(event)
 
 
