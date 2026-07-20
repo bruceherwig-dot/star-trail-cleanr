@@ -2,6 +2,11 @@
 
 ---
 
+## v2.75-beta
+- **Comet Mode and hot-pixel removal now work together.** Turning on "Remove hot pixels & colored specks" used to quietly cancel Comet Mode, leaving you with a plain trail instead of a comet. Now you get both: the comet fade is kept and the specks are still removed.
+- **The finished-run window no longer pops open a Finder folder.** When a run ended, the STC Extras folder used to open on top of the app. It doesn't anymore. The star trail and timelapse tools open as usual, and the Open Cleaned Folder button is there whenever you want the folder.
+- **Smoke tests:** 242 passing.
+
 ## v2.74-beta
 - **Cleaned sky no longer comes out darker than the sky around it.** On open sky, the repair could leave each cleaned spot a few shades dark, showing up as faint dark streaks where trails used to be. The step that rebuilds dark foreground (tree spikes, rocks) under a trail was mistaking ordinary night sky for foreground and pulling it too dark. It now tells them apart, so cleaned sky matches its surroundings. Dark foreground under a trail is still rebuilt as before.
 - **Star trails and timelapses now live in one window.** When a clean finishes, a single window opens with three tabs: Summary, Star Trail, and Timelapse.
