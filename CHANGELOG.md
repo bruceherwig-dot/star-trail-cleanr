@@ -2,6 +2,18 @@
 
 ---
 
+## v2.74-beta
+- **Cleaned sky no longer comes out darker than the sky around it.** On open sky, the repair could leave each cleaned spot a few shades dark, showing up as faint dark streaks where trails used to be. The step that rebuilds dark foreground (tree spikes, rocks) under a trail was mistaking ordinary night sky for foreground and pulling it too dark. It now tells them apart, so cleaned sky matches its surroundings. Dark foreground under a trail is still rebuilt as before.
+- **Star trails and timelapses now live in one window.** When a clean finishes, a single window opens with three tabs: Summary, Star Trail, and Timelapse.
+  - **Summary:** what was removed, the time you saved, a before/after clip to share, and where your cleaned frames are.
+  - **Star Trail:** build a normal (lighten) or comet trail, set the comet length and trail thickness, and remove hot pixels and colored specks.
+  - **Timelapse:** choose size, frame rate, and smoothing.
+- **The star trail and the before/after clip now build automatically during the clean,** ready the moment it finishes. No checkboxes to remember.
+- **Timelapse:** added a 6 fps option, and the options lock while a movie renders so they cannot change mid-render.
+- **The Settings tab now scrolls,** so nothing is cut off on smaller screens.
+- **Fixed:** the Open Cleaned Folder button on the Summary screen did nothing when clicked. It now opens the folder.
+- **Smoke tests:** 242 passing.
+
 ## v2.73-beta
 - **Crossings now pull in real sky instead of a copy of the crossing trail.** When a trail sits on top of trails in *both* the frame before and the frame after (two trails crossing, or one lingering in the same place for a few frames), there is no clean sky right next door. The repair used to fall back on the nearest neighbor even though it still carried the trail. Now it reaches a frame or two further out, where the trail has usually moved off, and borrows genuinely clean sky, slid so the stars still line up. It falls back to the old behavior only when nothing clean is within reach.
 - **Smoke tests:** 241 passing.
