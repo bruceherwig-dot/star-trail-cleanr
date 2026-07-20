@@ -21,13 +21,15 @@ def test_darken_fill_restores_dark_foreground():
     dmin = np.full((H, W, 3), 60, np.uint8)           # neighbor min = sky...
     dmin[:, 19:22] = 10                               # ...except the static dark bar
 
+    dmed = dmin.copy()                                # bar dark in EVERY frame -> median dark too
+
     comp_mask = np.zeros((H, W), bool)
     comp_mask[:, 15:26] = True                        # the trail band (covers bar + sky)
     collar = np.zeros((H, W), bool)
     collar[:, 5:14] = True                            # local sky ring (plenty of px)
     collar[:, 27:36] = True
 
-    out, fg_px, sky = _darken_fill(patch_now, dmin, comp_mask, collar, 255, np.uint8)
+    out, fg_px, sky = _darken_fill(patch_now, dmin, dmed, comp_mask, collar, 255, np.uint8)
 
     assert sky is not None and abs(sky - 60) < 1, f"local sky should read ~60, got {sky}"
     assert fg_px > 0, "the dark bar under the trail should be counted as foreground"
@@ -44,11 +46,30 @@ def test_darken_fill_noop_on_pure_sky():
     H = W = 30
     patch_now = np.full((H, W, 3), 70, np.uint8)
     dmin = np.full((H, W, 3), 68, np.uint8)           # all sky, nothing dark
+    dmed = dmin.copy()
     comp_mask = np.zeros((H, W), bool); comp_mask[:, 10:20] = True
     collar = np.zeros((H, W), bool); collar[:, 0:9] = True; collar[:, 21:30] = True
-    out, fg_px, sky = _darken_fill(patch_now, dmin, comp_mask, collar, 255, np.uint8)
+    out, fg_px, sky = _darken_fill(patch_now, dmin, dmed, comp_mask, collar, 255, np.uint8)
     assert fg_px == 0, "no foreground should be detected over open sky"
     assert np.array_equal(out, patch_now), "pure-sky patch must be left unchanged"
+
+
+def test_darken_fill_does_not_darken_star_freed_sky():
+    """Regression for the v2.71 sky-darkening bug: a sky pixel is dark only in its single
+    DARKEST neighbor frame (its star-free floor) but typically sits at sky level. The old
+    min gate stamped that floor over the trail and left the sky dark. The median gate must
+    read it as sky and leave it untouched."""
+    H = W = 30
+    patch_now = np.full((H, W, 3), 60, np.uint8)      # repaired to sky level
+    # Under the mask: dmin dips to 35 (the star-free darkest frame) -> old gate WOULD fire
+    # (35 < 0.72*60=43); but dmed is 58 (typical sky) -> new gate must NOT fire.
+    dmin = np.full((H, W, 3), 60, np.uint8); dmin[:, 10:20] = 35
+    dmed = np.full((H, W, 3), 60, np.uint8); dmed[:, 10:20] = 58
+    comp_mask = np.zeros((H, W), bool); comp_mask[:, 10:20] = True
+    collar = np.zeros((H, W), bool); collar[:, 0:9] = True; collar[:, 21:30] = True
+    out, fg_px, sky = _darken_fill(patch_now, dmin, dmed, comp_mask, collar, 255, np.uint8)
+    assert fg_px == 0, "star-freed sky (low min, typical median) must NOT be darkened"
+    assert np.array_equal(out, patch_now), "sky patch must be left unchanged"
 
 
 def _scene(n=5, size=80, sky=60, bar_cols=(38, 43), trail_rows=(25, 40),

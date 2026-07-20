@@ -429,20 +429,31 @@ def _split_component(comp_full: np.ndarray) -> list:
     return result if result else [np.uint8(comp_full) * 255]
 
 
-def _darken_fill(patch_now, dmin, comp_mask, collar, maxv, dt):
+def _darken_fill(patch_now, dmin, dmed, comp_mask, collar, maxv, dt):
     """Restore dark static foreground under a trail with a darken (min) replace.
 
     On a fixed tripod a spike/trunk/rock is the same dark pixel in every frame, and a
     trail is bright, so the per-pixel min across neighbor frames (`dmin`) is that
-    foreground with the bright trail rejected. The masked pixels darker than
-    `_DARKEN_FG_FRAC` * local sky are REPLACED with the min -- a hard replace, not a
-    blend: mixing the clean darken with the already-erased repair underneath just
-    reintroduced the mangled edge. Sky pixels (brighter) are left untouched so the Star
-    Bridge slide keeps the moving stars. Local sky is a high percentile (the 70th) of the
-    collar's max-channel, which stays right even when the collar straddles dark foreground.
+    foreground with the bright trail rejected. The masked pixels judged to be dark
+    foreground are REPLACED with the min -- a hard replace, not a blend: mixing the clean
+    darken with the already-erased repair underneath just reintroduced the mangled edge.
+    Sky pixels are left untouched so the Star Bridge slide keeps the moving stars. Local
+    sky is a high percentile (the 70th) of the collar's max-channel, which stays right even
+    when the collar straddles dark foreground.
+
+    The "is this dark foreground?" test uses the per-pixel MEDIAN across the window
+    (`dmed`), NOT the min. A real spike is dark in almost every frame (a trail only crosses
+    it briefly), so its median stays dark. A sky pixel is dark only in its single darkest
+    frame -- its median sits at the true sky level -- so using the min to gate stamped the
+    star-free sky floor over the whole trail and left every cleaned patch a few levels
+    darker than the surrounding sky (a shipped v2.71 bug, proven on Greg Meyer Arizona,
+    2026-07-19: the min gate fired on 54% of the repaired sky, the median gate on 7%, while
+    keeping 93% of the Joshua-tree spike pixels the min gate restored). The REPLACEMENT
+    still uses the min -- the crisp true foreground -- only the gate changed.
 
     patch_now: the already-repaired patch (BGR, this frame's dtype).
-    dmin: per-pixel min of the neighbor window over the same window, same shape/dtype.
+    dmin: per-pixel min of the neighbor window (the replacement value), same shape/dtype.
+    dmed: per-pixel median of the same window (the foreground/sky gate), same shape/dtype.
     comp_mask: bool mask of the trail pixels in this window.
     collar: bool mask of the local sky ring (dilated trail minus the trail).
     maxv, dt: value ceiling and dtype (unused by the replace, kept for signature parity).
@@ -459,11 +470,13 @@ def _darken_fill(patch_now, dmin, comp_mask, collar, maxv, dt):
     sky = float(np.percentile(cpx.max(axis=1), 70))
     if sky <= 0:
         return patch_now, 0, None
-    fg = comp_mask & (dmin.max(axis=2).astype(np.float32) < _DARKEN_FG_FRAC * sky)
+    # Gate on the MEDIAN across the window (typical value), not the darkest frame -- the min
+    # of a sky pixel is the star-free sky floor and reads as false "dark foreground".
+    fg = comp_mask & (dmed.max(axis=2).astype(np.float32) < _DARKEN_FG_FRAC * sky)
     if not fg.any():
         return patch_now, 0, sky
     out = patch_now.copy()
-    out[fg] = dmin[fg]
+    out[fg] = dmin[fg]   # replace with the crisp true foreground (the min), not the median
     return out, int(fg.sum()), sky
 
 
@@ -1101,10 +1114,12 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                 _w0 = max(0, frame_idx - _DARKEN_WINDOW)
                 _w1 = min(N, frame_idx + _DARKEN_WINDOW + 1)
                 if _w1 - _w0 >= 2:
-                    _dmin = np.min(np.stack([neighbor_frames[_k][y0:y1, x0:x1]
-                                             for _k in range(_w0, _w1)]), axis=0)
+                    _wstack = np.stack([neighbor_frames[_k][y0:y1, x0:x1]
+                                        for _k in range(_w0, _w1)])
+                    _dmin = np.min(_wstack, axis=0)                       # crisp foreground (the replace)
+                    _dmed = np.median(_wstack, axis=0).astype(frame.dtype)  # typical value (the gate)
                     _res_d, _fg_darken_px, _fg_sky = _darken_fill(
-                        result[y0:y1, x0:x1], _dmin, comp_mask, _collar, _maxv, frame.dtype)
+                        result[y0:y1, x0:x1], _dmin, _dmed, comp_mask, _collar, _maxv, frame.dtype)
                     result[y0:y1, x0:x1] = _res_d
 
             if seg_info is not None:
