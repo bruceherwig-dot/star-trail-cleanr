@@ -6774,6 +6774,11 @@ class MainWindow(QMainWindow):
 # and the title (and everything below) sits at the same position on both tabs.
 _CREATOR_PANEL_MARGINS = (24, 20, 24, 20)   # left, top, right, bottom
 _CREATOR_PANEL_SPACING = 10
+# Fixed LANDSCAPE preview box for the Star Trail / Timelapse tabs. Images are scaled to
+# FIT inside it (KeepAspectRatio): a landscape shot fills the width, a portrait shot centers
+# with side margins. Fixed so a tall portrait can't balloon the window height (which spread
+# the Summary tab into a big empty gap). 3:2 lands exactly at 420x280.
+_PREVIEW_W, _PREVIEW_H = 420, 280
 
 
 class TimelapsePanel(QWidget):
@@ -6816,15 +6821,17 @@ class TimelapsePanel(QWidget):
         # is drawn on it and clicking the poster plays the video in the system player.
         self._poster = QLabel()
         self._poster.setAlignment(Qt.AlignCenter)
+        self._poster.setFixedSize(_PREVIEW_W, _PREVIEW_H)
+        self._poster.setStyleSheet("background: #141414; border-radius: 6px;")
         self._poster.mousePressEvent = lambda e: self._play_video()
-        lay.addWidget(self._poster)
+        lay.addWidget(self._poster, 0, Qt.AlignHCenter)
         # Shown in the poster's place before any video is rendered. Real (selectable)
         # text in a dark video-frame box, sized to match the poster so nothing jumps.
         self._poster_placeholder = QLabel(
             "Choose your options below, then click Render to create your timelapse.")
         self._poster_placeholder.setAlignment(Qt.AlignCenter)
         self._poster_placeholder.setWordWrap(True)
-        self._poster_placeholder.setFixedWidth(420)
+        self._poster_placeholder.setFixedSize(_PREVIEW_W, _PREVIEW_H)
         self._poster_placeholder.setStyleSheet(
             "background: #141414; color: #dcdcdc; border-radius: 6px; padding: 16px; font-size: 19px;")
         lay.addWidget(self._poster_placeholder, 0, Qt.AlignHCenter)
@@ -6942,18 +6949,16 @@ class TimelapsePanel(QWidget):
         path = self._star_path if (self._star_path and os.path.isfile(self._star_path)) else \
             (self._frames[0] if self._frames else None)
         pm0 = QPixmap(path) if path else QPixmap()
-        # Height a 420-wide still would be, so the placeholder matches the poster.
-        h = pm0.scaledToWidth(420, Qt.SmoothTransformation).height() if not pm0.isNull() else 260
         has_video = bool(self._play_path and os.path.isfile(self._play_path))
         if has_video and not pm0.isNull():
-            pm = pm0.scaledToWidth(420, Qt.SmoothTransformation)
-            self._poster.setFixedHeight(pm.height())   # never let the layout squeeze it
+            # Fit into the fixed landscape box; portrait centers with side margins.
+            pm = pm0.scaled(_PREVIEW_W, _PREVIEW_H, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             self._draw_play_button(pm)
             self._poster.setPixmap(pm)
             self._poster.show()
             self._poster_placeholder.hide()
         else:
-            self._poster_placeholder.setFixedHeight(h)
+            self._poster_placeholder.setFixedSize(_PREVIEW_W, _PREVIEW_H)
             self._poster_placeholder.show()
             self._poster.hide()
 
@@ -7270,13 +7275,14 @@ class StarTrailPanel(QWidget):
         if self._star_path and os.path.isfile(self._star_path):
             _pm = QPixmap(self._star_path)
             if not _pm.isNull():
-                _scaled = _pm.scaledToWidth(420, Qt.SmoothTransformation)
+                _scaled = _pm.scaled(_PREVIEW_W, _PREVIEW_H, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                 self._thumb = QLabel()
                 self._thumb.setPixmap(_scaled)
                 self._thumb.setAlignment(Qt.AlignCenter)
-                # Fixed height so the layout can never squeeze the image to fit other
-                # controls -- keeps the title-to-image spacing identical on both tabs.
-                self._thumb.setFixedHeight(_scaled.height())
+                # Fixed LANDSCAPE box: portrait images center inside it with side margins
+                # instead of ballooning the window height. Same box on both tabs.
+                self._thumb.setFixedSize(_PREVIEW_W, _PREVIEW_H)
+                self._thumb.setStyleSheet("background: #141414; border-radius: 6px;")
                 self._thumb.setCursor(Qt.PointingHandCursor)
                 self._thumb.setToolTip("Click to open the star trail image")
                 self._thumb.mousePressEvent = lambda e: self._open_star()
@@ -7289,7 +7295,7 @@ class StarTrailPanel(QWidget):
             _ph = QLabel("Your star trail will appear here. Choose your options below, "
                          "then click Create Star Trail.")
             _ph.setAlignment(Qt.AlignCenter); _ph.setWordWrap(True)
-            _ph.setFixedWidth(420); _ph.setFixedHeight(260)
+            _ph.setFixedSize(_PREVIEW_W, _PREVIEW_H)
             _ph.setStyleSheet("background: #141414; color: #dcdcdc; border-radius: 6px; "
                               "padding: 16px; font-size: 19px;")
             lay.addWidget(_ph, 0, Qt.AlignHCenter)
@@ -7577,9 +7583,9 @@ class StarTrailPanel(QWidget):
                 self._status_lbl.setText("")   # no "done" text; the trail just updates
             _pm = QPixmap(self._star_path)
             if not _pm.isNull() and getattr(self, "_thumb", None) is not None:
-                _scaled = _pm.scaledToWidth(420, Qt.SmoothTransformation)
+                _scaled = _pm.scaled(_PREVIEW_W, _PREVIEW_H, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                 self._thumb.setPixmap(_scaled)
-                self._thumb.setFixedHeight(_scaled.height())
+                self._thumb.setFixedSize(_PREVIEW_W, _PREVIEW_H)
             self._open_star()               # auto-open the finished star trail
         else:
             self._bar.setVisible(False)
