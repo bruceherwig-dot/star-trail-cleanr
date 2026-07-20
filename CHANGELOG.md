@@ -2,6 +2,11 @@
 
 ---
 
+## v2.76-beta
+- **Fixed a slowdown on busy skies.** A change back in v2.66 quietly made cleaning runs with lots of trails per frame (a dense Milky Way, a satellite-heavy night) take far longer than they should. This fixes it, so those runs are back to normal speed. If heavy sequences had been crawling for you lately, they're quick again.
+- **Tidier preview and summary in the Star Trail & Timelapse window.** The preview now uses a fixed landscape frame, so a tall portrait shot no longer stretches the window (portrait images center with side margins). This also closes an empty gap that could appear on the Summary tab.
+- **Smoke tests:** 242 passing.
+
 ## v2.75-beta
 - **Comet Mode and hot-pixel removal now work together.** Turning on "Remove hot pixels & colored specks" used to quietly cancel Comet Mode, leaving you with a plain trail instead of a comet. Now you get both: the comet fade is kept and the specks are still removed.
 - **The finished-run window no longer pops open a Finder folder.** When a run ended, the STC Extras folder used to open on top of the app. It doesn't anymore. The star trail and timelapse tools open as usual, and the Open Cleaned Folder button is there whenever you want the folder.
