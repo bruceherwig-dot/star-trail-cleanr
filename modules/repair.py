@@ -98,6 +98,11 @@ MAX_SEG_LENGTH = 500   # reference segment length at full-frame resolution; scal
 _REF_FRAME_PX  = 6000 * 4000  # reference resolution the 500px value is calibrated for
 MIN_DISP  = 1.0   # minimum plausible star displacement N-1 to N+1 (px)
 MAX_DISP  = 60.0  # maximum plausible star displacement N-1 to N+1 (px)
+_MAX_TRACK_STARS = 40  # cap the brightest star blobs used to measure the shift. The vote
+                       # only needs a handful that agree; every extra faint star or JPEG
+                       # noise speck blows up _detect_shift's O(N^2) pairing + O(N^2) voting
+                       # into an O(N^4) stall on dense/noisy skies (Milky Way, high-ISO JPEG).
+                       # Profiled 2026-07-20: this was 99% of repair time on Greg/Phil skies.
 TRAIL_WARM_MARGIN   = 20  # how much warmer than local sky R-B counts as a trail remnant
 TRAIL_BRIGHT_THRESH = 50  # minimum R value to be considered trail-bright
 # Ring-levelling cap: the final ring-levelling nudges the filled patch to match a thin collar
@@ -313,6 +318,11 @@ def _detect_shift(gp, gn):
             w = g[ys, xs].astype(np.float64)
             out.append((float((xs * w).sum() / w.sum()),
                         float((ys * w).sum() / w.sum()), float(w.sum())))
+        # Keep only the brightest few: the shift vote needs a handful of agreeing stars,
+        # not every noise speck. Bounds N so the pairing + voting below can't go O(N^4).
+        if len(out) > _MAX_TRACK_STARS:
+            out.sort(key=lambda s: s[2], reverse=True)
+            out = out[:_MAX_TRACK_STARS]
         return out
     sp, sn = streaks(gp), streaks(gn)
     cands = []
