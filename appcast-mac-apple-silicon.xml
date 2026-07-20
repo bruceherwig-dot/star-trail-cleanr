@@ -6,6 +6,15 @@
         <description>Auto-update feed for Star Trail CleanR on Mac (Apple Silicon).</description>
         <language>en</language>
         <item>
+            <title>Version 2.76-beta</title>
+            <pubDate>Mon, 20 Jul 2026 19:16:19 +0000</pubDate>
+            <sparkle:version>2.76</sparkle:version>
+            <sparkle:shortVersionString>2.76-beta</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>10.13</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/bruceherwig-dot/star-trail-cleanr/releases/download/v2.76-beta/StarTrailCleanR-Mac-AppleSilicon.dmg" length="708857940" type="application/octet-stream" sparkle:edSignature="RvBHVWvkgJty63TeBqRWF05Dz08oIj9YI35iXDy1T+QWkyAANQG8wI3sTymypkVVr+fsi0W0+CYRjCW82MfrCQ=="/>
+        </item>
+        <item>
             <title>Version 2.75-beta</title>
             <pubDate>Mon, 20 Jul 2026 06:39:56 +0000</pubDate>
             <sparkle:version>2.75</sparkle:version>
