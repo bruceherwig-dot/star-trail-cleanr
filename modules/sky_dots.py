@@ -143,19 +143,24 @@ def _foreground_guard(allmap, fg_mask, H, W):
     return allmap
 
 
-def remove_specks(cleaned_dir, names, big, fg_mask, read_frame):
-    """Remove sky hot pixels / colored specks and return a cleaned lighten-max stack.
+def remove_specks(cleaned_dir, names, big, fg_mask, read_frame, comet_tail=0):
+    """Remove sky hot pixels / colored specks and return a cleaned stack.
 
     Args:
         cleaned_dir: folder of cleaned frames.
-        names: the frame filenames to stack (same list the plain trail used).
-        big: the finished plain lighten-max stack (BGR uint8) -- the detection
-            reference. Not re-stacked; used only to find the dots.
+        names: the frame filenames to stack, IN THE SAME ORDER the trail used
+            (comet mode is order-dependent, so the caller passes the comet order).
+        big: the finished stack (BGR uint8) -- the detection reference. Not
+            re-stacked; used only to find the dots.
         fg_mask: grayscale foreground mask (HxW uint8) or None.
         read_frame: callable(path) -> BGR uint8 image (robust reader from caller).
+        comet_tail: 0 for a plain lighten-max re-stack (default). When > 0 (a
+            fraction of the sequence, e.g. 0.5/0.75/1.0), the re-stack fades like the
+            comet stacker -- dim the running stack before folding each frame -- so a
+            comet trail keeps its fade instead of being flattened to a plain trail.
 
     Returns:
-        cleaned lighten-max stack (BGR uint8).
+        cleaned stack (BGR uint8): lighten-max, or comet-faded when comet_tail > 0.
 
     Raises:
         SkyDotsBail: the foreground guard tripped; caller falls back to plain.
@@ -191,9 +196,18 @@ def remove_specks(cleaned_dir, names, big, fg_mask, read_frame):
     print(f"  removing {n_iso} open-sky + {len(ontrail_pts)} on-trail specks", flush=True)
 
     # Re-stack, removing on-trail specks from each frame first (3x3 patch <- ring median).
-    acc = np.zeros((H, W, 3), np.uint8)
-    off = [(dx, dy) for dy in (-3, -2, 2, 3) for dx in (-3, -2, 2, 3)]
+    # Comet mode dims the running stack before folding each frame (matching
+    # _comet_stack_fullres) so the tail keeps fading; plain mode is order-independent
+    # lighten-max. `names` already arrives in the trail's order (reversed for a reversed
+    # comet), so folding them here reproduces the same trail with the dots gone.
     n = len(paths)
+    comet = float(comet_tail) > 0
+    if comet:
+        tail_frames = max(1, int(round(float(comet_tail) * n)))
+        fade = 0.04 ** (1.0 / tail_frames)   # ~4% bright after tail_frames, as in _comet_stack_fullres
+    facc = None                              # float32 accumulator for comet
+    acc = np.zeros((H, W, 3), np.uint8)      # uint8 accumulator for plain lighten-max
+    off = [(dx, dy) for dy in (-3, -2, 2, 3) for dx in (-3, -2, 2, 3)]
     for k, p in enumerate(paths):
         f = read_frame(p)
         if f is None:
@@ -204,10 +218,20 @@ def remove_specks(cleaned_dir, names, big, fg_mask, read_frame):
             vals = [f[cy + dy, cx + dx] for dx, dy in off
                     if 0 <= cy + dy < H and 0 <= cx + dx < W]
             f[cy - 1:cy + 2, cx - 1:cx + 2] = np.median(np.array(vals), axis=0)
-        np.maximum(acc, f, out=acc)
+        if comet:
+            ff = f.astype(np.float32)
+            if facc is None:
+                facc = ff
+            else:
+                facc *= fade
+                np.maximum(facc, ff, out=facc)
+        else:
+            np.maximum(acc, f, out=acc)
         if k % 25 == 0:
             print(f"  cleaning specks: {k}/{n}", flush=True)
     print(f"  cleaning specks: {n}/{n}", flush=True)
+    if comet and facc is not None:
+        acc = np.clip(facc, 0, 255).astype(np.uint8)
 
     # Composite ring-median fill for the open-sky specks on the finished stack.
     isomask = np.zeros((H, W), np.uint8)

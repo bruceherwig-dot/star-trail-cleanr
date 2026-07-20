@@ -709,6 +709,7 @@ def make_star_trail(cleaned_dir, out_path=None, stack=None, comet_tail=0,
         python3 make_share_clip.py --star-trail --cleaned "<cleaned folder>" [--out <file.jpg>]
     """
     _t_stack = time.time()
+    names = None   # set by the stacking branch below; reused by the hot-pixel re-stack
     if comet_tail and float(comet_tail) > 0:
         # Comet mode is order-dependent, so it cannot reuse the order-independent
         # lighten-max stack the run already built. Rebuild from the cleaned folder
@@ -749,7 +750,10 @@ def make_star_trail(cleaned_dir, out_path=None, stack=None, comet_tail=0,
             from modules.workspace import find_workspace
             from modules.io_safe import robust_imread
             from modules.sky_dots import remove_specks, SkyDotsBail
-            names = _list_frames(cleaned_dir)
+            # Keep the comet order the stack was built with; only list here if the
+            # stack was handed in (in-run stacker) and names was never set.
+            if not names:
+                names = _list_frames(cleaned_dir)
             fg = None
             ws = find_workspace(cleaned_dir)
             if ws:
@@ -759,7 +763,8 @@ def make_star_trail(cleaned_dir, out_path=None, stack=None, comet_tail=0,
             try:
                 _t_hp = time.time()
                 stack = remove_specks(cleaned_dir, names, stack, fg,
-                                      lambda p: robust_imread(p, cv2.IMREAD_COLOR))
+                                      lambda p: robust_imread(p, cv2.IMREAD_COLOR),
+                                      comet_tail=comet_tail)
                 print(f"  hot-pixel phase: {time.time() - _t_hp:.0f}s", flush=True)
             except SkyDotsBail as b:
                 print(f"HOTPIX_SKIPPED: {b}", flush=True)
