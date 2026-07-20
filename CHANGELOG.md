@@ -3,7 +3,7 @@
 ---
 
 ## v2.76-beta
-- **Much faster cleaning on busy skies.** Sequences with many trails per frame (a dense Milky Way, a satellite-heavy night) were taking many times longer than they should. The star-motion step was doing far more work than it needed on crowded frames; it now focuses on the brightest stars, which is all it needs to lock the motion. On heavy sequences this cuts cleaning time by roughly 30x, with no change to the result.
+- **Fixed a slowdown on busy skies.** A change back in v2.66 quietly made cleaning runs with lots of trails per frame (a dense Milky Way, a satellite-heavy night) take far longer than they should. This fixes it, so those runs are back to normal speed. If heavy sequences had been crawling for you lately, they're quick again.
 - **Tidier preview and summary in the Star Trail & Timelapse window.** The preview now uses a fixed landscape frame, so a tall portrait shot no longer stretches the window (portrait images center with side margins). This also closes an empty gap that could appear on the Summary tab.
 - **Smoke tests:** 242 passing.
 
