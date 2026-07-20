@@ -120,6 +120,18 @@
   .mlegend i{display:inline-block;width:11px;height:11px;border-radius:3px;vertical-align:middle;margin-right:6px;}
   .mlegend .agree{background:#4F8FE0;}.mlegend .stars{background:#57BEB2;}.mlegend .phase{background:#8FD98C;}.mlegend .fail{background:#E0A458;}
   .mnote{margin-top:14px;font-size:13px;color:var(--muted);font-style:italic;line-height:1.5;}
+
+  /* --- mobile hamburger menu --- */
+  header.sitenav .navtoggle{display:none;background:none;border:0;color:#fff;font-size:26px;line-height:1;cursor:pointer;padding:4px 8px}
+  @media(max-width:720px){
+    header.sitenav nav{flex-wrap:wrap;height:auto;min-height:66px}
+    header.sitenav .navtoggle{display:block;order:2}
+    header.sitenav .brand{order:1}
+    header.sitenav nav .btn{display:none}
+    header.sitenav .navlinks{order:3}
+    header.sitenav.open .navlinks{display:flex;flex-direction:column;flex-basis:100%;width:100%;padding:4px 0 14px;gap:0}
+    header.sitenav.open .navlinks a{padding:11px 2px;font-size:17px}
+  }
 </style>
 </head>
 <body>
@@ -136,7 +148,8 @@
       <a href="index.html#about">About</a>
     </div>
     <a class="btn" href="index.html#download">Download free</a>
-  </nav>
+    <button class="navtoggle" aria-label="Menu" aria-expanded="false">&#9776;</button>
+</nav>
 </header>
 
 
@@ -362,5 +375,6 @@ ba.addEventListener("touchstart",function(e){fx(e.touches[0].clientX);},{passive
 ba.addEventListener("touchmove",function(e){fx(e.touches[0].clientX);},{passive:true});
 set(0.5);});})();
 </script>
+<script>(function(){var h=document.querySelector("header"),t=h&&h.querySelector(".navtoggle");if(t){t.addEventListener("click",function(){var o=h.classList.toggle("open");t.setAttribute("aria-expanded",o?"true":"false");});}})();</script>
 </body>
 </html>

@@ -68,6 +68,18 @@
     .pagehead h1{font-size:30px}
     .row .name{width:120px}
   }
+
+  /* --- mobile hamburger menu --- */
+  .navtoggle{display:none;background:none;border:0;color:#fff;font-size:26px;line-height:1;cursor:pointer;padding:4px 8px}
+  @media(max-width:720px){
+    nav{flex-wrap:wrap;height:auto;min-height:66px}
+    .navtoggle{display:block;order:2}
+    .brand{order:1}
+    nav .btn{display:none}
+    .navlinks{order:3}
+    header.open .navlinks{display:flex;flex-direction:column;flex-basis:100%;width:100%;padding:4px 0 14px;gap:0}
+    header.open .navlinks a{padding:11px 2px;font-size:17px}
+  }
 </style>
 </head>
 <body>
@@ -85,7 +97,8 @@
       <a href="index.html#about">About</a>
     </div>
     <a class="btn" href="index.html#download">Download free</a>
-  </nav>
+    <button class="navtoggle" aria-label="Menu" aria-expanded="false">&#9776;</button>
+</nav>
 </header>
 
 <section class="pagehead">
@@ -251,5 +264,6 @@ fetch('https://api.startrailcleanr.com/stats.php',{cache:'no-store'})
   });
 </script>
 
+<script>(function(){var h=document.querySelector("header"),t=h&&h.querySelector(".navtoggle");if(t){t.addEventListener("click",function(){var o=h.classList.toggle("open");t.setAttribute("aria-expanded",o?"true":"false");});}})();</script>
 </body>
 </html>
