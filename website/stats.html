@@ -37,12 +37,17 @@
   .cards{display:grid;grid-template-columns:repeat(2,1fr);gap:22px;margin:34px 0}
   .card{background:var(--bg);border:1px solid var(--line);border-radius:14px;padding:24px}
   .card h3{font-size:13px;text-transform:uppercase;letter-spacing:1px;color:var(--blue);font-weight:600;margin-bottom:18px}
+  .cnote{color:var(--muted);font-size:12px;line-height:1.55;margin:-10px 0 16px}
   .row{display:flex;align-items:center;gap:12px;margin:11px 0;font-size:15px}
   .row.hidden{display:none}
   .row .name{flex:none;width:160px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .row .track{flex:1;height:9px;background:var(--bg2);border-radius:6px;overflow:hidden}
   .row .fill{height:100%;background:var(--blue);border-radius:6px}
   .row .val{flex:none;width:74px;text-align:right;color:var(--muted);font-variant-numeric:tabular-nums}
+  /* Wide rows: long combined names (full recipe, settings, lenses) get the whole
+     row width and drop the progress bar, so nothing gets clipped by an ellipsis. */
+  .row.wide .name{flex:1;width:auto;white-space:normal}
+  .row.wide .track{display:none}
   .showall{display:inline-block;margin-top:14px;color:var(--blue);font-weight:600;font-size:14px;cursor:pointer}
   .showall:hover{text-decoration:underline}
   .empty{color:var(--muted);font-size:14px;padding:4px 0}
@@ -102,19 +107,53 @@
   </div>
 
   <div class="cards">
-    <div class="card"><h3>Platforms</h3><div id="c-platforms"><div class="empty">Loading…</div></div></div>
-    <div class="card"><h3>Source files</h3><div id="c-formats"><div class="empty">Loading…</div></div></div>
-    <div class="card"><h3>Orientation</h3><div id="c-orientation"><div class="empty">Loading…</div></div></div>
-    <div class="card"><h3>GPU vs CPU</h3><div id="c-gpu-cpu"><div class="empty">Loading…</div></div></div>
-    <div class="card"><h3>Most-used cameras</h3><div id="c-cameras"><div class="empty">Loading…</div></div></div>
-    <div class="card"><h3>Most-used camera brands</h3><div id="c-brands"><div class="empty">Loading…</div></div></div>
-    <div class="card"><h3>Most-used lenses</h3><div id="c-lenses"><div class="empty">Loading…</div></div></div>
-    <div class="card"><h3>Most-used focal lengths</h3><div id="c-focal"><div class="empty">Loading…</div></div></div>
-    <div class="card"><h3>Most-used ISO</h3><div id="c-iso"><div class="empty">Loading…</div></div></div>
-    <div class="card"><h3>Most-used shutter speed</h3><div id="c-shutter"><div class="empty">Loading…</div></div></div>
-    <div class="card"><h3>Most-used aperture</h3><div id="c-aperture"><div class="empty">Loading…</div></div></div>
-    <div class="card"><h3>Where in the world</h3><div id="c-countries"><div class="empty">Loading…</div></div></div>
+    <div class="card"><h3>Platforms</h3>
+      <div class="cnote">One per photographer, taken from their most recent run. Everyone counts here, including people whose only run was a short test batch.</div>
+      <div id="c-platforms"><div class="empty">Loading…</div></div></div>
+    <div class="card"><h3>Source files</h3>
+      <div class="cnote">One per run. Test batches of 20 frames or fewer are left out, so a warm-up doesn't count as a real set.</div>
+      <div id="c-formats"><div class="empty">Loading…</div></div></div>
+    <div class="card"><h3>Orientation</h3>
+      <div class="cnote">One per run. Test batches are left out. Perfectly square frames are skipped, so these two won't always add up to the run total.</div>
+      <div id="c-orientation"><div class="empty">Loading…</div></div></div>
+    <div class="card"><h3>GPU vs CPU</h3>
+      <div class="cnote">One per photographer, not per run, so someone who runs ten times on a GPU doesn't tip the split. Test batches are left out. Anyone who has used both is counted under both, so these can add up to more than the photographer total.</div>
+      <div id="c-gpu-cpu"><div class="empty">Loading…</div></div></div>
+    <div class="card"><h3>Most-used cameras</h3>
+      <div class="cnote">One per photographer, not per run, so nobody can climb the list by running the app more. Test batches are left out. Anyone who shoots two bodies is counted under both, so these can add up to more than the photographer total.</div>
+      <div id="c-cameras"><div class="empty">Loading…</div></div></div>
+    <div class="card"><h3>Most-used camera brands</h3>
+      <div class="cnote">One per photographer. Test batches are left out. Someone who shoots two makes appears under both. Unknown means the run carried no readable camera name (RAW files and stripped JPEGs don't report one).</div>
+      <div id="c-brands"><div class="empty">Loading…</div></div></div>
+    <div class="card"><h3>Full frame vs crop</h3>
+      <div class="cnote">One per photographer. Test batches are left out. Read from the camera model, or from the crop factor (35mm-equivalent focal length) when the file reports it. "Not determined" means we couldn't tell (no readable camera name and no crop factor).</div>
+      <div id="c-sensor"><div class="empty">Loading…</div></div></div>
+    <div class="card"><h3>Most-used lenses</h3>
+      <div class="cnote">One per photographer. Test batches are left out. Lenses that report no usable name are skipped, so this list is shorter than the camera list.</div>
+      <div id="c-lenses"><div class="empty">Loading…</div></div></div>
+    <div class="card"><h3>Most-used focal lengths</h3>
+      <div class="cnote">One per photographer, rounded to the nearest millimeter. Test batches are left out. A zoom used at two lengths counts at both.</div>
+      <div id="c-focal"><div class="empty">Loading…</div></div></div>
+    <div class="card"><h3>Most-used ISO</h3>
+      <div class="cnote">One per photographer, not per run. Test batches are left out. Anyone who shoots at several ISOs counts at each, so these can total more than the photographer count.</div>
+      <div id="c-iso"><div class="empty">Loading…</div></div></div>
+    <div class="card"><h3>Most-used shutter speed</h3>
+      <div class="cnote">One per photographer, not per run. Test batches are left out. Anyone who shoots several shutter speeds counts at each.</div>
+      <div id="c-shutter"><div class="empty">Loading…</div></div></div>
+    <div class="card"><h3>Most-used aperture</h3>
+      <div class="cnote">One per photographer, not per run. Test batches are left out. Anyone who shoots several apertures counts at each.</div>
+      <div id="c-aperture"><div class="empty">Loading…</div></div></div>
+    <div class="card"><h3>Most-used full recipe</h3>
+      <div class="cnote">ISO, shutter speed, aperture, and focal length together, exactly as the set was shot. Counts every set rather than one per photographer, so a photographer who ran several sets shows up several times. Test batches are left out. When the lens didn't report aperture and focal length, that shows as "lens not reporting," and sets with no usable EXIF at all are grouped as "No data collected" at the bottom.</div>
+      <div id="c-recipe"><div class="empty">Loading…</div></div></div>
+    <div class="card"><h3>Where in the world</h3>
+      <div class="cnote">One per photographer. Everyone counts here, including test batches. Photographers who ran before country lookup existed aren't shown.</div>
+      <div id="c-countries"><div class="empty">Loading…</div></div></div>
+    <div class="card"><h3>Versions in use<span id="ver-cur"></span></h3>
+      <div class="cnote">One per photographer, taken from their most recent run, so this shows what people are on today rather than every version they've ever used.</div>
+      <div id="c-versions"><div class="empty">Loading…</div></div></div>
     <div class="card" style="grid-column:1/-1"><h3>On an average run</h3>
+      <div class="cnote">Runs over 20 frames only. The app asks people to try a short batch first, and those warm-ups would drag every average down, so they're left out.</div>
       <div class="facts">
         <div class="fact"><div class="fnum" id="f-frames">…</div><div class="flbl">Frames per run, average</div></div>
         <div class="fact"><div class="fnum" id="f-tpf">…</div><div class="flbl">Trails removed per frame</div></div>
@@ -130,7 +169,7 @@
     <div class="tile"><div class="num" id="t-tl">…</div><div class="lbl">Timelapse videos created</div></div>
   </div>
 
-  <div class="note">Lists rank by number of photographers who use each item, and grow as more gear is seen. No images, file names, or any personal information is ever collected.</div>
+  <div class="note">Most lists rank by the number of photographers using each item, so one heavy user can't skew them, and they grow as more gear is seen. The exceptions are noted on each card. Short test batches of 20 frames or fewer don't count toward the gear and settings lists. No images, file names, or any personal information is ever collected.</div>
 
 </div>
 
@@ -150,7 +189,7 @@ function animate(el,target,suffix){var t=Math.round(target||0),d=1200,t0=null,sf
     if(p<1)requestAnimationFrame(step);}
   requestAnimationFrame(step);}
 function esc(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML;}
-function bars(id, items, unit){
+function bars(id, items, unit, wide){
   var el=document.getElementById(id);
   if(!items||!items.length){el.innerHTML='<div class="empty">Not enough data yet.</div>';return;}
   var max=items[0].count||1, total=items.reduce(function(s,i){return s+i.count;},0)||1, html='';
@@ -158,16 +197,19 @@ function bars(id, items, unit){
     var w=Math.round(it.count/max*100);
     var pct=Math.round(it.count/total*100);
     var val=unit==='pct'?pct+'%':(unit==='both'?fmtNum(it.count)+' ('+pct+'%)':fmtNum(it.count));
-    html+='<div class="row'+(idx>=8?' extra hidden':'')+'"><span class="name" title="'+esc(it.name)+'">'+esc(it.name)+'</span><span class="track"><span class="fill" style="width:'+w+'%"></span></span><span class="val">'+val+'</span></div>';
+    html+='<div class="row'+(wide?' wide':'')+(idx>=8?' extra hidden':'')+'"><span class="name" title="'+esc(it.name)+'">'+esc(it.name)+'</span><span class="track"><span class="fill" style="width:'+w+'%"></span></span><span class="val">'+val+'</span></div>';
   });
-  if(items.length>8) html+='<a class="showall">Show all '+items.length+'</a>';
+  if(items.length>8) html+='<a class="showall" data-n="'+items.length+'">Show all '+items.length+'</a>';
   el.innerHTML=html;
 }
 document.addEventListener('click',function(e){
-  if(e.target&&e.target.classList&&e.target.classList.contains('showall')){
-    var card=e.target.closest('.card');
-    card.querySelectorAll('.row.extra').forEach(function(r){r.classList.remove('hidden');});
-    e.target.remove();
+  var t=e.target;
+  if(t&&t.classList&&t.classList.contains('showall')){
+    var card=t.closest('.card');
+    var expanded=card.classList.toggle('expanded');
+    card.querySelectorAll('.row.extra').forEach(function(r){r.classList.toggle('hidden',!expanded);});
+    t.textContent=expanded?'Show less':'Show all '+t.getAttribute('data-n');
+    if(!expanded) card.scrollIntoView({behavior:'smooth',block:'start'});
   }
 });
 fetch('https://api.startrailcleanr.com/stats.php',{cache:'no-store'})
@@ -183,16 +225,20 @@ fetch('https://api.startrailcleanr.com/stats.php',{cache:'no-store'})
     animate(document.getElementById('t-gpu'),d.windows_gpu,d.windows_gpu_pct!=null?' ('+d.windows_gpu_pct+'%)':'');
     animate(document.getElementById('t-tl'),d.timelapses);
     bars('c-platforms', d.platforms, 'pct');
+    bars('c-versions', d.versions, 'both');
+    var vc=document.getElementById('ver-cur'); if(vc&&d.current_version) vc.textContent=' (current '+d.current_version+')';
     bars('c-formats', d.formats, 'pct');
     bars('c-orientation', d.orientation, 'pct');
     bars('c-gpu-cpu', d.gpu_vs_cpu, 'pct');
     bars('c-cameras', d.cameras, 'count');
     bars('c-brands', d.camera_brands, 'both');
-    bars('c-lenses', d.lenses, 'count');
+    bars('c-sensor', d.sensor, 'both');
+    bars('c-lenses', d.lenses, 'count', true);
     bars('c-focal', d.focal_lengths, 'count');
     bars('c-iso', d.iso, 'count');
     bars('c-shutter', d.shutter, 'count');
     bars('c-aperture', d.aperture, 'count');
+    bars('c-recipe', d.full_recipe, 'count', true);
     bars('c-countries', d.countries, 'count');
     document.getElementById('f-frames').textContent=fmtNum(d.avg_frames);
     document.getElementById('f-trails').textContent=fmtNum(d.avg_trails_per_run);

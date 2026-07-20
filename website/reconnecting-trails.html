@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Bugs That Looked Like Blindness: Reconnecting Trails Across Tile Seams</title>
+<style>
+  :root{
+    --ground:#0B1220; --panel:#111A2C; --line:#1E2A3E;
+    --ink:#E8ECF4; --muted:#93A0B4; --amber:#E0A458; --warn:#E4573D;
+  }
+  html{background:var(--ground);}
+  body{
+    background:var(--ground); color:var(--ink);
+    font-family:Charter,'Iowan Old Style',Georgia,'Times New Roman',serif;
+    font-size:18px; line-height:1.65; margin:0; padding:0 20px 96px;
+  }
+  .wrap{max-width:960px; margin:0 auto;}
+  .prose{max-width:68ch; margin-left:auto; margin-right:auto;}
+  header.tt{padding:72px 0 8px; text-align:left; max-width:68ch; margin:0 auto;}
+  .eyebrow{
+    font-family:ui-sans-serif,system-ui,'Helvetica Neue',sans-serif;
+    font-size:12px; letter-spacing:.18em; text-transform:uppercase;
+    color:var(--amber); margin-bottom:18px;
+  }
+  h1{
+    font-size:clamp(30px,4.4vw,44px); line-height:1.14; font-weight:700;
+    margin:0 0 14px; text-wrap:balance;
+  }
+  .subtitle{font-size:20px; color:var(--muted); font-style:italic; margin:0 0 26px; text-wrap:balance;}
+  .byline{
+    font-family:ui-sans-serif,system-ui,sans-serif; font-size:13.5px; color:var(--muted);
+    border-top:1px solid var(--line); border-bottom:1px solid var(--line);
+    padding:10px 0; display:flex; gap:18px; flex-wrap:wrap;
+  }
+  .byline b{color:var(--ink); font-weight:600;}
+  h2{
+    font-size:25px; line-height:1.25; margin:64px 0 14px; text-wrap:balance;
+  }
+  h2 .no{color:var(--amber); font-variant-numeric:tabular-nums; margin-right:10px; font-weight:400;}
+  h3{font-size:19px; margin:34px 0 8px;}
+  p{margin:0 0 18px;}
+  a{color:var(--amber); text-decoration:underline; text-decoration-color:rgba(224,164,88,.4); text-underline-offset:3px;}
+  .abstract{
+    background:var(--panel); border:1px solid var(--line); border-radius:6px;
+    padding:22px 26px; margin:34px auto 0; max-width:68ch;
+  }
+  .abstract .lab{
+    font-family:ui-sans-serif,system-ui,sans-serif; font-size:11.5px; letter-spacing:.16em;
+    text-transform:uppercase; color:var(--amber); margin-bottom:8px;
+  }
+  .abstract p{margin:0; font-size:16.5px;}
+  figure{margin:34px auto; max-width:900px;}
+  figure img{width:100%; height:auto; display:block; border:1px solid var(--line); border-radius:4px;}
+  figure.pair{display:grid; grid-template-columns:1fr 1fr; gap:10px;}
+  figure.pair img{margin:0;}
+  figure.pair figcaption{grid-column:1/-1;}
+  figcaption{
+    font-family:ui-sans-serif,system-ui,sans-serif; font-size:13.5px; line-height:1.55;
+    color:var(--muted); padding-top:10px;
+  }
+  figcaption b{color:var(--ink); font-weight:600;}
+  figcaption .fno{color:var(--amber); font-weight:600;}
+  .callout{
+    border-left:3px solid var(--amber); padding:4px 0 4px 20px; margin:26px 0;
+    color:var(--ink); font-style:italic;
+  }
+  .refs{font-size:15.5px;}
+  .refs li{margin-bottom:12px; color:var(--muted);}
+  .refs li b{color:var(--ink); font-weight:600;}
+  ol,ul{padding-left:26px;}
+  li{margin-bottom:8px;}
+  .figstub{
+    font-family:ui-sans-serif,system-ui,sans-serif; font-size:13px; color:var(--muted);
+    border:1px dashed var(--line); border-radius:6px; padding:16px 18px; margin:34px auto;
+    max-width:900px; background:rgba(224,164,88,.04);
+  }
+  .figstub b{color:var(--amber);}
+  @media (max-width:640px){ figure.pair{grid-template-columns:1fr;} body{font-size:17px;} }
+  /* --- site menu (shared with home / research pages) --- */
+  :root{--navy:#0a1e3f;--sub:#a8c0e0;--blue:#1a6fc4;--blue-h:#1580e0;}
+  header.sitenav{position:sticky;top:0;z-index:50;background:var(--navy);border-bottom:1px solid rgba(255,255,255,.08);margin:0 -20px;}
+  header.sitenav nav{max-width:1080px;margin:0 auto;padding:0 24px;height:66px;display:flex;align-items:center;justify-content:space-between;}
+  header.sitenav .brand{display:flex;align-items:center;gap:11px;font-weight:600;font-size:18px;color:#fff;letter-spacing:.2px;text-decoration:none;font-family:ui-sans-serif,system-ui,sans-serif;}
+  header.sitenav .brand .logotile{width:40px;height:40px;border-radius:10px;background:#fff;display:flex;align-items:center;justify-content:center;flex:none;}
+  header.sitenav .brand .logotile img{width:34px;height:34px;border-radius:7px;display:block;}
+  header.sitenav .navlinks{display:flex;gap:26px;align-items:center;font-size:15px;font-family:ui-sans-serif,system-ui,sans-serif;}
+  header.sitenav .navlinks a{color:var(--sub);text-decoration:none;}
+  header.sitenav .navlinks a:hover,header.sitenav .navlinks a.on{color:#fff;}
+  header.sitenav .btn{display:inline-block;background:var(--blue);color:#fff;font-weight:600;padding:11px 20px;border-radius:8px;font-size:15px;text-decoration:none;font-family:ui-sans-serif,system-ui,sans-serif;}
+  header.sitenav .btn:hover{background:var(--blue-h);}
+  @media(max-width:720px){header.sitenav .navlinks{display:none;}}
+</style>
+</head>
+<body>
+<header class="sitenav">
+  <nav>
+    <a class="brand" href="index.html"><span class="logotile"><img src="logo.png" alt="Star Trail CleanR logo"></span> Star Trail CleanR</a>
+    <div class="navlinks">
+      <a href="index.html#how">How it works</a>
+      <a href="index.html#gallery">Gallery</a>
+      <a href="index.html#download">Download</a>
+      <a href="index.html#approach">Approach</a>
+      <a class="on" href="research.html">Research</a>
+      <a href="index.html#thanks">Thanks</a>
+      <a href="index.html#about">About</a>
+    </div>
+    <a class="btn" href="index.html#download">Download free</a>
+  </nav>
+</header>
+
+
+<header class="tt">
+  <div class="eyebrow">Star Trail CleanR &middot; Technical Notes &middot; No. 3</div>
+  <h1>The bugs that looked like blindness</h1>
+  <p class="subtitle">For months Star Trail CleanR kept leaving trails untouched, as if the detector could not see them. It could. It was finding them, and we were throwing the detections away. Here is how we tracked that down, and the other seam problems it turned up.</p>
+  <div class="byline">
+    <span><b>The Star Trail CleanR project</b> &middot; startrailcleanr.com</span>
+    <span>Published July 2026</span>
+    <span>Photographs: Greg Meyer, Arizona</span>
+  </div>
+</header>
+
+<div class="wrap">
+
+<div class="abstract">
+  <div class="lab">Summary</div>
+  <p>Star Trail CleanR finds airplane and satellite trails by cutting each photo into small squares and searching one square at a time. That is what lets it catch a hairline trail, and it is also where the trouble started. For months the tool would leave a trail sitting in the finished photo, in plain view, as if the detector had a blind spot. It didn't. Almost every time, the detector had found the trail and we lost it afterward, while stitching the squares back together. This note is the story of tracking those down: a piece our overlap cleanup deleted, a middle the detector never fired on and a second check has to bridge, and two crossing trails that came back as one fat blob. Some were one-time bugs; others still do real work whenever the sky is busy.</p>
+</div>
+
+<div class="prose">
+
+<h2>The trail the tool kept missing</h2>
+<p>The first note in this series, <a href="finding-trails.html">Finding the trails</a>, covers how the detector works: it looks at one photo at a time, and because a trail can be a single pixel wide across the whole frame, it cuts the photo into 640-pixel squares and studies each square on its own. A hairline that would vanish in the shrunk-down whole photo is obvious inside a small square.</p>
+<p>Cutting the photo into squares has a cost. A trail rarely lands neatly inside one square. It runs across the line between two of them, so the detector sees it as two separate pieces, one in each square, and those pieces have to be put back into one trail. Normally that just works. Because the squares overlap a little, the two pieces of a trail overlap too, so they touch, and a step called the grouper fuses every touching piece that shares the trail's angle into one shape, one trail no matter how many squares it crossed. That handles almost everything.</p>
+<p>The grouper has one strict rule, though: it only joins pieces that actually touch. Leave an empty gap between two pieces, where the trail runs but nothing was detected, and it leaves them apart. Those gaps, and a couple of other slip-ups in the reassembly, are what this note is about. We ran into them on several different star trail sets, and it was always the same: a trail would survive into the finished photo, sitting there in plain view after the tool had run, as if the detector had a blind spot.</p>
+<p>It didn't. Nearly every time the tool left a trail in the photo, the detector had already found it. We were losing it afterward, in our own code, while stitching the squares back together. Here are the real ways that happened.</p>
+
+<h2>The piece our cleanup deleted</h2>
+<p>This is the one that took months. On one frame, a trail crossed the line between two squares, and the detector's outline of it came out in two pieces with a clean gap between them, right where the trail itself was plainly solid. Every other tool we had said the trail was there. And it showed in the result: the tool cleaned both ends and left a stub of the trail in the middle, sitting right on the seam.</p>
+<p>We assumed the detector had missed the middle of the trail, the part that sat on the square's edge. So we checked. We took the single square that covers that edge and ran the detector on it by itself. The detector found the trail, clearly, with plenty of confidence. It had seen it the whole time.</p>
+<p>So what deleted it? Our own overlap cleanup. Because the squares overlap on purpose, the same trail often gets reported twice, once by each square that shares it. If we repaired both, we would repair the same trail on top of itself. So there is a step that spots two reports of the same trail and keeps one, drops the other. The rule that decides "these two are the same trail" measured how much the smaller report sat inside the larger one. On this trail, that measure hit its exact top value: the short piece sat entirely inside the long, seam-crossing piece. And the cleanup, faced with a tie, dropped the long piece and kept the short one. The part of the trail that crossed the seam went out with it.</p>
+<p>The fix was a single nudge. We moved the cutoff just past that top value, so a report that sits fully inside another is never dropped. Now every piece survives to the grouper, and the grouper puts the trail back together.</p>
+
+<h2>The missing middle</h2>
+<p>Even with that fix in, it still turned up now and then, and it was maddening every time. The detector would catch an airplane trail on one side of a seam, catch it again on the other side, and miss the plain stretch in the middle. Why the left piece and the right piece, but not the obvious one between them?</p>
+<p>These are the pieces the grouper gave up on: there is a real gap between them, and the grouper only joins pieces that touch. But look at where the two pieces stop. Each one ends right on a tile edge, within a few pixels of the grid line. That is what a seam clip looks like: the tile's view ended at that line, so the piece ends there while the trail keeps right on going. A real break would land anywhere; this lands exactly on the grid.</p>
+<p>So a second, stricter check takes those leftovers and looks for exactly that. It runs each candidate pair through a short list of tests: do they point the same way, are they the same thickness, do their centers line up, does the gap close along the way the trail is traveling, and the big one, do both pieces stop right on a tile line with the gap straddling it? Only when every answer is yes does it treat the two as one trail and draw a single shape across the gap, filling in the middle that was never detected. If the pieces stop anywhere but a grid line, it leaves them alone: the gap is probably real.</p>
+<p>How often it fires depends on the sky. On a calm night it barely comes up; on a busy one it fires all the time. On a single 199-frame Joshua Tree run it bridged fourteen gaps across a dozen frames, each one a trail every other test said was there, broken clean at a seam. It sits behind those five separate gates on purpose, so it never joins two trails that only happen to look alike, and it acts only when the gap sits right on a tile seam.</p>
+
+<figure>
+  <img src="note3-gap.jpg" alt="The same airplane trail before and after: the old code leaves it broken with a gap, the current code stitches it whole">
+  <figcaption><span class="fno">Figure 1.</span> The same airplane trail. Top, the old code: it comes out broken, with a gap and two stray fragments that never joined the main streak. Bottom, the current code: the pieces stitched into one continuous trail. Red is the trail mask; yellow marks the detected pieces.</figcaption>
+</figure>
+
+<p>We still do not know why the detector leaves that gap: why it catches both ends of a trail and misses the plain stretch between them. The gap check works around that. The real fix is a detector that catches the middle too, and that is what we are hoping better models will bring.</p>
+
+<h2>Two trails caught as one blob</h2>
+<p>One more problem looked the same from the outside. This time the detector found both trails, it just drew them as one. When two trails cross each other, it sometimes wraps both of them in a single fat shape. That should be two thin ones, one per trail. A fat shape repairs badly: it paints over a wide wedge of clean sky between the two trails. So we added a splitter. When a detected shape is too square to be a single trail, the tool looks for the two directions running through it and cuts it into two trail-shaped pieces.</p>
+
+<figure>
+  <img src="note3-blob.jpg" alt="Two crossing trails: with the splitter off the detector wraps both in one fat outline; with it on the blob is cut into separate pieces">
+  <figcaption><span class="fno">Figure 2.</span> Two crossing trails. Left, splitter off: the detector wraps both in one fat outline. Right, splitter on: the blob is cut into separate pieces, one per trail, so the repair follows each streak instead of the sky between them.</figcaption>
+</figure>
+
+<h2>It was the stitching</h2>
+<p>Step back and almost none of these were the detector being blind. It found the trails. The misses lived in how we put its answers back together after cutting the photo apart: a piece our own cleanup deleted, a middle the detector never fired on, two trails drawn as one. From the outside they all looked identical: a trail the tool did not remove. Underneath, each had a different cause.</p>
+<p>The lesson we learned is this: when the detector seems to miss something, check the stitching before blaming the detector. Ours could see the whole time. We just kept dropping what it found.</p>
+
+<h2>References</h2>
+<ol class="refs">
+  <li><b>Finding the trails.</b> The first note in this series, on how the detector works and why the photo is cut into squares. <a href="finding-trails.html">startrailcleanr.com/finding-trails.html</a></li>
+  <li><b>SAHI: Slicing Aided Hyper Inference.</b> The open library that handles cutting a large image into overlapping tiles and running a detector on each. Akyon et al., 2022.</li>
+  <li><b>YOLOv8.</b> The object-detection framework the trail detector is built on. Ultralytics, 2023.</li>
+</ol>
+
+</div><!-- .prose -->
+</div><!-- .wrap -->
+</body>
+</html>
