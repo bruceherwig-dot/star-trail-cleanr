@@ -7619,17 +7619,6 @@ class StarTrailPanel(QWidget):
         plan = [("stack", float(saved_secs.get("stack", 7.0)))]
         if self._hotpix_chk.isChecked():
             plan.append(("hotpix", float(saved_secs.get("hotpix", 60.0))))
-        else:
-            # The always-on sky stuck-pixel cleanup runs only when the cleaning run
-            # produced both maps (and the heavy hot-pixel pass isn't replacing it).
-            try:
-                from modules.workspace import find_workspace
-                wsd = find_workspace(self._cleaned)
-            except Exception:
-                wsd = None
-            if wsd and os.path.isfile(os.path.join(wsd, "hot_pixel_map.png")) \
-                    and os.path.isfile(os.path.join(wsd, "foreground_mask.png")):
-                plan.append(("cleanup", float(saved_secs.get("cleanup", 30.0))))
         if thick > 0:
             plan.append(("thicken", float(saved_secs.get("thicken", 1.5))))
         total_secs = sum(s for _, s in plan) or 1.0
@@ -7676,11 +7665,11 @@ class StarTrailPanel(QWidget):
 
     def _on_proc_output(self):
         # Every phase of make_share_clip reports as it works: stacking prints
-        # "<label>: i/n" per frame, the sky cleanup "sky cleanup: k/n" per speck
-        # cluster, hot-pixel removal "finding/cleaning specks: i/n", thickening a
-        # start marker, and the final save "wrote ...". Each line advances the bar
-        # inside that phase's time-weighted segment; "<name> phase: Ns" timing
-        # lines are collected so the next build's segments match this machine.
+        # "<label>: i/n" per frame, hot-pixel removal "finding/cleaning specks:
+        # i/n", thickening a start marker, and the final save "wrote ...". Each
+        # line advances the bar inside that phase's time-weighted segment;
+        # "<name> phase: Ns" timing lines are collected so the next build's
+        # segments match this machine.
         data = bytes(self._proc.readAllStandardOutput()).decode("utf-8", "replace")
         for line in data.splitlines():
             s = line.strip()
@@ -7688,10 +7677,9 @@ class StarTrailPanel(QWidget):
                 self._skip_msg = s.split(":", 1)[1].strip()
                 continue
             low = s.lower()
-            m = re.match(r"(stack|sky cleanup|hot-pixel|thicken) phase: (\d+)s$", low)
+            m = re.match(r"(stack|hot-pixel|thicken) phase: (\d+)s$", low)
             if m:
-                key = {"sky cleanup": "cleanup", "hot-pixel": "hotpix"}.get(
-                    m.group(1), m.group(1))
+                key = {"hot-pixel": "hotpix"}.get(m.group(1), m.group(1))
                 # Floor of 1s so a phase can never vanish from the next bar.
                 self._measured[key] = max(1.0, float(m.group(2)))
                 continue
@@ -7701,10 +7689,7 @@ class StarTrailPanel(QWidget):
                 a, b = tail.split("/", 1)
                 if a.strip().isdigit() and b.strip().isdigit():
                     frac = int(a) / max(1, int(b))
-            if low.startswith("sky cleanup:") and frac is not None:
-                self._phase_text = "Cleaning sky specks…"
-                self._set_phase_frac("cleanup", frac)
-            elif "finding specks" in low and frac is not None:
+            if "finding specks" in low and frac is not None:
                 # One saved duration covers find+clean; finding samples ~40 frames,
                 # cleaning re-reads every frame, so split the segment 30/70.
                 self._phase_text = "Finding hot pixels…"

@@ -775,43 +775,14 @@ def make_star_trail(cleaned_dir, out_path=None, stack=None, comet_tail=0,
             print(f"HOTPIX_SKIPPED: hot-pixel removal failed ({e}); kept the plain trail",
                   flush=True)
 
-    # Clean SKY stuck pixels ONCE, here, on the finished star trail (only runs
-    # because a star trail was requested). Reuses the stuck-pixel map and
-    # foreground mask the run already produced; fills sky defects with the
-    # content-aware fill so the thin trails are not smeared. Ground stuck pixels
-    # were already handled per-frame during cleaning. Skipped silently if the map
-    # or mask is missing (e.g. no foreground was painted), or if the heavy
-    # remove_hotpix path above already ran.
-    try:
-        from modules.workspace import find_workspace
-        from modules.hot_pixels import content_aware_fill
-        ws = None if remove_hotpix else find_workspace(cleaned_dir)
-        if ws:
-            hp = os.path.join(ws, "hot_pixel_map.png")
-            fgp = os.path.join(ws, "foreground_mask.png")
-            if os.path.isfile(hp) and os.path.isfile(fgp):
-                hot = cv2.imread(hp, cv2.IMREAD_GRAYSCALE)
-                fg = cv2.imread(fgp, cv2.IMREAD_GRAYSCALE)
-                if (hot is not None and fg is not None
-                        and hot.shape[:2] == stack.shape[:2] and fg.shape[:2] == stack.shape[:2]):
-                    sky_stuck = cv2.bitwise_and(
-                        cv2.dilate(hot, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (13, 13))),
-                        cv2.bitwise_not(fg))
-                    n_sky = int((sky_stuck > 0).sum())
-                    if n_sky > 0:
-                        # Per-cluster progress ("sky cleanup: k/n") so the Star Trail
-                        # window's bar walks through this step instead of sitting at
-                        # the end of stacking looking finished (BEST-quality fills on
-                        # big clusters are the longest phase of a comet build).
-                        _t_sky = time.time()
-                        stack = content_aware_fill(
-                            stack, sky_stuck,
-                            progress=lambda k, n: print(f"  sky cleanup: {k}/{n}",
-                                                        flush=True))
-                        print(f"cleaned sky stuck pixels on the star trail ({n_sky} px)", flush=True)
-                        print(f"  sky cleanup phase: {time.time() - _t_sky:.0f}s", flush=True)
-    except Exception as e:
-        print(f"sky stuck-pixel cleanup skipped: {e}", flush=True)
+    # NOTE (2026-07-20, Bruce's call): the automatic sky stuck-pixel cleanup that
+    # used to run here (the June #24 experiment, shipped v2.66) was REMOVED. It
+    # depended on the run's hot_pixel_map.png, which the GUI deletes at run end,
+    # so it almost never ran -- and when a stale map survived, it could smear real
+    # scenery mistaken for defects (runs/green_smear_zone_cap_2026_07_20/). Sky
+    # speck cleaning is the opt-in checkbox above (remove_hotpix); ground cleaning
+    # happens per-frame during the run. content_aware_fill stays in
+    # modules/hot_pixels.py for the planned cosmic-ray work.
 
     if thicken_px and int(thicken_px) > 0:
         print("thickening trails…", flush=True)   # phase marker for the progress bar
