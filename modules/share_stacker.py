@@ -64,19 +64,32 @@ class ShareStacker:
         self.after_vid = None         # canvas after-stack (video)
         self._after_folded = set()    # cleaned filenames already folded into the after-stacks
         self.before_built = False
+        # Plain-English reasons an output could not be built, reported by finalize()
+        # in its "skipped" dict so the GUI can tell the user instead of ending the
+        # run with nothing and no explanation (the silent-empty path a v2.76 Windows
+        # field report fell through).
+        self._geom_fail = None        # why the canvas geometry never got established
+        self._video_fail = None       # why the video encode subprocess failed
 
     # ── geometry ──────────────────────────────────────────────────────────────
     def _geometry(self):
         """Compute the video canvas geometry once from the first original frame.
-        Returns False if there are no readable originals yet."""
+        Returns False if there are no readable originals yet, recording why in
+        _geom_fail: a geometry failure quietly disables EVERY stack (star trail
+        and video), so the reason must survive to finalize()'s skipped report."""
         if self._cw is not None:
             return True
         names = msc._list_frames(self.original_dir)
         if not names:
+            self._geom_fail = (f"no frames were found in the original folder "
+                               f"({self.original_dir})")
             return False
         first = robust_imread(os.path.join(self.original_dir, names[0]), cv2.IMREAD_COLOR)
         if first is None:
+            self._geom_fail = (f"the first original frame could not be read "
+                               f"({os.path.join(self.original_dir, names[0])})")
             return False
+        self._geom_fail = None
         self._cw, self._ch = msc._canvas_size(first.shape[1], first.shape[0])
         self._img_h = self._ch - int(self._ch * msc.BOX_FRAC)   # photo region (above the text box)
         return True
@@ -141,29 +154,54 @@ class ShareStacker:
         stacks (no re-read). The star trail is saved in-process (just an image write);
         the video is encoded in a SEPARATE process (ffmpeg via imageio stalls inside a
         Qt background thread). Each render is timed. Returns
-        {"produced": {kind: path}, "timings": {kind: seconds}}."""
+        {"produced": {kind: path}, "timings": {kind: seconds}, "skipped": {kind: reason}}.
+        Every enabled output lands in exactly one of produced or skipped: an output
+        that quietly built nothing used to end the run with no video, no star trail,
+        and no explanation (a v2.76 Windows field report), so the reason is now
+        carried out in plain English for the GUI to show."""
         self.scan_cleaned(should_abort=should_abort)
-        produced, timings = {}, {}
+        produced, timings, skipped = {}, {}, {}
         if should_abort and should_abort():
-            return {"produced": produced, "timings": timings}
-        if self.want_star and self.after_full is not None and self.after_full.result() is not None:
-            self.after_full.report()
-            t0 = time.time()
-            produced["star_trail"] = msc.make_star_trail(
-                self.cleaned_dir, out_path=star_out, stack=self.after_full.result(),
-                comet_tail=self.comet_tail, thicken_px=self.thicken_px)
-            timings["star_trail"] = time.time() - t0
-        if (self.want_video and video_out and self._video_cmd_prefix
-                and self.before_vid is not None and self.after_vid is not None
-                and self.before_vid.result() is not None and self.after_vid.result() is not None):
-            self.before_vid.report()
-            self.after_vid.report()
-            t0 = time.time()
-            vid = self._render_video_subprocess(video_out)
-            if vid:
-                produced["video"] = vid
-                timings["video"] = time.time() - t0
-        return {"produced": produced, "timings": timings}
+            return {"produced": produced, "timings": timings, "skipped": skipped}
+
+        def _stack_reason(stack, what):
+            """Why a stack has no usable result, in words a user can act on."""
+            if self._geom_fail:
+                return self._geom_fail
+            if stack is None:
+                return f"the {what} stack was never started (no frames were seen)"
+            return f"no readable frames made it into the {what} stack"
+
+        if self.want_star:
+            if self.after_full is not None and self.after_full.result() is not None:
+                self.after_full.report()
+                t0 = time.time()
+                produced["star_trail"] = msc.make_star_trail(
+                    self.cleaned_dir, out_path=star_out, stack=self.after_full.result(),
+                    comet_tail=self.comet_tail, thicken_px=self.thicken_px)
+                timings["star_trail"] = time.time() - t0
+            else:
+                skipped["star_trail"] = _stack_reason(self.after_full, "cleaned-frames")
+        if self.want_video:
+            if (video_out and self._video_cmd_prefix
+                    and self.before_vid is not None and self.after_vid is not None
+                    and self.before_vid.result() is not None
+                    and self.after_vid.result() is not None):
+                self.before_vid.report()
+                self.after_vid.report()
+                t0 = time.time()
+                vid = self._render_video_subprocess(video_out)
+                if vid:
+                    produced["video"] = vid
+                    timings["video"] = time.time() - t0
+                else:
+                    skipped["video"] = (self._video_fail
+                                        or "the video encoder did not finish")
+            elif self.before_vid is None or (self.before_vid.result() is None):
+                skipped["video"] = _stack_reason(self.before_vid, "original-frames")
+            else:
+                skipped["video"] = _stack_reason(self.after_vid, "cleaned-frames")
+        return {"produced": produced, "timings": timings, "skipped": skipped}
 
     def _render_video_subprocess(self, video_out):
         """Save the two canvas stacks as temp PNGs and encode the wipe video in a
@@ -182,10 +220,13 @@ class ShareStacker:
             r = subprocess.run(cmd, capture_output=True, text=True)
             ok = r.returncode == 0 and os.path.exists(video_out)
             if not ok:
+                self._video_fail = (f"the video encoder exited with code {r.returncode}: "
+                                    f"{(r.stderr or r.stdout or 'no output')[-500:].strip()}")
                 print(f"  video subprocess FAILED (rc={r.returncode}): "
                       f"{(r.stderr or '')[-500:]}", flush=True)
             return video_out if ok else None
         except Exception as e:
+            self._video_fail = f"the video encoder could not be started: {type(e).__name__}: {e}"
             print(f"  video subprocess error: {type(e).__name__}: {e}", flush=True)
             return None
         finally:

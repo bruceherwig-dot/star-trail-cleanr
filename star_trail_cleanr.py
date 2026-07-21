@@ -125,15 +125,74 @@ else:
     _base = os.path.dirname(os.path.abspath(__file__))
 
 
+_APP_ERROR_LOG = os.path.join(os.path.expanduser("~"),
+                              ".star_trail_cleanr", "app_errors.log")
+
+
+def _log_app_error(context, exc=None, detail=""):
+    """Append a timestamped entry to ~/.star_trail_cleanr/app_errors.log so GUI-side
+    failures leave a trace we can ask any user for. Frozen windowed builds (Windows
+    especially) have no console, so a swallowed exception is otherwise invisible: the
+    v2.76 field report of buttons that 'just did nothing' is exactly this class.
+    `context` says what was being attempted, `exc` (optional) adds the full traceback,
+    `detail` (optional) adds free-form text like a path. Never raises; capped at 1 MB
+    by starting the file over (old contents have served their purpose by then)."""
+    try:
+        import datetime
+        import traceback
+        os.makedirs(os.path.dirname(_APP_ERROR_LOG), exist_ok=True)
+        mode = "a"
+        try:
+            if os.path.getsize(_APP_ERROR_LOG) > 1_000_000:
+                mode = "w"
+        except OSError:
+            pass
+        with open(_APP_ERROR_LOG, mode, encoding="utf-8") as f:
+            f.write(f"\n[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] "
+                    f"v{VERSION} {sys.platform} | {context}\n")
+            if detail:
+                f.write(f"  {detail}\n")
+            if exc is not None:
+                f.write("".join(traceback.format_exception(
+                    type(exc), exc, exc.__traceback__)))
+    except Exception:
+        pass   # the error log must never become its own crash
+
+
+def _warn_user(title, text):
+    """Show a small warning dialog. Parentless on purpose: usable from any handler.
+    Never raises (a message box that crashes would defeat its own point)."""
+    try:
+        box = QMessageBox()
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle(title)
+        box.setText(text)
+        box.exec()
+    except Exception:
+        pass
+
+
 def _open_folder_in_file_manager(path):
     """Open a folder in the OS file manager. Windows: Explorer.
-    Mac: Finder via 'open'. Linux: whichever file manager is wired to xdg-open."""
-    if sys.platform == "win32":
-        os.startfile(path)
-    elif sys.platform == "darwin":
-        subprocess.run(["open", path])
-    else:
-        subprocess.run(["xdg-open", path])
+    Mac: Finder via 'open'. Linux: whichever file manager is wired to xdg-open.
+    On failure: logs the traceback to the app error log, tells the user what
+    happened instead of silently doing nothing, and returns False."""
+    try:
+        if sys.platform == "win32":
+            os.startfile(path)
+        elif sys.platform == "darwin":
+            subprocess.run(["open", path], check=True)
+        else:
+            subprocess.run(["xdg-open", path], check=True)
+        return True
+    except Exception as e:
+        _log_app_error("open folder in file manager", exc=e, detail=f"path: {path}")
+        _warn_user("Couldn't open the folder",
+                   f"Star Trail CleanR couldn't open this folder:\n\n{path}\n\n"
+                   f"Reason: {e}\n\n"
+                   "Details were saved to the error log in your home folder "
+                   "(.star_trail_cleanr/app_errors.log).")
+        return False
 
 
 # ── Run-time estimate: a calibrated ballpark ─────────────────────────────────
@@ -6031,11 +6090,15 @@ class MainWindow(QMainWindow):
         star_path = (workspace_path(folder, "STC_cleaned_star_trail.jpg") if folder else "")
         try:
             self._open_creator_window(folder, star_path, "summary")
-        except Exception:
+        except Exception as e:
+            # Log the real reason BEFORE falling back -- this exact swallow is how a
+            # Windows machine ended a run with no window and no trace (v2.76 report).
+            _log_app_error("auto-open Star Trail & Timelapse window at run end",
+                           exc=e, detail=f"folder: {folder}")
             try:
                 self._show_run_complete_dialog()
-            except Exception:
-                pass
+            except Exception as e2:
+                _log_app_error("fallback run-complete dialog also failed", exc=e2)
 
     def _stop_share_threads(self):
         """Stop and forget every share-stacker thread started this session -- the
@@ -6104,12 +6167,28 @@ class MainWindow(QMainWindow):
         on its tabs and an Open Cleaned Folder button for anyone who wants the folder."""
         produced = result.get("produced", {}) if isinstance(result, dict) else {}
         timings = result.get("timings", {}) if isinstance(result, dict) else {}
+        skipped = result.get("skipped", {}) if isinstance(result, dict) else {}
         lines = []
         for kind, _path in produced.items():
             label = _SHARE_KIND_LABELS.get(kind, "share output")
             secs = timings.get(kind)
             msg = f"Your {label} is ready" + (f" (took {secs:.1f}s)." if secs is not None else ".")
             lines.append(msg)
+        # Every enabled output that DIDN'T build says so, with the reason -- a run
+        # must never again end "Complete!" with no video, no star trail, and no
+        # explanation in the log (the v2.76 Windows field report).
+        for kind, reason in skipped.items():
+            label = _SHARE_KIND_LABELS.get(kind, "share output")
+            msg = f"Couldn't build the {label}: {reason}"
+            lines.append(msg)
+            _log_app_error(f"share output skipped: {kind}", detail=reason)
+        if not produced and not skipped:
+            lines.append("The star trail and before/after video were not built "
+                         "this run (no reason was reported; this is a bug worth "
+                         "emailing about).")
+            _log_app_error("share stacker finished with nothing produced and "
+                           "nothing skipped")
+        for msg in lines:
             try:
                 self._status_out.append(msg)
             except Exception:
@@ -6138,6 +6217,7 @@ class MainWindow(QMainWindow):
         the status log (the cleaned frames themselves are fine and already saved) and
         still complete the run so the user is never left stuck on 'Finishing...'."""
         line = f"Could not finish the star trail / video: {msg}"
+        _log_app_error("share stacker failed", detail=msg)
         try:
             self._status_out.append(line)
         except Exception:
@@ -6663,8 +6743,17 @@ class MainWindow(QMainWindow):
         if not folder or not os.path.isdir(folder):
             self._error_label.setText("No cleaned frames yet. Run cleaning first.")
             return
-        star_path = workspace_path(folder, "STC_cleaned_star_trail.jpg")
-        self._open_creator_window(folder, star_path, "star")
+        try:
+            star_path = workspace_path(folder, "STC_cleaned_star_trail.jpg")
+            self._open_creator_window(folder, star_path, "star")
+        except Exception as e:
+            _log_app_error("open Star Trail & Timelapse window (setup page)",
+                           exc=e, detail=f"folder: {folder}")
+            _warn_user("Couldn't open the window",
+                       "Star Trail CleanR hit an error opening the Star Trail & "
+                       f"Timelapse window.\n\nReason: {e}\n\n"
+                       "Details were saved to the error log in your home folder "
+                       "(.star_trail_cleanr/app_errors.log).")
 
     def _output_has_frames(self):
         """True when this run's output folder holds at least one cleaned image
@@ -6683,18 +6772,44 @@ class MainWindow(QMainWindow):
     def _open_timelapse_from_run(self):
         """Run page "Star Trail & Timelapse" button. Open the combined window on this
         run's just-cleaned frames (Star Trail tab); it places itself beside the summary
-        if that is still open, otherwise centered (see _arrange_post_run)."""
+        if that is still open, otherwise centered (see _arrange_post_run). A failure
+        opening the window is reported to the user and logged, never swallowed: Qt
+        catches exceptions raised in button handlers and silently carries on, which
+        on a frozen Windows build (no console) reads as a dead button."""
         folder = getattr(self, '_done_output_folder', None)
-        if folder and os.path.isdir(folder):
+        if not folder or not os.path.isdir(folder):
+            _log_app_error("Star Trail & Timelapse button: output folder missing",
+                           detail=f"path: {folder}")
+            _warn_user("Cleaned folder not found",
+                       "The cleaned-frames folder from this run can't be found "
+                       f"(it may have been moved, or the drive disconnected):\n\n{folder}")
+            return
+        try:
             star_path = workspace_path(folder, "STC_cleaned_star_trail.jpg")
             self._open_creator_window(folder, star_path, "star")
+        except Exception as e:
+            _log_app_error("open Star Trail & Timelapse window (run page)",
+                           exc=e, detail=f"folder: {folder}")
+            _warn_user("Couldn't open the window",
+                       "Star Trail CleanR hit an error opening the Star Trail & "
+                       f"Timelapse window.\n\nReason: {e}\n\n"
+                       "Details were saved to the error log in your home folder "
+                       "(.star_trail_cleanr/app_errors.log).")
 
     def _open_output_folder(self):
         """Processing page / run-complete dialog "Open Cleaned Folder" button.
-        Open the just-finished run's output folder in the file manager."""
+        Open the just-finished run's output folder in the file manager. A missing
+        folder is reported (with the path), not silently ignored; the opener itself
+        reports and logs its own failures."""
         folder = getattr(self, '_done_output_folder', None)
-        if folder and os.path.isdir(folder):
-            _open_folder_in_file_manager(folder)
+        if not folder or not os.path.isdir(folder):
+            _log_app_error("Open Cleaned Folder button: output folder missing",
+                           detail=f"path: {folder}")
+            _warn_user("Cleaned folder not found",
+                       "The cleaned-frames folder from this run can't be found "
+                       f"(it may have been moved, or the drive disconnected):\n\n{folder}")
+            return
+        _open_folder_in_file_manager(folder)
 
     def _on_finished(self):
         """QThread.finished handler — fires after every run end (clean finish,
