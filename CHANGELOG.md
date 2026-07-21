@@ -2,6 +2,10 @@
 
 ---
 
+## v2.77-beta
+- **When something goes wrong after a run, the app now tells you.** A Windows report on v2.76 hit three problems at once with no error anywhere: the Open Cleaned Folder button did nothing, the Star Trail & Timelapse button did nothing, and the before/after video never appeared. Those failures were happening silently. Now: a button that fails shows a message saying what went wrong, the Star Log always reports whether the star trail and video were built (and if not, the reason in plain language), and the full technical details are saved to a small error log file (.star_trail_cleanr/app_errors.log in your home folder) that you can email us. This release makes the problem visible so it can be fixed for real; if you hit it, please send that file.
+- **Smoke tests:** 242 passing.
+
 ## v2.76-beta
 - **Fixed a slowdown on busy skies.** A change back in v2.66 quietly made cleaning runs with lots of trails per frame (a dense Milky Way, a satellite-heavy night) take far longer than they should. This fixes it, so those runs are back to normal speed. If heavy sequences had been crawling for you lately, they're quick again.
 - **Tidier preview and summary in the Star Trail & Timelapse window.** The preview now uses a fixed landscape frame, so a tall portrait shot no longer stretches the window (portrait images center with side margins). This also closes an empty gap that could appear on the Summary tab.
