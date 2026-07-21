@@ -7401,7 +7401,7 @@ class StarTrailPanel(QWidget):
                 self._thumb.setCursor(Qt.PointingHandCursor)
                 self._thumb.setToolTip("Click to open the star trail image")
                 self._thumb.mousePressEvent = lambda e: self._open_star()
-                lay.addWidget(self._thumb)
+                lay.addWidget(self._thumb, 0, Qt.AlignHCenter)
                 _hint_open = QLabel("Click the image to open")
                 _hint_open.setAlignment(Qt.AlignCenter)
                 _hint_open.setStyleSheet(f"color: {MUTED_TEXT};")
@@ -7605,15 +7605,40 @@ class StarTrailPanel(QWidget):
             pargs = ["--cleanr-worker", script] + args
         else:
             pargs = ["-u", script] + args
-        # Count frames so the progress bar can size each phase by its real read-work
-        # (stacking reads every frame, finding reads ~40, cleaning reads every frame).
+        # Time-weighted phase plan: each phase of the build owns a slice of the bar
+        # proportional to how long that phase took on THIS machine on the last build
+        # (saved at finish from the script's "<name> phase: Ns" lines). The bar
+        # tracks real elapsed work by definition, instead of read-counts -- which
+        # once left it sitting at 100% for 39 of a 46-second comet build while the
+        # finishing steps ran silently. First-ever build uses dev-measured defaults.
         try:
-            self._nframes = sum(
-                1 for e in os.scandir(self._cleaned)
-                if e.is_file() and e.name.lower().endswith(
-                    ('.jpg', '.jpeg', '.png', '.tif', '.tiff')))
-        except OSError:
-            self._nframes = 0
+            saved_secs = json.loads(
+                SETTINGS.value("startrail_phase_secs", "", type=str) or "{}")
+        except Exception:
+            saved_secs = {}
+        plan = [("stack", float(saved_secs.get("stack", 7.0)))]
+        if self._hotpix_chk.isChecked():
+            plan.append(("hotpix", float(saved_secs.get("hotpix", 60.0))))
+        else:
+            # The always-on sky stuck-pixel cleanup runs only when the cleaning run
+            # produced both maps (and the heavy hot-pixel pass isn't replacing it).
+            try:
+                from modules.workspace import find_workspace
+                wsd = find_workspace(self._cleaned)
+            except Exception:
+                wsd = None
+            if wsd and os.path.isfile(os.path.join(wsd, "hot_pixel_map.png")) \
+                    and os.path.isfile(os.path.join(wsd, "foreground_mask.png")):
+                plan.append(("cleanup", float(saved_secs.get("cleanup", 30.0))))
+        if thick > 0:
+            plan.append(("thicken", float(saved_secs.get("thicken", 1.5))))
+        total_secs = sum(s for _, s in plan) or 1.0
+        self._phase_bounds, acc = {}, 0.0
+        for name, secs in plan:
+            lo = acc
+            acc += 100.0 * secs / total_secs
+            self._phase_bounds[name] = (lo, acc)
+        self._measured = {}     # phase timings reported by this build, saved at finish
         self._build_cancelled = False
         self._build_btn.setText("Stop")
         self._bar.setVisible(True)
@@ -7636,43 +7661,67 @@ class StarTrailPanel(QWidget):
         self._proc.finished.connect(self._on_proc_finished)
         self._proc.start(sys.executable, pargs)
 
+    def _set_phase_frac(self, name, frac):
+        """Move the bar to `frac` (0..1) of phase `name`'s time-weighted segment
+        (see the plan built in _start_build). Never moves backward, so a phase the
+        plan didn't predict, or one the script skipped, can't make the bar jump
+        around -- worst case it waits, it never lies forward or retreats."""
+        lo_hi = getattr(self, "_phase_bounds", {}).get(name)
+        if lo_hi is None:
+            return
+        lo, hi = lo_hi
+        v = int(lo + max(0.0, min(1.0, frac)) * (hi - lo))
+        if v > self._bar.value():
+            self._bar.setValue(v)
+
     def _on_proc_output(self):
-        # make_share_clip prints "<label>: i/n" while stacking (star trail / comet);
-        # sky_dots prints "finding specks: j/n" then "cleaning specks: k/n" during hot-
-        # pixel removal. Size each phase by its real read-work so the bar tracks reality
-        # and adapts to the set size: stacking reads N frames, finding ~40, cleaning N.
+        # Every phase of make_share_clip reports as it works: stacking prints
+        # "<label>: i/n" per frame, the sky cleanup "sky cleanup: k/n" per speck
+        # cluster, hot-pixel removal "finding/cleaning specks: i/n", thickening a
+        # start marker, and the final save "wrote ...". Each line advances the bar
+        # inside that phase's time-weighted segment; "<name> phase: Ns" timing
+        # lines are collected so the next build's segments match this machine.
         data = bytes(self._proc.readAllStandardOutput()).decode("utf-8", "replace")
-        hotpix = self._hotpix_chk.isChecked()
-        n = max(1, getattr(self, "_nframes", 0))
-        find_n = min(40, n)
-        total = (n + find_n + n) if hotpix else n
-        b1 = int(n * 100 / total)                 # % at end of stacking
-        b2 = int((n + find_n) * 100 / total)      # % at end of finding
         for line in data.splitlines():
             s = line.strip()
             if s.startswith("HOTPIX_SKIPPED:"):
                 self._skip_msg = s.split(":", 1)[1].strip()
                 continue
             low = s.lower()
+            m = re.match(r"(stack|sky cleanup|hot-pixel|thicken) phase: (\d+)s$", low)
+            if m:
+                key = {"sky cleanup": "cleanup", "hot-pixel": "hotpix"}.get(
+                    m.group(1), m.group(1))
+                # Floor of 1s so a phase can never vanish from the next bar.
+                self._measured[key] = max(1.0, float(m.group(2)))
+                continue
             tail = s.rsplit(":", 1)[-1].strip() if ":" in s else ""
             frac = None
             if "/" in tail:
                 a, b = tail.split("/", 1)
                 if a.strip().isdigit() and b.strip().isdigit():
                     frac = int(a) / max(1, int(b))
-            if "cleaning specks" in low:          # cleaning pass: b2 -> 100%
-                self._phase_text = "Removing hot pixels…"
-                if frac is not None:
-                    self._bar.setValue(int(b2 + frac * (100 - b2)))
-            elif "finding specks" in low:         # sampling frames: b1 -> b2
+            if low.startswith("sky cleanup:") and frac is not None:
+                self._phase_text = "Cleaning sky specks…"
+                self._set_phase_frac("cleanup", frac)
+            elif "finding specks" in low and frac is not None:
+                # One saved duration covers find+clean; finding samples ~40 frames,
+                # cleaning re-reads every frame, so split the segment 30/70.
                 self._phase_text = "Finding hot pixels…"
-                if frac is not None:
-                    self._bar.setValue(int(b1 + frac * (b2 - b1)))
+                self._set_phase_frac("hotpix", 0.3 * frac)
+            elif "cleaning specks" in low and frac is not None:
+                self._phase_text = "Removing hot pixels…"
+                self._set_phase_frac("hotpix", 0.3 + 0.7 * frac)
             elif "finding hot pixels" in low or low.startswith("removing "):
                 self._phase_text = "Finding hot pixels…"
-                self._bar.setValue(b1)
-            elif frac is not None:                # stacking pass: 0 -> b1
-                self._bar.setValue(int(frac * b1))
+                self._set_phase_frac("hotpix", 0.0)
+            elif low.startswith("thickening"):
+                self._phase_text = "Thickening trails…"
+                self._set_phase_frac("thicken", 0.0)
+            elif low.startswith("wrote "):
+                self._bar.setValue(100)
+            elif frac is not None:                # stacking pass (star trail / comet)
+                self._set_phase_frac("stack", frac)
 
     def _on_proc_finished(self, code, _status):
         if getattr(self, "_spin_timer", None) is not None:
@@ -7689,6 +7738,17 @@ class StarTrailPanel(QWidget):
             return
         _out = getattr(self, "_pending_out", self._star_path)
         if code == 0 and _out and os.path.exists(_out):
+            # Remember how long each phase really took on this machine, so the next
+            # build's bar segments are sized by actual time (merged, not replaced:
+            # a plain build shouldn't erase the comet build's stack timing).
+            if getattr(self, "_measured", None):
+                try:
+                    saved_secs = json.loads(
+                        SETTINGS.value("startrail_phase_secs", "", type=str) or "{}")
+                except Exception:
+                    saved_secs = {}
+                saved_secs.update(self._measured)
+                SETTINGS.setValue("startrail_phase_secs", json.dumps(saved_secs))
             self._bar.setVisible(False)     # hide the bar on finish, like the Timelapse window
             self._star_path = _out          # preview + Open now point at the just-built file
             if getattr(self, "_skip_msg", ""):

@@ -211,7 +211,7 @@ def fix_hot_pixels(frames: List[np.ndarray], threshold: float = 2.0,
     return [cv2.inpaint(f, dilated, 3, cv2.INPAINT_NS) for f in frames]
 
 
-def content_aware_fill(img, fill_mask, pad=40):
+def content_aware_fill(img, fill_mask, pad=40, progress=None):
     """Replace the white areas of ``fill_mask`` in ``img`` with a content-aware
     fill that CONTINUES surrounding structure instead of smearing it.
 
@@ -234,6 +234,10 @@ def content_aware_fill(img, fill_mask, pad=40):
         8-bit mask, non-zero where pixels should be replaced.
     pad
         Pixels of surrounding context given to the fill around each defect.
+    progress
+        Optional callable(done, total) reported after each defect cluster is
+        filled, so a caller driving a progress bar can show this step moving
+        (the BEST-quality reconstruction costs real time on big clusters).
     """
     if fill_mask is None or not np.any(fill_mask):
         return img
@@ -259,4 +263,9 @@ def content_aware_fill(img, fill_mask, pad=40):
         except Exception:
             rep = cv2.inpaint(crop, m, 3, cv2.INPAINT_NS)
             crop[m > 0] = rep[m > 0]
+        if progress is not None:
+            try:
+                progress(k, n - 1)
+            except Exception:
+                pass   # a broken progress callback must never break the fill
     return out

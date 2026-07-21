@@ -676,10 +676,13 @@ def _thicken(img, px, fg_mask=None):
         fg = fg > 127
     bw = (img.max(2) > 24).astype(np.uint8)
     n, lab, st, _ = cv2.connectedComponentsWithStats(bw, 8)
-    trail = np.zeros_like(bw)
-    for k in range(1, n):
-        if max(int(st[k, cv2.CC_STAT_WIDTH]), int(st[k, cv2.CC_STAT_HEIGHT])) >= 12:
-            trail[lab == k] = 1
+    # One lookup pass, not one full-image scan per shape: a dense star field has
+    # tens of thousands of bright dots, and the per-shape loop this replaces cost
+    # ~13s at full resolution (measured, 38k shapes). Output is bit-identical.
+    is_trail = (np.maximum(st[:, cv2.CC_STAT_WIDTH],
+                           st[:, cv2.CC_STAT_HEIGHT]) >= 12)
+    is_trail[0] = False                       # label 0 is the background
+    trail = is_trail[lab].astype(np.uint8)
     if fg is not None:
         trail[fg] = 0                            # never widen the foreground itself
     kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * px + 1, 2 * px + 1))
@@ -796,12 +799,23 @@ def make_star_trail(cleaned_dir, out_path=None, stack=None, comet_tail=0,
                         cv2.bitwise_not(fg))
                     n_sky = int((sky_stuck > 0).sum())
                     if n_sky > 0:
-                        stack = content_aware_fill(stack, sky_stuck)
+                        # Per-cluster progress ("sky cleanup: k/n") so the Star Trail
+                        # window's bar walks through this step instead of sitting at
+                        # the end of stacking looking finished (BEST-quality fills on
+                        # big clusters are the longest phase of a comet build).
+                        _t_sky = time.time()
+                        stack = content_aware_fill(
+                            stack, sky_stuck,
+                            progress=lambda k, n: print(f"  sky cleanup: {k}/{n}",
+                                                        flush=True))
                         print(f"cleaned sky stuck pixels on the star trail ({n_sky} px)", flush=True)
+                        print(f"  sky cleanup phase: {time.time() - _t_sky:.0f}s", flush=True)
     except Exception as e:
         print(f"sky stuck-pixel cleanup skipped: {e}", flush=True)
 
     if thicken_px and int(thicken_px) > 0:
+        print("thickening trails…", flush=True)   # phase marker for the progress bar
+        _t_th = time.time()
         # Load the foreground mask (if painted) so thickening never fattens the ground.
         _fg = None
         try:
@@ -818,6 +832,7 @@ def make_star_trail(cleaned_dir, out_path=None, stack=None, comet_tail=0,
         print(f"thickened star trails by {int(thicken_px)} px"
               + (" (foreground protected)" if _fg is not None else " (no foreground mask)"),
               flush=True)
+        print(f"  thicken phase: {time.time() - _t_th:.0f}s", flush=True)
 
     if out_path is None:
         out_path = os.path.join(cleaned_dir, "STC_cleaned_star_trail.jpg")
