@@ -2,6 +2,12 @@
 
 ---
 
+## v2.78-beta
+- **The star trail build's progress bar now tracks the whole job.** It used to fill up within seconds (it only followed the frame-stacking step) and then sit at 100% while the finishing steps, sky speck cleanup, trail thickening, and saving, ran silently for most of the build. Now every step reports its progress, the bar's sections are sized by how long each step actually takes on your computer (it learns from your previous build), and it only reaches 100% when the image is written. The label under the bar names the step it's on.
+- **Trail Thickness is much faster.** The thickening step was redoing the same work tens of thousands of times; on a full-resolution build it took about 13 seconds and now takes about 1. The result is pixel-for-pixel identical.
+- **The Star Trail preview image is centered.** It was hugging the left edge of the window since v2.76; it now centers like the Timelapse preview.
+- **Smoke tests:** 242 passing.
+
 ## v2.77-beta
 - **When something goes wrong after a run, the app now tells you.** A Windows report on v2.76 hit three problems at once with no error anywhere: the Open Cleaned Folder button did nothing, the Star Trail & Timelapse button did nothing, and the before/after video never appeared. Those failures were happening silently. Now: a button that fails shows a message saying what went wrong, the Star Log always reports whether the star trail and video were built (and if not, the reason in plain language), and the full technical details are saved to a small error log file (.star_trail_cleanr/app_errors.log in your home folder) that you can email us. This release makes the problem visible so it can be fixed for real; if you hit it, please send that file.
 - **Smoke tests:** 242 passing.
