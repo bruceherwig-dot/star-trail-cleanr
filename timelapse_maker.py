@@ -35,7 +35,15 @@ import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Source runs need this folder on the import path to find modules/. NEVER do it
+# in the frozen app: there this script sits in the same folder as the collected
+# cv2/ package directory, and putting that folder FIRST on the path makes
+# `import cv2` load through the wrong door -- on macOS bundles that trips
+# OpenCV's "recursion detected loading cv2" guard and killed the timelapse
+# (caught by the CI bundle smoke, 2026-07-22). PyInstaller already has every
+# bundled module on the path.
+if not getattr(sys, "frozen", False):
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from modules.io_safe import robust_imread, image_size, capture_time
 from modules.frame_list import IMAGE_EXTS, order_by_capture_time, natural_key
 

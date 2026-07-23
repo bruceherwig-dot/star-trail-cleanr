@@ -60,7 +60,12 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Source runs need this folder on the import path to find modules/. NEVER in the
+# frozen app (see timelapse_maker.py: putting the bundle folder first makes
+# `import cv2` resolve through the collected cv2/ directory and trips OpenCV's
+# recursion guard on macOS bundles).
+if not getattr(sys, "frozen", False):
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from modules.io_safe import robust_imread          # noqa: E402  upright-safe read
 from modules.frame_list import natural_key, IMAGE_EXTS  # noqa: E402
 
