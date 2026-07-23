@@ -128,6 +128,18 @@ else:
 _APP_ERROR_LOG = os.path.join(os.path.expanduser("~"),
                               ".star_trail_cleanr", "app_errors.log")
 
+# This run's star_log_*.txt (STC Extras). Every caught failure is mirrored into
+# it so the user has ONE file in ONE folder they already know (the View Star Log
+# button) -- never a scavenger hunt through hidden home folders. The hidden
+# app_errors.log stays only as the silent backup for errors with no run yet.
+_CURRENT_STAR_LOG = None
+
+
+def _set_current_star_log(path):
+    """Point error mirroring at this run's Star Log file."""
+    global _CURRENT_STAR_LOG
+    _CURRENT_STAR_LOG = path
+
 
 def _log_app_error(context, exc=None, detail=""):
     """Append a timestamped entry to ~/.star_trail_cleanr/app_errors.log so GUI-side
@@ -140,6 +152,21 @@ def _log_app_error(context, exc=None, detail=""):
     try:
         import datetime
         import traceback
+        entry = (f"\n[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] "
+                 f"v{VERSION} {sys.platform} | {context}\n")
+        if detail:
+            entry += f"  {detail}\n"
+        if exc is not None:
+            entry += "".join(traceback.format_exception(
+                type(exc), exc, exc.__traceback__))
+        # Mirror into this run's Star Log first: one file, one place the user
+        # already knows how to open.
+        if _CURRENT_STAR_LOG and os.path.isfile(_CURRENT_STAR_LOG):
+            try:
+                with open(_CURRENT_STAR_LOG, "a", encoding="utf-8") as f:
+                    f.write(entry)
+            except OSError:
+                pass
         os.makedirs(os.path.dirname(_APP_ERROR_LOG), exist_ok=True)
         mode = "a"
         try:
@@ -148,13 +175,7 @@ def _log_app_error(context, exc=None, detail=""):
         except OSError:
             pass
         with open(_APP_ERROR_LOG, mode, encoding="utf-8") as f:
-            f.write(f"\n[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] "
-                    f"v{VERSION} {sys.platform} | {context}\n")
-            if detail:
-                f.write(f"  {detail}\n")
-            if exc is not None:
-                f.write("".join(traceback.format_exception(
-                    type(exc), exc, exc.__traceback__)))
+            f.write(entry)
     except Exception:
         pass   # the error log must never become its own crash
 
@@ -6697,6 +6718,7 @@ class MainWindow(QMainWindow):
             with open(_full, 'w', encoding='utf-8') as f:
                 f.write('\n'.join(lines) + '\n')
             self._last_log_path = _full  # opened by the "View Star Log" link
+            _set_current_star_log(_full)  # caught errors mirror into this file
         except OSError:
             pass
 
@@ -7273,6 +7295,7 @@ class TimelapsePanel(QWidget):
         self._bar.setValue(0)
         # Spinner + counting-up timer to the left of the phase text.
         self._phase_text = "Rendering…"
+        self._out_tail = []          # fresh output tail for this render
         self._render_started = time.time()
         self._spin_idx = 0
         if getattr(self, "_spin_timer", None) is None:
@@ -7297,6 +7320,10 @@ class TimelapsePanel(QWidget):
 
     def _on_proc_output(self):
         data = bytes(self._proc.readAllStandardOutput()).decode("utf-8", "replace")
+        # Keep the tail of the renderer's output so a failure can put the real
+        # reason in the Star Log instead of a bare "didn't finish".
+        self._out_tail = (getattr(self, "_out_tail", [])
+                          + [l for l in data.splitlines() if l.strip()])[-15:]
         for line in data.splitlines():
             if line.startswith("TIMELAPSE_PROGRESS:"):
                 try:
@@ -7331,7 +7358,10 @@ class TimelapsePanel(QWidget):
                     pass
         else:
             self._bar.setVisible(False)
-            self._status_lbl.setText("The timelapse didn't finish. The run log has the detail.")
+            _log_app_error("timelapse render failed",
+                           detail=f"exit code {code}; last output:\n  "
+                                  + "\n  ".join(getattr(self, "_out_tail", ["(none)"])))
+            self._status_lbl.setText("The timelapse didn't finish. The Star Log has the detail.")
 
     def _remove_partial(self):
         """Delete a half-written output file left by a cancelled/failed render."""
@@ -7629,6 +7659,7 @@ class StarTrailPanel(QWidget):
             self._phase_bounds[name] = (lo, acc)
         self._measured = {}     # phase timings reported by this build, saved at finish
         self._build_cancelled = False
+        self._out_tail = []          # fresh output tail for this build
         self._build_btn.setText("Stop")
         self._bar.setVisible(True)
         self._bar.setValue(0)
@@ -7671,6 +7702,10 @@ class StarTrailPanel(QWidget):
         # "<name> phase: Ns" timing lines are collected so the next build's
         # segments match this machine.
         data = bytes(self._proc.readAllStandardOutput()).decode("utf-8", "replace")
+        # Keep the tail of the builder's output so a failure can put the real
+        # reason in the Star Log instead of a bare "didn't finish".
+        self._out_tail = (getattr(self, "_out_tail", [])
+                          + [l for l in data.splitlines() if l.strip()])[-15:]
         for line in data.splitlines():
             s = line.strip()
             if s.startswith("HOTPIX_SKIPPED:"):
@@ -7749,7 +7784,10 @@ class StarTrailPanel(QWidget):
             self._open_star()               # auto-open the finished star trail
         else:
             self._bar.setVisible(False)
-            self._status_lbl.setText("The star trail didn't finish. The run log has the detail.")
+            _log_app_error("star trail build failed",
+                           detail=f"exit code {code}; last output:\n  "
+                                  + "\n  ".join(getattr(self, "_out_tail", ["(none)"])))
+            self._status_lbl.setText("The star trail didn't finish. The Star Log has the detail.")
 
     def shutdown(self):
         """Stop an in-progress rebuild; called by CreatorWindow's closeEvent (this
