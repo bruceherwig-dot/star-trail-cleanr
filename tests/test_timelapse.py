@@ -43,4 +43,6 @@ def test_estimate_is_resolution_independent():
 
 def test_version_is_current():
     # Bumped to 1.1 when the Blend pulldown was added (2026-07-03).
-    assert TIMELAPSE_VERSION == "1.1"
+    # Bumped to 1.2 with the encoder fallback (2026-07-20): a bundle missing
+    # imageio-ffmpeg now degrades to the OpenCV writer instead of crashing.
+    assert TIMELAPSE_VERSION == "1.2"

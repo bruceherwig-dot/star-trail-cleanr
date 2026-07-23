@@ -41,7 +41,7 @@ jobs:
         run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
       - name: Install dependencies
         run: |
-          pip install pyinstaller 'numpy<2' pillow PySide6 ultralytics sahi nvidia-ml-py sentry-sdk tifffile scikit-image pyobjc-core rawpy
+          pip install pyinstaller 'numpy<2' pillow PySide6 ultralytics sahi nvidia-ml-py sentry-sdk tifffile scikit-image imageio imageio-ffmpeg pyobjc-core rawpy
           pip uninstall -y opencv-python opencv-python-headless opencv-contrib-python opencv-contrib-python-headless || true
           pip install 'opencv-contrib-python-headless==4.11.0.86'
           python -c "import numpy,cv2,sys; print('numpy',numpy.__version__,'cv2',cv2.__version__,'xphoto' if hasattr(cv2,'xphoto') else 'NO-XPHOTO'); sys.exit(0 if (hasattr(cv2,'xphoto') and numpy.__version__[0]=='1') else 1)"
@@ -113,7 +113,7 @@ jobs:
         run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
       - name: Install dependencies
         run: |
-          pip install pyinstaller 'numpy<2' pillow PySide6 ultralytics sahi nvidia-ml-py sentry-sdk tifffile scikit-image pyobjc-core 'rawpy==0.25.1'
+          pip install pyinstaller 'numpy<2' pillow PySide6 ultralytics sahi nvidia-ml-py sentry-sdk tifffile scikit-image imageio imageio-ffmpeg pyobjc-core 'rawpy==0.25.1'
           pip uninstall -y opencv-python opencv-python-headless opencv-contrib-python opencv-contrib-python-headless || true
           pip install 'opencv-contrib-python-headless==4.11.0.86'
           python -c "import numpy,cv2,sys; print('numpy',numpy.__version__,'cv2',cv2.__version__,'xphoto' if hasattr(cv2,'xphoto') else 'NO-XPHOTO'); sys.exit(0 if (hasattr(cv2,'xphoto') and numpy.__version__[0]=='1') else 1)"
@@ -170,7 +170,7 @@ jobs:
         run: pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cpu
       - name: Install dependencies
         run: |
-          pip install pyinstaller 'numpy<2' pillow PySide6 ultralytics sahi nvidia-ml-py sentry-sdk tifffile scikit-image rawpy
+          pip install pyinstaller 'numpy<2' pillow PySide6 ultralytics sahi nvidia-ml-py sentry-sdk tifffile scikit-image imageio imageio-ffmpeg rawpy
           pip uninstall -y opencv-python opencv-python-headless opencv-contrib-python opencv-contrib-python-headless || true
           pip install 'opencv-contrib-python-headless==4.11.0.86'
           python -c "import numpy,cv2,sys; print('numpy',numpy.__version__,'cv2',cv2.__version__,'xphoto' if hasattr(cv2,'xphoto') else 'NO-XPHOTO'); sys.exit(0 if (hasattr(cv2,'xphoto') and numpy.__version__[0]=='1') else 1)"
@@ -257,7 +257,7 @@ jobs:
         run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
       - name: Install dependencies
         run: |
-          pip install pyinstaller 'numpy<2' pillow PySide6 ultralytics sahi nvidia-ml-py sentry-sdk tifffile scikit-image rawpy
+          pip install pyinstaller 'numpy<2' pillow PySide6 ultralytics sahi nvidia-ml-py sentry-sdk tifffile scikit-image imageio imageio-ffmpeg rawpy
           pip uninstall -y opencv-python opencv-python-headless opencv-contrib-python opencv-contrib-python-headless || true
           pip install 'opencv-contrib-python-headless==4.11.0.86'
           python -c "import numpy,cv2,sys; print('numpy',numpy.__version__,'cv2',cv2.__version__,'xphoto' if hasattr(cv2,'xphoto') else 'NO-XPHOTO'); sys.exit(0 if (hasattr(cv2,'xphoto') and numpy.__version__[0]=='1') else 1)"

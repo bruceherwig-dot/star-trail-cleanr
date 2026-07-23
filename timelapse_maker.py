@@ -39,7 +39,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from modules.io_safe import robust_imread, image_size, capture_time
 from modules.frame_list import IMAGE_EXTS, order_by_capture_time, natural_key
 
-TIMELAPSE_VERSION = "1.1"
+TIMELAPSE_VERSION = "1.2"   # 1.2: encoder fallback (missing bundled ffmpeg can no longer crash)
 
 # Target LONG-EDGE pixel counts for each preset. "full" keeps the native size.
 # We never upscale: a preset bigger than the source falls back to full.
@@ -95,6 +95,51 @@ def estimate_output_bytes(n_frames, fps, width, height):
     return int(VIDEO_BITRATE_BPS / 8 * duration_s * 1.05)
 
 
+def _open_writer(out_path, fps, tw, th):
+    """Return a frame writer that takes BGR frames. Uses imageio/libx264 at
+    constant 15 Mbps with the dark-sky settings when the bundled ffmpeg is
+    present; falls back to the OpenCV writer otherwise, so a missing encoder
+    degrades to a working (lower-grade) movie instead of a crash dialog. That
+    crash shipped: frozen builds never actually contained imageio-ffmpeg (it
+    was missing from the CI installs) and this file had no net, so the first
+    Windows user to render a timelapse got an unhandled-exception box
+    (field report, 2026-07-20). Same pattern as make_share_clip._open_writer.
+    Prints the encoder in use so the window's log and the CI bundle smoke test
+    can see which path ran."""
+    import cv2
+    try:
+        import imageio_ffmpeg  # noqa: F401  (ensures the bundled ffmpeg is present)
+        import imageio
+        w = imageio.get_writer(
+            out_path, format="FFMPEG", mode="I", fps=fps, codec="libx264",
+            macro_block_size=None, ffmpeg_params=VIDEO_FFMPEG_PARAMS)
+
+        class _W:
+            backend = "imageio/libx264 CBR-15M aq-mode=3 +grain"
+
+            def write(self, bgr):
+                w.append_data(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+
+            def close(self):
+                w.close()
+        return _W()
+    except Exception as e:
+        print(f"  (bundled ffmpeg unavailable: {e}; using OpenCV writer)", flush=True)
+        vw = cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*"avc1"), fps, (tw, th))
+        if not vw.isOpened():
+            vw = cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (tw, th))
+
+        class _W:
+            backend = "opencv (low bitrate fallback)"
+
+            def write(self, bgr):
+                vw.write(bgr)
+
+            def close(self):
+                vw.release()
+        return _W()
+
+
 def render(frames_dir, out_path, size_key="4k", fps=30, style="plain",
            blend_window=3, limit=0):
     """Encode the timelapse. Prints TIMELAPSE_PROGRESS lines the window reads to
@@ -112,10 +157,8 @@ def render(frames_dir, out_path, size_key="4k", fps=30, style="plain",
           f"{tw}x{th} @ {fps}fps, style={style}", flush=True)
 
     import cv2
-    import imageio
-    writer = imageio.get_writer(
-        out_path, format="FFMPEG", mode="I", fps=fps, codec="libx264",
-        macro_block_size=None, ffmpeg_params=VIDEO_FFMPEG_PARAMS)
+    writer = _open_writer(out_path, fps, tw, th)
+    print(f"  encoder: {writer.backend}", flush=True)
 
     buf = []
     n = len(frames)
@@ -137,7 +180,7 @@ def render(frames_dir, out_path, size_key="4k", fps=30, style="plain",
             frame = img
         if (frame.shape[1], frame.shape[0]) != (tw, th):
             frame = cv2.resize(frame, (tw, th), interpolation=cv2.INTER_AREA)
-        writer.append_data(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        writer.write(frame)
         written += 1
         if i % 5 == 0 or i == n - 1:
             print(f"TIMELAPSE_PROGRESS: {i + 1}/{n}", flush=True)

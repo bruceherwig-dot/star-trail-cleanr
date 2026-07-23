@@ -199,6 +199,43 @@ def main():
 
         print("\nPASS: all output formats (jpg, tif8, tif16) bundled cleanly", flush=True)
 
+        # Timelapse render through the bundled encoder. Regression net for the
+        # 2026-07-20 field report: imageio-ffmpeg was never installed by CI, so
+        # every frozen build shipped without the real video encoder -- dev runs
+        # worked (local pip had it) and the gap was invisible until a Windows
+        # user's timelapse crashed. The render must succeed AND use the real
+        # imageio/libx264 encoder: the OpenCV fallback keeps field users
+        # un-crashed, but a CI build that falls back means the bundle is
+        # missing its encoder, so the build must die here, not ship.
+        tl_script = worker.parent / "timelapse_maker.py"
+        tl_out = Path(td) / "smoke_timelapse.mp4"
+        cmd = [
+            str(exe), "--cleanr-worker", str(tl_script),
+            str(in_dir), "-o", str(tl_out), "--size", "full", "--fps", "5",
+        ]
+        print("\n=== Smoke: timelapse (bundled ffmpeg encoder) ===", flush=True)
+        print(f"Running: {' '.join(cmd)}", flush=True)
+        try:
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=TIMEOUT_SECS,
+            )
+        except subprocess.TimeoutExpired:
+            print(f"FAIL (timelapse): did not finish within {TIMEOUT_SECS}s", file=sys.stderr)
+            sys.exit(1)
+        print(proc.stdout, flush=True)
+        print(proc.stderr, flush=True)
+        if proc.returncode != 0:
+            print(f"FAIL (timelapse): worker exited {proc.returncode}", file=sys.stderr)
+            sys.exit(1)
+        if not tl_out.exists() or tl_out.stat().st_size == 0:
+            print("FAIL (timelapse): no movie file produced", file=sys.stderr)
+            sys.exit(1)
+        if "imageio/libx264" not in proc.stdout:
+            print("FAIL (timelapse): bundle is missing imageio-ffmpeg; the OpenCV "
+                  "fallback was used. The real encoder must ship.", file=sys.stderr)
+            sys.exit(1)
+        print("PASS (timelapse): bundled ffmpeg encoder produced the movie", flush=True)
+
 
 if __name__ == "__main__":
     main()
