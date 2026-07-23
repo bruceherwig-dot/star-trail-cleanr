@@ -2,6 +2,12 @@
 
 ---
 
+## v2.79-beta
+- **Timelapse and video features now actually ship with their video encoder.** A Windows user's error report (thank you, Philip) revealed that no installed copy of the app has ever contained the high-quality video encoder: it was missing from the build recipe on every platform, and only worked in development where it happened to be installed. Effects until now: rendering a timelapse on an installed copy crashed with an error dialog, and the before/after share clip quietly used a lower-quality backup encoder. Both are fixed: the encoder is now bundled on all platforms, and every build is machine-tested to prove the real encoder is inside before it can be released.
+- **A missing encoder can no longer crash the timelapse.** Even if something on a user's machine strips the encoder out (some antivirus software does), the timelapse now falls back to a backup encoder and still produces a movie, with a note in the log, instead of a crash dialog.
+- **Removed a leftover experimental sky-speck cleanup from star trail builds.** A June experiment that automatically erased stuck camera pixels from the finished star trail turned out to almost never run (the app deleted its defect map before the star trail was built), and in rare cases it could smudge real scenery it mistook for defects. It's gone. Sky speck cleaning is the "Remove hot pixels & colored specks" checkbox in the Star Trail window, which is unaffected; ground cleaning during the run is unaffected.
+- **Smoke tests:** 242 passing.
+
 ## v2.78-beta
 - **The star trail build's progress bar now tracks the whole job.** It used to fill up within seconds (it only followed the frame-stacking step) and then sit at 100% while the finishing steps, sky speck cleanup, trail thickening, and saving, ran silently for most of the build. Now every step reports its progress, the bar's sections are sized by how long each step actually takes on your computer (it learns from your previous build), and it only reaches 100% when the image is written. The label under the bar names the step it's on.
 - **Trail Thickness is much faster.** The thickening step was redoing the same work tens of thousands of times; on a full-resolution build it took about 13 seconds and now takes about 1. The result is pixel-for-pixel identical.
