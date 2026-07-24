@@ -394,6 +394,11 @@ $current_version = '';
 foreach (array_keys($ver) as $vk) {
     if ($current_version === '' || version_compare($vk, $current_version, '>')) $current_version = $vk;
 }
+// Ordered by version number, newest first (not by user count): the list reads
+// as a release timeline, so adoption of the newest build is visible at the top.
+$ver_list = array();
+foreach ($ver as $vk => $set) $ver_list[] = array('name' => $vk, 'count' => count($set));
+usort($ver_list, function ($a, $b) { return version_compare($b['name'], $a['name']); });
 
 echo json_encode(array(
     'trails_cleaned'        => $BASELINE_TRAILS + $trails,
@@ -427,7 +432,7 @@ echo json_encode(array(
     'windows_gpu'           => $windows_gpu,
     'windows_gpu_pct'       => $windows_users ? (int) round($windows_gpu * 100 / $windows_users) : 0,
     'timelapses'            => $timelapses,
-    'versions'              => ranked($ver),
+    'versions'              => $ver_list,
     'current_version'       => $current_version,
     'generated'             => gmdate('c'),
 ));
