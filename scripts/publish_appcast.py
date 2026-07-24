@@ -55,7 +55,17 @@ GH_REPO = "bruceherwig-dot/star-trail-cleanr"
 # Base URL where a tagged release's installer files live on GitHub.
 RELEASE_BASE = f"https://github.com/{GH_REPO}/releases/download"
 # Base URL where the live appcast feeds are served from (GitHub Pages).
+# Still published every release: installs older than v2.80 read these.
 PAGES_BASE = "https://bruceherwig-dot.github.io/star-trail-cleanr"
+# Our own server: the feeds the app reads from v2.80 on (chosen 2026-07-24
+# after a tester's machine blocked the updater's GitHub fetch while our site
+# worked fine). Single-item feeds whose download links point at the mirror
+# installer copies uploaded by scripts/mirror_upload.py each release.
+MIRROR_BASE = "https://api.startrailcleanr.com"
+MIRROR_DL = f"{MIRROR_BASE}/downloads"
+MIRROR_DIR = "/home/dh_bmigjp/api.startrailcleanr.com"
+MIRROR_HOST = "pdx1-shared-a4-09.dreamhost.com"
+MIRROR_USER = "dh_bmigjp"
 # XML namespace Sparkle uses for its custom tags (version, signature, etc.).
 SPARKLE_NS = "http://www.andymatuschak.org/xml-namespaces/sparkle"
 
@@ -234,12 +244,28 @@ def fetch_live(appcast, timeout=20):
     """
     # Unique query string each call busts the CDN cache so we always see the
     # newest published feed.
-    url = f"{PAGES_BASE}/{appcast}?cb={int(time.time())}"
+    return fetch_url(f"{PAGES_BASE}/{appcast}", timeout=timeout)
+
+
+def fetch_url(url, timeout=20):
+    """Download one URL as text with cache-busting, shared by both the GitHub
+    Pages fetch (fetch_live) and the mirror-feed verification."""
+    full = f"{url}?cb={int(time.time())}"
     req = urllib.request.Request(
-        url, headers={"Cache-Control": "no-cache", "Pragma": "no-cache",
-                      "User-Agent": "StarTrailCleanR-AppcastPublish"})
+        full, headers={"Cache-Control": "no-cache", "Pragma": "no-cache",
+                       "User-Agent": "StarTrailCleanR-AppcastPublish"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read().decode("utf-8")
+
+
+def head_length(url, timeout=20):
+    """Content length of one URL from a HEAD request (no download), used to
+    confirm each mirror installer matches the size its feed item advertises."""
+    req = urllib.request.Request(
+        f"{url}?cb={int(time.time())}", method="HEAD",
+        headers={"User-Agent": "StarTrailCleanR-AppcastPublish"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return int(resp.headers.get("Content-Length", -1))
 
 
 def do_publish(args):
@@ -288,6 +314,94 @@ def do_publish(args):
         print(f"  prepended Version {short} -> {platform['appcast']}")
 
     print("\nAppcast files updated. The workflow will commit + push them to gh-pages.")
+
+
+def do_publish_mirror(args):
+    """Mirror mode: publish single-item feeds on our own server.
+
+    From v2.80 the app reads its update feed from api.startrailcleanr.com, so a
+    machine that blocks GitHub (VPN, firewall, security software, or a country
+    block) can still check for and download updates. For each platform this:
+
+      1. Fetches the LIVE GitHub Pages feed (the publish-appcast job has already
+         verified it tops out at this release).
+      2. Takes only its newest <item> and repoints the download link at the
+         mirror installer copy (same bytes, so the signature still verifies —
+         the mirror holds only the CURRENT release under stable filenames,
+         which is why the mirror feed carries one item, not history).
+      3. Uploads the feed to the server, then HARD-FAILS unless the live mirror
+         feed advertises this version AND each mirror installer's actual size
+         matches the size the feed item advertises (catches a mirror that
+         didn't refresh).
+
+    Needs DREAMHOST_PASSWORD in the environment; a missing password is a
+    FAILURE, not a skip — these feeds are what shipped apps read."""
+    numeric, _ = parse_version(args.tag)
+    password = os.environ.get("DREAMHOST_PASSWORD", "")
+    if not password:
+        sys.exit("DREAMHOST_PASSWORD not set — the mirror feeds are what the "
+                 "app reads; refusing to skip.")
+    import io
+    import paramiko
+
+    uploads = {}
+    for platform in PLATFORMS:
+        appcast = platform["appcast"]
+        live = fetch_live(appcast)
+        top = top_item_version(live)
+        if top != numeric:
+            sys.exit(f"{appcast}: GitHub Pages feed tops at {top!r}, expected "
+                     f"{numeric!r} — publish-appcast must succeed first.")
+        start = live.find("<item>")
+        end = live.rfind("</item>") + len("</item>")
+        if start == -1 or end <= start:
+            sys.exit(f"{appcast}: no <item> found in live feed")
+        first_end = live.index("</item>", start) + len("</item>")
+        item = live[start:first_end]
+        gh_url = f"{RELEASE_BASE}/{args.tag}/{platform['release_filename']}"
+        mirror_url = f"{MIRROR_DL}/{platform['release_filename']}"
+        if gh_url not in item:
+            sys.exit(f"{appcast}: newest item does not reference {gh_url}; "
+                     "refusing to guess which link to repoint.")
+        item = item.replace(gh_url, mirror_url)
+        feed = live[:start] + item + live[end:]
+        uploads[appcast] = (feed, item, mirror_url)
+
+    t = paramiko.Transport((MIRROR_HOST, 22))
+    t.connect(username=MIRROR_USER, password=password)
+    sftp = paramiko.SFTPClient.from_transport(t)
+    for appcast, (feed, _item, _url) in uploads.items():
+        remote = f"{MIRROR_DIR}/{appcast}"
+        sftp.putfo(io.BytesIO(feed.encode("utf-8")), remote)
+        sftp.chmod(remote, 0o644)
+        print(f"uploaded {appcast} -> {remote}")
+    sftp.close()
+    t.close()
+
+    # Hard gate: the live mirror feeds must advertise this version, and each
+    # mirror binary must match the byte length its feed item promises.
+    failures = []
+    for appcast, (_feed, item, mirror_url) in uploads.items():
+        live = fetch_url(f"{MIRROR_BASE}/{appcast}")
+        top = top_item_version(live)
+        if top != numeric:
+            failures.append(f"{appcast}: live mirror feed tops at {top!r}")
+            continue
+        m = re.search(r'length="(\d+)"', item)
+        want = int(m.group(1)) if m else -1
+        got = head_length(mirror_url)
+        if got != want:
+            failures.append(f"{appcast}: mirror installer {mirror_url} is "
+                            f"{got} bytes, feed advertises {want} — mirror "
+                            "out of sync with this release")
+            continue
+        print(f"  OK  {appcast} -> {numeric}, installer size matches ({got} bytes)")
+    if failures:
+        print("\nFAILED mirror publish:")
+        for f in failures:
+            print(f"  {f}")
+        sys.exit(1)
+    print(f"\nAll mirror feeds live at {numeric} with matching installers.")
 
 
 def do_verify(args):
@@ -343,6 +457,9 @@ def main():
     parser.add_argument("tag", help="Release tag, e.g. v2.47-beta")
     parser.add_argument("--verify", action="store_true",
                         help="Verify-only: poll live feeds, exit non-zero unless all advertise <tag>.")
+    parser.add_argument("--publish-mirror", action="store_true",
+                        help="Publish single-item feeds to our own server (the feeds the app "
+                             "reads from v2.80 on); needs DREAMHOST_PASSWORD in the environment.")
     parser.add_argument("--artifacts-dir", help="Folder containing the built installers (searched recursively).")
     parser.add_argument("--key-file", help="Path to the Sparkle ed25519 private key file.")
     parser.add_argument("--gh-pages-dir", help="Checked-out gh-pages working copy to update in place.")
@@ -352,6 +469,8 @@ def main():
 
     if args.verify:
         do_verify(args)
+    elif args.publish_mirror:
+        do_publish_mirror(args)
     else:
         missing = [n for n in ("artifacts_dir", "key_file", "gh_pages_dir")
                    if getattr(args, n) is None]

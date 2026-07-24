@@ -19,7 +19,8 @@ There are TWO independent update channels, and they read DIFFERENT sources:
 1. **The orange BANNER** reads **GitHub `/releases/latest`** (the REST API). It only fires when a real
    GitHub **release** exists with a newer version. A higher entry in the appcast feed does NOT make the
    banner appear. (`modules/update_check.py`.)
-2. **The Sparkle ENGINE** (the native install window) reads the **appcast XML feed** on gh-pages. The
+2. **The Sparkle ENGINE** (the native install window) reads the **appcast XML feed** — from
+   `api.startrailcleanr.com` (our server) in v2.80+, from gh-pages in older installs. The
    banner's Download button and Settings → Check for Updates both drive this engine, which then shows
    its own install window. (`modules/sparkle_updater.py` + the appcasts.)
 
@@ -37,7 +38,8 @@ Python ↔ Sparkle ↔ macOS boundary, which dev and CI cannot see.
 **RULE: no release is shipped until a real frozen build has been watched doing a full update end to end
 (banner appears → click → install window opens) WITHOUT crashing.** The repeatable test:
 1. Publish a throwaway `vX.YY-test` GitHub release (higher number; cancel the CI it triggers) so the
-   banner fires, and add a matching temp top entry to the appcast feed so the engine has something to show.
+   banner fires, and add a matching temp top entry to the appcast feed the build under test READS
+   (v2.80+: the mirror feed on api.startrailcleanr.com; pre-2.80: gh-pages) so the engine has something to show.
 2. Install the real build, relaunch, confirm the banner appears, click it, confirm the Sparkle install
    window opens with no crash. Do NOT install. Click Skip.
 3. Delete the throwaway release + tag and revert the appcast. (`/releases/latest` may 404 for a few
@@ -69,17 +71,33 @@ which has no built-in installer and uses a download link.
 ### Half 1: PUBLISHING (server side) — putting each new version into the feed
 
 - The "feed" is three XML files (Sparkle/WinSparkle "appcasts"), one per
-  platform, hosted on GitHub Pages:
-  - `appcast-mac-apple-silicon.xml`, `appcast-mac-intel.xml`, `appcast-windows.xml`
-  - at `https://bruceherwig-dot.github.io/star-trail-cleanr/`
-- Publishing happens **automatically on every release tag**, in CI:
-  `.github/workflows/build.yml` → the **`publish-appcast`** job. It signs each
-  installer with the `SPARKLE_ED_PRIVATE_KEY` GitHub secret, prepends the new
-  version to each feed (`scripts/publish_appcast.py`), pushes to the `gh-pages`
-  branch, then **HARD-FAILS the build if the live feeds don't show the new
-  version.**
-- **"Release done" = the `publish-appcast` job is GREEN**, not just "the build
-  compiled." If that job is red, auto-update users did NOT get the release.
+  platform: `appcast-mac-apple-silicon.xml`, `appcast-mac-intel.xml`,
+  `appcast-windows.xml`. They live in TWO places:
+  - **`https://api.startrailcleanr.com/` — OUR server. The feeds the app READS
+    from v2.80 on** (chosen 2026-07-24: a tester's VPN/security setup blocked
+    the engine's GitHub fetch while our site worked). Single-item feeds; their
+    download links point at the mirror installer copies on the same server
+    (`/downloads/`), so a GitHub-blocked machine can both check AND download.
+  - `https://bruceherwig-dot.github.io/star-trail-cleanr/` — GitHub Pages,
+    full history. **Still published every release**: installs older than
+    v2.80 have this address baked in.
+- Publishing happens **automatically on every release tag**, in CI
+  (`.github/workflows/build.yml`), in two chained jobs:
+  - **`publish-appcast`**: signs each installer with the
+    `SPARKLE_ED_PRIVATE_KEY` GitHub secret, prepends the new version to each
+    gh-pages feed (`scripts/publish_appcast.py`), pushes, then HARD-FAILS
+    unless the live gh-pages feeds show the new version.
+  - **`publish-appcast-mirror`** (needs publish-appcast + mirror-installers):
+    takes each verified feed's newest item, repoints its download link at the
+    mirror copy (same bytes, same signature), uploads the single-item feeds to
+    our server (`scripts/publish_appcast.py --publish-mirror`), then
+    HARD-FAILS unless the live mirror feeds advertise the new version AND each
+    mirror installer's size matches what the feed promises.
+  - `mirror-installers` is CRITICAL PATH for the same reason (the feed the app
+    reads points at its files); it hard-fails on a missing secret or installer.
+- **"Release done" = `publish-appcast` AND `publish-appcast-mirror` both
+  GREEN**, not just "the build compiled." If either is red, auto-update users
+  did NOT get the release.
 - **History (why this is automated now):** publishing used to be a manual local
   command (`scripts/release_signer.py`) run on Bruce's Mac. It got skipped after
   v2.04-beta. The feed sat **frozen at 2.04 for 39 days** (May 1 – Jun 9, 2026)
@@ -136,7 +154,7 @@ was removed.
 **B) The one-click install engine (Sparkle on Mac, WinSparkle on Windows).**
 - Code: `modules/sparkle_updater.py`, `modules/winsparkle_updater.py`; started at
   launch in `star_trail_cleanr.py` (`init_sparkle` / `init_winsparkle`).
-- It reads the **appcast feed** and does the download + in-place install + restart.
+- It reads the **appcast feed** (our server in v2.80+, gh-pages before) and does the download + in-place install + restart.
 - It is **NO LONGER triggered automatically on launch** — the
   `check_for_updates_in_background()` launch call was removed 2026-06-19. It is
   driven by the **banner's Update button** and **Settings → Check for Updates**.

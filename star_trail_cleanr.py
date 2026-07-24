@@ -8308,8 +8308,11 @@ if __name__ == '__main__':
         # _on_update_result for the banner.
     elif sys.platform == "win32":
         from modules.winsparkle_updater import init_winsparkle
+        # Feed served from OUR server (v2.80+), not GitHub Pages: machines that
+        # block GitHub (VPN/security software) can still check and download.
+        # gh-pages feeds remain published for pre-2.80 installs.
         init_winsparkle(
-            appcast_url="https://bruceherwig-dot.github.io/star-trail-cleanr/appcast-windows.xml",
+            appcast_url="https://api.startrailcleanr.com/appcast-windows.xml",
             app_name="Star Trail CleanR",
             app_version=VERSION,
             company_name="Star Trail CleanR",

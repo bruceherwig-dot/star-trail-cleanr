@@ -427,18 +427,15 @@ jobs:
           fi
 
   mirror-installers:
-    # Layer 2 of the update failsafe: copy the four installers to our own
-    # DreamHost mirror (https://api.startrailcleanr.com/downloads/) so a user who
-    # cannot reach github.com (GitHub blocked in-country) can still download.
-    # website/latest.php serves the mirror URL when the file is present, else the
-    # GitHub URL, so this step "lights up" the mirror each release. Independent
-    # job (nothing needs it) + continue-on-error + a no-op when the DREAMHOST
-    # secret is unset, so a mirror hiccup can NEVER block the release or the
-    # auto-update feeds that actually reach users.
+    # Copies the four installers to our own DreamHost mirror
+    # (https://api.startrailcleanr.com/downloads/). CRITICAL PATH since v2.80:
+    # the app's update engine reads its feed from api.startrailcleanr.com and
+    # that feed's download links point at these mirror copies, so this job
+    # HARD-FAILS on a missing secret or missing installer. (It also still
+    # serves website/latest.php's GitHub-blocked download fallback.)
     needs: [build-mac, build-mac-intel, build-windows, build-linux]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -454,3 +451,27 @@ jobs:
         env:
           DREAMHOST_PASSWORD: ${{ secrets.DREAMHOST_PASSWORD }}
         run: python3 scripts/mirror_upload.py artifacts
+
+  publish-appcast-mirror:
+    # The feeds the app actually reads from v2.80 on. Takes the newest item
+    # from each just-verified GitHub Pages feed, repoints its download link at
+    # the mirror installer copy (same bytes, same signature), uploads the
+    # single-item feeds to api.startrailcleanr.com, and HARD-FAILS unless the
+    # live mirror feeds advertise this release AND each mirror installer's
+    # size matches what the feed promises. Runs after BOTH the gh-pages
+    # publish (source of the signed item) and the mirror upload (source of
+    # the binaries) so it can never advertise files that aren't there.
+    needs: [publish-appcast, mirror-installers]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install paramiko
+        run: pip install paramiko
+      - name: Publish and verify the mirror feeds
+        env:
+          DREAMHOST_PASSWORD: ${{ secrets.DREAMHOST_PASSWORD }}
+        run: python3 scripts/publish_appcast.py "${GITHUB_REF_NAME}" --publish-mirror

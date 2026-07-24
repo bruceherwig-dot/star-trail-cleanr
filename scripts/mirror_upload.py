@@ -13,13 +13,14 @@ Usage:  python3 scripts/mirror_upload.py <artifacts_dir>
     <artifacts_dir> is searched recursively for each expected installer filename.
 
 Credentials: the SFTP password comes from the DREAMHOST_PASSWORD environment
-variable (a GitHub Actions secret in CI). If it is unset/empty, this exits 0
-without doing anything, so the mirror step is a no-op until the secret is added --
-it can never block a release. The host/user are not secret.
+variable (a GitHub Actions secret in CI). The host/user are not secret. Never
+prints the password.
 
-Never prints the password. Never fails the build: a missing file is reported (not
-silently skipped) and the script still exits 0 -- the latest.php fallback means a
-miss just serves the GitHub URL for that platform.
+CRITICAL PATH since v2.80: the app's update engine reads its feed from
+api.startrailcleanr.com, and that feed's download links point at these mirror
+copies. A missing password or missing installer now FAILS the build (exit 1) --
+a release whose mirror didn't refresh would advertise an update its own
+download links can't serve. (Before v2.80 this was a best-effort no-op layer.)
 """
 import glob
 import os
@@ -44,29 +45,30 @@ EXPECTED = [
 def main() -> int:
     if len(sys.argv) < 2:
         print("usage: mirror_upload.py <artifacts_dir>")
-        return 0  # never fail the build on a usage slip
+        return 1
     artifacts_dir = sys.argv[1]
 
     password = os.environ.get("DREAMHOST_PASSWORD", "").strip()
     if not password:
-        print("DREAMHOST_PASSWORD not set -- skipping mirror upload (no-op). "
-              "Add the GitHub secret to enable it.")
-        return 0
+        print("DREAMHOST_PASSWORD not set -- FAILING: the app's update feed "
+              "points at this mirror, so a release without it is broken.")
+        return 1
 
     # Locate each expected installer anywhere under the artifacts dir (the CI
     # download-artifact step nests each in its own subfolder).
     found = {}
+    missing = []
     for name in EXPECTED:
         hits = glob.glob(os.path.join(artifacts_dir, "**", name), recursive=True)
         if hits:
             found[name] = hits[0]
         else:
-            print(f"WARNING: {name} not found under {artifacts_dir} -- "
-                  f"latest.php will serve the GitHub URL for it this release")
-
-    if not found:
-        print("No installers found to mirror; nothing uploaded.")
-        return 0
+            missing.append(name)
+    if missing:
+        print("FAILING: these installers were not found under "
+              f"{artifacts_dir}: {', '.join(missing)} -- the update feed "
+              "points at the mirror, so every installer must be present.")
+        return 1
 
     import paramiko
     t = paramiko.Transport((HOST, PORT))

@@ -541,10 +541,14 @@ if sys.platform == 'win32':
 # runtime via the ctypes wrapper in modules/winsparkle_updater.py — no
 # Info.plist equivalent needed; just the DLL placement.
 
-# GitHub Pages hosts the appcast XML feeds (one per platform) on the
-# repo's gh-pages branch. URLs are stable across releases; only the
-# advertised version inside the XML changes.
-APPCAST_BASE = 'https://bruceherwig-dot.github.io/star-trail-cleanr'
+# The app reads its update feed from OUR OWN server (v2.80+), so machines
+# that block GitHub (VPNs, security software, country blocks) can still check
+# for and download updates -- a tester's machine hit exactly that 2026-07-24.
+# The publish-appcast-mirror CI job publishes these feeds each release, with
+# download links pointing at the mirror installer copies on the same server.
+# GitHub Pages feeds are STILL published every release for installs older
+# than v2.80, whose baked-in URL points there.
+APPCAST_BASE = 'https://api.startrailcleanr.com'
 
 sparkle_pubkey_path = os.path.join(os.path.dirname(__file__), 'assets', 'sparkle_public_key.txt')
 sparkle_pubkey = None
