@@ -2307,6 +2307,10 @@ class MainWindow(QMainWindow):
     UI and _on_* methods that handle button clicks and worker signals.
     """
     update_failed = Signal()  # WinSparkle reported a failed user-initiated check
+    # Quiet-check outcomes (Windows, 2026-07-25): the engine checks without its
+    # own windows; these marshal its worker-thread callbacks onto the UI thread.
+    update_found_quiet = Signal()   # newer version confirmed -> open install window
+    update_none_quiet = Signal()    # check completed, already newest
 
     def __init__(self):
         """Build the whole window: restore saved geometry (or open at a
@@ -2965,7 +2969,14 @@ class MainWindow(QMainWindow):
             box = QMessageBox(self)
             box.setWindowTitle("Couldn't install the update")
             box.setIcon(QMessageBox.Warning)
-            box.setText("Star Trail CleanR couldn't install the update automatically.")
+            # If the banner's own check (different connection method) already
+            # confirmed a newer version, name it -- the user should know WHAT
+            # they're missing, not just that the installer is blocked.
+            known = getattr(self, "_update_banner_tag", None)
+            box.setText(
+                f"Version {known} is available, but Star Trail CleanR couldn't "
+                "install it automatically." if known else
+                "Star Trail CleanR couldn't install the update automatically.")
             box.setInformativeText(
                 "This is almost always something on your computer blocking the "
                 "updater, a security suite, VPN, or firewall, not a problem with "
@@ -2993,15 +3004,49 @@ class MainWindow(QMainWindow):
                 if not check_for_updates():
                     self._updater_unavailable_fallback()
             elif sys.platform == "win32":
-                from modules.winsparkle_updater import check_for_updates
-                if not check_for_updates():
-                    self._updater_unavailable_fallback()
+                self._win_check_for_updates()
             else:
                 import webbrowser
                 webbrowser.open("https://startrailcleanr.com")
         else:
             import webbrowser
             webbrowser.open("https://startrailcleanr.com")
+
+    def _win_check_for_updates(self):
+        """Windows update check, quiet-first (2026-07-25). The engine checks
+        WITHOUT its own windows; the outcome comes back through the quiet
+        signals: found -> _on_quiet_update_found opens the engine's install
+        window; not found -> _on_quiet_update_none shows our up-to-date note;
+        failure -> _on_update_failed shows our explain-and-download dialog.
+        Machines whose Windows networking layer blocks the engine (a real
+        tester's machine) used to get the engine's dead-end 'Update Error!'
+        box first; now they only ever see our dialog. Falls back to the old
+        engine-UI check when quiet checking isn't available (old DLL), and to
+        the visible fallback when the engine never loaded."""
+        from modules.winsparkle_updater import check_for_updates_quiet, check_for_updates
+        if check_for_updates_quiet():
+            return
+        if not check_for_updates():
+            self._updater_unavailable_fallback()
+
+    def _on_quiet_update_found(self):
+        """A quiet Windows check confirmed a newer version: now open the
+        engine's normal install window (its fetch just succeeded, so this
+        cannot produce the error box)."""
+        from modules.winsparkle_updater import check_for_updates
+        if not check_for_updates():
+            self._updater_unavailable_fallback()
+
+    def _on_quiet_update_none(self):
+        """A quiet Windows check completed: already on the newest version."""
+        try:
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Information)
+            box.setWindowTitle("You're up to date")
+            box.setText(f"Star Trail CleanR {VERSION} is the newest version.")
+            box.exec()
+        except Exception:
+            pass
 
     # ── About tab ────────────────────────────────────────────────────────────
 
@@ -3358,9 +3403,7 @@ class MainWindow(QMainWindow):
             if not check_for_updates():
                 self._updater_unavailable_fallback()
         elif sys.platform == "win32":
-            from modules.winsparkle_updater import check_for_updates
-            if not check_for_updates():
-                self._updater_unavailable_fallback()
+            self._win_check_for_updates()
         elif self._update_download_url:
             from PySide6.QtCore import QUrl
             from PySide6.QtGui import QDesktopServices
@@ -8346,9 +8389,15 @@ if __name__ == '__main__':
     # callback safely onto the UI thread.
     if sys.platform == "win32" and getattr(sys, "frozen", False):
         try:
-            from modules.winsparkle_updater import set_error_handler
+            from modules.winsparkle_updater import set_error_handler, set_quiet_handlers
             window.update_failed.connect(window._on_update_failed)
             set_error_handler(window.update_failed.emit)
+            # Quiet-check outcomes (see _win_check_for_updates): found opens the
+            # engine's install window; not-found shows our up-to-date note.
+            window.update_found_quiet.connect(window._on_quiet_update_found)
+            window.update_none_quiet.connect(window._on_quiet_update_none)
+            set_quiet_handlers(found=window.update_found_quiet.emit,
+                               notfound=window.update_none_quiet.emit)
         except Exception:
             pass
 

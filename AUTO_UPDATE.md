@@ -155,6 +155,18 @@ was removed.
 - Code: `modules/sparkle_updater.py`, `modules/winsparkle_updater.py`; started at
   launch in `star_trail_cleanr.py` (`init_sparkle` / `init_winsparkle`).
 - It reads the **appcast feed** (our server in v2.80+, gh-pages before) and does the download + in-place install + restart.
+- **Windows quiet-first checks (v2.80+, 2026-07-25):** a user-initiated check
+  (Settings button / banner button) runs `win_sparkle_check_update_without_ui`
+  first — no engine windows. Outcomes come back via callbacks
+  (`modules/winsparkle_updater.py` quiet handlers): FOUND → the engine's normal
+  install window opens (its fetch just succeeded); NOT FOUND → our own
+  "You're up to date" note; ERROR → only our "Couldn't install the update"
+  dialog (which names the newer version when the banner already confirmed one)
+  with the Download Latest button. The engine's own dead-end "Update Error!"
+  box no longer appears — a real tester's machine blocks the engine's Windows
+  networking layer entirely (VPN on or off, any feed host), and that box gave
+  her nothing to act on. Falls back to the old engine-UI check when the DLL
+  lacks the outcome callbacks. Mac is unchanged (no field failures there).
 - It is **NO LONGER triggered automatically on launch** — the
   `check_for_updates_in_background()` launch call was removed 2026-06-19. It is
   driven by the **banner's Update button** and **Settings → Check for Updates**.

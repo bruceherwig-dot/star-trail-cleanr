@@ -75,6 +75,49 @@ def set_error_handler(fn):
     _error_handler = fn
 
 
+# Quiet-check support (2026-07-25): a user-initiated check runs WITHOUT the
+# engine's own windows (win_sparkle_check_update_without_ui) and reports its
+# outcome through these callbacks. The engine's install window is only shown
+# AFTER a confirmed find, so a machine whose Windows networking layer blocks
+# the engine (a real tester's machine) sees OUR dialog instead of the engine's
+# dead-end "Update Error!" box. Callback objects live at module scope so ctypes
+# keeps them alive while WinSparkle holds their pointers.
+_found_cb = None
+_notfound_cb = None
+_found_handler = None
+_notfound_handler = None
+
+
+def _on_winsparkle_found():
+    """Engine thread: a quiet check confirmed a newer version exists."""
+    global _user_initiated
+    try:
+        if _user_initiated and _found_handler is not None:
+            _found_handler()
+    except Exception:
+        pass
+    _user_initiated = False
+
+
+def _on_winsparkle_notfound():
+    """Engine thread: a quiet check completed; already on the newest version."""
+    global _user_initiated
+    try:
+        if _user_initiated and _notfound_handler is not None:
+            _notfound_handler()
+    except Exception:
+        pass
+    _user_initiated = False
+
+
+def set_quiet_handlers(found, notfound):
+    """Register the outcome callables for quiet checks (thread-safe required;
+    the GUI passes Qt signal .emit functions)."""
+    global _found_handler, _notfound_handler
+    _found_handler = found
+    _notfound_handler = notfound
+
+
 def _find_winsparkle_dll():
     """Return absolute path to WinSparkle.dll inside the frozen bundle, or
     None if we're not in a frozen Windows bundle. The build places the DLL
@@ -142,6 +185,19 @@ def init_winsparkle(appcast_url, app_name, app_version, company_name="Star Trail
             _dll.win_sparkle_set_error_callback(_error_cb)
         except Exception:
             pass
+        # Quiet-check outcome callbacks (found / not found). Guarded the same
+        # way: an older DLL without these exports just means quiet checks are
+        # unavailable and check_for_updates_quiet() returns False.
+        global _found_cb, _notfound_cb
+        try:
+            _dll.win_sparkle_set_did_find_update_callback.argtypes = [_WIN_SPARKLE_ERROR_CB]
+            _found_cb = _WIN_SPARKLE_ERROR_CB(_on_winsparkle_found)
+            _dll.win_sparkle_set_did_find_update_callback(_found_cb)
+            _dll.win_sparkle_set_did_not_find_update_callback.argtypes = [_WIN_SPARKLE_ERROR_CB]
+            _notfound_cb = _WIN_SPARKLE_ERROR_CB(_on_winsparkle_notfound)
+            _dll.win_sparkle_set_did_not_find_update_callback(_notfound_cb)
+        except Exception:
+            _found_cb = _notfound_cb = None
         _dll.win_sparkle_init()
     except Exception:
         import traceback
@@ -155,6 +211,27 @@ def updater_alive():
     the native one-click updater owns notification, and by fallback logic to
     detect a dead engine."""
     return _dll is not None
+
+
+def check_for_updates_quiet():
+    """User-initiated check WITHOUT any engine windows. The outcome arrives via
+    the handlers registered with set_quiet_handlers / set_error_handler:
+    found -> caller shows the engine's install window (check_for_updates());
+    not found -> caller shows its own up-to-date note;
+    error -> caller shows its own explain-and-download dialog.
+
+    Returns True when the check was dispatched, False when the engine never
+    loaded or this DLL lacks the outcome callbacks -- callers treat False as
+    "fall back to the old visible path" so the button never does nothing."""
+    if _dll is None or _found_cb is None:
+        return False
+    try:
+        global _user_initiated
+        _user_initiated = True
+        _dll.win_sparkle_check_update_without_ui()
+        return True
+    except Exception:
+        return False
 
 
 def check_for_updates():
