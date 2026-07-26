@@ -1266,7 +1266,19 @@ class CleanerWorker(QThread):
                 _dev = _best_device()
                 _device_str = {"mps": "GPU (Apple)", "cuda": "GPU (NVIDIA)"}.get(_dev, "CPU")
             except Exception:
+                _dev = None
                 _device_str = "unknown device"
+            # Work out WHY, if this run is about to use the processor on a machine
+            # that has a graphics card. Computed once here and reused by the
+            # anonymous usage report at the end of the run.
+            self._gpu_status_code = None
+            try:
+                from modules.nvidia_detect import detect_nvidia as _detect_nv
+                from modules.gpu_pack import gpu_status as _gpu_status
+                _nv_outcome = _detect_nv()[0] if _dev is not None else None
+                self._gpu_status_code = _gpu_status(_dev or "cpu", _nv_outcome)
+            except Exception:
+                pass
             try:
                 from modules.user_folder import get_installed_model_version as _gmv
                 _mv = _gmv()
@@ -1281,6 +1293,16 @@ class CleanerWorker(QThread):
                 f"{_model_str}  |  {_device_str}  |  {self.output_format.upper()} output"
                 f"  |  {_scrub_str}"
             )
+            # Never lose the graphics card silently: if this machine has one and the
+            # run is going to the processor anyway, say so in plain words and name
+            # the fix. Lands in the run window and therefore in the Star Log.
+            try:
+                from modules.gpu_pack import run_note as _gpu_run_note
+                _gpu_note = _gpu_run_note(self._gpu_status_code or "")
+                if _gpu_note:
+                    self.status.emit(_gpu_note)
+            except Exception:
+                pass
 
             self.progress.emit(0, 100, "")
             self.frame_count.emit(0, total)
@@ -1832,6 +1854,10 @@ class CleanerWorker(QThread):
                         _ugpu = _best_device() in ("mps", "cuda")
                     except Exception:
                         _ugpu = None
+                    # Why the run used what it used (see modules.gpu_pack.gpu_status).
+                    # Without this we can only see THAT a machine dropped to the
+                    # processor, never why, which left us guessing from one report.
+                    _ugpu_status = getattr(self, "_gpu_status_code", None)
                     _ufacts = {
                         "type": "run",
                         "app_version": VERSION,
@@ -1853,6 +1879,8 @@ class CleanerWorker(QThread):
                     }
                     if _ugpu is not None:
                         _ufacts["gpu"] = _ugpu
+                    if _ugpu_status:
+                        _ufacts["gpu_status"] = _ugpu_status
                     _ufacts.update(_leader_gear_exif(frames))
                     from modules import usage_report
                     usage_report.send(_ufacts)
@@ -2054,21 +2082,25 @@ class GpuPackInstallThread(QThread):
         raise RuntimeError(f"{label} failed: {last_err}") from last_err
 
     def run(self):
-        """Download and install the CUDA torch + torchvision wheels into the
-        GPU override folder. Clears any stale prior install first, downloads
-        each wheel (trying mirrors on 403), extracts it, fixes file
-        permissions, then writes the version tag. Emits finished_ok() on
-        success or failed() with a user-friendly message (permission, 403, or
-        connection errors get tailored text)."""
+        """Download and install the CUDA torch + torchvision wheels.
+
+        Everything is downloaded and unpacked into a STAGING folder first and
+        only swapped into service once it is complete. Two rules drive this:
+        a half-finished install must never cost someone the working GPU support
+        they already had, and we must never install a version the app will then
+        refuse to load. Emits finished_ok() on success or failed() with a
+        user-friendly message (permission, 403, or connection errors get
+        tailored text)."""
+        import shutil
         import zipfile
-        from modules.gpu_pack import (resolve_available_url_set, get_override_dir,
-                                       write_version_tag, clear_gpu_files,
+        from modules.gpu_pack import (resolve_available_url_set, get_staging_dir,
+                                       write_version_tag, swap_staged_into_place,
                                        chmod_extracted_files)
 
-        # Resolve to a version whose wheels are actually downloadable. Normally
-        # this is the version baked into the build; if that version ever lacks a
-        # cu128 wheel, resolve self-heals to the newest known-good pair instead of
-        # dying on a 404 (a quick reachability check, runs in this worker thread).
+        # The app only loads a pack matching the version baked into this build,
+        # so installing anything else would burn a ~4 GB download on files that
+        # can never be used. If the version this build needs isn't downloadable,
+        # stop and say so rather than quietly substituting an older one.
         self.progress.emit("Checking GPU support download...", 0, 0)
         url_sets, healed = resolve_available_url_set()
         if not url_sets:
@@ -2078,55 +2110,60 @@ class GpuPackInstallThread(QThread):
             )
             return
         if healed:
-            self.progress.emit(
-                "Using the latest compatible GPU support version...", 0, 0)
+            self.failed.emit(
+                "GPU support isn't available for this version of Star Trail CleanR "
+                "right now.\n\n"
+                "Nothing on your computer has been changed. Please update to the "
+                "latest version and try again, or let us know if this keeps happening."
+            )
+            return
 
         torch_urls = [s[0] for s in url_sets]
         tv_urls    = [s[1] for s in url_sets]
         torch_ver  = url_sets[0][2]
-        override_dir = get_override_dir()
+        staging_dir = get_staging_dir()
 
+        # Wipe any leftovers from an earlier attempt. This folder is ours alone;
+        # the pack currently in service lives elsewhere and is untouched until
+        # the swap at the end.
+        self.progress.emit("Preparing...", 0, 0)
+        shutil.rmtree(str(staging_dir), ignore_errors=True)
         try:
-            override_dir.mkdir(parents=True, exist_ok=True)
+            staging_dir.mkdir(parents=True, exist_ok=True)
         except OSError as e:
             self.failed.emit(
-                f"Cannot create the GPU support folder:\n{override_dir}\n\n{e}\n\n"
+                f"Cannot create the GPU support folder:\n{staging_dir}\n\n{e}\n\n"
                 "Check that you have permission to write to your AppData folder."
             )
             return
 
-        torch_whl = override_dir / "torch_pack.whl"
-        tv_whl = override_dir / "torchvision_pack.whl"
-
-        # Robust cleanup: onerror handler + shell fallback + 3-retry loop.
-        # Handles read-only files from zip extraction and transient AV locks.
-        self.progress.emit("Preparing...", 0, 0)
-        _ok, _err = clear_gpu_files()
-        for _stale in (override_dir / "torch", override_dir / "torchvision"):
-            if _stale.is_dir():
-                detail = f"\n\nDetails: {_err}" if _err else ""
-                self.failed.emit(
-                    "Installation blocked: GPU support files from a previous install "
-                    f"could not be removed. Windows is holding them open.{detail}\n\n"
-                    "Reboot your computer, then reopen Star Trail CleanR and click "
-                    "Install GPU Support again. The reboot will release the locked files."
-                )
-                return
+        torch_whl = staging_dir / "torch_pack.whl"
+        tv_whl = staging_dir / "torchvision_pack.whl"
 
         try:
             self._download("Downloading GPU support (1 of 2)", torch_urls, torch_whl)
             self.progress.emit("Installing GPU support (1 of 2)...", 0, 0)
             with zipfile.ZipFile(str(torch_whl), "r") as zf:
-                zf.extractall(str(override_dir))
+                zf.extractall(str(staging_dir))
             torch_whl.unlink(missing_ok=True)
-            chmod_extracted_files(override_dir)
+            chmod_extracted_files(staging_dir)
 
             self._download("Downloading GPU support (2 of 2)", tv_urls, tv_whl)
             self.progress.emit("Installing GPU support (2 of 2)...", 0, 0)
             with zipfile.ZipFile(str(tv_whl), "r") as zf:
-                zf.extractall(str(override_dir))
+                zf.extractall(str(staging_dir))
             tv_whl.unlink(missing_ok=True)
-            chmod_extracted_files(override_dir)
+            chmod_extracted_files(staging_dir)
+
+            # Only now does the pack in service get replaced.
+            self.progress.emit("Finishing up...", 0, 0)
+            swapped, swap_err = swap_staged_into_place()
+            if not swapped:
+                raise RuntimeError(
+                    f"The download finished but {swap_err}.\n\n"
+                    "Your previous GPU support has been left as it was. Reboot your "
+                    "computer, then reopen Star Trail CleanR and try again."
+                )
 
             if not write_version_tag(torch_ver):
                 raise RuntimeError(
@@ -2136,18 +2173,21 @@ class GpuPackInstallThread(QThread):
             self.finished_ok.emit()
 
         except Exception as e:
-            for whl in (torch_whl, tv_whl):
-                try:
-                    whl.unlink(missing_ok=True)
-                except Exception:
-                    pass
+            # The half-finished download is ours and only ours: throwing it away
+            # cannot touch whatever pack is currently in service.
+            shutil.rmtree(str(staging_dir), ignore_errors=True)
             msg = str(e)
+            # These three all happen while downloading or unpacking, before
+            # anything in service is touched, so each one gets the same promise:
+            # a failed install costs you nothing you already had.
+            reassure = ("\n\nAny GPU support you already had is untouched and still "
+                        "working.")
             if "Errno 13" in msg or "Permission denied" in msg or "Access is denied" in msg:
                 msg = (
                     "Installation failed: Windows denied access to a file.\n\n"
                     "Reboot your computer, then reopen Star Trail CleanR and click "
-                    "Install GPU Support again. The reboot will release the locked files.\n\n"
-                    f"Details: {e}"
+                    "Install GPU Support again. The reboot will release the locked files."
+                    f"{reassure}\n\nDetails: {e}"
                 )
             elif "__blocked__" in msg or ("403" in msg and "Forbidden" in msg):
                 msg = (
@@ -2156,13 +2196,13 @@ class GpuPackInstallThread(QThread):
                     "We automatically tried an alternative server, but it was also blocked.\n\n"
                     "The most reliable fix is to use a VPN: connect to any US or European "
                     "server, then click Install GPU Support again.\n\n"
-                    "Click More Info for step-by-step instructions.\n\n"
-                    f"Details: {e}"
+                    "Click More Info for step-by-step instructions."
+                    f"{reassure}\n\nDetails: {e}"
                 )
             elif "urlopen error" in msg or "ConnectionReset" in msg or "timed out" in msg:
                 msg = (
-                    "Download failed. Check your internet connection and try again.\n\n"
-                    f"Details: {e}"
+                    "Download failed. Check your internet connection and try again."
+                    f"{reassure}\n\nDetails: {e}"
                 )
             self.failed.emit(msg)
 
@@ -3787,16 +3827,11 @@ class MainWindow(QMainWindow):
 
     def _on_nvidia_detect_result(self, outcome, detail):
         """Handle the NVIDIA-detection result. `outcome` is "yes"/"no"/etc.
-        Show the install banner when a card is present, the GPU pack isn't
-        installed, and the user hasn't dismissed the banner before. Then
-        refresh the Settings compute-status section."""
+        Records it and refreshes the Settings compute-status section, which is
+        also what decides whether the GPU banner is shown (it needs both this
+        answer and the chosen torch device, which arrive on separate threads)."""
         print(f"[nvidia-detect] outcome={outcome} detail={detail}", flush=True)
         self._nvidia_outcome = outcome
-        from modules.gpu_pack import is_installed as _gpu_installed
-        if (outcome == "yes"
-                and not _gpu_installed()
-                and not SETTINGS.value("nvidia_banner_dismissed", False, type=bool)):
-            self._nvidia_banner.setVisible(True)
         self._refresh_compute_section()
 
     def _on_best_device_result(self, device):
@@ -3959,46 +3994,37 @@ class MainWindow(QMainWindow):
         self._nvidia_banner.setVisible(False)
 
     def _refresh_compute_section(self):
-        """Rebuild the Settings tab's GPU-status line from the latest device
-        and NVIDIA-detection results. Picks one of several status strings
-        (Apple MPS active, NVIDIA CUDA active, CPU with various GPU-pack
-        hints) and shows the Windows GPU-install controls only when an NVIDIA
-        card is present but running on CPU. Safe to call before the Settings
-        widgets exist (returns early)."""
+        """Rebuild the Settings tab's GPU-status line from the latest device and
+        NVIDIA-detection results, and decide whether the GPU banner belongs on
+        screen.
+
+        Both answers come from modules.gpu_pack.gpu_status, so the Settings tab,
+        the run log and the anonymous usage report can never tell three
+        different stories about the same machine. The Windows GPU controls show
+        whenever a reinstall would actually help.
+
+        Called from both the NVIDIA-detect and best-device threads, since the
+        verdict needs their two answers together. Safe to call before the
+        Settings widgets exist (returns early)."""
         if not hasattr(self, "_compute_status_label"):
             return
         import platform as _pl
         device = self._compute_device
-        outcome = self._nvidia_outcome
-        gpu_mismatch = bool(os.environ.get('STC_GPU_VERSION_MISMATCH'))
-
-        if device == "mps":
-            status = "Apple MPS: GPU acceleration active"
-        elif device == "cuda":
-            status = "NVIDIA CUDA: GPU acceleration active"
-        elif device == "cpu" and outcome == "yes" and gpu_mismatch:
-            status = ("CPU: GPU pack version mismatch. "
-                      "Reinstall the GPU pack for this version of Star Trail CleanR "
-                      "to re-enable acceleration.")
-        elif device == "cpu" and outcome == "yes" and os.environ.get('STC_CUDA_UNSUPPORTED'):
-            status = ("NVIDIA GPU detected but your card isn't supported by the current "
-                      "GPU pack, running on CPU.")
-        elif device == "cpu" and outcome == "yes":
-            status = "CPU: NVIDIA GPU detected. Install the GPU pack for faster processing."
-        elif device == "cpu" and _pl.system() == "Windows":
-            status = "CPU: no GPU acceleration"
-        elif device == "cpu":
-            status = "CPU processing only: GPU acceleration not available on this device"
-        else:
+        if device is None:
+            return          # best-device thread hasn't reported yet
+        from modules.gpu_pack import gpu_status, status_message
+        code = gpu_status(device, self._nvidia_outcome)
+        status = status_message(code)
+        if not status:
             return
 
         self._compute_status_label.setText(status)
+        # Reinstalling the pack is the fix for all three of these; it is NOT a
+        # fix for a card the packed CUDA build doesn't support, so that case
+        # keeps the controls hidden.
         show_upgrade = (
             _pl.system() == "Windows"
-            and outcome == "yes"
-            and device == "cpu"
-            and not gpu_mismatch
-            and not os.environ.get('STC_CUDA_UNSUPPORTED')
+            and code in ("cpu_pack_missing", "cpu_pack_mismatch", "cpu_pack_unused")
         )
         self._gpu_install_widget.setVisible(show_upgrade)
         self._gpu_upgrade_browser.setVisible(show_upgrade)
@@ -4007,6 +4033,38 @@ class MainWindow(QMainWindow):
             self._gpu_clear_btn.setVisible(show_upgrade)
         if hasattr(self, '_gpu_help_btn'):
             self._gpu_help_btn.setVisible(show_upgrade)
+        self._maybe_show_nvidia_banner(code)
+
+    def _maybe_show_nvidia_banner(self, code):
+        """Show the orange GPU banner when there is a graphics card going unused
+        and a reinstall would bring it back. Only ever shows the banner; hiding
+        stays with the Later button and the install handlers, so this can't fight
+        them.
+
+        The "you could add GPU support" nudge respects a past Later click. The
+        two BROKEN cases do not: a user whose working GPU support stopped being
+        used has not dismissed anything, and silently dropping them to the
+        processor forever is the bug this whole change exists to kill.
+        """
+        if not hasattr(self, "_nvidia_banner"):
+            return
+        if getattr(self, "_gpu_install_thread", None) is not None \
+                and self._gpu_install_thread.isRunning():
+            return
+        if code == "cpu_pack_missing":
+            if SETTINGS.value("nvidia_banner_dismissed", False, type=bool):
+                return
+            self._nvidia_label.setText(
+                "NVIDIA GPU detected. Install GPU support for faster processing.")
+            self._nvidia_install_btn.setText("Install")
+        elif code in ("cpu_pack_mismatch", "cpu_pack_unused"):
+            # Kept to one line: the banner is a fixed 44px tall.
+            self._nvidia_label.setText(
+                "GPU support stopped working. Reinstall it to use your graphics card again.")
+            self._nvidia_install_btn.setText("Reinstall")
+        else:
+            return
+        self._nvidia_banner.setVisible(True)
 
     def _relaunch(self):
         """Close and reopen the app."""

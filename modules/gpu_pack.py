@@ -76,6 +76,25 @@ _KNOWN_GOOD_CU128 = [
 # Folder-name pieces used to build the persistent override path under LOCALAPPDATA.
 _APP_DIR = "StarTrailCleanR"
 _OVERRIDE_DIR = "gpu_override"
+# A new pack is downloaded and unpacked here first, then swapped into place, so a
+# failed or interrupted install can never destroy a working one. The backup name
+# holds the previous pack for the moment the swap takes, and is deleted after.
+_STAGING_DIR = "gpu_override_staging"
+_BACKUP_DIR = "gpu_override_previous"
+
+# ── The version lock ──────────────────────────────────────────────────────────
+# CHANGING THIS ORPHANS EVERY EXISTING GPU USER.
+#
+# The runtime hook will only load a pack whose torch version equals the version
+# baked into the running build (mismatched binaries would crash, not just run
+# slowly). So the moment this version changes, every Windows user who already
+# installed a GPU pack drops to the CPU until they reinstall a ~4 GB download.
+#
+# It has not moved since the pack shipped in May 2026. Keep it that way unless
+# there is a reason worth that cost. It is repeated here, in the CI pin, and in
+# _KNOWN_GOOD_CU128 below, and a smoke test fails if the three ever disagree --
+# so a bump cannot happen as a quiet one-line edit in the build file.
+GPU_PACK_TORCH_LOCK = ("2.11.0", "0.26.0")
 
 
 def get_override_dir() -> Path:
@@ -95,6 +114,75 @@ def get_override_dir() -> Path:
     if not localappdata:
         localappdata = str(Path.home() / "AppData" / "Local")
     return Path(localappdata) / _APP_DIR / _OVERRIDE_DIR
+
+
+def get_staging_dir() -> Path:
+    """Return the folder a new GPU pack is downloaded and unpacked into before it
+    replaces the working one. Sibling of the override folder, so the final move is
+    a rename on the same drive rather than a multi-gigabyte copy."""
+    return get_override_dir().parent / _STAGING_DIR
+
+
+def get_backup_dir() -> Path:
+    """Return the folder the previous GPU pack is moved aside to during a swap.
+    Only exists for the moment the swap takes; deleted once the new pack is in
+    place, or moved back if the swap fails."""
+    return get_override_dir().parent / _BACKUP_DIR
+
+
+def swap_staged_into_place() -> Tuple[bool, str]:
+    """Put a fully downloaded pack from the staging folder into service.
+
+    Why this exists: the installer used to delete the working pack FIRST and then
+    download. A download that failed (blocked network, dropped connection) left a
+    user who had working GPU acceleration with nothing at all, and no way to know
+    why. Nothing is removed here until the replacement is verified on disk.
+
+    Steps: check the staged folder really holds both extracted packages, move any
+    existing pack aside, rename the staged folder into place, then delete the old
+    one. If the rename into place fails, the old pack is moved back so the user
+    ends up exactly where they started.
+
+    Returns (ok, error). `error` is a short plain-English reason on failure.
+    """
+    import shutil
+    staging = get_staging_dir()
+    override = get_override_dir()
+    backup = get_backup_dir()
+
+    # Never retire a working pack for an incomplete download.
+    for part in ("torch", "torchvision"):
+        if not (staging / part).is_dir():
+            return False, "the downloaded GPU files are incomplete"
+
+    if backup.exists():
+        shutil.rmtree(str(backup), ignore_errors=True)
+        if backup.exists():
+            return False, "a previous install left files behind that could not be cleared"
+
+    moved_old = False
+    if override.exists():
+        try:
+            os.replace(str(override), str(backup))
+            moved_old = True
+        except OSError as e:
+            return False, f"the existing GPU files could not be set aside ({e})"
+
+    try:
+        os.replace(str(staging), str(override))
+    except OSError as e:
+        # Put the user back exactly as they were before we touched anything.
+        if moved_old:
+            try:
+                os.replace(str(backup), str(override))
+            except OSError:
+                pass
+        return False, f"the new GPU files could not be moved into place ({e})"
+
+    if moved_old:
+        # Best effort: leftover disk use is untidy, but the new pack is live.
+        shutil.rmtree(str(backup), ignore_errors=True)
+    return True, ""
 
 
 def is_installed() -> bool:
@@ -460,3 +548,108 @@ def chmod_extracted_files(override_dir: Path) -> None:
                                  stat.S_IWRITE | stat.S_IREAD)
                     except Exception:
                         pass
+
+
+# ── Why are we on the CPU? ────────────────────────────────────────────────────
+# One place that answers that question, so the Settings tab, the run log and the
+# anonymous usage report can never disagree about it.
+#
+# Background: several things can quietly send a machine that HAS a working
+# NVIDIA card back to the CPU (the pack was never installed, the pack does not
+# match the version this build expects, the card is too old for the packed CUDA
+# build, or the pack is present but torch still refuses CUDA). Before this
+# existed, the only place any of that was said out loud was a status line on the
+# Settings tab, so a user could silently lose GPU speed and never be told.
+
+# Status codes returned by `gpu_status`. Stable strings: they are sent in the
+# anonymous usage report, so renaming one breaks comparisons with older data.
+GPU_STATUS_CODES = (
+    "gpu_nvidia",            # running on an NVIDIA card via CUDA
+    "gpu_apple",             # running on Apple's built-in GPU (MPS)
+    "cpu_no_card",           # Windows, no usable NVIDIA card found
+    "cpu_only",              # not Windows and no GPU available (e.g. Intel Mac)
+    "cpu_pack_missing",      # card present, GPU pack never installed
+    "cpu_pack_mismatch",     # card present, pack installed but built for another app version
+    "cpu_card_unsupported",  # card present, pack installed, card too old for this CUDA build
+    "cpu_pack_unused",       # card present, pack installed and matching, still on CPU
+)
+
+
+def gpu_status(device: str, nvidia_outcome: Optional[str] = None) -> str:
+    """Return one short code saying which compute device a run will use, and if
+    it is the CPU, why.
+
+    `device` is what torch actually picked: "cuda", "mps" or "cpu" (see
+    modules.detect_trails.best_device).
+    `nvidia_outcome` is the answer from modules.nvidia_detect.detect_nvidia
+    ("yes" means a working NVIDIA card is present). Pass None on platforms where
+    that check was never run.
+
+    Returns one of GPU_STATUS_CODES. Pure decision logic apart from reading
+    whether a GPU pack is on disk and the two environment flags the runtime hook
+    and the CUDA probe set; safe to call from any thread.
+    """
+    if device == "cuda":
+        return "gpu_nvidia"
+    if device == "mps":
+        return "gpu_apple"
+
+    # From here down we are on the CPU. Without a usable NVIDIA card there is
+    # nothing the user could do about it, so those two cases just say so.
+    if nvidia_outcome != "yes":
+        return "cpu_no_card" if sys.platform == "win32" else "cpu_only"
+
+    # A working card IS present, so something is stopping us from using it.
+    # Order matters: the two environment flags name a specific cause, and the
+    # mismatch flag is only ever set when a pack is actually installed.
+    if os.environ.get("STC_GPU_VERSION_MISMATCH"):
+        return "cpu_pack_mismatch"
+    if os.environ.get("STC_CUDA_UNSUPPORTED"):
+        return "cpu_card_unsupported"
+    if not is_installed():
+        return "cpu_pack_missing"
+    return "cpu_pack_unused"
+
+
+def status_message(code: str) -> str:
+    """Return the Settings-tab compute-status line for a `gpu_status` code.
+
+    Returns an empty string for an unknown code so a future code can never blank
+    out or crash the Settings tab.
+    """
+    return {
+        "gpu_nvidia": "NVIDIA CUDA: GPU acceleration active",
+        "gpu_apple": "Apple MPS: GPU acceleration active",
+        "cpu_no_card": "CPU: no GPU acceleration",
+        "cpu_only": "CPU processing only: GPU acceleration not available on this device",
+        "cpu_pack_missing": "CPU: NVIDIA GPU detected. Install the GPU pack for faster processing.",
+        "cpu_pack_mismatch": ("CPU: GPU pack version mismatch. Reinstall the GPU pack "
+                              "for this version of Star Trail CleanR to re-enable acceleration."),
+        "cpu_card_unsupported": ("NVIDIA GPU detected but your card isn't supported by the "
+                                 "current GPU pack, running on CPU."),
+        "cpu_pack_unused": ("CPU: GPU support is installed but isn't being used. "
+                            "Reinstall it to switch back to your graphics card."),
+    }.get(code, "")
+
+
+def run_note(code: str) -> str:
+    """Return the plain-English sentence to print at the start of a run when the
+    machine has a graphics card it isn't using, or "" when there is nothing worth
+    saying.
+
+    This is what lands in the run window and therefore in the Star Log, so it is
+    written for a photographer, not a programmer: no CUDA, no MPS, no "pack
+    version". The three codes that mean "you have a card and could get it back"
+    each name their own fix; everything else returns "".
+    """
+    return {
+        "cpu_pack_missing": ("Running on the processor. This PC has an NVIDIA graphics card. "
+                             "Install GPU support in Settings to run much faster."),
+        "cpu_pack_mismatch": ("Running on the processor. GPU support does not match this version "
+                              "of Star Trail CleanR. Reinstall it in Settings to use your "
+                              "graphics card again."),
+        "cpu_pack_unused": ("Running on the processor. GPU support is installed but is not being "
+                            "used. Reinstall it in Settings to use your graphics card again."),
+        "cpu_card_unsupported": ("Running on the processor. This graphics card is not supported "
+                                 "by the current GPU support download."),
+    }.get(code, "")

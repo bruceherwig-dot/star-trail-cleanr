@@ -47,6 +47,29 @@ def test_candidate_pairs_dedup_and_order():
     assert len(pairs) == len(set(pairs)), "candidate list must not contain duplicates"
 
 
+def test_version_lock_matches_pin_and_known_good():
+    """The version lock, the CI pin and the self-heal default must all agree.
+
+    Bumping the torch version drops every Windows user who already installed a
+    GPU pack back to the CPU until they redownload ~4 GB, because the runtime
+    hook only loads a pack matching the running build. Stating the version in
+    three places and failing here on disagreement means a bump cannot slip
+    through as a quiet one-line edit in build.yml.
+    """
+    from modules.gpu_pack import GPU_PACK_TORCH_LOCK, _KNOWN_GOOD_CU128
+    workflow = (REPO / ".github" / "workflows" / "build.yml").read_text()
+    m = re.search(r"pip install torch==([\d.]+) torchvision==([\d.]+) "
+                  r"--index-url https://download\.pytorch\.org/whl/cpu", workflow)
+    assert m, "could not find the pinned Windows torch install line in build.yml"
+    assert (m.group(1), m.group(2)) == GPU_PACK_TORCH_LOCK, (
+        f"build.yml pins torch=={m.group(1)}/{m.group(2)} but GPU_PACK_TORCH_LOCK is "
+        f"{GPU_PACK_TORCH_LOCK}. Changing this orphans every existing GPU user: read "
+        f"the comment on GPU_PACK_TORCH_LOCK in modules/gpu_pack.py before touching it.")
+    assert _KNOWN_GOOD_CU128[0] == GPU_PACK_TORCH_LOCK, (
+        f"_KNOWN_GOOD_CU128[0] is {_KNOWN_GOOD_CU128[0]} but the lock is "
+        f"{GPU_PACK_TORCH_LOCK}; keep them in sync")
+
+
 def test_known_good_first_matches_ci_pin():
     """The self-heal default (_KNOWN_GOOD_CU128[0]) must equal the version the
     Windows build is pinned to, or a bumped pin could ship a version the self-heal
