@@ -640,8 +640,27 @@ def _maybe_init_sentry():
             send_default_pii=False,
             release=f"star-trail-cleanr@{VERSION}",
         )
+        _sentry_ignore_handled_loggers()
     except Exception:
         pass
+
+
+def _sentry_ignore_handled_loggers():
+    """Stop image libraries' own error logging from being reported as crashes.
+
+    Sentry's default logging integration turns any logging.error() call into an
+    event, including ones from libraries we deliberately let fail. io_safe tries
+    OpenCV, then tifffile, then Pillow, and expects rejections along the way: a
+    file only one of them can read is normal. Pillow announces its refusals via
+    logging.error, so a TIFF that OpenCV and Pillow can't read but tifffile can
+    produced a crash report for a run that finished perfectly well.
+
+    Real failures still report: when every reader fails, the worker raises its
+    own error with the full per-reader diagnosis attached.
+    """
+    from sentry_sdk.integrations.logging import ignore_logger
+    for name in ("PIL", "PIL.TiffImagePlugin", "PIL.Image"):
+        ignore_logger(name)
 
 
 def _pre_window_update_check():

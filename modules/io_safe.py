@@ -202,7 +202,33 @@ def _try_tifffile(path: str, flags: int) -> Tuple[Optional[np.ndarray], Optional
 
     if arr.ndim == 2:
         return arr, None
-    if arr.ndim != 3 or arr.shape[2] not in (3, 4):
+    if arr.ndim != 3:
+        return arr, None
+
+    # Channel counts the rest of the app can't use.
+    #
+    # tifffile is the only reader here that will hand back an image with more
+    # than four channels: OpenCV refuses anything outside 1-4, and Pillow raises
+    # (logging "More samples per pixel than can be decoded" on its way out, which
+    # is the only trace of this a crash report used to show). So tifffile quietly
+    # succeeded and passed, say, a seven-channel Photoshop export straight into a
+    # pipeline that only understands three or four, and OpenCV threw much further
+    # downstream when it tried to convert the colours.
+    #
+    # Trim here, where the RGB-to-BGR convention is already handled, so every
+    # caller (worker, previews, mask editor, share stacker) gets a normal photo:
+    #   more than 4 -> keep red, green and blue; drop spot/alpha extras
+    #   exactly 2   -> grey plus alpha; keep the grey
+    if arr.shape[2] > 4:
+        print(f"  Note: {Path(path).name} has {arr.shape[2]} colour channels. "
+              f"Using its red, green and blue; any extra channels "
+              f"(spot colours, saved selections, transparency) are ignored.",
+              flush=True)
+        arr = np.ascontiguousarray(arr[:, :, :3])
+    elif arr.shape[2] == 2:
+        arr = np.ascontiguousarray(arr[:, :, 0])
+        return arr, None
+    elif arr.shape[2] not in (3, 4):
         return arr, None
 
     if flags == cv2.IMREAD_GRAYSCALE:

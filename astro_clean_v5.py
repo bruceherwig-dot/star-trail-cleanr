@@ -258,6 +258,15 @@ def _init_worker_sentry():
             release=f"star-trail-cleanr@{version}",
         )
         sentry_sdk.set_tag("component", "worker")
+        # Pillow logs its refusals via logging.error, and Sentry's logging
+        # integration turns those into crash reports. io_safe deliberately lets
+        # readers fail in turn (OpenCV, then tifffile, then Pillow), so a file
+        # only one of them can open is normal and must not page us. A file NO
+        # reader can open still reports, via the worker's own error path with
+        # the full per-reader diagnosis.
+        from sentry_sdk.integrations.logging import ignore_logger
+        for _lg in ("PIL", "PIL.TiffImagePlugin", "PIL.Image"):
+            ignore_logger(_lg)
     except Exception:
         pass
 
