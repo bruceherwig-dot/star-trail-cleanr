@@ -2,6 +2,11 @@
 
 ---
 
+## v2.81-beta
+- **Photos with extra channels now open instead of failing partway through.** A TIFF saved out of Photoshop can carry more than the usual red, green and blue, because saved selections and masks are stored inside the file as extra channels. Those files got as far as the trail detector and then failed. The app now uses the red, green and blue and ignores the extras, noting it in the Star Log, so the clean runs normally. Your photograph is unaffected; only the stored selections are left out, and they were never carried into the cleaned copy anyway. Black-and-white TIFFs saved with transparency now open too.
+- **Fewer false crash reports.** The app tries several different readers when opening a photo and expects some of them to turn it down, but those routine refusals were being reported to us as if the app had crashed. They no longer are. A file that genuinely cannot be opened still reports, with the full detail.
+- **Smoke tests:** 261 passing.
+
 ## v2.80-beta
 - **The app can no longer use your graphics card without telling you, or stop using it in silence.** On a Windows PC with an NVIDIA card, several things could quietly send a clean back to the much slower processor, and the only place it was ever mentioned was a line on the Settings tab. Now, if your computer has a graphics card the app is not using, the run window and the Star Log say so in plain language and tell you how to fix it, and the orange banner offering GPU support comes back if support that used to work stops being used (even if you dismissed that banner long ago).
 - **A failed GPU support install can no longer cost you the GPU support you already had.** The installer used to delete your working files before downloading the new ones, so a blocked or interrupted download left you with no graphics acceleration and no explanation. The download now goes to a separate folder and only replaces your working copy once it is complete. If anything goes wrong, you are left exactly where you started, and the message says so.
