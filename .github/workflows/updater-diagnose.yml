@@ -1,0 +1,25 @@
+# Manual diagnostic: corner the Windows update-check failure.
+#
+# The in-app WinSparkle check fails for every Windows tester AND on a clean
+# cloud Windows machine (updater live-check gate, 2026-07-27), with no detail.
+# This job runs scripts/diagnose_winsparkle.py, a console harness that drives
+# the vendored WinSparkle.dll directly against several feeds (including
+# WinSparkle's own reference feed) and fetches ours with raw WinInet, so the
+# CI log shows exactly where the failure lives. Manual dispatch only; builds
+# nothing, releases nothing, touches no user.
+name: Updater diagnosis (Windows)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diagnose:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Run diagnosis
+        run: python scripts/diagnose_winsparkle.py
+        shell: pwsh
