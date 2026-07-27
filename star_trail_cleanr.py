@@ -8448,6 +8448,39 @@ if __name__ == '__main__':
             _alive = updater_alive()
             print(f"UPDATER_SMOKE: controller_alive={_alive}", flush=True)
             sys.exit(0 if _alive else 1)
+        # CI live-check gate: with STC_UPDATER_CHECK=1 the built app performs a
+        # REAL update check against the live feed and reports what the engine
+        # said, then exits. "Engine loads" (the gate above) was never proof the
+        # check WORKS -- three Windows testers in a row got "An error occurred
+        # in retrieving update information", we blamed their security software
+        # each time, and no Windows install has ever been seen to update itself.
+        # A clean cloud Windows box with nothing blocking anything settles who
+        # is at fault: an error HERE means it has never worked for anybody.
+        if os.environ.get("STC_UPDATER_CHECK") == "1":
+            from modules.winsparkle_updater import (check_for_updates_quiet,
+                                                    set_error_handler,
+                                                    set_quiet_handlers)
+            _res = {"outcome": None}
+            # The engine calls these from its own thread; storing a string is
+            # all we do there, so no marshalling to the UI thread is needed.
+            set_quiet_handlers(found=lambda: _res.__setitem__("outcome", "found"),
+                               notfound=lambda: _res.__setitem__("outcome", "up-to-date"))
+            set_error_handler(lambda: _res.__setitem__("outcome", "error"))
+            if not check_for_updates_quiet():
+                print("UPDATER_CHECK: engine could not start a check", flush=True)
+                sys.exit(1)
+            _deadline = time.time() + 90
+            while _res["outcome"] is None and time.time() < _deadline:
+                app.processEvents()
+                time.sleep(0.1)
+            _outcome = _res["outcome"] or "timed out"
+            print(f"UPDATER_CHECK: {_outcome}", flush=True)
+            # A Windows GUI program detaches from the console, so the line above
+            # never reaches the CI log. The exit code carries the answer instead:
+            #   0 found or up-to-date  -- the feed was fetched and parsed
+            #   2 the engine reported an error fetching update information
+            #   3 nothing came back at all within the timeout
+            sys.exit({"found": 0, "up-to-date": 0, "error": 2}.get(_outcome, 3))
         # As on Mac, no auto-popup on launch -- the amber banner is the launch
         # notification and its Update button drives WinSparkle's one-click install.
     _splash_status.setText("Warming up the trail detector…")

@@ -207,6 +207,34 @@ jobs:
           Write-Host "updater smoke exit code: $($p.ExitCode)"
           if ($p.ExitCode -ne 0) { exit 1 }
         shell: pwsh
+      - name: Updater live-check gate (reports only, does not block yet)
+        # The gate above proves the engine LOADS. It never proved a check
+        # SUCCEEDS, and that gap hid the biggest open bug we have: three
+        # Windows testers in a row hit "An error occurred in retrieving update
+        # information", we told each of them it was their security software,
+        # and no Windows install has ever been observed updating itself.
+        #
+        # This runs a REAL check against the live feed on a clean cloud Windows
+        # box with nothing blocking anything. An error here means it has never
+        # worked for anyone and the fault is ours, not our users'.
+        #
+        # Reports only for now, on purpose: we do not yet know the answer, and
+        # a hard gate would block releases for a condition that predates it.
+        # Once the first run tells us, this becomes blocking (drop the
+        # continue-on-error) or the finding gets fixed and then gated.
+        continue-on-error: true
+        run: |
+          $env:STC_UPDATER_CHECK = "1"
+          $p = Start-Process -FilePath "dist\StarTrailCleanR\StarTrailCleanR.exe" -Wait -PassThru
+          Write-Host "updater live-check exit code: $($p.ExitCode)"
+          switch ($p.ExitCode) {
+            0 { Write-Host "RESULT: the update check SUCCEEDED on a clean Windows machine." }
+            1 { Write-Host "RESULT: the engine could not start a check at all." }
+            2 { Write-Host "RESULT: the engine FAILED to retrieve update information. This is the error three testers reported, on a machine with nothing blocking it." }
+            3 { Write-Host "RESULT: the check never came back within 90 seconds." }
+            default { Write-Host "RESULT: unexpected exit code." }
+          }
+        shell: pwsh
       - name: Read version
         id: version
         run: echo "version=$(Get-Content version.txt)" >> $env:GITHUB_OUTPUT
