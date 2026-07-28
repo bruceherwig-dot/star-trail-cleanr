@@ -156,7 +156,16 @@ def init_winsparkle(appcast_url, app_name, app_version, company_name="Star Trail
 
     try:
         _dll = ctypes.CDLL(dll_path)
-        _dll.win_sparkle_set_appcast_url.argtypes = [ctypes.c_wchar_p]
+        # NARROW string, unlike every other text setter in this engine.
+        # winsparkle.h: win_sparkle_set_appcast_url(const char *url) -- the odd
+        # one out next to set_app_details(const wchar_t *...). Declaring this
+        # wide made the engine read the URL as the single letter "h" (wide text
+        # pads each letter with a zero byte, and narrow text stops at the first
+        # zero), which broke every Windows update check from 2026-05-01 until
+        # 2026-07-27 while the error dialog blamed the user's connection.
+        # Proven both ways on a clean CI machine before fixing; the release
+        # gate in build.yml now fails any build where the real check errors.
+        _dll.win_sparkle_set_appcast_url.argtypes = [ctypes.c_char_p]
         _dll.win_sparkle_set_app_details.argtypes = [
             ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_wchar_p,
         ]
@@ -171,7 +180,7 @@ def init_winsparkle(appcast_url, app_name, app_version, company_name="Star Trail
         # Turning automatic checks on enables WinSparkle's own periodic timer
         # as a backstop and persists the setting; the explicit per-launch
         # check below is what actually surfaces updates on open.
-        _dll.win_sparkle_set_appcast_url(appcast_url)
+        _dll.win_sparkle_set_appcast_url(appcast_url.encode("ascii"))
         _dll.win_sparkle_set_app_details(company_name, app_name, app_version)
         _dll.win_sparkle_set_automatic_check_for_updates(1)
         # Register an error callback so a failed user-initiated update (e.g. the

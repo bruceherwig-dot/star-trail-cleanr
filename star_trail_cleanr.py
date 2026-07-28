@@ -3016,11 +3016,12 @@ class MainWindow(QMainWindow):
 
     def _on_update_failed(self):
         """Fires (via the update_failed signal) when WinSparkle reports a failed
-        user-initiated update -- it loaded fine but couldn't retrieve the update,
-        usually a security suite, VPN, or firewall blocking its networking on this
-        machine. The native engine shows its own terse error; this adds the part
-        that actually helps: a plain explanation and a one-click manual download.
-        Additive only -- it never touches the working install path."""
+        user-initiated update check. With the narrow-URL fix in
+        winsparkle_updater (2026-07-27) this now means a genuine fetch problem,
+        such as no network or a proxy in the way; for months before that it
+        fired for everyone because the engine was handed a mangled URL, so this
+        dialog must never assert whose fault the failure is. It offers the part
+        that always helps: a one-click manual download."""
         try:
             from PySide6.QtCore import QUrl
             from PySide6.QtGui import QDesktopServices
@@ -3037,9 +3038,8 @@ class MainWindow(QMainWindow):
                 "install it automatically." if known else
                 "Star Trail CleanR couldn't install the update automatically.")
             box.setInformativeText(
-                "This is almost always something on your computer blocking the "
-                "updater, a security suite, VPN, or firewall, not a problem with "
-                "your install or our servers.\n\n"
+                "This is usually temporary, such as a network hiccup. It can also "
+                "happen when security software blocks the updater.\n\n"
                 "You can download the latest version directly and install it right "
                 "over your current one. Your settings and folders are kept.")
             dl = box.addButton("Download Latest", QMessageBox.AcceptRole)

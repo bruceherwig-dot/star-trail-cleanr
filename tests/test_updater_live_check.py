@@ -42,15 +42,36 @@ def test_exit_codes_distinguish_the_outcomes():
     assert 0 not in (error, timeout), "failures must not exit 0"
 
 
-def test_ci_runs_the_live_check_on_windows():
+def test_ci_runs_the_live_check_on_windows_and_blocks():
     workflow = (REPO / ".github" / "workflows" / "build.yml").read_text()
     assert "STC_UPDATER_CHECK" in workflow, "CI must run the live check"
     assert "Updater live-check gate" in workflow, "the step needs a findable name"
-    # It reports rather than blocks for now, on purpose: the condition predates
-    # the gate. If someone makes it blocking, this reminder goes with it.
-    step = workflow[workflow.index("Updater live-check gate"):][:1600]
-    assert ("continue-on-error: true" in step) or ("exit 1" in step), (
-        "the step must either report deliberately or block deliberately")
+    step = workflow[workflow.index("Updater live-check gate"):][:1800]
+    # Blocking since the narrow-URL fix (2026-07-27). The report-only phase
+    # existed to learn the answer; the answer was "broken for everyone since
+    # May". A failing check now means users can't update -- builds must stop.
+    assert "continue-on-error" not in step, (
+        "the live-check gate must BLOCK: report-only ended with the URL fix")
+    assert "exit 1" in step, "the gate must fail the build on a failed check"
+
+
+def test_appcast_url_is_passed_narrow():
+    """The cause of the May-to-July dead updater, pinned so it cannot return.
+
+    winsparkle.h declares win_sparkle_set_appcast_url(const char *) -- NARROW,
+    unlike every other text setter (wide). Declaring it wide made the engine
+    read the URL as the single letter "h": wide text pads each letter with a
+    zero byte, and narrow text stops at the first zero. Every Windows update
+    check failed instantly for every user while the dialog blamed their
+    connection. Proven and fixed 2026-07-27 on a clean CI machine.
+    """
+    src = (REPO / "modules" / "winsparkle_updater.py").read_text()
+    assert re.search(r"win_sparkle_set_appcast_url\.argtypes\s*=\s*"
+                     r"\[ctypes\.c_char_p\]", src), (
+        "win_sparkle_set_appcast_url must be declared c_char_p (narrow); "
+        "c_wchar_p makes the engine see the URL as the single letter 'h'")
+    assert re.search(r"win_sparkle_set_appcast_url\(appcast_url\.encode", src), (
+        "the URL must be encoded to bytes before the narrow call")
 
 
 def test_the_live_check_uses_the_feed_users_actually_read():
