@@ -144,8 +144,42 @@ def test_no_card_is_stated_not_scolded():
 
 
 def test_header_badge_stays_short():
-    """It sits beside the version in a tight header."""
+    """It sits beside the version in a tight header. 'GPU: Apple Silicon' is the
+    longest we allow; anything past that starts crowding the tab strip."""
     from modules.gpu_pack import GPU_STATUS_CODES, header_badge
     for code in GPU_STATUS_CODES:
         text, _ = header_badge(code)
-        assert len(text) <= 14, f"{code} badge too long for the header: {text!r}"
+        assert len(text) <= 18, f"{code} badge too long for the header: {text!r}"
+
+
+def test_apple_hardware_is_named_only_when_it_is_accurate():
+    """Apple's PyTorch requirements are "Apple silicon OR AMD GPUs", so a Mac
+    using its GPU is not necessarily an M-series machine. Naming an Intel Mac
+    with an AMD card "Apple Silicon" would be visibly wrong to its owner, so
+    the specific name appears only on arm64 and the general wording otherwise.
+    """
+    import modules.gpu_pack as g
+    real = g.is_apple_silicon
+    try:
+        g.is_apple_silicon = lambda: True
+        assert g.header_badge("gpu_apple") == ("GPU: Apple Silicon", "ok")
+        assert "Apple Silicon" in g.status_message("gpu_apple")
+        assert "Apple Silicon" in g.summary_line("gpu_apple")
+
+        g.is_apple_silicon = lambda: False
+        text, tone = g.header_badge("gpu_apple")
+        assert tone == "ok" and "Silicon" not in text, text
+        assert "Silicon" not in g.status_message("gpu_apple")
+        assert "Silicon" not in g.summary_line("gpu_apple")
+        # The fallback must still say something on all three surfaces.
+        assert text and g.status_message("gpu_apple") and g.summary_line("gpu_apple")
+    finally:
+        g.is_apple_silicon = real
+
+
+def test_apple_silicon_check_is_specific_to_m_series():
+    """It must key off the processor, not merely off being a Mac."""
+    import platform
+    from modules.gpu_pack import is_apple_silicon
+    expected = sys.platform == "darwin" and platform.machine() == "arm64"
+    assert is_apple_silicon() is expected

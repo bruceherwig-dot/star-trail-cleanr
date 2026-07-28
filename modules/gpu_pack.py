@@ -611,12 +611,28 @@ def gpu_status(device: str, nvidia_outcome: Optional[str] = None) -> str:
     return "cpu_pack_unused"
 
 
+def is_apple_silicon() -> bool:
+    """True on an M-series Mac (M1 and later).
+
+    Used only to NAME the hardware accurately in what the user reads. Apple's
+    own PyTorch requirements are "Mac computers with Apple silicon or AMD GPUs",
+    so a Mac using its GPU is not necessarily an M-series machine: an older
+    Intel Mac with a discrete AMD card can reach the same state. Calling that
+    machine "Apple Silicon" would be visibly wrong to its owner, so the wording
+    falls back to the general form whenever this is False.
+    """
+    import platform
+    return sys.platform == "darwin" and platform.machine() == "arm64"
+
+
 def status_message(code: str) -> str:
     """Return the Settings-tab compute-status line for a `gpu_status` code.
 
     Returns an empty string for an unknown code so a future code can never blank
     out or crash the Settings tab.
     """
+    if code == "gpu_apple" and is_apple_silicon():
+        return "Apple Silicon: GPU acceleration active"
     return {
         "gpu_nvidia": "NVIDIA CUDA: GPU acceleration active",
         "gpu_apple": "Apple MPS: GPU acceleration active",
@@ -645,6 +661,8 @@ def header_badge(code: str) -> Tuple[str, str]:
     badge should be clickable through to Settings, where the fix lives.
     Returns ("", "neutral") for an unknown code so the header just stays bare.
     """
+    if code == "gpu_apple" and is_apple_silicon():
+        return ("GPU: Apple Silicon", "ok")
     return {
         "gpu_nvidia": ("GPU: NVIDIA", "ok"),
         "gpu_apple": ("GPU: Apple", "ok"),
@@ -667,6 +685,8 @@ def summary_line(code: str) -> str:
     cramped header badge, and nothing at all on a machine with no card, where
     naming the absence would just read as a complaint.
     """
+    if code == "gpu_apple" and is_apple_silicon():
+        return "Cleaned using your Apple Silicon graphics."
     return {
         "gpu_nvidia": "Cleaned using your NVIDIA graphics card.",
         "gpu_apple": "Cleaned using your Mac's built-in graphics.",
