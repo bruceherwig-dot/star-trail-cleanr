@@ -2,6 +2,11 @@
 
 ---
 
+## v2.82-beta
+- **Checking for updates on Windows works now. It never did before.** Since the one-click updater arrived in May, every check on every Windows PC failed with "an error occurred in retrieving update information," and the app wrongly suggested the user's security software was to blame. The real cause was one line of our code handing the update engine a garbled web address. With it fixed, Windows users get the same one-click updates Mac users have had all along. Getting THIS version still takes one manual download (the copy on your PC has the old bug); every version after arrives with one click. If we told you your security suite or VPN was blocking updates: it wasn't, and we're sorry.
+- **Every Windows release build now proves a real update check works before it can ship.** The build machine installs the app, checks our live update feed, and the release is blocked if the check fails. This is the test that found the bug; it is now permanent.
+- **Smoke tests:** 266 passing.
+
 ## v2.81-beta
 - **Photos with extra channels now open instead of failing partway through.** A TIFF saved out of Photoshop can carry more than the usual red, green and blue, because saved selections and masks are stored inside the file as extra channels. Those files got as far as the trail detector and then failed. The app now uses the red, green and blue and ignores the extras, noting it in the Star Log, so the clean runs normally. Your photograph is unaffected; only the stored selections are left out, and they were never carried into the cleaned copy anyway. Black-and-white TIFFs saved with transparency now open too.
 - **Fewer false crash reports.** The app tries several different readers when opening a photo and expects some of them to turn it down, but those routine refusals were being reported to us as if the app had crashed. They no longer are. A file that genuinely cannot be opened still reports, with the full detail.
