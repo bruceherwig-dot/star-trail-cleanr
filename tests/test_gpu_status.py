@@ -100,6 +100,52 @@ def test_run_note_is_written_for_photographers():
 
 def test_unknown_code_is_harmless():
     """A future code must never blank the Settings tab or raise."""
-    from modules.gpu_pack import status_message, run_note
+    from modules.gpu_pack import (status_message, run_note, header_badge,
+                                  summary_line)
     assert status_message("something_new") == ""
     assert run_note("something_new") == ""
+    assert header_badge("something_new") == ("", "neutral")
+    assert summary_line("something_new") == ""
+
+
+def test_a_working_gpu_says_so_without_being_asked():
+    """The gap a user reported: the app only ever spoke up when the graphics
+    card was NOT being used, so there was no way to confirm before starting an
+    hours-long run, or afterwards, that it had been used."""
+    from modules.gpu_pack import header_badge, summary_line, run_note
+    for code in ("gpu_nvidia", "gpu_apple"):
+        text, tone = header_badge(code)
+        assert text and tone == "ok", f"{code} must show a positive badge"
+        assert summary_line(code), f"{code} must confirm on the run summary"
+        # Nothing is wrong, so the run log stays quiet -- that part is unchanged.
+        assert run_note(code) == ""
+
+
+def test_an_unused_card_is_flagged_and_actionable():
+    """A card going unused must read as fixable, not as a plain fact."""
+    from modules.gpu_pack import header_badge, summary_line
+    for code in ("cpu_pack_missing", "cpu_pack_mismatch", "cpu_pack_unused"):
+        text, tone = header_badge(code)
+        assert text and tone == "warn", f"{code} must warn in the header"
+        assert "Settings" in summary_line(code), (
+            f"{code} must point at where the fix lives")
+
+
+def test_no_card_is_stated_not_scolded():
+    """With no graphics card there is nothing to fix, so the header states it
+    plainly and the run summary says nothing at all."""
+    from modules.gpu_pack import header_badge, summary_line
+    for code in ("cpu_no_card", "cpu_only", "cpu_card_unsupported"):
+        text, tone = header_badge(code)
+        assert tone == "neutral", f"{code} must not read as a warning"
+        assert text, f"{code} should still state what is doing the work"
+        assert summary_line(code) == "", (
+            f"{code} must not nag on the run summary")
+
+
+def test_header_badge_stays_short():
+    """It sits beside the version in a tight header."""
+    from modules.gpu_pack import GPU_STATUS_CODES, header_badge
+    for code in GPU_STATUS_CODES:
+        text, _ = header_badge(code)
+        assert len(text) <= 14, f"{code} badge too long for the header: {text!r}"

@@ -3231,7 +3231,24 @@ class MainWindow(QMainWindow):
             f"color: {BRAND_HEADER_SUB}; font-size: 12px; background: transparent;"
         )
         self._header_subline.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        text_col.addWidget(self._header_subline)
+        # The badge sits BESIDE the subline rather than inside it: the subline is
+        # one label so version + detector copy together as a block, and folding a
+        # live status into it would break that.
+        _sub_row = QHBoxLayout()
+        _sub_row.setContentsMargins(0, 0, 0, 0)
+        _sub_row.setSpacing(14)
+        _sub_row.addWidget(self._header_subline)
+        # Always-visible compute indicator. A user asked to see his graphics card
+        # was working BEFORE starting an hours-long run; until now the app only
+        # spoke up when something was wrong. Filled in by _refresh_compute_section
+        # once both detection threads report; blank until then, never guessing.
+        self._header_gpu = QLabel("")
+        self._header_gpu.setStyleSheet(
+            f"color: {BRAND_HEADER_SUB}; font-size: 12px; background: transparent;")
+        self._header_gpu.setAlignment(Qt.AlignBottom | Qt.AlignLeft)
+        _sub_row.addWidget(self._header_gpu, 0, Qt.AlignBottom)
+        _sub_row.addStretch()
+        text_col.addLayout(_sub_row)
         text_col.addStretch()
         outer.addWidget(text_wrap)
         outer.addStretch()
@@ -4052,7 +4069,47 @@ class MainWindow(QMainWindow):
             self._gpu_clear_btn.setVisible(show_upgrade)
         if hasattr(self, '_gpu_help_btn'):
             self._gpu_help_btn.setVisible(show_upgrade)
+        self._refresh_header_gpu_badge(code)
         self._maybe_show_nvidia_banner(code)
+
+    def _refresh_header_gpu_badge(self, code):
+        """Update the compute indicator beside the version in the header.
+
+        Green when a graphics card is doing the work, amber and clickable
+        through to Settings when there's a card going unused, plain grey when
+        there's no card to use (a fact, not a fault). Remembers the code so the
+        click handler and the run summary can reuse this window's verdict."""
+        if not hasattr(self, "_header_gpu"):
+            return
+        from modules.gpu_pack import header_badge
+        text, tone = header_badge(code)
+        self._header_gpu_code = code
+        colour = {"ok": "#5cd65c", "warn": BRAND_NOTICE_ORANGE}.get(
+            tone, BRAND_HEADER_SUB)
+        self._header_gpu.setText(text)
+        self._header_gpu.setStyleSheet(
+            f"color: {colour}; font-size: 12px; font-weight: bold; "
+            f"background: transparent;")
+        if tone == "warn":
+            self._header_gpu.setCursor(Qt.PointingHandCursor)
+            self._header_gpu.setToolTip(
+                "This computer has a graphics card that isn't being used. "
+                "Click to open Settings.")
+            self._header_gpu.mousePressEvent = lambda e: self._open_settings_tab()
+        else:
+            self._header_gpu.setCursor(Qt.ArrowCursor)
+            self._header_gpu.setToolTip("")
+            self._header_gpu.mousePressEvent = lambda e: None
+
+    def _open_settings_tab(self):
+        """Jump to the Settings tab (from the header's GPU badge)."""
+        try:
+            for i in range(self._tabs.count()):
+                if self._tabs.tabText(i).strip().lower() == "settings":
+                    self._tabs.setCurrentIndex(i)
+                    return
+        except Exception:
+            pass
 
     def _maybe_show_nvidia_banner(self, code):
         """Show the orange GPU banner when there is a graphics card going unused
@@ -5912,12 +5969,27 @@ class MainWindow(QMainWindow):
                 time_saved = f"~{m} minute{'s' if m != 1 else ''}"
         else:
             time_saved = f"~{saved_sec} second{'s' if saved_sec != 1 else ''}"
+        # What did the work. A user asked for this by name: the finished-run
+        # screen is where he wanted confirmation his graphics card had been
+        # used, rather than having to infer it from the log. Taken from the
+        # verdict the worker recorded at the START of this run, so it describes
+        # THIS run and not the machine's state afterwards.
+        _gpu_line = ""
+        try:
+            from modules.gpu_pack import summary_line as _gpu_summary
+            _code = getattr(getattr(self, "worker", None), "_gpu_status_code", None)
+            _txt = _gpu_summary(_code or "")
+            if _txt:
+                _gpu_line = f"<span style='font-size:15px;'>{_txt}</span><br><br>"
+        except Exception:
+            pass
         self._stats_trail_line = (
             f"Swept <b>{total_trails:,}</b> airplane and satellite trails from your stars<br>"
             f"across <b>{total_frames:,}</b> twinkling frames.<br>"
             f"<i>Based on manual cleanup at 30 seconds per trail.</i><br><br>"
             f"<span style='font-size:20px; font-weight:bold;'>TIME SAVED: {time_saved}</span>"
             f"<br><br>"
+            + _gpu_line
             + stack_cta
         )
         # Stats HTML stored on self; the modal dialog renders it on _on_done.

@@ -632,6 +632,53 @@ def status_message(code: str) -> str:
     }.get(code, "")
 
 
+def header_badge(code: str) -> Tuple[str, str]:
+    """Return (text, tone) for the always-visible header indicator.
+
+    A Windows user asked for this: he wanted to know his graphics card was
+    working BEFORE committing to an hours-long run, not just to be warned when
+    it wasn't. `run_note` only speaks up when something is wrong, so a working
+    card said nothing anywhere he would look.
+
+    Kept short: it sits beside the version in a tight header. `tone` is
+    "ok" / "warn" / "neutral" for the caller to colour; "warn" also means the
+    badge should be clickable through to Settings, where the fix lives.
+    Returns ("", "neutral") for an unknown code so the header just stays bare.
+    """
+    return {
+        "gpu_nvidia": ("GPU: NVIDIA", "ok"),
+        "gpu_apple": ("GPU: Apple", "ok"),
+        "cpu_pack_missing": ("GPU: off", "warn"),
+        "cpu_pack_mismatch": ("GPU: off", "warn"),
+        "cpu_pack_unused": ("GPU: off", "warn"),
+        "cpu_card_unsupported": ("CPU only", "neutral"),
+        "cpu_no_card": ("CPU only", "neutral"),
+        "cpu_only": ("CPU only", "neutral"),
+    }.get(code, ("", "neutral"))
+
+
+def summary_line(code: str) -> str:
+    """Return the sentence for the finished-run summary, or "" when there is
+    nothing worth saying.
+
+    The moment the same user described wanting confirmation was at the END of a
+    long run: "this final screen would also be a great place to confirm for the
+    user that their expensive GPU was put to work." Plain words here, unlike the
+    cramped header badge, and nothing at all on a machine with no card, where
+    naming the absence would just read as a complaint.
+    """
+    return {
+        "gpu_nvidia": "Cleaned using your NVIDIA graphics card.",
+        "gpu_apple": "Cleaned using your Mac's built-in graphics.",
+        "cpu_pack_missing": ("Cleaned on the processor. Installing GPU support "
+                             "in Settings would make this much faster."),
+        "cpu_pack_mismatch": ("Cleaned on the processor. Reinstalling GPU support "
+                              "in Settings would put your graphics card back to work."),
+        "cpu_pack_unused": ("Cleaned on the processor. Reinstalling GPU support "
+                            "in Settings would put your graphics card back to work."),
+    }.get(code, "")
+
+
 def run_note(code: str) -> str:
     """Return the plain-English sentence to print at the start of a run when the
     machine has a graphics card it isn't using, or "" when there is nothing worth
