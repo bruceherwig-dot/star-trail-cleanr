@@ -164,7 +164,7 @@ function platform_label($platform, $arch) {
     return $p !== '' ? ucfirst($p) : '';
 }
 
-$trails = 0; $runs = 0; $timelapses = 0; $no_exif = 0;
+$trails = 0; $runs = 0; $timelapses = 0; $startrails = 0; $no_exif = 0;
 $real_runs = 0; $real_frames = 0; $real_trails = 0; $real_gpu = 0;  // runs over 20 frames only
 $users = array();
 $gpu_users = array();   // photographers with >=1 GPU run (for the Windows-GPU tile)
@@ -199,6 +199,9 @@ if (is_readable($REPORTS)) {
             // Reports are appended in time order, so the last one wins = current build.
             if ($id !== '' && !empty($r['app_version'])) $user_version[$id] = (string) $r['app_version'];
             if ($type === 'timelapse') { $timelapses++; continue; }
+            // Deliberate Star Trail tab renders (v2.83+). The automatic trail built
+            // during every run is not reported, so this counts real button presses.
+            if ($type === 'startrail') { $startrails++; continue; }
             $runs++;
             // A photographer "has a GPU" if any of their runs (any length) used it.
             if ($id !== '' && isset($r['gpu']) && $r['gpu'] === true) $gpu_users[$id] = true;
@@ -431,6 +434,7 @@ echo json_encode(array(
     'gpu_vs_cpu'            => $gpu_cpu_list,
     'windows_gpu'           => $windows_gpu,
     'windows_gpu_pct'       => $windows_users ? (int) round($windows_gpu * 100 / $windows_users) : 0,
+    'startrails'            => $startrails,
     'timelapses'            => $timelapses,
     'versions'              => $ver_list,
     'current_version'       => $current_version,

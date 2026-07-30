@@ -179,6 +179,7 @@
   <div class="tiles bottom">
     <div class="tile"><div class="num" id="t-runs">…</div><div class="lbl">Times run</div></div>
     <div class="tile"><div class="num" id="t-gpu">…</div><div class="lbl">Windows users on the GPU</div></div>
+    <div class="tile"><div class="num" id="t-st">…</div><div class="lbl">Star trails created</div></div>
     <div class="tile"><div class="num" id="t-tl">…</div><div class="lbl">Timelapse videos created</div></div>
   </div>
 
@@ -236,6 +237,7 @@ fetch('https://api.startrailcleanr.com/stats.php',{cache:'no-store'})
     animate(document.getElementById('t-countries'),d.countries_count);
     document.getElementById('t-countries').nextElementSibling.textContent=(d.countries_count===1?'Country':'Countries');
     animate(document.getElementById('t-gpu'),d.windows_gpu,d.windows_gpu_pct!=null?' ('+d.windows_gpu_pct+'%)':'');
+    animate(document.getElementById('t-st'),d.startrails||0);
     animate(document.getElementById('t-tl'),d.timelapses);
     bars('c-platforms', d.platforms, 'pct');
     bars('c-versions', d.versions, 'both');

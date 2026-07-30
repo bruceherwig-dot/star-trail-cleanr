@@ -7973,6 +7973,27 @@ class StarTrailPanel(QWidget):
                 _scaled = _pm.scaled(_PREVIEW_W, _PREVIEW_H, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                 self._thumb.setPixmap(_scaled)
                 self._thumb.setFixedSize(_PREVIEW_W, _PREVIEW_H)
+            # Anonymous usage report for a DELIBERATE star trail render (this tab's
+            # Build button), mirroring the timelapse render report. The automatic
+            # trail built during every run is NOT counted -- that would just
+            # re-count runs. Settings only, per Bruce (no platform). Opt-in gated
+            # and wrapped so telemetry can never affect a build.
+            try:
+                if SETTINGS.value("crash_reporting_enabled", False, type=bool):
+                    from modules import usage_report
+                    _comet = self._mode_comet.isChecked()
+                    usage_report.send({
+                        "type": "startrail",
+                        "app_version": VERSION,
+                        "style": "comet" if _comet else "normal",
+                        "comet_length": (self._comet_len_cb.currentData()
+                                         if _comet else None),
+                        "reversed": bool(_comet and self._reverse_chk.isChecked()),
+                        "thicken_px": self._size_cb.currentData(),
+                        "speck_cleanup": self._hotpix_chk.isChecked(),
+                    })
+            except Exception:
+                pass
             self._open_star()               # auto-open the finished star trail
         else:
             self._bar.setVisible(False)
