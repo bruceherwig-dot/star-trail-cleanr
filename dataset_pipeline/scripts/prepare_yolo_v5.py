@@ -66,7 +66,7 @@ SEED         = 42
 TASK_CONFIG = {
     36: ("Warren Hatch - Stroudt's Preserve",                       114),
     39: ("borrego_springs_1",                                         5),
-    40: ("Bruce Herwig Johsua Tree 6.26 80 sec exposure Star Trail", 89),
+    40: ("Bruce Herwig Joshua Tree 6.26 80 sec exposure Star Trail", 89),
     41: ("Thomas Jackson Star Trails Borrego",                      301),
     54: ("Thomas Jackson GoPro_G0088569",                           900),
     55: ("Thomas Jackson GoPro_G0037688",                           997),
