@@ -7377,9 +7377,12 @@ class TimelapsePanel(QWidget):
         self._tl_prev_btn.setEnabled(self._tl_idx < len(cands) - 1)
         self._tl_next_btn.setEnabled(self._tl_idx > 0)
         has = bool(self._play_path and os.path.isfile(self._play_path))
-        if has and many:
+        if has:
+            # The filename (STC_timelapse_4k.mp4 ...) records the render settings,
+            # so it shows whenever a video exists, count appended when several do.
             self._tl_caption.setText(
-                f"{os.path.basename(self._play_path)} · {self._tl_idx + 1} of {len(cands)}")
+                os.path.basename(self._play_path)
+                + (f" · {self._tl_idx + 1} of {len(cands)}" if many else ""))
             self._tl_caption.setVisible(True)
         else:
             self._tl_caption.setVisible(False)
@@ -7708,6 +7711,14 @@ class StarTrailPanel(QWidget):
         _prow.addWidget(self._next_btn, 0, Qt.AlignVCenter)
         _prow.addStretch(1)
         lay.addLayout(_prow)
+        # Filename caption: the option-named files (STC_star_trail_comet-long_
+        # thick2_despeck.jpg ...) are the record of the settings each build used,
+        # so the caption IS the settings readout for whichever build is shown.
+        self._name_lbl = QLabel("")
+        self._name_lbl.setAlignment(Qt.AlignCenter)
+        self._name_lbl.setStyleSheet(f"color: {MUTED_TEXT};")
+        self._name_lbl.setVisible(False)
+        lay.addWidget(self._name_lbl)
         self._hint_open = QLabel("Click the image to open")
         self._hint_open.setAlignment(Qt.AlignCenter)
         self._hint_open.setStyleSheet(f"color: {MUTED_TEXT};")
@@ -7901,6 +7912,10 @@ class StarTrailPanel(QWidget):
             tokens.append(f"thick{thick}")
         if self._hotpix_chk.isChecked():
             tokens.append("despeck")
+        # The caption under the preview shows this filename as the record of the
+        # settings used, so the non-default Source choice must leave a mark too.
+        if self._src_cb.currentData() == "original":
+            tokens.append("original")
         base = os.path.join(ws, "STC_star_trail_" + "_".join(tokens) + ".jpg")
         return _unique_path(base)
 
@@ -8051,20 +8066,24 @@ class StarTrailPanel(QWidget):
         for b in (self._prev_btn, self._next_btn):
             b.setVisible(many)
         if not self._builds:
-            self._thumb.hide(); self._hint_open.hide(); self._ph.show()
+            self._thumb.hide(); self._hint_open.hide(); self._name_lbl.hide()
+            self._ph.show()
             return
         self._ph.hide()
         self._star_path = self._builds[self._build_idx]
         pm = QPixmap(self._star_path)
         if pm.isNull():
-            self._thumb.hide(); self._hint_open.hide(); self._ph.show()
+            self._thumb.hide(); self._hint_open.hide(); self._name_lbl.hide()
+            self._ph.show()
             return
         self._thumb.setPixmap(pm.scaled(_PREVIEW_W, _PREVIEW_H,
                                         Qt.KeepAspectRatio, Qt.SmoothTransformation))
         self._thumb.show()
-        self._hint_open.setText(
-            f"Click the image to open · {self._build_idx + 1} of {len(self._builds)}"
-            if many else "Click the image to open")
+        self._name_lbl.setText(
+            os.path.basename(self._star_path)
+            + (f" · {self._build_idx + 1} of {len(self._builds)}" if many else ""))
+        self._name_lbl.show()
+        self._hint_open.setText("Click the image to open")
         self._hint_open.show()
         self._prev_btn.setEnabled(self._build_idx < len(self._builds) - 1)
         self._next_btn.setEnabled(self._build_idx > 0)
