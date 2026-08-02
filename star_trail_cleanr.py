@@ -5091,13 +5091,27 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             self._creator_window = None
+        # The stats belong to ONE folder. Bruce switched folders and the Summary
+        # tab kept showing the previous run's numbers -- both the in-memory stats
+        # and the saved copy were restored with no memory of which folder they
+        # described. Now the folder rides along, and stats only show on a match;
+        # any other folder gets the neutral "appears here after you clean" text.
+        def _same_folder(a, b):
+            try:
+                return a and b and os.path.realpath(a) == os.path.realpath(b)
+            except OSError:
+                return False
         summary_html = (getattr(self, "_stats_trail_line", "") or "") + \
                        (getattr(self, "_stats_timing_line", "") or "")
+        if not _same_folder(getattr(self, "_stats_folder", None), cleaned_folder):
+            summary_html = ""
         # Remember the last run's summary so the Summary tab still shows real numbers
         # when the window is opened via a button or after an app restart.
         if summary_html.strip():
             SETTINGS.setValue("last_run_summary_html", summary_html)
-        else:
+            SETTINGS.setValue("last_run_summary_folder", cleaned_folder)
+        elif _same_folder(SETTINGS.value("last_run_summary_folder", "", type=str),
+                          cleaned_folder):
             summary_html = SETTINGS.value("last_run_summary_html", "", type=str)
         # Open THIS creator's cleaned folder directly (not the main window's
         # _done_output_folder, which is empty when the summary loads from saved stats).
@@ -5940,6 +5954,10 @@ class MainWindow(QMainWindow):
         # Capture for the run-summary file and the run-complete dialog.
         self._run_total_trails = total_trails
         self._run_total_frames = total_frames
+        # Which folder these stats describe. The creator window shows them only
+        # when it opens on this same folder (see _open_creator).
+        self._stats_folder = getattr(getattr(self, "worker", None),
+                                     "output_folder", None)
         color = SUCCESS_TEXT if total_trails > 0 else MUTED_TEXT
         self._trail_counter_label.setStyleSheet(
             f"font-size: 22px; font-weight: bold; color: {color};"
