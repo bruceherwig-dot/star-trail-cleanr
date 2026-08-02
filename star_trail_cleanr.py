@@ -7514,7 +7514,7 @@ class TimelapsePanel(QWidget):
         frames_dir = self._current_folder()
         ext = self._fmt_cb.currentData() or "mp4"
         blend = int(self._blend_cb.currentData() or 0)
-        tag = "original_" if src == "original" else ""
+        tag = f"{src}_"     # cleaned or original, always named in the file
         # Option-named output in the cleaned folder's STC Extras workspace, so a
         # re-render keeps its own file instead of overwriting; identical options get a
         # _2, _3 counter. (source tag + size + fps + smoothing.)
@@ -7913,9 +7913,8 @@ class StarTrailPanel(QWidget):
         if self._hotpix_chk.isChecked():
             tokens.append("despeck")
         # The caption under the preview shows this filename as the record of the
-        # settings used, so the non-default Source choice must leave a mark too.
-        if self._src_cb.currentData() == "original":
-            tokens.append("original")
+        # settings used, so the source is always named -- cleaned or original.
+        tokens.append(self._src_cb.currentData() or "cleaned")
         base = os.path.join(ws, "STC_star_trail_" + "_".join(tokens) + ".jpg")
         return _unique_path(base)
 
