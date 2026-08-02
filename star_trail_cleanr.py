@@ -478,10 +478,11 @@ def _secondary_btn_css():
     )
 
 
-def _newest_star_trail(baseline_path, cleaned_folder):
-    """Return the most recent star trail to preview: the run's instant baseline
-    (STC_cleaned_star_trail.jpg) or any Build output (STC_star_trail_*.jpg) in the
-    same workspace, newest by mtime. Falls back to the baseline path."""
+def _star_trail_builds(baseline_path, cleaned_folder):
+    """Every existing star trail for this workspace, newest first: the run's
+    instant baseline (STC_cleaned_star_trail.jpg) plus each Build output
+    (STC_star_trail_*.jpg). Empty list when none exist yet. The preview's
+    left/right arrows page through exactly this list."""
     import glob
     ws = os.path.dirname(baseline_path) if baseline_path else \
         os.path.dirname(workspace_path(cleaned_folder, "x")) if cleaned_folder else None
@@ -490,10 +491,15 @@ def _newest_star_trail(baseline_path, cleaned_folder):
         cands.append(baseline_path)
     if ws and os.path.isdir(ws):
         cands += glob.glob(os.path.join(ws, "STC_star_trail_*.jpg"))
-    existing = [c for c in cands if os.path.isfile(c)]
-    if existing:
-        return max(existing, key=os.path.getmtime)
-    return baseline_path
+    return sorted({c for c in cands if os.path.isfile(c)},
+                  key=os.path.getmtime, reverse=True)
+
+
+def _newest_star_trail(baseline_path, cleaned_folder):
+    """Return the most recent star trail to preview, or the baseline path when
+    nothing exists yet (callers treat a missing file as 'no trail')."""
+    builds = _star_trail_builds(baseline_path, cleaned_folder)
+    return builds[0] if builds else baseline_path
 
 
 def _unique_path(path):
@@ -7110,6 +7116,24 @@ _CREATOR_PANEL_SPACING = 10
 _PREVIEW_W, _PREVIEW_H = 420, 280
 
 
+def _make_preview_arrow(glyph, on_click):
+    """One of the ‹ › paging buttons that flank a preview when several built
+    files exist. Slim, dark, vertically centered against the preview box;
+    hidden by default -- the panel shows it only when there is something to
+    page through."""
+    b = QPushButton(glyph)
+    b.setFixedSize(30, 64)
+    b.setCursor(Qt.PointingHandCursor)
+    b.setStyleSheet(
+        "QPushButton { background: #2a2a2a; color: #dcdcdc; border: none;"
+        " border-radius: 8px; font-size: 22px; font-weight: bold; }"
+        "QPushButton:hover { background: #3d3d3d; }"
+        "QPushButton:disabled { background: #1c1c1c; color: #555; }")
+    b.clicked.connect(on_click)
+    b.setVisible(False)
+    return b
+
+
 class TimelapsePanel(QWidget):
     """Timelapse Maker -- the Timelapse tab inside CreatorWindow (was its own
     dialog). Pick source (cleaned/original) / size / fps / format, see an
@@ -7153,7 +7177,6 @@ class TimelapsePanel(QWidget):
         self._poster.setFixedSize(_PREVIEW_W, _PREVIEW_H)
         self._poster.setStyleSheet("background: #141414; border-radius: 6px;")
         self._poster.mousePressEvent = lambda e: self._play_video()
-        lay.addWidget(self._poster, 0, Qt.AlignHCenter)
         # Shown in the poster's place before any video is rendered. Real (selectable)
         # text in a dark video-frame box, sized to match the poster so nothing jumps.
         self._poster_placeholder = QLabel(
@@ -7163,7 +7186,28 @@ class TimelapsePanel(QWidget):
         self._poster_placeholder.setFixedSize(_PREVIEW_W, _PREVIEW_H)
         self._poster_placeholder.setStyleSheet(
             "background: #141414; color: #dcdcdc; border-radius: 6px; padding: 16px; font-size: 19px;")
-        lay.addWidget(self._poster_placeholder, 0, Qt.AlignHCenter)
+        # Arrows flank the poster and appear only when several rendered videos
+        # exist; they choose which one Play/Open act on. Caption names the shown
+        # file, since different renders share one poster image.
+        self._tl_prev_btn = _make_preview_arrow("‹", lambda: self._step_video(+1))
+        self._tl_next_btn = _make_preview_arrow("›", lambda: self._step_video(-1))
+        _prow = QHBoxLayout()
+        _prow.addStretch(1)
+        _prow.addWidget(self._tl_prev_btn, 0, Qt.AlignVCenter)
+        _pstack = QVBoxLayout(); _pstack.setSpacing(0)
+        _pstack.addWidget(self._poster)
+        _pstack.addWidget(self._poster_placeholder)
+        _prow.addLayout(_pstack)
+        _prow.addWidget(self._tl_next_btn, 0, Qt.AlignVCenter)
+        _prow.addStretch(1)
+        lay.addLayout(_prow)
+        self._tl_caption = QLabel("")
+        self._tl_caption.setAlignment(Qt.AlignCenter)
+        self._tl_caption.setStyleSheet(f"color: {MUTED_TEXT};")
+        self._tl_caption.setVisible(False)
+        lay.addWidget(self._tl_caption)
+        self._tl_builds = []
+        self._tl_idx = 0
 
         def _row(text, combo):
             r = QHBoxLayout()
@@ -7312,23 +7356,43 @@ class TimelapsePanel(QWidget):
         p.end()
 
     def _refresh_play_state(self):
-        """Find a rendered timelapse in the workspace (this render, or one from a
-        previous session; newest wins), then redraw the poster with its play button
-        and make it clickable when a video is available."""
+        """Find every rendered timelapse in the workspace (this render, or ones
+        from previous sessions), newest first, and show the selected one. The
+        ‹ › arrows page the selection when several exist; Play, the poster
+        click, and Open Video all act on the shown file. The caption names it,
+        since different renders share one poster image."""
         import glob
         ws = os.path.dirname(workspace_path(self._cleaned, "STC_timelapse.mp4"))
         cands = []
         for ext in ("mp4", "mov"):
             cands += glob.glob(os.path.join(ws, "STC_timelapse_*." + ext))
+        cands.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+        self._tl_builds = cands
+        self._tl_idx = max(0, min(self._tl_idx, len(cands) - 1))
         if cands:
-            cands.sort(key=lambda p: os.path.getmtime(p), reverse=True)
-            self._play_path = cands[0]
+            self._play_path = cands[self._tl_idx]
+        many = len(cands) > 1
+        for b in (self._tl_prev_btn, self._tl_next_btn):
+            b.setVisible(many)
+        self._tl_prev_btn.setEnabled(self._tl_idx < len(cands) - 1)
+        self._tl_next_btn.setEnabled(self._tl_idx > 0)
         has = bool(self._play_path and os.path.isfile(self._play_path))
+        if has and many:
+            self._tl_caption.setText(
+                f"{os.path.basename(self._play_path)} · {self._tl_idx + 1} of {len(cands)}")
+            self._tl_caption.setVisible(True)
+        else:
+            self._tl_caption.setVisible(False)
         self._poster.setCursor(Qt.PointingHandCursor if has else Qt.ArrowCursor)
         self._poster.setToolTip("Click to play the timelapse video" if has else "")
         if getattr(self, "_open_vid_btn", None) is not None:
             self._open_vid_btn.setEnabled(has)
         self._set_poster()   # redraw with (or without) the play button overlay
+
+    def _step_video(self, delta):
+        """Arrow click: +1 pages to an older render, -1 back toward the newest."""
+        self._tl_idx += delta
+        self._refresh_play_state()
 
     def _open_saved_folder(self):
         """Open the STC Extras folder where timelapses are saved."""
@@ -7539,6 +7603,7 @@ class TimelapsePanel(QWidget):
             self._bar.setVisible(False)
             self._status_lbl.setText(f"Done: {os.path.basename(self._out_path)}")
             self._play_path = self._out_path
+            self._tl_idx = 0                    # a fresh render is newest: show it
             self._refresh_play_state()          # light up the play button + Open Video button
             # No auto-open of the Finder folder -- the user opens the video or folder
             # via the buttons / play overlay (one screen, on demand).
@@ -7606,36 +7671,46 @@ class StarTrailPanel(QWidget):
         _title.setStyleSheet(f"color: {BRAND_HEADING_BLUE};")
         lay.addWidget(_title)
 
-        # Preview: the newest star trail if one exists, else a placeholder telling the
-        # user how to make one (mirrors the Timelapse tab so the area is never blank).
-        self._thumb = None
-        if self._star_path and os.path.isfile(self._star_path):
-            _pm = QPixmap(self._star_path)
-            if not _pm.isNull():
-                _scaled = _pm.scaled(_PREVIEW_W, _PREVIEW_H, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                self._thumb = QLabel()
-                self._thumb.setPixmap(_scaled)
-                self._thumb.setAlignment(Qt.AlignCenter)
-                # Fixed LANDSCAPE box: portrait images center inside it with side margins
-                # instead of ballooning the window height. Same box on both tabs.
-                self._thumb.setFixedSize(_PREVIEW_W, _PREVIEW_H)
-                self._thumb.setStyleSheet("background: #141414; border-radius: 6px;")
-                self._thumb.setCursor(Qt.PointingHandCursor)
-                self._thumb.setToolTip("Click to open the star trail image")
-                self._thumb.mousePressEvent = lambda e: self._open_star()
-                lay.addWidget(self._thumb, 0, Qt.AlignHCenter)
-                _hint_open = QLabel("Click the image to open")
-                _hint_open.setAlignment(Qt.AlignCenter)
-                _hint_open.setStyleSheet(f"color: {MUTED_TEXT};")
-                lay.addWidget(_hint_open)
-        if self._thumb is None:
-            _ph = QLabel("Your star trail will appear here. Choose your options below, "
-                         "then click Create Star Trail.")
-            _ph.setAlignment(Qt.AlignCenter); _ph.setWordWrap(True)
-            _ph.setFixedSize(_PREVIEW_W, _PREVIEW_H)
-            _ph.setStyleSheet("background: #141414; color: #dcdcdc; border-radius: 6px; "
-                              "padding: 16px; font-size: 19px;")
-            lay.addWidget(_ph, 0, Qt.AlignHCenter)
+        # Preview: the newest star trail if one exists, else a placeholder telling
+        # the user how to make one (mirrors the Timelapse tab so the area is never
+        # blank). Thumb and placeholder BOTH always exist and swap visibility --
+        # the old build-on-demand thumb meant a window opened before any trail
+        # existed could never show the first build. Arrows flank the preview and
+        # appear only when more than one built trail exists.
+        self._thumb = QLabel()
+        self._thumb.setAlignment(Qt.AlignCenter)
+        # Fixed LANDSCAPE box: portrait images center inside it with side margins
+        # instead of ballooning the window height. Same box on both tabs.
+        self._thumb.setFixedSize(_PREVIEW_W, _PREVIEW_H)
+        self._thumb.setStyleSheet("background: #141414; border-radius: 6px;")
+        self._thumb.setCursor(Qt.PointingHandCursor)
+        self._thumb.setToolTip("Click to open the star trail image")
+        self._thumb.mousePressEvent = lambda e: self._open_star()
+        self._ph = QLabel("Your star trail will appear here. Choose your options below, "
+                          "then click Create Star Trail.")
+        self._ph.setAlignment(Qt.AlignCenter); self._ph.setWordWrap(True)
+        self._ph.setFixedSize(_PREVIEW_W, _PREVIEW_H)
+        self._ph.setStyleSheet("background: #141414; color: #dcdcdc; border-radius: 6px; "
+                               "padding: 16px; font-size: 19px;")
+        self._prev_btn = _make_preview_arrow("‹", lambda: self._step_build(+1))
+        self._next_btn = _make_preview_arrow("›", lambda: self._step_build(-1))
+        _prow = QHBoxLayout()
+        _prow.addStretch(1)
+        _prow.addWidget(self._prev_btn, 0, Qt.AlignVCenter)
+        _pstack = QVBoxLayout(); _pstack.setSpacing(0)
+        _pstack.addWidget(self._thumb)
+        _pstack.addWidget(self._ph)
+        _prow.addLayout(_pstack)
+        _prow.addWidget(self._next_btn, 0, Qt.AlignVCenter)
+        _prow.addStretch(1)
+        lay.addLayout(_prow)
+        self._hint_open = QLabel("Click the image to open")
+        self._hint_open.setAlignment(Qt.AlignCenter)
+        self._hint_open.setStyleSheet(f"color: {MUTED_TEXT};")
+        lay.addWidget(self._hint_open)
+        self._builds = []
+        self._build_idx = 0
+        self._refresh_builds()
 
         _LABEL_W = 112     # wide enough for "Trail Thickness"
 
@@ -7935,6 +8010,42 @@ class StarTrailPanel(QWidget):
             elif frac is not None:                # stacking pass (star trail / comet)
                 self._set_phase_frac("stack", frac)
 
+    def _refresh_builds(self, select_newest=False):
+        """Re-list the built star trails and show one. Newest is index 0; the
+        ‹ arrow pages to older builds, › back toward the newest. Arrows appear
+        only when there are at least two. With no builds at all, the placeholder
+        shows and the hint hides."""
+        self._builds = _star_trail_builds(self._star_path, self._cleaned)
+        if select_newest:
+            self._build_idx = 0
+        self._build_idx = max(0, min(self._build_idx, len(self._builds) - 1))
+        many = len(self._builds) > 1
+        for b in (self._prev_btn, self._next_btn):
+            b.setVisible(many)
+        if not self._builds:
+            self._thumb.hide(); self._hint_open.hide(); self._ph.show()
+            return
+        self._ph.hide()
+        self._star_path = self._builds[self._build_idx]
+        pm = QPixmap(self._star_path)
+        if pm.isNull():
+            self._thumb.hide(); self._hint_open.hide(); self._ph.show()
+            return
+        self._thumb.setPixmap(pm.scaled(_PREVIEW_W, _PREVIEW_H,
+                                        Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        self._thumb.show()
+        self._hint_open.setText(
+            f"Click the image to open · {self._build_idx + 1} of {len(self._builds)}"
+            if many else "Click the image to open")
+        self._hint_open.show()
+        self._prev_btn.setEnabled(self._build_idx < len(self._builds) - 1)
+        self._next_btn.setEnabled(self._build_idx > 0)
+
+    def _step_build(self, delta):
+        """Arrow click: +1 pages to an older build, -1 back toward the newest."""
+        self._build_idx += delta
+        self._refresh_builds()
+
     def _on_proc_finished(self, code, _status):
         if getattr(self, "_spin_timer", None) is not None:
             self._spin_timer.stop()          # stop the spinner/timer before final status
@@ -7963,16 +8074,13 @@ class StarTrailPanel(QWidget):
                 SETTINGS.setValue("startrail_phase_secs", json.dumps(saved_secs))
             self._bar.setVisible(False)     # hide the bar on finish, like the Timelapse window
             self._star_path = _out          # preview + Open now point at the just-built file
+            self._refresh_builds(select_newest=True)   # ALWAYS shows the new build,
+            # including the first one in a window that opened before any trail existed
             if getattr(self, "_skip_msg", ""):
                 self._status_lbl.setText("Kept the plain trail. " + self._skip_msg)
                 self._status_lbl.setWordWrap(True)
             else:
                 self._status_lbl.setText("")   # no "done" text; the trail just updates
-            _pm = QPixmap(self._star_path)
-            if not _pm.isNull() and getattr(self, "_thumb", None) is not None:
-                _scaled = _pm.scaled(_PREVIEW_W, _PREVIEW_H, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                self._thumb.setPixmap(_scaled)
-                self._thumb.setFixedSize(_PREVIEW_W, _PREVIEW_H)
             # Anonymous usage report for a DELIBERATE star trail render (this tab's
             # Build button), mirroring the timelapse render report. The automatic
             # trail built during every run is NOT counted -- that would just
