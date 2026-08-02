@@ -7652,9 +7652,13 @@ class StarTrailPanel(QWidget):
     live progress bar; the Build button doubles as Stop. Only the frame-re-reading
     options (comet, hot pixels) cost time; a plain trail is already sitting there."""
 
-    def __init__(self, cleaned_folder, star_path, parent=None):
+    def __init__(self, cleaned_folder, star_path, original_folder=None, parent=None):
         super().__init__(parent)
         self._cleaned = cleaned_folder
+        # The uncleaned input frames, for the Source choice (mirrors the
+        # Timelapse tab). None or missing on disk = the choice isn't offered.
+        self._original = original_folder if (original_folder and
+                                             os.path.isdir(original_folder)) else None
         # Preview the MOST RECENT star trail: the run's instant baseline OR any Build
         # output (STC_star_trail_*.jpg). Since Build stopped overwriting the baseline
         # (option-named files now), the newest existing file is the right preview.
@@ -7724,6 +7728,23 @@ class StarTrailPanel(QWidget):
             r.addWidget(w, 1)
             lay.addLayout(r)
             return _l
+
+        # Source: cleaned frames (default) or the original, uncleaned frames --
+        # the same choice the Timelapse tab offers, only shown when the original
+        # folder is actually on disk. Remembered across sessions; no saved
+        # choice = Cleaned.
+        self._src_cb = QComboBox()
+        self._src_cb.addItem("Cleaned", "cleaned")
+        if self._original:
+            self._src_cb.addItem("Original", "original")
+            _saved_src = SETTINGS.value("startrail_source")
+            _si = self._src_cb.findData(_saved_src) if _saved_src else -1
+            if _si >= 0:
+                self._src_cb.setCurrentIndex(_si)
+            self._src_cb.currentIndexChanged.connect(
+                lambda *_: SETTINGS.setValue("startrail_source",
+                                             self._src_cb.currentData()))
+            _row("Source", self._src_cb)
 
         from PySide6.QtWidgets import QRadioButton, QButtonGroup
         # Blending mode radios, stacked vertically: Normal on top, Comet Mode below.
@@ -7891,7 +7912,13 @@ class StarTrailPanel(QWidget):
         thick = int(self._size_cb.currentData() or 0)
         self._pending_out = self._build_out_path()   # option-named, never overwrites
         script = os.path.join(_base, "make_share_clip.py")
-        args = ["--star-trail", "--cleaned", self._cleaned, "--out", self._pending_out,
+        # Stack whichever frames the Source choice points at. The flag name
+        # stays --cleaned (it is just the frames folder to the script); output
+        # lands in the same STC Extras workspace either way.
+        _src = (self._original
+                if self._src_cb.currentData() == "original" and self._original
+                else self._cleaned)
+        args = ["--star-trail", "--cleaned", _src, "--out", self._pending_out,
                 "--comet-tail", str(comet), "--thicken", str(thick)]
         if self._mode_comet.isChecked() and self._reverse_chk.isChecked():
             args.append("--reverse")     # flip comet-tail direction (comet only)
@@ -7940,7 +7967,8 @@ class StarTrailPanel(QWidget):
         self._spin_timer.start(200)
         self._tick_spinner()
         for w in (self._hotpix_chk, self._mode_normal, self._mode_comet, self._comet_len_cb,
-                  self._reverse_chk, self._size_cb, self._open_img_btn, self._open_dir_btn):
+                  self._reverse_chk, self._size_cb, self._src_cb,
+                  self._open_img_btn, self._open_dir_btn):
             w.setEnabled(False)
         self._proc = QProcess(self)
         self._proc.setProcessChannelMode(QProcess.MergedChannels)
@@ -8052,7 +8080,8 @@ class StarTrailPanel(QWidget):
         self._build_btn.setText("Create Star Trail")
         self._build_btn.setEnabled(True)
         for w in (self._hotpix_chk, self._mode_normal, self._mode_comet, self._comet_len_cb,
-                  self._reverse_chk, self._size_cb, self._open_img_btn, self._open_dir_btn):
+                  self._reverse_chk, self._size_cb, self._src_cb,
+                  self._open_img_btn, self._open_dir_btn):
             w.setEnabled(True)
         self._sync_comet_len()   # re-gray Length if Blending Mode is Normal
         if self._build_cancelled:
@@ -8099,6 +8128,7 @@ class StarTrailPanel(QWidget):
                         "reversed": bool(_comet and self._reverse_chk.isChecked()),
                         "thicken_px": self._size_cb.currentData(),
                         "speck_cleanup": self._hotpix_chk.isChecked(),
+                        "source": self._src_cb.currentData(),
                     })
             except Exception:
                 pass
@@ -8297,7 +8327,8 @@ class CreatorWindow(QDialog):
         except Exception:
             _video_path = ""
         self._summary_panel = SummaryPanel(summary_html, on_open_folder, _video_path, self)
-        self._star_panel = StarTrailPanel(cleaned_folder, star_path, self)
+        self._star_panel = StarTrailPanel(cleaned_folder, star_path,
+                                          original_folder=original_folder, parent=self)
         self._tl_panel = TimelapsePanel(cleaned_folder, original_folder, star_path, self)
         self._tabs.addTab(self._summary_panel, "Summary")
         self._tabs.addTab(self._star_panel, "Star Trail")
