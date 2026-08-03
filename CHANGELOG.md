@@ -2,6 +2,15 @@
 
 ---
 
+## v2.83-beta
+- **The app now shows you it's using your graphics card, not just when it isn't.** A small indicator next to the version in the header reads "GPU: NVIDIA" or "GPU: Apple Silicon" in green when your graphics card is doing the work, "CPU only" when there's no card to use, and an amber "GPU: off" when your computer has a card that isn't being used, and clicking that opens Settings where one button fixes it. The finished-run summary confirms it too: "Cleaned using your NVIDIA graphics card." Asked for by a Windows tester who wanted to know before committing to an hours-long run, and we agreed.
+- **The Star Trail tab gets the same Source choice as the Timelapse tab.** Build your star trail from the cleaned frames (the default) or from the untouched originals, trails and all, for before-and-after comparisons.
+- **Your first star trail now appears in the preview.** If the window opened before any trail existed, a newly built one never showed up. It does now.
+- **Browse your builds with arrows.** Make more than one star trail or timelapse and left/right arrows appear beside the preview to flip between them, newest first. Clicking, Open, and Play always act on the one you're looking at, and a caption shows each file's name, which records the settings it was built with, now including whether it came from cleaned or original frames.
+- **The Summary tab no longer shows a different folder's numbers.** Switching to a new set of images used to leave the previous run's trail counts on screen.
+- **The community stats now count star trails created**, the ones deliberately built on the Star Trail tab, powering the new tile on startrailcleanr.com/stats.html. Settings only, sent anonymously, opt-in as always.
+- **Smoke tests:** 272 passing.
+
 ## v2.82-beta
 - **Checking for updates on Windows works now. It never did before.** Since the one-click updater arrived in May, every check on every Windows PC failed with "an error occurred in retrieving update information," and the app wrongly suggested the user's security software was to blame. The real cause was one line of our code handing the update engine a garbled web address. With it fixed, Windows users get the same one-click updates Mac users have had all along. Getting THIS version still takes one manual download (the copy on your PC has the old bug); every version after arrives with one click. If we told you your security suite or VPN was blocking updates: it wasn't, and we're sorry.
 - **Every Windows release build now proves a real update check works before it can ship.** The build machine installs the app, checks our live update feed, and the release is blocked if the check fails. This is the test that found the bug; it is now permanent.
