@@ -1392,11 +1392,25 @@ def main():
         fg_mask = None
         sky_mask = None
     if fg_mask is not None and fg_mask.shape[:2] != (h, w):
-        print("\nERROR: the foreground mask does not match these frames "
-              f"(mask is {fg_mask.shape[1]}x{fg_mask.shape[0]}, frames are {w}x{h}). "
-              "It was likely painted for a different orientation or image size. "
-              "Re-create the foreground mask for these frames, then try again.")
-        sys.exit(1)
+        # Same shape, different size: the mask is right, just painted at another
+        # resolution (a real user painted on a half-size frame the run then
+        # skipped -- Sentry, 2026-08-03). A mask is a stencil, so scaling it to
+        # fit loses nothing that matters. Only a genuine shape difference (e.g.
+        # portrait mask on landscape frames) still stops the run.
+        mh, mw = fg_mask.shape[:2]
+        if mh > 0 and h > 0 and abs((mw / mh) - (w / h)) < 0.01:
+            fg_mask = cv2.resize(fg_mask, (w, h), interpolation=cv2.INTER_NEAREST)
+            if sky_mask is not None and sky_mask.shape[:2] != (h, w):
+                sky_mask = cv2.resize(sky_mask, (w, h),
+                                      interpolation=cv2.INTER_NEAREST)
+            print(f"  Note: the foreground mask was painted at {mw}x{mh}; "
+                  f"scaled it to match these {w}x{h} frames.", flush=True)
+        else:
+            print("\nERROR: the foreground mask does not match these frames "
+                  f"(mask is {mw}x{mh}, frames are {w}x{h}). "
+                  "It was likely painted for a different orientation or image size. "
+                  "Re-create the foreground mask for these frames, then try again.")
+            sys.exit(1)
 
     # 16-bit handling
     is_16bit = frames_all[0].dtype == np.uint16

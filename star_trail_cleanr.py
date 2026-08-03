@@ -5217,6 +5217,30 @@ class MainWindow(QMainWindow):
             self._error_label.setText("No image files found in the selected folder.")
             return
 
+        # Paint on what the run will actually use. The run keeps only the
+        # majority resolution and skips the rest; the editor used to open the
+        # alphabetical first file, so in a mixed-size folder a user could paint
+        # a mask at a size the run then rejected (a real user hit exactly this
+        # -- Sentry, 2026-08-03). Same-size filter as the run; if sizing fails
+        # for every frame, fall back to the plain list rather than blocking.
+        try:
+            from collections import Counter
+            from modules.io_safe import image_size as _isz
+            from PySide6.QtWidgets import QApplication as _QApp
+            _QApp.setOverrideCursor(Qt.WaitCursor)
+            try:
+                sizes = {f: _isz(f) for f in frames}
+            finally:
+                _QApp.restoreOverrideCursor()
+            counts = Counter(s for s in sizes.values() if s)
+            if counts:
+                dominant = counts.most_common(1)[0][0]
+                matching = [f for f in frames if sizes.get(f) == dominant]
+                if matching:
+                    frames = matching
+        except Exception:
+            pass
+
         # Create mask window if needed, or reuse
         if self._mask_window is None:
             self._mask_window = MaskEditorWindow(self)
