@@ -2,6 +2,11 @@
 
 ---
 
+## v2.84-beta
+- **The foreground mask can no longer be painted at the wrong size.** In a folder that mixes image sizes, the mask editor used to open on whatever file sorted first, even if the run would later skip that file for being the odd size out, so a correctly painted mask could be refused with "the foreground mask does not match these frames." The editor now paints on a frame of the majority size, the same one the run keeps.
+- **A right-shaped mask at the wrong size now just works.** If your saved mask matches the frames' shape but not their exact size, say you re-exported your images larger, the app scales the mask to fit and notes it in the Star Log instead of stopping the run. A genuinely mismatched mask, portrait against landscape, still stops with the same clear message.
+- **Smoke tests:** 277 passing.
+
 ## v2.83-beta
 - **The app now shows you it's using your graphics card, not just when it isn't.** A small indicator next to the version in the header reads "GPU: NVIDIA" or "GPU: Apple Silicon" in green when your graphics card is doing the work, "CPU only" when there's no card to use, and an amber "GPU: off" when your computer has a card that isn't being used, and clicking that opens Settings where one button fixes it. The finished-run summary confirms it too: "Cleaned using your NVIDIA graphics card." Asked for by a Windows tester who wanted to know before committing to an hours-long run, and we agreed.
 - **The Star Trail tab gets the same Source choice as the Timelapse tab.** Build your star trail from the cleaned frames (the default) or from the untouched originals, trails and all, for before-and-after comparisons.
