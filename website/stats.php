@@ -177,6 +177,7 @@ $sensor = array();      // full frame / APS-C / etc., ONE VOTE PER PHOTOGRAPHER
 $sensor_users = array();// photographers we could classify by sensor size at least once
 $iso = array(); $shutter = array(); $aperture = array();   // EXIF exposure settings
 $recipe = array();  // full recipe (ISO, shutter, aperture, focal mm) together, as shot -- PER RUN
+$mp = array();      // megapixels per set, whole-MP buckets -- PER RUN, like the recipe
 $user_plat = array();   // install_id -> OS bucket (Apple Silicon / Intel Mac / Windows)
 $user_version = array(); // install_id -> latest app_version reported (adoption)
 
@@ -238,6 +239,15 @@ if (is_readable($REPORTS)) {
             if ($w > 0 && $h > 0) {
                 if ($w > $h)      $orient['Landscape']++;
                 elseif ($h > $w)  $orient['Portrait']++;
+            }
+            // Megapixels per set: one vote per run, like the recipe -- the size
+            // is a property of the set. Whole-MP buckets ("24 MP"); prefers the
+            // reported figure, falls back to width x height.
+            $mpv = isset($r['megapixels']) ? (float) $r['megapixels']
+                 : (($w > 0 && $h > 0) ? $w * $h / 1000000.0 : 0);
+            if ($mpv > 0) {
+                $mk = ((int) round($mpv)) . ' MP';
+                $mp[$mk] = (isset($mp[$mk]) ? $mp[$mk] : 0) + 1;
             }
             // GPU vs CPU: ONE VOTE PER PHOTOGRAPHER, same as the gear lists, so
             // someone who runs ten times on a GPU can't skew the split. A person
@@ -314,6 +324,14 @@ if (is_readable($REPORTS)) {
 $fmt_list = array();
 foreach ($fmt as $k => $n) $fmt_list[] = array('name' => $k, 'count' => $n);
 usort($fmt_list, function ($a, $b) { return $b['count'] - $a['count']; });
+
+// Megapixels: most-common first; ties break small-to-large so the list is stable.
+$mp_list = array();
+foreach ($mp as $k => $n) $mp_list[] = array('name' => $k, 'count' => $n);
+usort($mp_list, function ($a, $b) {
+    if ($a['count'] !== $b['count']) return $b['count'] - $a['count'];
+    return ((int) $a['name']) - ((int) $b['name']);
+});
 
 // Full recipe (ISO, shutter, aperture, focal mm), ranked by how many sets were
 // shot that way, most-used first.
@@ -426,6 +444,7 @@ echo json_encode(array(
     'shutter'               => ranked($shutter, 'numeric'),
     'aperture'              => ranked($aperture),
     'full_recipe'           => $recipe_list,
+    'megapixels'            => $mp_list,
     'runs'                  => $real_runs,
     'avg_frames'            => $real_runs ? (int) round($real_frames / $real_runs) : 0,
     'trails_per_frame'      => $real_frames ? round($real_trails / $real_frames, 1) : 0,

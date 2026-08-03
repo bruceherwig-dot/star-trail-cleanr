@@ -159,6 +159,9 @@
     <div class="card"><h3>Most-used settings</h3>
       <div class="cnote">ISO, shutter speed, aperture, and focal length together, exactly as the set was shot. Counts every set rather than one per photographer, so a photographer who ran several sets shows up several times. Test batches are left out. When the lens didn't report aperture and focal length, that shows as "lens not reporting," and sets with no usable EXIF at all are grouped as "No data collected" at the bottom.</div>
       <div id="c-recipe"><div class="empty">Loading…</div></div></div>
+    <div class="card"><h3>Megapixels per set</h3>
+      <div class="cnote">How big the frames in each cleaned set were, in megapixels. Counts every set rather than one per photographer, same as the settings list, and test batches are left out.</div>
+      <div id="c-mp"><div class="empty">Loading…</div></div></div>
     <div class="card"><h3>Where in the world</h3>
       <div class="cnote">One per photographer. Everyone counts here, including test batches. Photographers who ran before country lookup existed aren't shown.</div>
       <div id="c-countries"><div class="empty">Loading…</div></div></div>
@@ -254,6 +257,7 @@ fetch('https://api.startrailcleanr.com/stats.php',{cache:'no-store'})
     bars('c-shutter', d.shutter, 'count');
     bars('c-aperture', d.aperture, 'count');
     bars('c-recipe', d.full_recipe, 'count', true);
+    bars('c-mp', d.megapixels, 'count');
     bars('c-countries', d.countries, 'count');
     document.getElementById('f-frames').textContent=fmtNum(d.avg_frames);
     document.getElementById('f-trails').textContent=fmtNum(d.avg_trails_per_run);
