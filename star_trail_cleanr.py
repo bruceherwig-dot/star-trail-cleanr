@@ -7976,6 +7976,11 @@ class StarTrailPanel(QWidget):
                 else self._cleaned)
         args = ["--star-trail", "--cleaned", _src, "--out", self._pending_out,
                 "--comet-tail", str(comet), "--thicken", str(thick)]
+        if _src is not self._cleaned:
+            # Building from originals: match the shot list to the cleaned build
+            # (same shots, same skip, one file per shot even with RAW+JPG twins)
+            # so before and after are comparable by construction.
+            args += ["--match-cleaned", self._cleaned]
         if self._mode_comet.isChecked() and self._reverse_chk.isChecked():
             args.append("--reverse")     # flip comet-tail direction (comet only)
         if self._hotpix_chk.isChecked():

@@ -127,6 +127,54 @@ def _list_frames(folder):
     return fs[SKIP_FIRST:end] if end > SKIP_FIRST else fs[SKIP_FIRST:]
 
 
+def _list_frames_matched(original_dir, cleaned_dir):
+    """Frames in `original_dir` matched, shot for shot, to the cleaned build.
+
+    A star trail built from originals should compare against the cleaned one:
+    same shots, same order, same first/last test-shot skip. Listing the original
+    folder directly can't promise that -- it may hold RAW+JPG twins of every
+    shot (both would stack, and comet mode would fade each shot twice) and
+    stray frames the run skipped. So the shot list comes from the CLEANED
+    folder (with the 3+3 skip already applied) and each shot is matched back to
+    an original file by name stem. When a shot has both a RAW and a non-RAW
+    twin, the non-RAW copy is used: same image, far faster to read for a stack.
+
+    Unmatched shots are reported loudly (no silent drops). Returns [] when
+    NOTHING matches, so callers can refuse rather than quietly stack the wrong
+    frames.
+    """
+    from modules.frame_list import RAW_EXTS
+    by_stem = {}
+    exts = tuple(IMAGE_EXTS)
+    for f in os.listdir(original_dir):
+        stem, ext = os.path.splitext(f)
+        if ext.lower() not in exts or not os.path.isfile(os.path.join(original_dir, f)):
+            continue
+        by_stem.setdefault(stem, []).append(f)
+    names, unmatched = [], []
+    for cleaned_name in _list_frames(cleaned_dir):
+        stem = os.path.splitext(cleaned_name)[0]
+        cands = by_stem.get(stem, [])
+        if not cands:
+            unmatched.append(cleaned_name)
+            continue
+        nonraw = [c for c in cands
+                  if os.path.splitext(c)[1].lower() not in RAW_EXTS]
+        names.append(sorted(nonraw or cands)[0])
+    print(f"  original frames matched to the cleaned shots: {len(names)} "
+          f"(same shots, same {SKIP_FIRST}+{SKIP_LAST} test-shot skip)", flush=True)
+    if unmatched:
+        print("  " + "!" * 60, flush=True)
+        print(f"  WARNING: {len(unmatched)} cleaned shot(s) have no original "
+              f"file in {original_dir} -- the original stack will be missing "
+              f"them.", flush=True)
+        print(f"    unmatched: {', '.join(unmatched[:20])}"
+              + (f" ... (+{len(unmatched) - 20} more)" if len(unmatched) > 20 else ""),
+              flush=True)
+        print("  " + "!" * 60, flush=True)
+    return names
+
+
 def _stack(dirpath, names, cw, ch, label):
     """Lighten/maximum stack of `names` in `dirpath`, each filled to the canvas.
     Resizing to the small canvas BEFORE stacking keeps 900+ frames fast/light.
@@ -701,7 +749,8 @@ def _thicken(img, px, fg_mask=None):
 
 
 def make_star_trail(cleaned_dir, out_path=None, stack=None, comet_tail=0,
-                    thicken_px=0, remove_hotpix=False, reverse=False):
+                    thicken_px=0, remove_hotpix=False, reverse=False,
+                    match_cleaned=None):
     """OUTPUT 1 — the quick-and-dirty full-resolution STAR TRAIL (`--star-trail`).
 
     `stack`: optional pre-built full-resolution lighten-max stack from the in-run
@@ -725,7 +774,8 @@ def make_star_trail(cleaned_dir, out_path=None, stack=None, comet_tail=0,
         # (0.5/0.75/1.0), so the tail scales to the frame count.
         if not os.path.isdir(cleaned_dir):
             raise SystemExit(f"cleaned folder not found: {cleaned_dir}")
-        names = _list_frames(cleaned_dir)
+        names = (_list_frames_matched(cleaned_dir, match_cleaned)
+                 if match_cleaned else _list_frames(cleaned_dir))
         if not names:
             raise SystemExit(f"no cleaned frames found in {cleaned_dir}")
         if reverse:
@@ -738,10 +788,11 @@ def make_star_trail(cleaned_dir, out_path=None, stack=None, comet_tail=0,
     elif stack is None:
         if not os.path.isdir(cleaned_dir):
             raise SystemExit(f"cleaned folder not found: {cleaned_dir}")
-        names = _list_frames(cleaned_dir)
+        names = (_list_frames_matched(cleaned_dir, match_cleaned)
+                 if match_cleaned else _list_frames(cleaned_dir))
         if not names:
             raise SystemExit(f"no cleaned frames found in {cleaned_dir}")
-        print(f"{len(names)} cleaned frames (first {SKIP_FIRST} and last {SKIP_LAST} "
+        print(f"{len(names)} frames (first {SKIP_FIRST} and last {SKIP_LAST} "
               f"skipped) -> full-res lighten-max star trail", flush=True)
         stack = _stack_fullres(cleaned_dir, names, "star trail")
         if stack is None:
@@ -848,6 +899,10 @@ if __name__ == "__main__":
                     help="star trail: remove sky hot pixels / colored specks (re-reads every frame)")
     ap.add_argument("--reverse", action="store_true",
                     help="star trail (comet only): process frames in reverse order to flip the tail direction")
+    ap.add_argument("--match-cleaned", default=None,
+                    help="star trail from ORIGINAL frames: match the shot list to this "
+                         "cleaned folder (same shots, same test-shot skip, one file per "
+                         "shot even when RAW+JPG twins exist)")
     ap.add_argument("--masks-dir", default=None,
                     help="folder of <stem>_polys.json detections (red map; default: resolved)")
     ap.add_argument("--foreground", default=None,
@@ -862,6 +917,7 @@ if __name__ == "__main__":
         if not st_cleaned:
             ap.error("--star-trail needs --cleaned (or --original to default to <original>/cleaned)")
         make_star_trail(st_cleaned, args.out, comet_tail=args.comet_tail,
+                        match_cleaned=args.match_cleaned,
                         thicken_px=args.thicken, remove_hotpix=args.remove_hotpix,
                         reverse=args.reverse)
     elif args.red_map:
