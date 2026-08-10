@@ -67,6 +67,24 @@ def _green_deficient(big, cx, cy):
     return bool((((np.minimum(B, R) - G) > 4) & (np.maximum(B, R) > 14)).any())
 
 
+def _persistence_count(sample_frames, cx, cy, floor=40):
+    """How many sampled frames have something bright at this exact pixel.
+
+    THE test that separates a sensor defect from starlight. A stuck pixel is a
+    property of the sensor: it lands on the same pixel in every single frame. A
+    star is somewhere else in every frame -- its light passes through any given
+    pixel once. Nothing about a dot's size, shape, colour or brightness in the
+    finished stack can tell the two apart; only this can.
+    """
+    hits = 0
+    for f in sample_frames:
+        if f is None or cy >= f.shape[0] or cx >= f.shape[1]:
+            continue
+        if int(f[max(0, cy - 1):cy + 2, max(0, cx - 1):cx + 2].max()) > floor:
+            hits += 1
+    return hits
+
+
 def _detect_map(big, sample_frames):
     """Build the full speck mask: the persistence detectors (chromatic + white,
     which need the sampled frames) UNION the point-and-color small-blob detector
@@ -75,7 +93,17 @@ def _detect_map(big, sample_frames):
     The small-blob pass runs at two brightness floors (g>32 and g>90): the low
     floor catches faint dots; the high one un-merges a bright dot fused to a faint
     trail. Each candidate must be a local POINT (peak > its r=4..6 ring + 5) AND a
-    real dot (saturated color, green-deficient, or bright > 42)."""
+    real dot (saturated color, green-deficient, or bright > 42) AND persistent
+    across the sampled frames.
+
+    THAT LAST CONDITION IS THE POINT (added 2026-08-03). Without it this pass
+    judged the finished stack alone, where a star bead and a stuck pixel look
+    identical: it decided "isolated dot?" by checking only 4-6 pixels out, so in
+    any sequence with a gap between exposures -- where each star draws a dotted
+    line rather than a solid one -- every bead of every trail qualified.
+    Measured on Bruce's Perseid set before the fix: 38,878 pixels removed, of
+    which 45 were real fixed defects (0.12%), while 54 of the 99 genuine defects
+    present were missed entirely. It was erasing starlight by the thousand."""
     H, W = big.shape[:2]
     g = big.max(2).astype(np.int16)
 
@@ -97,10 +125,18 @@ def _detect_map(big, sample_frames):
                 yy, xx = np.ogrid[cy - 6:cy + 7, cx - 6:cx + 7]
                 rg = (np.maximum(np.abs(yy - cy), np.abs(xx - cx)) >= 4)
                 is_point = int(g[cy, cx]) > int(g[cy - 6:cy + 7, cx - 6:cx + 7][rg].max()) + 5
-                if is_point and (_saturated(big, cx, cy)
-                                 or _green_deficient(big, cx, cy)
-                                 or int(g[cy, cx]) > 42):
-                    cr[lab == i] = 255
+                if not (is_point and (_saturated(big, cx, cy)
+                                      or _green_deficient(big, cx, cy)
+                                      or int(g[cy, cx]) > 42)):
+                    continue
+                # Looks like a dot in the stack -- but so does every bead of a
+                # dotted star trail. Only erase it if the frames agree it is
+                # stuck to the sensor. Needs most of the sample: a star can
+                # graze the same pixel in a couple of frames by chance.
+                if sample_frames and _persistence_count(sample_frames, cx, cy) < \
+                        max(3, int(0.6 * len(sample_frames))):
+                    continue
+                cr[lab == i] = 255
     return cv2.bitwise_or(hot, cr)
 
 
