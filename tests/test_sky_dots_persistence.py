@@ -70,6 +70,9 @@ def test_the_blob_pass_actually_consults_the_frames():
     """Guard the wiring: the check is worthless if the pass stops calling it."""
     src = (REPO / "modules" / "sky_dots.py").read_text()
     i = src.index("def _detect_map")
-    body = src[i:i + 3000]
+    body = src[i:i + 6000]
     assert "_persistence_count" in body, \
-        "the small-blob pass must require persistence before erasing"
+        "the small-blob pass must still consult the frames"
+    assert "alone" in body and "d <= 14" in body, \
+        "the isolation test must reach 14px: a star's dot has a companion " \
+        "along its arc, a one-off event has nothing at all"

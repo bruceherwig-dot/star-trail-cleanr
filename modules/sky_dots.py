@@ -93,17 +93,25 @@ def _detect_map(big, sample_frames):
     The small-blob pass runs at two brightness floors (g>32 and g>90): the low
     floor catches faint dots; the high one un-merges a bright dot fused to a faint
     trail. Each candidate must be a local POINT (peak > its r=4..6 ring + 5) AND a
-    real dot (saturated color, green-deficient, or bright > 42) AND persistent
-    across the sampled frames.
+    real dot (saturated color, green-deficient, or bright > 42) AND either ALONE
+    (nothing bright within 14px) or STUCK (persistent across the sampled frames).
 
-    THAT LAST CONDITION IS THE POINT (added 2026-08-03). Without it this pass
-    judged the finished stack alone, where a star bead and a stuck pixel look
-    identical: it decided "isolated dot?" by checking only 4-6 pixels out, so in
-    any sequence with a gap between exposures -- where each star draws a dotted
-    line rather than a solid one -- every bead of every trail qualified.
-    Measured on Bruce's Perseid set before the fix: 38,878 pixels removed, of
-    which 45 were real fixed defects (0.12%), while 54 of the 99 genuine defects
-    present were missed entirely. It was erasing starlight by the thousand."""
+    THAT LAST CONDITION IS THE POINT (2026-08-03). This pass used to judge the
+    finished stack alone and called a dot isolated on the strength of a 4-6px
+    ring. In any sequence with a gap between exposures each star draws a DOTTED
+    line, so every bead of every trail looked isolated and was erased: measured
+    on Bruce's Perseid set, 38,878 pixels removed of which 45 were real defects
+    (0.12%), while 54 of the 99 genuine defects present were missed entirely.
+
+    Requiring persistence alone then went too far the other way -- it left the
+    real specks behind, because the leftovers are one-off events (cosmic rays,
+    single-frame noise) that no amount of frame-sampling will call persistent.
+    Neither colour nor collinearity separated them either (measured: 14% vs 13%,
+    and 85% vs 77%). What does separate them is Bruce's own observation: "this
+    is a star trail, if it was a star it would be in a trail." A star always
+    draws an arc, so its dot has a companion further along that arc. Widening
+    the isolation test to 14px is the whole discriminator; persistence stays as
+    an OR so a defect sitting ON a trail is still caught."""
     H, W = big.shape[:2]
     g = big.max(2).astype(np.int16)
 
@@ -122,19 +130,39 @@ def _detect_map(big, sample_frames):
                 cx, cy = int(ce[i][0]), int(ce[i][1])
                 if not (8 < cx < W - 8 and 8 < cy < H - 8):
                     continue
-                yy, xx = np.ogrid[cy - 6:cy + 7, cx - 6:cx + 7]
-                rg = (np.maximum(np.abs(yy - cy), np.abs(xx - cx)) >= 4)
-                is_point = int(g[cy, cx]) > int(g[cy - 6:cy + 7, cx - 6:cx + 7][rg].max()) + 5
+                # ISOLATION, judged out to 14px -- not 6. A star always draws an
+                # arc, so its dot has a companion further along that arc; only a
+                # one-off event has nothing around it at all. At 4-6px a beaded
+                # trail (gap between exposures) looked isolated at every bead,
+                # which is what ate Bruce's stars.
+                # Clamped to the frame: the border guard above only reserves
+                # 8px, so near an edge this window is cut short rather than
+                # running off (a negative slice index would silently wrap).
+                y0, y1 = max(0, cy - 14), min(H, cy + 15)
+                x0, x1 = max(0, cx - 14), min(W, cx + 15)
+                win = g[y0:y1, x0:x1]
+                yy, xx = np.ogrid[y0:y1, x0:x1]
+                d = np.maximum(np.abs(yy - cy), np.abs(xx - cx))
+                peak = int(g[cy, cx])
+                r_near = (d >= 4) & (d <= 6)
+                r_wide = (d >= 4) & (d <= 14)
+                is_point = (not r_near.any()) or peak > int(win[r_near].max()) + 5
+                alone = (not r_wide.any()) or peak > int(win[r_wide].max()) + 5
                 if not (is_point and (_saturated(big, cx, cy)
                                       or _green_deficient(big, cx, cy)
                                       or int(g[cy, cx]) > 42)):
                     continue
-                # Looks like a dot in the stack -- but so does every bead of a
-                # dotted star trail. Only erase it if the frames agree it is
-                # stuck to the sensor. Needs most of the sample: a star can
-                # graze the same pixel in a couple of frames by chance.
-                if sample_frames and _persistence_count(sample_frames, cx, cy) < \
-                        max(3, int(0.6 * len(sample_frames))):
+                # Erase it only if it cannot be starlight. Two ways to know:
+                #   ALONE  -- nothing bright within 14px, so no arc runs through
+                #             it; a star always has one (Bruce, 2026-08-03:
+                #             "this is a star trail, if it was a star it would
+                #             be in a trail").
+                #   STUCK  -- the frames show it at the same pixel over and
+                #             over, which catches a defect sitting ON a trail
+                #             where the isolation test alone would spare it.
+                stuck = bool(sample_frames) and _persistence_count(
+                    sample_frames, cx, cy) >= max(3, int(0.6 * len(sample_frames)))
+                if not (alone or stuck):
                     continue
                 cr[lab == i] = 255
     return cv2.bitwise_or(hot, cr)
