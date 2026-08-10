@@ -480,9 +480,12 @@ def _secondary_btn_css():
 
 def _star_trail_builds(baseline_path, cleaned_folder):
     """Every existing star trail for this workspace, newest first: the run's
-    instant baseline (STC_cleaned_star_trail.jpg) plus each Build output
+    instant baseline (STC_cleaned_star_trail.jpg), the matching original-source
+    trail (STC_original_star_trail.jpg), plus each Build output
     (STC_star_trail_*.jpg). Empty list when none exist yet. The preview's
-    left/right arrows page through exactly this list."""
+    left/right arrows page through exactly this list. The original-source name
+    has to be listed explicitly -- it matches neither the baseline path nor the
+    Build glob, so leaving it out made the run's second trail invisible."""
     import glob
     ws = os.path.dirname(baseline_path) if baseline_path else \
         os.path.dirname(workspace_path(cleaned_folder, "x")) if cleaned_folder else None
@@ -491,6 +494,7 @@ def _star_trail_builds(baseline_path, cleaned_folder):
         cands.append(baseline_path)
     if ws and os.path.isdir(ws):
         cands += glob.glob(os.path.join(ws, "STC_star_trail_*.jpg"))
+        cands.append(os.path.join(ws, "STC_original_star_trail.jpg"))
     return sorted({c for c in cands if os.path.isfile(c)},
                   key=os.path.getmtime, reverse=True)
 
