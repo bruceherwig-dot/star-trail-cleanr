@@ -799,11 +799,14 @@ def make_star_trail(cleaned_dir, out_path=None, stack=None, comet_tail=0,
             raise SystemExit(f"stacking failed (cleaned dir = {cleaned_dir})")
     print(f"  stack phase: {time.time() - _t_stack:.0f}s", flush=True)
 
-    # Opt-in heavy sky-speck removal (--remove-hotpix): finds hot pixels, cosmic
-    # rays, and Bayer defects and removes them by re-reading every frame. This is
-    # the slow path the Star Trail window's checkbox triggers; it supersedes the
-    # light per-map cleanup below. If the foreground guard trips (specks clumped
-    # into an unmasked landscape) it prints HOTPIX_SKIPPED and keeps the plain trail.
+    # Opt-in sky-speck removal (--remove-hotpix): finds hot pixels, cosmic rays,
+    # and Bayer defects by reading the frames -- once, judging them 20 at a time --
+    # then paints them out on the finished stack (2026-08-09; it used to re-read
+    # AND re-stack every frame, which left holes darker than the sky; the whole
+    # story is in modules/sky_dots.py). This is what
+    # the Star Trail window's checkbox triggers; it supersedes the light per-map
+    # cleanup below. If the foreground guard trips (specks clumped into an
+    # unmasked landscape) it prints HOTPIX_SKIPPED and keeps the plain trail.
     if remove_hotpix:
         try:
             from modules.workspace import find_workspace
@@ -814,16 +817,23 @@ def make_star_trail(cleaned_dir, out_path=None, stack=None, comet_tail=0,
             if not names:
                 names = _list_frames(cleaned_dir)
             fg = None
+            run_map = None
             ws = find_workspace(cleaned_dir)
             if ws:
                 fgp = os.path.join(ws, "foreground_mask.png")
                 if os.path.isfile(fgp):
                     fg = robust_imread(fgp, cv2.IMREAD_GRAYSCALE)
+                # The clean itself wrote this, one batch at a time: the record of
+                # where THIS camera's stuck pixels are. Far better evidence than
+                # anything recoverable from the finished stack, and free.
+                hmp = os.path.join(ws, "hot_pixel_map.png")
+                if os.path.isfile(hmp):
+                    run_map = robust_imread(hmp, cv2.IMREAD_GRAYSCALE)
             try:
                 _t_hp = time.time()
                 stack = remove_specks(cleaned_dir, names, stack, fg,
                                       lambda p: robust_imread(p, cv2.IMREAD_COLOR),
-                                      comet_tail=comet_tail)
+                                      comet_tail=comet_tail, run_map=run_map)
                 print(f"  hot-pixel phase: {time.time() - _t_hp:.0f}s", flush=True)
             except SkyDotsBail as b:
                 print(f"HOTPIX_SKIPPED: {b}", flush=True)

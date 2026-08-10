@@ -1933,8 +1933,14 @@ class CleanerWorker(QThread):
                 except OSError:
                     pass
 
-            if self.mask_path:
-                _cleanup_hot_map()
+            # The hot-pixel map is KEPT (2026-08-09). Every batch adds what it
+            # found to it, so by the end of the run it is the record of where this
+            # camera's stuck pixels actually are -- built from all the frames, 20
+            # at a time, at a bar no star can clear. Deleting it here threw that
+            # away and left the Star Trail window's speck removal to re-derive
+            # everything from a 40-frame sample of the finished sequence, which is
+            # both weaker evidence and the reason it was marking real stars. It is
+            # still cleared before batch 1 (above), so it never carries over.
 
             # Remove the per-run frame manifest temp file (best effort).
             try:
@@ -8086,8 +8092,8 @@ class StarTrailPanel(QWidget):
 
     def _on_proc_output(self):
         # Every phase of make_share_clip reports as it works: stacking prints
-        # "<label>: i/n" per frame, hot-pixel removal "finding/cleaning specks:
-        # i/n", thickening a start marker, and the final save "wrote ...". Each
+        # "<label>: i/n" per frame, hot-pixel removal "finding specks: i/n",
+        # thickening a start marker, and the final save "wrote ...". Each
         # line advances the bar inside that phase's time-weighted segment;
         # "<name> phase: Ns" timing lines are collected so the next build's
         # segments match this machine.
@@ -8115,14 +8121,18 @@ class StarTrailPanel(QWidget):
                 if a.strip().isdigit() and b.strip().isdigit():
                     frac = int(a) / max(1, int(b))
             if "finding specks" in low and frac is not None:
-                # One saved duration covers find+clean; finding samples ~40 frames,
-                # cleaning re-reads every frame, so split the segment 30/70.
+                # Sampling frames IS this phase now. Painting the specks out
+                # afterwards happens on the finished stack in one pass instead of
+                # re-reading every frame, so it no longer reports per-frame and no
+                # longer deserves 70% of the segment (it used to, and it was the
+                # only reason this option had to read the whole sequence twice).
                 self._phase_text = "Finding hot pixels…"
-                self._set_phase_frac("hotpix", 0.3 * frac)
-            elif "cleaning specks" in low and frac is not None:
+                self._set_phase_frac("hotpix", 0.9 * frac)
+            elif low.startswith("removing ") or low.startswith("speck removal done"):
+                # Detection finished, painting now: the tail of the segment.
                 self._phase_text = "Removing hot pixels…"
-                self._set_phase_frac("hotpix", 0.3 + 0.7 * frac)
-            elif "finding hot pixels" in low or low.startswith("removing "):
+                self._set_phase_frac("hotpix", 0.95)
+            elif "finding hot pixels" in low:
                 self._phase_text = "Finding hot pixels…"
                 self._set_phase_frac("hotpix", 0.0)
             elif low.startswith("thickening"):
