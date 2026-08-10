@@ -2267,12 +2267,15 @@ class ShareStackThread(QThread):
     failed = Signal(str)
 
     def __init__(self, original_dir, cleaned_dir, ws_dir, want_star, want_video,
-                 video_cmd_prefix=None, parent=None, comet_tail=0, thicken_px=0):
+                 video_cmd_prefix=None, parent=None, comet_tail=0, thicken_px=0,
+                 want_original_star=False):
         super().__init__(parent)
         from modules.share_stacker import ShareStacker   # lazy: keeps GUI startup light
         self._stacker = ShareStacker(original_dir, cleaned_dir, want_star, want_video,
                                      video_cmd_prefix=video_cmd_prefix,
-                                     comet_tail=comet_tail, thicken_px=thicken_px)
+                                     comet_tail=comet_tail, thicken_px=thicken_px,
+                                     want_original_star=want_original_star)
+        self._want_original_star = want_original_star
         self._ws_dir = ws_dir
         self._q = queue.Queue()
         self._aborted = False
@@ -2313,8 +2316,11 @@ class ShareStackThread(QThread):
                 return
             star = os.path.join(self._ws_dir, "STC_cleaned_star_trail.jpg")
             vid = os.path.join(self._ws_dir, "STC_share_video.mp4")
+            orig_star = (os.path.join(self._ws_dir, "STC_original_star_trail.jpg")
+                         if self._want_original_star else None)
             result = self._stacker.finalize(star_out=star, video_out=vid,
-                                            should_abort=self._abort_check)
+                                            should_abort=self._abort_check,
+                                            original_star_out=orig_star)
             if not self._aborted:
                 self.done.emit(result)
         except Exception as e:
@@ -6400,6 +6406,29 @@ class MainWindow(QMainWindow):
         # Trail window, never during the run.
         comet_tail = 0
         thicken_px = 0
+        # A SECOND full-res star trail, built from the ORIGINAL frames, so the Star
+        # Trail tab offers the before picture beside the after one. The frames are
+        # already being read for the video, so this costs no extra reading -- but it
+        # holds one more full-resolution image in memory for the length of the run.
+        # A keepsake image must never squeeze the actual cleaning, so it is skipped
+        # when free memory is short (the run then behaves exactly as it did before).
+        want_original_star = True
+        try:
+            import psutil as _ps
+            from modules.io_safe import image_size as _isz
+            from modules.frame_list import glob_patterns as _gp
+            _first = sorted(f for e in _gp()
+                            for f in glob.glob(os.path.join(original_dir, e)))[:1]
+            _sz = _isz(_first[0]) if _first else None
+            _need = (_sz[0] * _sz[1] * 3) if _sz else (60 * 1000 * 1000 * 3)
+            _free = _ps.virtual_memory().available
+            if _free < _need * 8:          # keep a wide margin for the batch itself
+                want_original_star = False
+                print(f"[share] skipping the original-frames star trail: "
+                      f"{_free // (1024*1024)}MB free is tight for another "
+                      f"{_need // (1024*1024)}MB stack", flush=True)
+        except Exception:
+            pass
         try:
             ws_dir = output_workspace(cleaned_dir, create=True)
             # How the video encode re-invokes make_share_clip in its OWN process
@@ -6410,7 +6439,8 @@ class MainWindow(QMainWindow):
                 video_cmd = [sys.executable, "-u", SHARE_SCRIPT]
             t = ShareStackThread(original_dir, cleaned_dir, ws_dir,
                                  want_star, want_video, video_cmd_prefix=video_cmd, parent=self,
-                                 comet_tail=comet_tail, thicken_px=thicken_px)
+                                 comet_tail=comet_tail, thicken_px=thicken_px,
+                                 want_original_star=want_original_star)
             t.done.connect(self._on_share_stack_done)
             t.failed.connect(self._on_share_stack_failed)
             self._share_stack_thread = t

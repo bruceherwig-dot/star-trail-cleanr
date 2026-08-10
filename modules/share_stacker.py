@@ -39,11 +39,18 @@ class ShareStacker:
     video), so a clean-only run does no work here."""
 
     def __init__(self, original_dir, cleaned_dir, want_star=False, want_video=False,
-                 video_cmd_prefix=None, comet_tail=0, thicken_px=0):
+                 video_cmd_prefix=None, comet_tail=0, thicken_px=0,
+                 want_original_star=False):
         self.original_dir = original_dir
         self.cleaned_dir = cleaned_dir
         self.want_star = want_star
         self.want_video = want_video
+        # Second star trail built from the ORIGINAL frames, so the Star Trail tab
+        # offers the before picture next to the after one (the arrows page between
+        # them). Free in reading time -- build_before already walks the originals
+        # for the video -- but it holds one more full-res image in memory, so the
+        # GUI turns it off when memory is tight rather than squeeze the cleaning.
+        self.want_original_star = want_original_star
         # DEV-ONLY star-trail styling (0 = off): comet_tail fades trails into comet
         # tails over this many frames; thicken_px widens them. Only the star trail.
         self.comet_tail = comet_tail
@@ -59,7 +66,8 @@ class ShareStacker:
         # current run's output. (2s slack absorbs filesystem mtime granularity.)
         self._run_start = time.time()
         self._cw = self._ch = self._img_h = None
-        self.after_full = None        # full-res star-trail stack
+        self.after_full = None        # full-res star-trail stack (cleaned)
+        self.before_full = None       # full-res star-trail stack (ORIGINALS)
         self.before_vid = None        # canvas before-stack (video)
         self.after_vid = None         # canvas after-stack (video)
         self._after_folded = set()    # cleaned filenames already folded into the after-stacks
@@ -99,16 +107,23 @@ class ShareStacker:
         """Read the ORIGINALS once and fold them into the before stacks the enabled
         outputs need. Only the video needs a before-stack; the star trail does not.
         Safe to call once at the very start of a run."""
-        if not self.want_video:
+        if not (self.want_video or self.want_original_star):
             self.before_built = True
             return
         if not self._geometry():
             return
-        self.before_vid = msc.IncrementalStack("before", canvas=(self._cw, self._img_h))
+        if self.want_video:
+            self.before_vid = msc.IncrementalStack("before", canvas=(self._cw, self._img_h))
+        if self.want_original_star:
+            self.before_full = msc.IncrementalStack("before-full")            # full-res
         for n in msc._list_frames(self.original_dir):
             if should_abort and should_abort():
                 return
-            self.before_vid.feed_path(os.path.join(self.original_dir, n))
+            p = os.path.join(self.original_dir, n)
+            if self.before_vid is not None:
+                self.before_vid.feed_path(p)
+            if self.before_full is not None:
+                self.before_full.feed_path(p)
         self.before_built = True
 
     # ── after stack (cleaned, arrives during the run) ──────────────────────────
@@ -149,7 +164,8 @@ class ShareStacker:
             self._after_folded.add(n)
 
     # ── finalize: render the enabled outputs from the finished stacks ──────────
-    def finalize(self, star_out=None, video_out=None, should_abort=None):
+    def finalize(self, star_out=None, video_out=None, should_abort=None,
+                 original_star_out=None):
         """One last scan, then render each enabled output from the finished in-memory
         stacks (no re-read). The star trail is saved in-process (just an image write);
         the video is encoded in a SEPARATE process (ffmpeg via imageio stalls inside a
@@ -172,6 +188,19 @@ class ShareStacker:
                 return f"the {what} stack was never started (no frames were seen)"
             return f"no readable frames made it into the {what} stack"
 
+        # Original-source trail first, so the CLEANED one is the newer file and the
+        # Star Trail tab (newest first) opens on it, with this one a left-arrow away.
+        if self.want_original_star and original_star_out:
+            if self.before_full is not None and self.before_full.result() is not None:
+                self.before_full.report()
+                t0 = time.time()
+                produced["original_star_trail"] = msc.make_star_trail(
+                    self.original_dir, out_path=original_star_out,
+                    stack=self.before_full.result())
+                timings["original_star_trail"] = time.time() - t0
+            else:
+                skipped["original_star_trail"] = _stack_reason(
+                    self.before_full, "original-frames")
         if self.want_star:
             if self.after_full is not None and self.after_full.result() is not None:
                 self.after_full.report()
