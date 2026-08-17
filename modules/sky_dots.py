@@ -73,20 +73,40 @@ def _green_deficient(big, cx, cy):
     return bool((((np.minimum(B, R) - G) > 4) & (np.maximum(B, R) > 14)).any())
 
 
-def _persistence_count(sample_frames, cx, cy, floor=40):
-    """How many sampled frames have something bright at this exact pixel.
+def _persistence_count(sample_frames, cx, cy, margin=12):
+    """How many sampled frames show something at this pixel that STANDS OUT from
+    the sky right around it.
 
     THE test that separates a sensor defect from starlight. A stuck pixel is a
     property of the sensor: it lands on the same pixel in every single frame. A
     star is somewhere else in every frame -- its light passes through any given
     pixel once. Nothing about a dot's size, shape, colour or brightness in the
     finished stack can tell the two apart; only this can.
+
+    "STANDS OUT" IS THE WHOLE POINT, AND IT USED TO BE A FIXED NUMBER (>40).
+    That number is one camera on one night. Measured on Bruce's two Perseid
+    sequences: on the dark EOS R north sky 0.2% of plain sky pixels clear 40, but
+    on the brighter 6D Milky Way sky 23.8% do -- and since this reads the
+    brightest of a 3x3 patch, nearly everything cleared it. So on the brighter
+    sequence every candidate came back "present in every frame" on the strength of
+    sky glow alone, and 8,720 patches were laid down on evidence that was not
+    real. The same lesson is already in the notes from the July two-camera
+    failure: an absolute brightness bar is one camera's fingerprint, which is why
+    build_hot_pixel_map compares against the LOCAL MEDIAN. This does the same.
     """
     hits = 0
     for f in sample_frames:
         if f is None or cy >= f.shape[0] or cx >= f.shape[1]:
             continue
-        if int(f[max(0, cy - 1):cy + 2, max(0, cx - 1):cx + 2].max()) > floor:
+        y0, y1 = max(0, cy - 8), min(f.shape[0], cy + 9)
+        x0, x1 = max(0, cx - 8), min(f.shape[1], cx + 9)
+        win = f[y0:y1, x0:x1].max(2)
+        yy, xx = np.ogrid[y0:y1, x0:x1]
+        ring = np.maximum(np.abs(yy - cy), np.abs(xx - cx)) >= 4
+        if not ring.any():
+            continue
+        centre = int(f[max(0, cy - 1):cy + 2, max(0, cx - 1):cx + 2].max())
+        if centre > int(np.median(win[ring])) + margin:
             hits += 1
     return hits
 
@@ -607,12 +627,23 @@ def remove_specks(cleaned_dir, names, big, fg_mask, read_frame, comet_tail=0,
     # A hole is the one failure the user actually sees, and the fill is built so
     # this can only ever print 0. It reads the output, so a future edit that drops
     # the sky floor shows up here instead of in Bruce's Photoshop.
+    #
+    # It weighs the DIMMEST PIXEL THE FILL ACTUALLY WROTE, not the blob's centre
+    # point. A speck blob is often bent or split, so its centre of gravity can sit
+    # on a pixel outside it that was never filled -- ordinary dark sky between two
+    # trails. Reading that pixel reported holes that did not exist (4 of 1,927 on
+    # Bruce's 6D sequence) while a genuinely dim filled pixel elsewhere in the same
+    # blob would have gone unnoticed. This looks at every filled pixel instead.
     nn, ll, ss, cc = cv2.connectedComponentsWithStats((allmap > 0).astype(np.uint8), 8)
     holes = 0
     for i in range(1, nn):
         cx, cy = int(cc[i][0]), int(cc[i][1])
+        x, y = int(ss[i, cv2.CC_STAT_LEFT]), int(ss[i, cv2.CC_STAT_TOP])
+        bw, bh = int(ss[i, cv2.CC_STAT_WIDTH]), int(ss[i, cv2.CC_STAT_HEIGHT])
+        sub = ll[y:y + bh, x:x + bw] == i
+        dimmest = int(out[y:y + bh, x:x + bw][sub].max(axis=1).min())
         sky = _ring_colour(out, allmap, cx, cy)
-        if sky is not None and int(out[cy, cx].max()) < int(sky.max()) - 8:
+        if sky is not None and dimmest < int(sky.max()) - 8:
             holes += 1
     print(f"  speck removal done (spots left darker than their surroundings, "
           f"must be 0: {holes})", flush=True)

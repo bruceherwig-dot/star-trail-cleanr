@@ -189,6 +189,29 @@ def test_a_sequence_whose_motion_cannot_be_read_loses_no_stars():
         "a looser ratio starts erasing faint stars (measured: 5 of 400 at 0.5)"
 
 
+def test_sky_glow_is_not_mistaken_for_a_stuck_pixel():
+    """Field case, 2026-08-10: 8,720 patches on a bright sky, on false evidence.
+
+    "Present in this frame" used to mean "brighter than 40". On Bruce's dark EOS R
+    sky 0.2% of plain sky clears 40; on his brighter 6D sky 23.8% does, and this
+    reads the brightest of a 3x3 patch, so nearly every candidate came back
+    persistent on sky glow alone. The test now asks whether the pixel stands out
+    from the sky AROUND it, which is what build_hot_pixel_map has always done.
+    """
+    from modules.sky_dots import _persistence_count
+
+    # A bright sky, no defect: every pixel is well above any fixed bar.
+    bright = [np.full((60, 60, 3), 70, np.uint8) for _ in range(20)]
+    assert _persistence_count(bright, 30, 30) == 0, \
+        "sky glow was counted as a stuck pixel"
+
+    # The same bright sky with a genuine defect standing above it.
+    for f in bright:
+        f[29:32, 29:32] = 140
+    assert _persistence_count(bright, 30, 30) == len(bright), \
+        "a defect that stands above a bright sky must still be caught"
+
+
 def test_the_blob_pass_actually_consults_the_frames():
     """Guard the wiring: the check is worthless if the pass stops calling it."""
     src = (REPO / "modules" / "sky_dots.py").read_text()
