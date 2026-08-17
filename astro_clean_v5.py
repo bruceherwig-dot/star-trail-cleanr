@@ -440,7 +440,12 @@ def load_with_neighbors(frame_dir: Path, start: int, batch: int,
     ext_end = min(total, end + 1)
 
     sliced = all_sorted[ext_start:ext_end]
+    n_before_filter = len(sliced)
     sliced = _filter_by_resolution(sliced, expected_width, expected_height)
+    # How many the resolution filter threw away, so the caller can say WHY a
+    # batch came up empty instead of just reporting the count.
+    load_with_neighbors.last_dropped = n_before_filter - len(sliced)
+    load_with_neighbors.last_total = total
 
     core_start = start - ext_start
     core_end = core_start + (end - start)
@@ -1076,7 +1081,21 @@ def main():
     n = len(frame_files)
     n_all = len(frame_files_all)
     if n < 3:
-        print(f"ERROR: need >= 3 frames (got {n})")
+        # Say WHAT HAPPENED, not just the count. Two users lost a day to this on
+        # 2026-08-11 (Sentry): the message read "need >= 3 frames (got 0)", which
+        # tells nobody that the app had handed itself a frame list that did not
+        # match its own batch plan. If the resolution filter is what emptied the
+        # batch, name that -- it is the difference between a mystery and a
+        # sentence a person can act on.
+        dropped = getattr(load_with_neighbors, "last_dropped", 0)
+        if dropped:
+            print(f"ERROR: none of the frames in this batch are "
+                  f"{args.expected_width}x{args.expected_height} -- "
+                  f"{dropped} were a different size and were skipped, leaving "
+                  f"{n}. This batch cannot be cleaned.")
+        else:
+            print(f"ERROR: this batch has only {n} frame(s); cleaning needs at "
+                  f"least 3 (each frame is repaired using its neighbours).")
         sys.exit(1)
 
     # Grab ICC profile + DPI from the first core frame so output inherits the color

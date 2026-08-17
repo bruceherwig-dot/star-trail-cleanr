@@ -1109,23 +1109,24 @@ class CleanerWorker(QThread):
             # matches shooting order -- which puts a jump in the stack and makes
             # the repair borrow from the wrong neighbors. All-or-nothing: only
             # reorder when EVERY frame carries a timestamp, else keep filename
-            # order. Read the times once here and hand the engine this exact
-            # order via a manifest, so it never re-derives order (fast on big
-            # sets + the GUI and engine can never disagree).
+            # order.
+            #
+            # The manifest is NOT written here. It is written further down, once
+            # the frame range, the frame limit and the resolution filter have all
+            # had their say, so it holds exactly the frames the batch plan counts
+            # -- see the write below. Writing it here is what broke two users on
+            # 2026-08-11: the engine was told "frames 0 to 11" but handed a list
+            # that still contained every file the GUI had decided to skip, sliced
+            # it, dropped the wrong-sized ones, and exited with "need >= 3 frames
+            # (got 0)" on every attempt.
             self._frame_manifest = None
             try:
                 from modules.io_safe import capture_time as _cap_time
-                from modules.frame_list import order_by_capture_time, write_manifest
+                from modules.frame_list import order_by_capture_time
                 _times = {f: _cap_time(f) for f in frames}
                 frames = order_by_capture_time(frames, _times)
-                import tempfile as _tf
-                _mf = _tf.NamedTemporaryFile(
-                    prefix="stc_frames_", suffix=".txt", delete=False)
-                write_manifest(_mf.name, frames)
-                _mf.close()
-                self._frame_manifest = _mf.name
             except Exception:
-                self._frame_manifest = None  # fall back to the worker's own listing
+                pass          # keep filename order; the manifest is written either way
 
             if self.frame_end > 0:
                 frames = frames[self.frame_start : self.frame_end + 1]
@@ -1170,7 +1171,12 @@ class CleanerWorker(QThread):
                     f"your full-size original images."
                 )
                 return
-            matching = sorted(f for f, s in readable.items() if s == dominant)
+            # Filter IN PLACE, never re-sort. `frames` is in capture-time order by
+            # now, and sorting these back into filename order silently undid it:
+            # the engine then cleaned the frames in shooting order while the batch
+            # plan assumed alphabetical, so every batch borrowed the wrong
+            # neighbours for repair. No crash, no warning, wrong picture.
+            matching = [f for f in frames if readable.get(f) == dominant]
             mismatched = sorted(f for f, s in readable.items() if s != dominant)
             unreadable_sorted = sorted(unreadable)
 
@@ -1230,6 +1236,22 @@ class CleanerWorker(QThread):
             if not frames:
                 self.error.emit("No image files matched the dominant resolution.")
                 return
+
+            # NOW write the manifest: the frame range, the frame limit and the
+            # resolution filter have all had their say, so this list and the batch
+            # plan below are the same list. The engine reads it verbatim, so the
+            # two sides cannot disagree about which frame is frame 0 -- which is
+            # the whole point, and what was broken when this was written earlier.
+            try:
+                from modules.frame_list import write_manifest
+                import tempfile as _tf
+                _mf = _tf.NamedTemporaryFile(
+                    prefix="stc_frames_", suffix=".txt", delete=False)
+                write_manifest(_mf.name, frames)
+                _mf.close()
+                self._frame_manifest = _mf.name
+            except Exception:
+                self._frame_manifest = None  # fall back to the worker's own listing
 
             # Stash skipped counts so the run summary can show them.
             self._skipped_resolution_count = len(mismatched)
