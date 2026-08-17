@@ -411,10 +411,46 @@ foreach ($user_plat as $uid => $lab) {
 // Versions in use: one vote per user, their latest reported build.
 $ver = array();
 foreach ($user_version as $uid => $v) $ver[$v][$uid] = true;
-$current_version = '';
+
+// The highest version anyone has REPORTED. Kept only as a fallback -- it is not
+// the current release, it is the most up-to-date user, so it always lagged a
+// release until someone upgraded.
+$highest_reported = '';
 foreach (array_keys($ver) as $vk) {
-    if ($current_version === '' || version_compare($vk, $current_version, '>')) $current_version = $vk;
+    if ($highest_reported === '' || version_compare($vk, $highest_reported, '>')) $highest_reported = $vk;
 }
+
+// THE CURRENT VERSION IS THE LATEST RELEASE, whoever is or isn't running it.
+// Read from the same place the app's update banner reads: the newest published
+// release tag. Cached on disk, because this endpoint is public and GitHub allows
+// only 60 unauthenticated calls an hour per IP -- uncached, a busy day would get
+// us rate-limited and the number would vanish.
+$current_version = '';
+$cache_file = sys_get_temp_dir() . '/stc_latest_release.txt';
+$cache_ttl  = 900;   // 15 minutes
+if (is_readable($cache_file) && (time() - filemtime($cache_file)) < $cache_ttl) {
+    $current_version = trim((string) file_get_contents($cache_file));
+}
+if ($current_version === '') {
+    $ctx = stream_context_create(array('http' => array(
+        'timeout' => 4,
+        'header'  => "User-Agent: star-trail-cleanr-stats\r\nAccept: application/vnd.github+json\r\n",
+    )));
+    $raw = @file_get_contents(
+        'https://api.github.com/repos/bruceherwig-dot/star-trail-cleanr/releases/latest',
+        false, $ctx);
+    if ($raw !== false) {
+        $rel = json_decode($raw, true);
+        if (isset($rel['tag_name']) &&
+            preg_match('/(\d+\.\d+(?:\.\d+)?)/', $rel['tag_name'], $m)) {
+            $current_version = $m[1];          // "v2.85-beta" -> "2.85"
+            @file_put_contents($cache_file, $current_version);
+        }
+    }
+}
+// GitHub unreachable and no cache: fall back rather than show nothing. A number
+// one release behind beats a blank space on a public page.
+if ($current_version === '') $current_version = $highest_reported;
 // Ordered by version number, newest first (not by user count): the list reads
 // as a release timeline, so adoption of the newest build is visible at the top.
 $ver_list = array();
