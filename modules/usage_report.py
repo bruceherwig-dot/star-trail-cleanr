@@ -25,17 +25,24 @@ import os
 import ssl
 import sys
 import threading
+import time
 import urllib.request
 import uuid
 
 ENDPOINT = "https://api.startrailcleanr.com/collect.php"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3          # 3 adds previous_version / updated_via
 _TIMEOUT_S = 8
 
 _APP_DIR = os.path.join(os.path.expanduser("~"), ".star_trail_cleanr")
 _INSTALL_ID_FILE = os.path.join(_APP_DIR, "install_id.txt")
 _DEV_SECRET_FILE = os.path.join(_APP_DIR, "stc_collect_secret.txt")
 _DEV_EXCLUDE_MARKER = os.path.join(_APP_DIR, ".dev_telemetry_exclude")
+# Which version this install last reported, and whether the in-app updater was
+# used to leave it. See _version_change() -- these two files exist to answer one
+# question we have never been able to answer: does the one-click update work?
+_LAST_VERSION_FILE = os.path.join(_APP_DIR, "last_version.txt")
+_UPDATER_MARKER = os.path.join(_APP_DIR, "updater_engaged.txt")
+_UPDATER_WINDOW_S = 7 * 24 * 3600
 
 # Shared secret: baked at build time by CI (gitignored `_collect_config.py`).
 # Absent when running from source, where we fall back to the local dev file.
@@ -85,13 +92,83 @@ def _is_dev():
     return os.path.exists(_DEV_EXCLUDE_MARKER)
 
 
+def note_updater_engaged():
+    """Record that the IN-APP updater was just used. Called the moment the user
+    sets an update going; harmless and silent if it can't be written.
+
+    Without this we cannot tell an in-place update from someone downloading the
+    installer again by hand: both look identical in the data (same install,
+    new version). Telling them apart is the entire point -- as of 2026-08-18 no
+    Windows machine had ever been OBSERVED updating in place, and we could not
+    say whether that meant the updater was broken or simply that people
+    re-download."""
+    try:
+        os.makedirs(_APP_DIR, exist_ok=True)
+        with open(_UPDATER_MARKER, "w") as f:
+            f.write(str(int(time.time())) + "\n")
+    except Exception:
+        # Deliberately every exception, not just OSError. This runs inside the
+        # updater path, and a bad path raises ValueError rather than OSError --
+        # a note about telemetry must never be able to stop an update.
+        pass
+
+
+def _version_change(current):
+    """How this install got to the version it is running now.
+
+    Returns (previous_version, updated_via) where updated_via is 'in_app' when
+    the updater was engaged in the last week, else 'manual'. Both are None on a
+    fresh install and on every ordinary run -- the fields only ever appear on
+    the FIRST run after the version actually changed, so this is a handful of
+    reports per release, not a new field on every run."""
+    if not current:
+        return None, None
+    previous = None
+    try:
+        with open(_LAST_VERSION_FILE) as f:
+            previous = f.read().strip() or None
+    except Exception:
+        pass
+
+    if previous != current:
+        try:
+            os.makedirs(_APP_DIR, exist_ok=True)
+            with open(_LAST_VERSION_FILE, "w") as f:
+                f.write(str(current) + "\n")
+        except Exception:
+            pass
+
+    if not previous or previous == current:
+        return None, None       # fresh install, or nothing changed
+
+    via = "manual"
+    try:
+        if os.path.exists(_UPDATER_MARKER):
+            age = time.time() - os.path.getmtime(_UPDATER_MARKER)
+            if age < _UPDATER_WINDOW_S:
+                via = "in_app"
+            os.remove(_UPDATER_MARKER)
+    except Exception:
+        pass
+    return previous, via
+
+
 def build_payload(facts):
     """Wrap the caller's facts with the identity + dev fields that every report
-    carries. Pure (no I/O beyond reading/creating the install ID); testable."""
+    carries, and -- on the first run after a version change only -- the version
+    it came from and whether the in-app updater brought it there.
+
+    Does small I/O in the user's own app folder (install ID, last version, the
+    updater marker) and nothing else; still testable by pointing those paths
+    somewhere temporary."""
     payload = dict(facts or {})
     payload["schema"] = SCHEMA_VERSION
     payload["install_id"] = get_install_id()
     payload["dev"] = _is_dev()
+    previous, via = _version_change(payload.get("app_version"))
+    if previous:
+        payload["previous_version"] = previous
+        payload["updated_via"] = via
     return payload
 
 

@@ -243,6 +243,14 @@ def check_for_updates():
         return False
     _log("check_for_updates: invoking checkForUpdates_(None)")
     try:
+        # Note that the in-app updater was used, so the next run's usage report
+        # can distinguish a one-click update from a hand-downloaded installer.
+        # Wrapped: telemetry must never be able to break an update.
+        try:
+            from modules.usage_report import note_updater_engaged
+            note_updater_engaged()
+        except Exception:
+            pass
         _updater_controller.checkForUpdates_(None)
         _log("check_for_updates: returned")
         return True

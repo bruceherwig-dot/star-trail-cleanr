@@ -79,3 +79,89 @@ def test_send_with_secret_dispatches_payload():
         usage_report._get_secret = orig_secret
         usage_report._post = orig_post
         threading.Thread = orig_thread
+
+
+def _isolate(d):
+    """Point every file usage_report touches at a temp dir, and give the caller
+    back a restore function. The module writes into the user's own app folder,
+    which a test must never touch."""
+    saved = (usage_report._APP_DIR, usage_report._INSTALL_ID_FILE,
+             usage_report._LAST_VERSION_FILE, usage_report._UPDATER_MARKER)
+    usage_report._APP_DIR = d
+    usage_report._INSTALL_ID_FILE = os.path.join(d, "id.txt")
+    usage_report._LAST_VERSION_FILE = os.path.join(d, "last_version.txt")
+    usage_report._UPDATER_MARKER = os.path.join(d, "updater_engaged.txt")
+
+    def restore():
+        (usage_report._APP_DIR, usage_report._INSTALL_ID_FILE,
+         usage_report._LAST_VERSION_FILE, usage_report._UPDATER_MARKER) = saved
+    return restore
+
+
+def test_a_fresh_install_reports_no_previous_version():
+    """A first run is not an upgrade and must not be counted as one."""
+    with tempfile.TemporaryDirectory() as d:
+        restore = _isolate(d)
+        try:
+            p = usage_report.build_payload({"app_version": "2.85"})
+            assert "previous_version" not in p
+            assert "updated_via" not in p
+        finally:
+            restore()
+
+
+def test_an_ordinary_run_reports_no_previous_version():
+    """The fields appear on the first run after a change, not on every run."""
+    with tempfile.TemporaryDirectory() as d:
+        restore = _isolate(d)
+        try:
+            usage_report.build_payload({"app_version": "2.85"})
+            p = usage_report.build_payload({"app_version": "2.85"})
+            assert "previous_version" not in p
+        finally:
+            restore()
+
+
+def test_a_hand_downloaded_upgrade_is_reported_as_manual():
+    with tempfile.TemporaryDirectory() as d:
+        restore = _isolate(d)
+        try:
+            usage_report.build_payload({"app_version": "2.85"})
+            p = usage_report.build_payload({"app_version": "2.86"})
+            assert p["previous_version"] == "2.85"
+            assert p["updated_via"] == "manual"
+        finally:
+            restore()
+
+
+def test_a_one_click_update_is_reported_as_in_app():
+    """THE question this exists to answer: did the in-app updater actually work?
+
+    As of 2026-08-18 no Windows machine had ever been observed updating in
+    place, and the data could not say whether the updater was broken or whether
+    people simply re-download. This makes the two distinguishable.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        restore = _isolate(d)
+        try:
+            usage_report.build_payload({"app_version": "2.85"})
+            usage_report.note_updater_engaged()          # user clicked update
+            p = usage_report.build_payload({"app_version": "2.86"})
+            assert p["previous_version"] == "2.85"
+            assert p["updated_via"] == "in_app"
+            # The marker is spent: the NEXT upgrade must not inherit it.
+            p2 = usage_report.build_payload({"app_version": "2.87"})
+            assert p2["updated_via"] == "manual", \
+                "the updater marker must be cleared once it has been reported"
+        finally:
+            restore()
+
+
+def test_telemetry_cannot_break_an_update():
+    """note_updater_engaged is called from inside the updater path, so it must
+    never raise, even when the folder cannot be written."""
+    restore = _isolate("/nonexistent-path-that-cannot-be-created\x00/x")
+    try:
+        usage_report.note_updater_engaged()      # must not raise
+    finally:
+        restore()

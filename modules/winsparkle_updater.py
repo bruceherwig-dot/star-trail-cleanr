@@ -222,6 +222,18 @@ def updater_alive():
     return _dll is not None
 
 
+def _note_updater_engaged():
+    """Leave a note that the in-app updater was used, so the next run's usage
+    report can say the new version arrived by one click rather than by hand.
+    Never raises and never blocks an update -- telemetry must not be able to
+    break the thing it is measuring."""
+    try:
+        from modules.usage_report import note_updater_engaged
+        note_updater_engaged()
+    except Exception:
+        pass
+
+
 def check_for_updates_quiet():
     """User-initiated check WITHOUT any engine windows. The outcome arrives via
     the handlers registered with set_quiet_handlers / set_error_handler:
@@ -255,6 +267,7 @@ def check_for_updates():
     try:
         global _user_initiated
         _user_initiated = True   # so a failure surfaces the manual-download fallback
+        _note_updater_engaged()
         _dll.win_sparkle_check_update_with_ui()
         return True
     except Exception:
