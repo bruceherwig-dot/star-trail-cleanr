@@ -95,8 +95,20 @@ PLATFORMS = [
         ),
     },
     {
+        # THE ENCLOSURE MUST BE THE .exe, NOT THE .zip. WinSparkle hands the
+        # downloaded file to Windows and lets the file association decide what
+        # to do with it (ShellExecuteEx, no arguments -- winsparkle/src/ui.cpp),
+        # so a zip opens an Explorer window and installs NOTHING. That is what
+        # made every Windows one-click update do nothing from the day the
+        # updater shipped: proven on a clean Windows runner on 2026-08-21, which
+        # installed 2.84, ran what this feed advertised, and was still on 2.84
+        # afterwards. WinSparkle's own guide: "the enclosure is typically some
+        # kind of installer: an MSI, Inno Setup installer, NSIS installer".
+        # The .zip still ships and is still what the website serves -- it exists
+        # to dodge Edge SmartScreen for people downloading by hand. Only the
+        # UPDATER needs the bare installer. Do not "tidy" these back together.
         "key": "windows",
-        "release_filename": "StarTrailCleanRSetup.zip",
+        "release_filename": "StarTrailCleanRSetup.exe",
         "appcast": "appcast-windows.xml",
         "extra": "",
     },
@@ -358,6 +370,26 @@ def do_publish_mirror(args):
             sys.exit(f"{appcast}: no <item> found in live feed")
         first_end = live.index("</item>", start) + len("</item>")
         item = live[start:first_end]
+        # THE GATE THAT WOULD HAVE CAUGHT THIS IN APRIL.
+        # On Windows, WinSparkle executes whatever the enclosure points at and
+        # lets the file association decide (ShellExecuteEx, no arguments). Point
+        # it at an archive and Windows opens an Explorer window: nothing
+        # installs, no error is raised, and the user is left on the old version
+        # believing they updated. That is exactly what shipped from the day the
+        # Windows updater went live until 2026-08-21, through five separate
+        # "updater fixes", because nothing ever checked WHAT we were advertising.
+        # Proven on a clean Windows runner: installed 2.84, ran what the feed
+        # offered, still 2.84.
+        if platform["key"] == "windows":
+            fn = platform["release_filename"]
+            if not fn.lower().endswith((".exe", ".msi")):
+                sys.exit(
+                    f"{appcast}: the Windows enclosure is {fn!r}, which Windows "
+                    "cannot install by executing it. WinSparkle's guide: 'the "
+                    "enclosure is typically some kind of installer: an MSI, Inno "
+                    "Setup installer, NSIS installer, and so on.' Point the feed "
+                    "at the installer. The .zip is for people downloading by "
+                    "hand (it dodges SmartScreen); it is not an update.")
         gh_url = f"{RELEASE_BASE}/{args.tag}/{platform['release_filename']}"
         mirror_url = f"{MIRROR_DL}/{platform['release_filename']}"
         if gh_url not in item:

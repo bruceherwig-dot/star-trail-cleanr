@@ -38,6 +38,11 @@ EXPECTED = [
     "StarTrailCleanR-Mac-AppleSilicon.dmg",
     "StarTrailCleanR-Mac-Intel.dmg",
     "StarTrailCleanRSetup.zip",
+    # The bare installer as well as the zip. The Windows update feed points at
+    # THIS file (see scripts/publish_appcast.py): WinSparkle executes whatever
+    # it downloads, and a zip installs nothing. The feed reads from this mirror,
+    # so if the .exe is not uploaded here the update is a 404 instead.
+    "StarTrailCleanRSetup.exe",
     "StarTrailCleanR-Linux-x86_64.tar.gz",
 ]
 

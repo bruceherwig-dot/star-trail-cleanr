@@ -186,8 +186,58 @@ was removed.
 |---|---|---|---|
 | Mac Apple Silicon | Sparkle | appcast-mac-apple-silicon.xml | one-click in-place |
 | Mac Intel | Sparkle | appcast-mac-intel.xml | one-click in-place |
-| Windows | WinSparkle | appcast-windows.xml | one-click in-place |
+| Windows | WinSparkle | appcast-windows.xml | click update, then click through the installer wizard |
 | Linux | none | (banner only) | banner button opens GitHub download page |
+
+## WINDOWS SHIPS TWO FILES ON PURPOSE — never merge them (2026-08-21)
+
+Every release publishes **both** `StarTrailCleanRSetup.exe` and
+`StarTrailCleanRSetup.zip`. They are the same installer, and they exist for two
+different jobs. They look like a duplicate. They are not. Deleting either one
+breaks something, silently:
+
+| file | who uses it | why it must be that file |
+|---|---|---|
+| `StarTrailCleanRSetup.exe` | **the updater** (the Windows appcast enclosure) | WinSparkle hands the downloaded file to Windows and lets the file association decide what to do with it (`ShellExecuteEx`, no arguments, `winsparkle/src/ui.cpp`). An `.exe` installs. A `.zip` opens an Explorer window and installs **nothing**. |
+| `StarTrailCleanRSetup.zip` | **the website** download button, and the banner's manual-download link | Edge SmartScreen quarantines an unsigned `.exe` download behind a scary dialog whose "Keep" option is nearly hidden. Wrapping it in a zip sidesteps that for people downloading by hand. |
+
+**What went wrong, and for how long.** The feed pointed at the `.zip` from the day
+the Windows updater shipped. Clicking "update" downloaded a zip, opened Explorer,
+and installed nothing — no error, no crash, nothing in Sentry. The user simply
+stayed on the old version, probably believing they had updated. Five separate
+"Windows updater" fixes shipped between 2026-05-01 and 2026-08-21 without anyone
+catching it, because every one of them tested whether the app could **find** an
+update, and none tested what happened when it **ran** one. WinSparkle's own guide
+says it plainly: *"the enclosure is typically some kind of installer: an MSI, Inno
+Setup installer, NSIS installer, and so on."*
+
+**Where each of these lives, so a change stays consistent:**
+- `scripts/publish_appcast.py` — the `windows` entry's `release_filename` is the
+  **.exe**, and there is a publish-time guard that refuses to publish a Windows
+  feed pointing at anything that is not `.exe`/`.msi`. Do not remove the guard.
+- `scripts/mirror_upload.py` — uploads **both** files. The feed reads from the
+  mirror, so an un-mirrored installer is a 404 instead of an update.
+- `.github/workflows/build.yml` — packages and attaches **both** to the release.
+- `modules/update_check.py` (`WIN_ASSET`) and `website/latest.php`
+  (`platform_files`) — these are the **manual download** paths and stay the
+  **.zip** on purpose.
+- `tests/test_windows_enclosure.py` — fails the build if any of the above drifts.
+
+**What "working" looks like on Windows, so nobody chases a bug that isn't one.**
+WinSparkle runs the installer with **no arguments**, so the user sees the normal
+Inno Setup wizard and clicks through it. That is the expected behaviour and it is
+NOT the same as the silent in-place swap Mac gets. If you want it fully silent,
+WinSparkle supports passing installer arguments (`/VERYSILENT` for Inno) — that is
+a deliberate separate change, not a bug fix.
+
+**How to test it without a Windows machine.** Run the
+`Windows updater INSTALL test` workflow (manual dispatch, `windows-latest`
+runner). It installs the previous release, reads the **live** feed, downloads
+whatever the enclosure advertises, runs it exactly as WinSparkle does, and reports:
+- **FAIL** — nothing installed. The feed advertises something Windows cannot run.
+- **PARTIAL** — the installer started but the version did not change, because
+  nobody clicked the wizard. This is the expected pass on a headless runner.
+- **PASS** — the version on disk changed unattended.
 
 ## Model updates — a SEPARATE channel from app updates (verified against code 2026-06-17)
 

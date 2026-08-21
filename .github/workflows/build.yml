@@ -252,8 +252,18 @@ jobs:
         shell: pwsh
       - uses: actions/upload-artifact@v4
         with:
+          # BOTH files ship. The zip is what a person downloads from the website
+          # (it dodges the SmartScreen gate described above). The bare .exe is
+          # what the UPDATER needs: WinSparkle hands the downloaded file to
+          # Windows and lets the file association decide, so a zip merely opens
+          # an Explorer window and installs nothing. Proven on a clean Windows
+          # runner 2026-08-21 -- the app was still on 2.84 afterwards. WinSparkle's
+          # own guide: "the enclosure is typically some kind of installer: an MSI,
+          # Inno Setup installer, NSIS installer, and so on."
           name: StarTrailCleanR-Windows
-          path: installer/StarTrailCleanRSetup.zip
+          path: |
+            installer/StarTrailCleanRSetup.zip
+            installer/StarTrailCleanRSetup.exe
 
   build-linux:
     needs: lint
@@ -332,6 +342,7 @@ jobs:
             StarTrailCleanR-Mac/StarTrailCleanR-Mac-AppleSilicon.dmg
             StarTrailCleanR-Mac-Intel/StarTrailCleanR-Mac-Intel.dmg
             StarTrailCleanR-Windows/StarTrailCleanRSetup.zip
+            StarTrailCleanR-Windows/StarTrailCleanRSetup.exe
             StarTrailCleanR-Linux/StarTrailCleanR-Linux-x86_64.tar.gz
           body: |
             ## Star Trail CleanR ${{ github.ref_name }}

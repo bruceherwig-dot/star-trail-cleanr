@@ -90,6 +90,16 @@ TIMEOUT_S = 5
 # upload-artifact step name: fields.
 MAC_AS_ASSET = "StarTrailCleanR-Mac-AppleSilicon.dmg"
 MAC_INTEL_ASSET = "StarTrailCleanR-Mac-Intel.dmg"
+# The .zip ON PURPOSE. This constant is the MANUAL download path -- the banner's
+# "download it yourself" link -- where a human saves the file and opens it, and
+# the zip wrapper is what keeps Edge SmartScreen from quarantining an unsigned
+# .exe behind a near-hidden "Keep" option.
+#
+# The UPDATER is a different thing entirely and needs the bare installer: see
+# scripts/publish_appcast.py, where the Windows appcast enclosure is the .exe,
+# because WinSparkle executes what it downloads and a zip installs nothing.
+# Both files ship every release. The full story is in AUTO_UPDATE.md
+# ("WINDOWS SHIPS TWO FILES ON PURPOSE"). Do not "tidy" these into one.
 WIN_ASSET = "StarTrailCleanRSetup.zip"
 LINUX_ASSET = "StarTrailCleanR-Linux-x86_64.tar.gz"
 

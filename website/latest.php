@@ -57,6 +57,11 @@ function platform_files(): array {
     return [
         'mac-as'    => 'StarTrailCleanR-Mac-AppleSilicon.dmg',
         'mac-intel' => 'StarTrailCleanR-Mac-Intel.dmg',
+        // .zip ON PURPOSE: this is the website's download button, i.e. a human
+        // saving a file. The zip wrapper dodges Edge SmartScreen's quarantine of
+        // unsigned .exe downloads. The UPDATER uses the bare .exe instead (see
+        // scripts/publish_appcast.py) because WinSparkle executes what it
+        // downloads and a zip installs nothing. Both ship. See AUTO_UPDATE.md.
         'windows'   => 'StarTrailCleanRSetup.zip',
         'linux'     => 'StarTrailCleanR-Linux-x86_64.tar.gz',
     ];
