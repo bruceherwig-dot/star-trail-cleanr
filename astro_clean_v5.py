@@ -1,4 +1,48 @@
 #!/usr/bin/env python3
+"""The cleaning engine — finds the trails in a batch of frames and paints them out.
+
+This is where the actual image work happens. It is a COMMAND-LINE PROGRAM, not a
+library: the desktop app (star_trail_cleanr.py) runs it as a separate process,
+once per batch of up to 20 frames, and reads its printed output to drive the
+progress bar. Nothing here draws any interface.
+
+WHAT IT DOES TO ONE BATCH
+  1. Load the batch, plus one neighbour frame on each side (the repair needs the
+     frames either side to borrow clean pixels from).
+  2. Detect trails: a YOLO segmentation model looks at each frame in 640x640
+     tiles, and the results are merged into one mask per frame. Anything below
+     the horizon is excluded when the user has painted a foreground mask.
+  3. Repair each trail with Star Bridge: take the same patch of sky from the
+     frame before and the frame after, morph between them, and lay that over the
+     trail. The stars underneath survive because they really were there in the
+     neighbouring frames, a few pixels along.
+  4. Write a cleaned copy of every frame in the batch. Originals are never
+     touched.
+
+WHY BATCHES OF 20
+The repair assumes the sky has barely moved between a frame and its neighbours.
+Over more than a few minutes the stars rotate far enough that borrowed pixels no
+longer line up, so the app cuts the sequence into batches and runs this engine
+once per batch.
+
+THE CONTRACT WITH THE APP (both sides must agree, or users get nothing)
+  - `--frame-manifest` is the authoritative, de-duplicated, capture-time-ordered
+    list of frames. When it is given it is used VERBATIM; this program does not
+    re-derive the order. `--start` and `--batch` index into that list.
+  - `--expected-width/height/bitdepth` describe the frames the app decided to
+    keep. Anything else in the folder is filtered out here.
+  - Progress is reported by printing lines the app parses. Changing that output
+    format changes the progress bar.
+  - Exit non-zero on failure, with a message that says what a person should do
+    about it -- this text can end up in front of a user.
+
+RUN IT BY HAND (useful for debugging one batch):
+    python3 astro_clean_v5.py <folder> -o <out> --model assets/best.pt \
+        --start 0 --batch 20
+
+See ARCHITECTURE.md for how this fits the rest, and modules/detect_trails.py and
+modules/repair.py for the two halves of the actual work.
+"""
 import sys, os
 # Apple Silicon: torchvision::nms is not implemented for the MPS (GPU)
 # device in the PyTorch version we ship, so YOLO warmup crashes during

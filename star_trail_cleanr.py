@@ -1,3 +1,56 @@
+"""Star Trail CleanR — the desktop app (this is the program the user runs).
+
+WHAT THIS PROGRAM IS FOR
+A photographer shoots a few hundred night-sky frames on a fixed tripod and
+stacks them into a star trail. Aircraft and satellites cross the sky during the
+shoot and leave straight streaks across the picture. This app finds those
+streaks and paints them out, frame by frame, while leaving the real stars alone,
+and hands back a cleaned copy of every frame to stack.
+
+THIS FILE IS THE WHOLE USER INTERFACE. It is large because it is the entire app:
+window, tabs, settings, the mask painter, the run screen, the star trail and
+timelapse builders, the update banner, and the run orchestration. It does NOT do
+any image cleaning itself.
+
+THE ONE STRUCTURAL IDEA — THIS FILE RUNS ITSELF AS A SEPARATE PROGRAM
+The cleaning engine lives in astro_clean_v5.py and runs as a SEPARATE PROCESS,
+not as an import. To spawn it, the app re-runs its own executable with
+`--cleanr-worker <script> ...` (see the top of this file, and SCRIPT /
+SHARE_SCRIPT below). The re-invoked process notices that flag and becomes the
+engine instead of opening a window.
+
+The reason is that a frozen app has no Python interpreter to call: `sys.executable`
+IS the app. So "run a script" has to mean "run myself, in worker mode".
+
+Consequences worth knowing before changing anything here:
+  - The GUI and the engine share NO memory. Everything the engine needs arrives
+    as command-line arguments, and everything it reports comes back as lines of
+    text on stdout, which the GUI parses to move the progress bar.
+  - A crash in the engine cannot take the window down, and a heavy run cannot
+    freeze the interface.
+  - The two sides can DISAGREE, and that is the bug class to watch for. The GUI
+    decides which frames to clean and in what order and writes them to a
+    manifest file; the engine reads that manifest verbatim. When those two lists
+    were built at different moments, users got "need >= 3 frames (got 0)" and
+    could not run the app at all (fixed 2026-08-21; the tests that lock it are in
+    tests/test_manifest_matches_plan.py).
+
+HOW ONE RUN GOES
+  1. Scan the folder: list frames, drop duplicate RAW/JPG/TIFF twins, order by
+     capture time, measure every frame, keep the dominant size.
+  2. Plan batches of up to 20 frames (star motion over a longer span breaks the
+     repair) and write the frame manifest.
+  3. For each batch, spawn the engine and stream its output into the progress bar.
+  4. At the end, build the share outputs (star trail stack, before/after video)
+     and, if the user opted in, send one anonymous usage report.
+
+WHERE THE REST LIVES
+  - astro_clean_v5.py     the cleaning engine (detect + repair), one batch per run
+  - modules/              the real work: detection, repair, image IO, updates
+  - make_share_clip.py    star trail stacks and the before/after video
+  - ARCHITECTURE.md       the map of the whole codebase, read that first
+  - AUTO_UPDATE.md        how updating works; read before touching any of it
+"""
 import sys
 import os
 import re

@@ -10,6 +10,13 @@
 - **Original source images** — never delete, overwrite, or modify. Convert/copy alongside, never replace.
 - **Reviewed LabelMe labels** — never regenerate or overwrite manually reviewed JSON files. Back up first.
 
+## Read the map before changing code
+`ARCHITECTURE.md` (repo root) explains how the pieces fit: the app runs the
+cleaning engine as a SEPARATE PROCESS (`--cleanr-worker`), the two sides can
+disagree about which frames to clean, and several files at the root are dead
+history (`astro_clean.py`, `_v2`, `_v3`, `archive/`,
+`v5_star_bridge_backup_2026_04_09/`). Read it before editing anything unfamiliar.
+
 ## Current pipeline (v5) — 2 steps
 1. **Detect** — per-frame YOLO/SAHI tiled inference with sky mask and component filtering
 2. **Repair** — Star Bridge morph from neighbor frames N-1/N+1, black fill fallback

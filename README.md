@@ -12,9 +12,13 @@ Website: [www.startrailcleanr.com](https://www.startrailcleanr.com)
 
 The links below always point to the latest release.
 
-- [**Mac (Apple Silicon)**](https://github.com/bruceherwig-dot/star-trail-cleanr/releases/latest/download/StarTrailCleanR-Mac-AppleSilicon.zip)
-- [**Mac (Intel)**](https://github.com/bruceherwig-dot/star-trail-cleanr/releases/latest/download/StarTrailCleanR-Mac-Intel.zip)
-- [**Windows**](https://github.com/bruceherwig-dot/star-trail-cleanr/releases/latest/download/StarTrailCleanRSetup.zip)
+**[Download for Mac, Windows, or Linux](https://www.startrailcleanr.com/#download)**
+
+<!-- These go to the website's download buttons ON PURPOSE, rather than to
+     GitHub asset URLs. Asset filenames change (Mac moved from .zip to .dmg),
+     and hardcoded links here rotted into 404s without anyone noticing. The
+     website buttons resolve to the current release for every platform and also
+     count the download. Please do not replace them with direct file links. -->
 
 See the [Releases page](https://github.com/bruceherwig-dot/star-trail-cleanr/releases) for older versions and full changelogs.
 
@@ -87,3 +91,11 @@ The first time you launch Star Trail CleanR you'll be asked whether you'd like t
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+---
+
+## For developers
+
+`ARCHITECTURE.md` maps the codebase: what runs when a user clicks Clean, which
+files matter, and which are kept only for history. Start there rather than with
+the source.
