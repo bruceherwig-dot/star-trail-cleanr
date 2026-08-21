@@ -44,6 +44,32 @@ Star Trail CleanR runs in two steps:
 
 ---
 
+## What You Get When It Finishes
+
+**Your original photos are never touched.** Everything is written alongside them.
+
+Inside your photo folder you'll find a new **`cleaned`** folder holding one cleaned
+copy of every frame, with the same filenames. Inside that is a folder called
+**`STC Extras`** with everything else the run made:
+
+| | |
+|---|---|
+| **STC_cleaned_star_trail.jpg** | your star trail, stacked from the cleaned frames |
+| **STC_original_star_trail.jpg** | the same stack from your untouched originals, so you can compare |
+| **STC_share_video.mp4** | a short before-and-after video |
+| **STC_star_trail_…jpg** / **STC_timelapse_…mp4** | anything you build on the Star Trail or Timelapse tab. The filename records the settings used, so you can tell two versions apart |
+| **Star Log** | the one file to open when something looked wrong. If a frame was skipped or a mask was refused, it says so, in plain English |
+| **foreground_mask.png** | the mask you painted, reused automatically next time |
+| **masks** folder | what the detector found on each frame, if you want to see its work |
+
+**It went well if:** every frame has a cleaned copy, and the star trail opens with
+no streaks across the sky.
+
+**Worth a look if:** a streak is still there (the detector missed it), or frames are
+missing from the cleaned folder. The Star Log will say why.
+
+---
+
 ## Limitations
 
 - **Trail variety is bounded by the AI's training data.** If a type of trail isn't being detected well in your sequences, you can help train the next version: zip 300+ frames from that scene and email them to bruceherwig+startrailcleanr@gmail.com. For large folders, share a Dropbox, Google Drive, or WeTransfer link instead. The model gets smarter every time the community contributes.

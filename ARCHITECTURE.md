@@ -60,6 +60,47 @@ Everything follows from that:
 
 ---
 
+## What a run produces (expected outcome)
+
+If a run worked, this is what exists afterwards. **The original photos are never
+modified** — everything is written alongside them.
+
+```
+<your photo folder>/            your originals, untouched
+└── cleaned/                    one cleaned copy per frame, same filenames
+    └── STC Extras/             everything else the run made
+        ├── STC_cleaned_star_trail.jpg    star trail stacked from the CLEANED frames
+        ├── STC_original_star_trail.jpg   the same stack from the ORIGINALS, to compare
+        ├── STC_share_video.mp4           short before/after video
+        ├── STC_star_trail_*.jpg          trails you built on the Star Trail tab; the
+        │                                 filename records the settings used
+        ├── STC_timelapse_*.mp4           timelapses you built
+        ├── foreground_mask.png           the mask you painted, reused next run
+        ├── hot_pixel_map.png             where this camera's stuck pixels are, found
+        │                                 during the clean, 20 frames at a time
+        ├── masks/                        what the detector found, per frame:
+        │                                 <frame>.png, <frame>_raw.png, <frame>_polys.json
+        ├── star_log_<date>.txt           THE file to read when something looked wrong
+        ├── run_log_<date>.jsonl          machine-readable record of every step
+        └── Archive/                      older logs, tucked out of the way
+```
+
+Older runs put this folder next to the originals as `cleanr_workspace/`. Both
+names are still found (`modules/workspace.py`), so old sequences keep working.
+
+**A good run:** every frame has a cleaned counterpart, the star trail opens with
+no streaks across it, and the Star Log is short.
+
+**A run worth investigating:** frames are missing from `cleaned/`, the Star Log
+lists skipped files, or the star trail still shows a streak — which means the
+detector missed it, and the masks folder will show what it did find at that frame.
+
+**A failed run** stops with a message saying what happened. The message is meant to
+be actionable on its own; if it is not, that is a bug in the message, not just in
+the code.
+
+---
+
 ## The files that matter
 
 ### Entry points

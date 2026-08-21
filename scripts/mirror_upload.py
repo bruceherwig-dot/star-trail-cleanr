@@ -1,5 +1,11 @@
 """Upload the built installers to the DreamHost failsafe mirror.
 
+WHAT SUCCESS LOOKS LIKE: every file in EXPECTED below exists on the server under
+api.startrailcleanr.com/downloads/ at the same byte length as the build produced,
+and each is reachable over HTTPS. The update feeds point at these copies, so a
+missing or truncated file here is not a slow download for the user -- it is a
+404 in the middle of an update.
+
 Layer 2 of the update failsafe (see project_update_failsafe_design / AUTO_UPDATE):
 users who cannot reach github.com (GitHub blocked at the country level) need a
 non-GitHub place to download the app. website/latest.php serves the mirror URL for

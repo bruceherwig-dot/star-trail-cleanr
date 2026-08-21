@@ -1,5 +1,23 @@
 """Publish the Star Trail CleanR auto-update feeds (appcasts).
 
+WHAT SUCCESS LOOKS LIKE (check these, do not assume the job going green means
+the release reached anyone):
+  - All six feeds advertise the new version: three on GitHub Pages
+    (appcast-windows.xml, appcast-mac-apple-silicon.xml, appcast-mac-intel.xml)
+    and the same three on the mirror at api.startrailcleanr.com, which is what
+    the app actually reads from v2.80 on.
+  - The mirror feeds' enclosure URLs point at the MIRROR copies of the
+    installers, and those files exist at the advertised byte length.
+  - https://api.github.com/.../releases/latest resolves to the new tag. That is
+    a SEPARATE channel: the orange in-app banner reads it, Sparkle does not.
+  - The Windows enclosure is the .exe installer, never the .zip. WinSparkle
+    executes what it downloads; a zip opens Explorer and installs nothing.
+
+If any of that is wrong the release did NOT ship, however green the build looks.
+This script hard-fails rather than publishing a feed that would leave users
+stranded, so a failure here is the system working. Read the error and fix the
+cause; never tag around it.
+
 This is the SIMPLE, STURDY publisher that runs automatically inside GitHub
 Actions on every release tag (see .github/workflows/build.yml, job
 `publish-appcast`). It replaces the old delta-based local flow
