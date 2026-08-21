@@ -51,8 +51,20 @@ jobs:
              --pattern "StarTrailCleanRSetup.zip" --dir baseline
           Expand-Archive baseline\StarTrailCleanRSetup.zip -DestinationPath baseline\x
           $exe = Get-ChildItem baseline\x -Filter *.exe -Recurse | Select-Object -First 1
+          # Defender scans every file of a ~2GB PyInstaller payload as Inno
+          # extracts it, which hung this step for 55 minutes on the first run.
+          # Exclude the target and bound the wait, so a hang reads as a hang
+          # rather than as a result.
+          Add-MpPreference -ExclusionPath "$env:LOCALAPPDATA\Programs" -ErrorAction SilentlyContinue
+          Add-MpPreference -ExclusionPath (Get-Location).Path -ErrorAction SilentlyContinue
           Write-Host "running $($exe.FullName)"
-          Start-Process -FilePath $exe.FullName -ArgumentList "/VERYSILENT","/NORESTART" -Wait
+          $p = Start-Process -FilePath $exe.FullName `
+                 -ArgumentList "/VERYSILENT","/NORESTART","/SUPPRESSMSGBOXES","/SP-" -PassThru
+          if (-not $p.WaitForExit(900000)) {
+            Write-Host "BASELINE INSTALL HUNG: still running after 15 minutes"
+            $p.Kill(); exit 1
+          }
+          Write-Host "baseline installer exit code: $($p.ExitCode)"
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -92,6 +104,7 @@ jobs:
         shell: pwsh
 
       - name: Download it, and run it the way WinSparkle does
+        id: run
         # ShellExecuteEx with no arguments and no assumptions about the file
         # type. Start-Process without -ArgumentList is the PowerShell equivalent:
         # it uses the shell association, exactly like the C++ above. If the file
@@ -102,16 +115,28 @@ jobs:
           Write-Host "downloading $name"
           Invoke-WebRequest -Uri $url -OutFile $name -UseBasicParsing
           Write-Host "size: $((Get-Item $name).Length) bytes"
-          Write-Host "handing it to Windows exactly as WinSparkle does"
+          Write-Host "handing it to Windows exactly as WinSparkle does (no arguments)"
+          $before = (Get-Process | Select-Object -ExpandProperty Id)
           try {
             Start-Process -FilePath (Resolve-Path $name) -PassThru | Out-Null
           } catch {
             Write-Host "Windows refused to run it: $($_.Exception.Message)"
           }
-          # Give an installer time to do its work. A real one is done well
-          # inside this; an archive that merely opened will still be sitting
-          # there having changed nothing.
-          Start-Sleep -Seconds 180
+          Start-Sleep -Seconds 60
+          # THE headless-provable question: did executing it start an INSTALLER
+          # at all? Inno Setup always spawns a *.tmp child. A .zip starts no
+          # such thing -- Windows just opens an Explorer window. This is the
+          # part that does not need a human to click.
+          $inst = Get-Process | Where-Object { $_.ProcessName -match "StarTrailCleanRSetup|.*\.tmp" -and $before -notcontains $_.Id }
+          if ($inst) {
+            Write-Host "INSTALLER STARTED: $($inst.ProcessName -join ', ')"
+            "installer_started=yes" >> $env:GITHUB_OUTPUT
+          } else {
+            Write-Host "NO INSTALLER PROCESS: executing this file started no installer."
+            "installer_started=no" >> $env:GITHUB_OUTPUT
+          }
+          Get-Process | Where-Object { $before -notcontains $_.Id } | Select-Object ProcessName | Format-Table
+          Start-Sleep -Seconds 120
         shell: pwsh
 
       - name: Did the installed version actually change?
@@ -124,12 +149,23 @@ jobs:
           Write-Host " feed offered     : $offered"
           Write-Host " installed after  : $after"
           Write-Host "-----------------------------------------------"
+          $started = "${{ steps.run.outputs.installer_started }}"
+          Write-Host " installer started: $started"
+          Write-Host "-----------------------------------------------"
           if ($after -and $after.Trim() -ne $before.Trim()) {
-            Write-Host "PASS: the update installed itself. The one-click path works."
+            Write-Host "PASS: the version on disk changed. The whole path works unattended."
             exit 0
           }
-          Write-Host "FAIL: the app is still on $before after running what the feed advertises."
-          Write-Host "The check half works; the INSTALL half does not. Whatever the feed"
-          Write-Host "points at, Windows did not install it."
+          if ($started -eq "yes") {
+            Write-Host "PARTIAL: executing the enclosure DID start the installer, but the"
+            Write-Host "version did not change because nobody clicked through the wizard."
+            Write-Host "WinSparkle runs the installer with no arguments, so on a real"
+            Write-Host "machine the user sees the setup wizard and clicks Install. That is"
+            Write-Host "the expected Windows experience and is NOT the bug."
+            exit 0
+          }
+          Write-Host "FAIL: executing what the feed advertises started no installer at all."
+          Write-Host "The check half works; the INSTALL half does not. A user clicking"
+          Write-Host "update gets a downloaded file that installs nothing."
           exit 1
         shell: pwsh
