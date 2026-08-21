@@ -1,0 +1,135 @@
+name: Windows updater INSTALL test
+
+# THE HALF WE HAVE NEVER TESTED.
+#
+# The build workflow already proves two things on a clean Windows machine: the
+# update engine loads, and a check against the live feed succeeds. Both are
+# about whether the app can FIND an update. Nothing has ever tested what happens
+# after the user clicks install -- and between 2026-05-01 and 2026-08-21 five
+# separate "Windows updater" fixes shipped without a single confirmed one-click
+# update, on any machine, ever.
+#
+# This performs the install step exactly as WinSparkle performs it. From
+# winsparkle/src/ui.cpp, the entire install is:
+#
+#     sei.lpFile = m_updateFile.t_str();
+#     ShellExecuteEx(&sei);
+#
+# It hands the downloaded file to Windows and lets the file association decide
+# what to do with it. That is what this reproduces: read the LIVE appcast, take
+# the enclosure URL it advertises, download it, run it the way Windows would,
+# and then look at what version is actually installed afterwards.
+#
+# Run it by hand from the Actions tab (or `gh workflow run updater_install_test.yml`).
+# It changes nothing and publishes nothing.
+
+on:
+  workflow_dispatch:
+    inputs:
+      appcast:
+        description: "Appcast feed to test"
+        required: true
+        default: "https://api.startrailcleanr.com/appcast-windows.xml"
+      baseline_tag:
+        description: "Release tag to install first (the 'old' version)"
+        required: true
+        default: "v2.84-beta"
+
+jobs:
+  install-test:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Install the baseline version
+        # Start from a real installed app, the way a user is, not from a build
+        # directory. Inno Setup's /VERYSILENT is the same installer the user
+        # runs, just without the click-through.
+        run: |
+          $tag = "${{ inputs.baseline_tag }}"
+          Write-Host "downloading baseline $tag"
+          gh release download $tag --repo bruceherwig-dot/star-trail-cleanr `
+             --pattern "StarTrailCleanRSetup.zip" --dir baseline
+          Expand-Archive baseline\StarTrailCleanRSetup.zip -DestinationPath baseline\x
+          $exe = Get-ChildItem baseline\x -Filter *.exe -Recurse | Select-Object -First 1
+          Write-Host "running $($exe.FullName)"
+          Start-Process -FilePath $exe.FullName -ArgumentList "/VERYSILENT","/NORESTART" -Wait
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Record the version that is installed now
+        id: before
+        run: |
+          # Find version.txt rather than assume where PyInstaller put it: a
+          # wrong guess here would report a false failure, which is the exact
+          # habit this whole exercise exists to break.
+          $root = "$env:LOCALAPPDATA\Programs\StarTrailCleanR"
+          $f = Get-ChildItem $root -Filter version.txt -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $f) {
+            Write-Host "BASELINE INSTALL FAILED: no version.txt found under $root"
+            Get-ChildItem $root -ErrorAction SilentlyContinue | Select-Object -First 20 | Format-Table Name
+            exit 1
+          }
+          Write-Host "version file: $($f.FullName)"
+          $v = (Get-Content $f.FullName).Trim()
+          "path=$($f.FullName)" >> $env:GITHUB_OUTPUT
+          Write-Host "installed baseline version: $v"
+          "version=$v" >> $env:GITHUB_OUTPUT
+        shell: pwsh
+
+      - name: Take the enclosure the live feed advertises
+        id: feed
+        run: |
+          $xml = [xml](Invoke-WebRequest -Uri "${{ inputs.appcast }}" -UseBasicParsing).Content
+          $item = $xml.rss.channel.item | Select-Object -First 1
+          $url = $item.enclosure.url
+          $ver = $item.enclosure.version
+          Write-Host "feed offers version $ver"
+          Write-Host "enclosure URL: $url"
+          Write-Host "enclosure file type: $([System.IO.Path]::GetExtension($url))"
+          "url=$url"  >> $env:GITHUB_OUTPUT
+          "offered=$ver" >> $env:GITHUB_OUTPUT
+        shell: pwsh
+
+      - name: Download it, and run it the way WinSparkle does
+        # ShellExecuteEx with no arguments and no assumptions about the file
+        # type. Start-Process without -ArgumentList is the PowerShell equivalent:
+        # it uses the shell association, exactly like the C++ above. If the file
+        # is an installer it installs; if it is an archive, Windows opens it.
+        run: |
+          $url = "${{ steps.feed.outputs.url }}"
+          $name = Split-Path $url -Leaf
+          Write-Host "downloading $name"
+          Invoke-WebRequest -Uri $url -OutFile $name -UseBasicParsing
+          Write-Host "size: $((Get-Item $name).Length) bytes"
+          Write-Host "handing it to Windows exactly as WinSparkle does"
+          try {
+            Start-Process -FilePath (Resolve-Path $name) -PassThru | Out-Null
+          } catch {
+            Write-Host "Windows refused to run it: $($_.Exception.Message)"
+          }
+          # Give an installer time to do its work. A real one is done well
+          # inside this; an archive that merely opened will still be sitting
+          # there having changed nothing.
+          Start-Sleep -Seconds 180
+        shell: pwsh
+
+      - name: Did the installed version actually change?
+        run: |
+          $before  = "${{ steps.before.outputs.version }}"
+          $offered = "${{ steps.feed.outputs.offered }}"
+          $after = Get-Content "${{ steps.before.outputs.path }}" -ErrorAction SilentlyContinue
+          Write-Host "-----------------------------------------------"
+          Write-Host " installed before : $before"
+          Write-Host " feed offered     : $offered"
+          Write-Host " installed after  : $after"
+          Write-Host "-----------------------------------------------"
+          if ($after -and $after.Trim() -ne $before.Trim()) {
+            Write-Host "PASS: the update installed itself. The one-click path works."
+            exit 0
+          }
+          Write-Host "FAIL: the app is still on $before after running what the feed advertises."
+          Write-Host "The check half works; the INSTALL half does not. Whatever the feed"
+          Write-Host "points at, Windows did not install it."
+          exit 1
+        shell: pwsh
