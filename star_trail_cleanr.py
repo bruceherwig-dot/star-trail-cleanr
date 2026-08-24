@@ -1848,6 +1848,16 @@ class CleanerWorker(QThread):
                     # user-facing Star Log -- they read as "the app is broken".
                     # The raw line is still captured in proc_stdout_lines above
                     # (crash report) and the on-disk run log for debugging.
+                    # The ENGINE says which processor it actually loaded the
+                    # model on. Believe that over the guess this process made
+                    # before the run: they are different processes, and the
+                    # engine silently falls back to the CPU if the model will
+                    # not load on the card. Reporting the guess is how a run
+                    # could show a green GPU badge while every frame was cleaned
+                    # on the processor (2026-08-23).
+                    if proc_line.startswith("STC_DEVICE:"):
+                        self._worker_device = proc_line.split(":", 1)[1].strip()
+                        continue
                     if not _is_engine_noise(proc_line):
                         _add_log(f"  {proc_line}")
 
@@ -1955,13 +1965,25 @@ class CleanerWorker(QThread):
                     except Exception:
                         _umodel = None
                     try:
-                        _ugpu = _best_device() in ("mps", "cuda")
+                        _wdev = getattr(self, "_worker_device", None)
+                        # Prefer the engine's answer; fall back to our own only
+                        # when no batch ever reported one (a run that died early).
+                        _ugpu = ((_wdev in ("mps", "cuda")) if _wdev
+                                 else _best_device() in ("mps", "cuda"))
                     except Exception:
                         _ugpu = None
                     # Why the run used what it used (see modules.gpu_pack.gpu_status).
                     # Without this we can only see THAT a machine dropped to the
                     # processor, never why, which left us guessing from one report.
                     _ugpu_status = getattr(self, "_gpu_status_code", None)
+                    try:
+                        _wdev2 = getattr(self, "_worker_device", None)
+                        if _wdev2:
+                            from modules.gpu_pack import gpu_status as _gs2
+                            from modules.nvidia_detect import detect_nvidia as _dn2
+                            _ugpu_status = _gs2(_wdev2, _dn2()[0])
+                    except Exception:
+                        pass
                     _ufacts = {
                         "type": "run",
                         "app_version": VERSION,

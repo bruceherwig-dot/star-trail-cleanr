@@ -1546,8 +1546,37 @@ def main():
     print("\nStep 1 - detecting trails", flush=True)
     print("  Loading AI trail detector...", flush=True)
     _tload = time.perf_counter()
-    model = load_model(str(args.model), args.confidence, args.device)
+    model, _device_used = load_model(str(args.model), args.confidence, args.device)
     _model_load_s = time.perf_counter() - _tload
+
+    # SAY WHAT IS ACTUALLY HAPPENING -- when it works as well as when it does
+    # not. Bruce, 2026-08-23: "we want to let the user know when something fails,
+    # but better when it works as advertised. and if it fails what we need to do
+    # to fix it." A user with a 3080 Ti spent a 9-hour run squinting at Task
+    # Manager trying to work out whether his card was being used at all.
+    #
+    # This is printed by the WORKER, the process that actually loaded the model,
+    # so it reports the truth rather than what the app expected. The machine
+    # -readable marker on the next line is what the app records for the run
+    # summary and the usage report. Only the first batch says it out loud; the
+    # marker goes on every batch so a mid-run fallback cannot hide.
+    print(f"STC_DEVICE:{_device_used}", flush=True)
+    if args.start == 0:
+        if _device_used == "cuda":
+            _card = ""
+            try:
+                from modules.nvidia_detect import detect_nvidia
+                _out, _detail = detect_nvidia()
+                if _out == "yes" and _detail:
+                    _card = " (" + str(_detail).split(" (driver")[0] + ")"
+            except Exception:
+                pass
+            print(f"  Using your NVIDIA graphics card{_card}.", flush=True)
+        elif _device_used == "mps":
+            print("  Using your Mac's graphics processor.", flush=True)
+        else:
+            print("  Using the processor. See the note above if this machine "
+                  "has a graphics card.", flush=True)
 
     masks_all = []
     raw_masks_all = []

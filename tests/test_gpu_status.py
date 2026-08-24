@@ -183,3 +183,48 @@ def test_apple_silicon_check_is_specific_to_m_series():
     from modules.gpu_pack import is_apple_silicon
     expected = sys.platform == "darwin" and platform.machine() == "arm64"
     assert is_apple_silicon() is expected
+
+
+def test_the_engine_announces_the_device_it_really_used():
+    """The app and the engine are separate processes, and only one of them knows.
+
+    Field case, 2026-08-23: a user with an RTX 3080 Ti sat through a nine-hour
+    run unable to tell whether his card was doing anything, because Windows Task
+    Manager does not show this kind of GPU work in its default view. Meanwhile
+    the app's badge and the anonymous usage report were BOTH filled in by asking
+    the app's own process what device it could reach -- not the engine that
+    actually loads the model, which silently drops to the processor if the model
+    will not load on the card. A run could therefore report "GPU" while every
+    frame was cleaned on the processor.
+    """
+    from pathlib import Path
+    repo = Path(__file__).parent.parent
+
+    engine = (repo / "astro_clean_v5.py").read_text()
+    assert "STC_DEVICE:" in engine, \
+        "the engine must report the device it actually loaded the model on"
+    assert "Using your NVIDIA graphics card" in engine, \
+        "the engine must confirm success in plain words, not only warn on failure"
+
+    detect = (repo / "modules" / "detect_trails.py").read_text()
+    assert "return model, device" in detect, \
+        "load_model must hand back the device it ended up on, including after a " \
+        "silent fallback to the processor"
+
+    app = (repo / "star_trail_cleanr.py").read_text()
+    assert "_worker_device" in app, \
+        "the app must record what the engine reported"
+    assert "STC_DEVICE:" in app, \
+        "the app must read the engine's device line"
+
+
+def test_the_usage_report_states_the_engines_device_not_a_guess():
+    """Otherwise the numbers we make decisions from are about the wrong process."""
+    from pathlib import Path
+    app = (Path(__file__).parent.parent / "star_trail_cleanr.py").read_text()
+    i = app.find('_ugpu = ')
+    assert i > 0, "the usage report's gpu field vanished"
+    window = app[i - 400:i + 400]
+    assert "_worker_device" in window, (
+        "the gpu field must come from the engine's reported device, falling back "
+        "to a local guess only when no batch ever reported one")

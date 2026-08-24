@@ -301,7 +301,7 @@ def main():
 
     print(f"Loading model from {MODEL_PATH}")
     from modules.detect_trails import load_model
-    model = load_model(MODEL_PATH)
+    model, _dev = load_model(MODEL_PATH)
 
     print(f"\nRunning {len(entries)} entries...\n")
 

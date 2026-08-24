@@ -700,16 +700,31 @@ def summary_line(code: str) -> str:
 
 
 def run_note(code: str) -> str:
-    """Return the plain-English sentence to print at the start of a run when the
-    machine has a graphics card it isn't using, or "" when there is nothing worth
-    saying.
+    """Return the plain-English sentence to print at the start of a run saying
+    which processor is doing the work, and -- when it is not the one the user
+    could have -- what to do about it.
 
     This is what lands in the run window and therefore in the Star Log, so it is
     written for a photographer, not a programmer: no CUDA, no MPS, no "pack
-    version". The three codes that mean "you have a card and could get it back"
-    each name their own fix; everything else returns "".
+    version".
+
+    EVERY code gets a sentence now, including the ones where everything is fine.
+    It used to speak only on failure, which meant a run using the graphics card
+    said nothing at all about it -- and a user with a fast card had no way to
+    confirm it was working, because Windows Task Manager does not show this kind
+    of GPU work in its default view. Saying "using your NVIDIA graphics card"
+    costs one line and answers the question before it is asked.
+
+    Where the answer is "nothing you can do", it says that too, so nobody goes
+    hunting for a setting that will not help.
     """
     return {
+        # NOTE ON SUCCESS: the confirmation that the card IS being used is
+        # deliberately not here. It is printed by the ENGINE (astro_clean_v5),
+        # which is the only process that knows what it actually loaded and can
+        # name the card. Saying it here as well would print the same sentence
+        # twice, and this side would be the unreliable one -- this process only
+        # knows what device it could reach, not what the engine did.
         "cpu_pack_missing": ("Running on the processor. This PC has an NVIDIA graphics card. "
                              "Install GPU support in Settings to run much faster."),
         "cpu_pack_mismatch": ("Running on the processor. GPU support does not match this version "
@@ -718,5 +733,6 @@ def run_note(code: str) -> str:
         "cpu_pack_unused": ("Running on the processor. GPU support is installed but is not being "
                             "used. Reinstall it in Settings to use your graphics card again."),
         "cpu_card_unsupported": ("Running on the processor. This graphics card is not supported "
-                                 "by the current GPU support download."),
+                                 "by the current GPU support download, so there is nothing to "
+                                 "change: the run will simply take longer."),
     }.get(code, "")

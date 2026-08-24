@@ -100,6 +100,15 @@ def load_model(model_path: str, confidence: float = 0.25,
 
     device=None (or "auto") picks the best available: cuda > mps > cpu.
     Pass an explicit string to override.
+
+    Returns (model, device_actually_used). THAT SECOND VALUE MATTERS: if the
+    model will not load on the graphics card this falls back to the processor
+    below, and before 2026-08-23 it did so in silence. The app's GPU badge and
+    the anonymous usage report were both filled in by asking the APP's process
+    what device it could reach -- a different process from the one doing the
+    work -- so a run could report "GPU" while every frame was cleaned on the
+    processor, and nobody, user or developer, would ever know. The caller now
+    reports what actually happened instead of what was expected.
     """
     if not device or device == "auto":
         device = best_device()
@@ -120,9 +129,10 @@ def load_model(model_path: str, confidence: float = 0.25,
                 confidence_threshold=confidence,
                 device="cpu",
             )
+            device = "cpu"          # say what really happened, not what we tried
         else:
             raise
-    return model
+    return model, device
 
 
 # ── Mask construction helpers ─────────────────────────────────────────────────
