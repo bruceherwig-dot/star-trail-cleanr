@@ -1013,6 +1013,15 @@ class CleanerWorker(QThread):
     initial_estimate = Signal(float)   # initial estimate seconds (emitted once)
     remaining_estimate = Signal(float) # live seconds-left, drives the Updated Estimate label
     warmup_active = Signal(bool)       # True = AI loading window, False = real per-frame progress kicked in
+    device_in_use = Signal(str)        # "cuda"/"mps"/"cpu" AS REPORTED BY THE ENGINE.
+                                       # The header badge is otherwise decided once
+                                       # at launch by asking THIS process what it
+                                       # could reach -- a different process from the
+                                       # one doing the work, which silently drops to
+                                       # the processor if the model will not load on
+                                       # the card. Without this the badge can read a
+                                       # green "GPU: NVIDIA" for a nine-hour run
+                                       # that never touched the card (2026-08-23).
     bad_file_prompt = Signal(str, str)  # path, diagnosis — main thread shows the modal
     too_many_bad_files = Signal(int)   # count — main thread shows the final notice
     frames_filter_prompt = Signal(dict)  # info dict — main thread shows the modal explaining skipped frames
@@ -1856,7 +1865,10 @@ class CleanerWorker(QThread):
                     # could show a green GPU badge while every frame was cleaned
                     # on the processor (2026-08-23).
                     if proc_line.startswith("STC_DEVICE:"):
-                        self._worker_device = proc_line.split(":", 1)[1].strip()
+                        _rep = proc_line.split(":", 1)[1].strip()
+                        if _rep and _rep != getattr(self, "_worker_device", None):
+                            self._worker_device = _rep
+                            self.device_in_use.emit(_rep)
                         continue
                     if not _is_engine_noise(proc_line):
                         _add_log(f"  {proc_line}")
@@ -3991,7 +4003,28 @@ class MainWindow(QMainWindow):
 
     def _on_best_device_result(self, device):
         """Record which compute device torch will use ("cuda"/"mps"/"cpu")
-        and refresh the Settings compute-status line accordingly."""
+        and refresh the Settings compute-status line accordingly.
+
+        This is a PREDICTION, made in this process at launch. What the cleaning
+        engine really used arrives later via _on_device_in_use and wins."""
+        self._compute_device = device
+        self._refresh_compute_section()
+
+    def _on_device_in_use(self, device):
+        """The cleaning engine reported which processor it ACTUALLY loaded the
+        model on. Correct the header badge and the Settings line to match.
+
+        The badge is otherwise decided once at startup by asking this process
+        what device it could reach. The engine is a separate process and falls
+        back to the processor without a word if the model will not load on the
+        card, so the badge could show a green "GPU: NVIDIA" through an entire
+        nine-hour run that never touched the card. A user hit exactly that and
+        spent the run watching Task Manager trying to work out the truth.
+
+        The correction STAYS after the run: the startup guess is the thing that
+        was wrong, so reverting to it would put the lie back."""
+        if not device or device == getattr(self, "_compute_device", None):
+            return
         self._compute_device = device
         self._refresh_compute_section()
 
@@ -5800,6 +5833,7 @@ class MainWindow(QMainWindow):
         self.worker.batch_info.connect(self._on_batch_info)
         self.worker.step_progress.connect(self._on_step_progress)
         self.worker.warmup_active.connect(self._on_warmup_active)
+        self.worker.device_in_use.connect(self._on_device_in_use)
         self.worker.frame_count.connect(self._on_frame_count)
         self.worker.stats_ready.connect(self._on_stats_ready)
         self.worker.timing_stats.connect(self._on_timing_stats)

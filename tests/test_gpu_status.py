@@ -228,3 +228,31 @@ def test_the_usage_report_states_the_engines_device_not_a_guess():
     assert "_worker_device" in window, (
         "the gpu field must come from the engine's reported device, falling back "
         "to a local guess only when no batch ever reported one")
+
+
+def test_the_header_badge_is_corrected_by_the_engine():
+    """The thing the user is actually looking at must not keep a stale answer.
+
+    The badge beside the version is decided once at launch, in the app's own
+    process, by asking what device IT could reach. The cleaning runs in a
+    separate process that picks its own and silently falls back to the processor
+    if the model will not load on the card. Kari Tuomi (2026-08-23) watched a
+    nine-hour run on an RTX 3080 Ti with no way to tell whether the card was
+    doing anything; a green badge sourced from a guess is worse than no badge,
+    because he would have believed it.
+    """
+    from pathlib import Path
+    app = (Path(__file__).parent.parent / "star_trail_cleanr.py").read_text()
+
+    assert "device_in_use = Signal(str)" in app, \
+        "the worker must be able to tell the window which device it really used"
+    assert "self.worker.device_in_use.connect" in app, \
+        "the window must listen for it"
+
+    i = app.find("def _on_device_in_use")
+    assert i > 0, "the correction handler is gone"
+    body = app[i:i + 1600]
+    assert "_refresh_compute_section" in body, \
+        "the correction must actually refresh the badge, not just record a value"
+    assert "_compute_device" in body, \
+        "the engine's answer must replace the startup guess"
