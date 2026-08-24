@@ -26,7 +26,8 @@ import subprocess
 
 import cv2
 
-from modules.io_safe import robust_imread
+from modules.io_safe import robust_imread, robust_imwrite
+# robust_imWRITE: cv2 cannot write non-ASCII paths on Windows.
 import make_share_clip as msc
 
 
@@ -241,8 +242,8 @@ class ShareStacker:
         before_png = os.path.join(ws, "_before_stack.png")
         after_png = os.path.join(ws, "_after_stack.png")
         try:
-            cv2.imwrite(before_png, self.before_vid.result())
-            cv2.imwrite(after_png, self.after_vid.result())
+            robust_imwrite(before_png, self.before_vid.result())
+            robust_imwrite(after_png, self.after_vid.result())
             cmd = list(self._video_cmd_prefix) + [
                 "--original", self.original_dir, "--out", video_out,
                 "--prebuilt-before", before_png, "--prebuilt-after", after_png]

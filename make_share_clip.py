@@ -66,7 +66,10 @@ from PIL import Image, ImageDraw, ImageFont
 # recursion guard on macOS bundles).
 if not getattr(sys, "frozen", False):
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from modules.io_safe import robust_imread          # noqa: E402  upright-safe read
+from modules.io_safe import robust_imread, robust_imwrite  # noqa: E402
+# robust_imWRITE, not cv2.imwrite: cv2 cannot write to a path containing
+# non-ASCII characters on Windows. A user with Scandinavian letters in his
+# folder name could not export a star trail at all (2026-08-23).
 from modules.frame_list import natural_key, IMAGE_EXTS  # noqa: E402
 
 TAGLINE = "Remove the Trails. Keep the Stars."
@@ -665,7 +668,7 @@ def make_red_trail_map(original_dir, out_path=None, masks_dir=None,
         ws = find_workspace(original_dir) or os.path.join(original_dir, "cleanr_workspace")
         out_path = os.path.join(ws, "STC_red_trail_map.jpg")
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    cv2.imwrite(out_path, overlay, [cv2.IMWRITE_JPEG_QUALITY, 95])
+    robust_imwrite(out_path, overlay, [cv2.IMWRITE_JPEG_QUALITY, 95])
     pct = 100.0 * (red > 0).mean()
     print(f"wrote {out_path}  ({used} frames, {n_poly} detections, "
           f"{pct:.1f}% red)")
@@ -874,7 +877,7 @@ def make_star_trail(cleaned_dir, out_path=None, stack=None, comet_tail=0,
     if out_path is None:
         out_path = os.path.join(cleaned_dir, "STC_cleaned_star_trail.jpg")
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    ok = cv2.imwrite(out_path, stack, [cv2.IMWRITE_JPEG_QUALITY, 95])
+    ok = robust_imwrite(out_path, stack, [cv2.IMWRITE_JPEG_QUALITY, 95])
     if not ok:
         raise SystemExit(f"could not write {out_path}")
     h, w = stack.shape[:2]

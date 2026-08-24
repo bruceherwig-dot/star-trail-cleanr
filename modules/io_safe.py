@@ -560,7 +560,8 @@ def image_bitdepth(path: Union[str, Path]) -> Optional[int]:
         return None
 
 
-def robust_imwrite(path: Union[str, Path], image: np.ndarray) -> bool:
+def robust_imwrite(path: Union[str, Path], image: np.ndarray,
+                   params: Optional[list] = None) -> bool:
     """Drop-in cv2.imwrite replacement that handles non-ASCII paths.
 
     cv2.imwrite on Windows uses ANSI file APIs and fails to write files
@@ -571,13 +572,22 @@ def robust_imwrite(path: Union[str, Path], image: np.ndarray) -> bool:
     Tries cv2 first (fast path), falls back to Pillow on failure.
     Accepts BGR / BGRA / grayscale numpy arrays — same convention as
     cv2.imwrite. Returns True on success, False on failure.
+
+    `params` is the same optional list cv2.imwrite takes, e.g.
+    [cv2.IMWRITE_JPEG_QUALITY, 95]. It is ALSO honoured on the Pillow
+    fallback, which matters more than it looks: Pillow defaults JPEG to
+    quality 75, so without this a picture saved on a non-ASCII path -- the
+    exact case this function exists for -- would come out visibly worse than
+    the same picture saved next door. Reported by a user whose folder had
+    Scandinavian letters in it (2026-08-23); he could not export a star trail
+    at all, and the naive fix would have quietly given him a worse one.
     """
     p = str(path)
 
     prev = _silence_cv2_logs()
     try:
         try:
-            if cv2.imwrite(p, image):
+            if cv2.imwrite(p, image, params) if params else cv2.imwrite(p, image):
                 return True
         except Exception:
             pass
@@ -602,7 +612,16 @@ def robust_imwrite(path: Union[str, Path], image: np.ndarray) -> bool:
                     return False
             else:
                 return False
-            im.save(p)
+            # Carry the encoder settings across to Pillow. Only quality is
+            # worth translating: it is the one that changes what the user sees.
+            kw = {}
+            if params:
+                for i in range(0, len(params) - 1, 2):
+                    if params[i] == cv2.IMWRITE_JPEG_QUALITY:
+                        kw["quality"] = int(params[i + 1])
+                    elif params[i] == cv2.IMWRITE_PNG_COMPRESSION:
+                        kw["compress_level"] = int(params[i + 1])
+            im.save(p, **kw)
             return True
         except Exception:
             return False
