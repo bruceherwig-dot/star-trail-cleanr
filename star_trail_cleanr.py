@@ -8060,6 +8060,21 @@ class StarTrailPanel(QWidget):
         _open_row.addStretch(1)
         lay.addLayout(_open_row)
 
+        # The star trail this tab builds is a JPG. That is the right default and
+        # it is what most people want, so this does NOT apologise for it -- it
+        # answers the one question the people who need more will ask, and points
+        # at the only place the answer can come from: the bit depth is fixed when
+        # the frames are CLEANED, not here, so a TIFF export from this tab could
+        # never hold more than the frames already carry. Asked for by Kari Tuomi
+        # (2026-08-23), who wanted more headroom to paint out the trails the
+        # detector missed.
+        _depth_note = QLabel("Want more depth for editing? Stack your cleaned "
+                             "frames yourself, and choose TIFF when cleaning.")
+        _depth_note.setAlignment(Qt.AlignCenter)
+        _depth_note.setWordWrap(True)
+        _depth_note.setStyleSheet(f"color: {MUTED_TEXT}; font-size: 12px;")
+        lay.addWidget(_depth_note)
+
         _make_labels_selectable(self)   # house rule: all GUI text is copy/paste-able
 
     def _sync_comet_len(self, *_):
