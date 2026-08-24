@@ -2,6 +2,13 @@
 
 ---
 
+## v2.87-beta
+- **Fixed: a folder name with accented or non-English letters could stop your star trail from being saved.** The cleaning finished normally and then the export failed at the last step, which is a miserable way to lose a run. Reported by a user in Finland whose folder name contained the letter a with dots above. It now saves correctly, at full quality, whatever your folders are called.
+- **The app now tells you which processor is doing the work, and means it.** The Star Log says "Using your NVIDIA graphics card" and names the card, or explains why the card is not being used and what to do about it. Before this, the app only spoke up when something was wrong, so there was no way to confirm your graphics card was actually helping before committing to an hours-long run.
+- **And it now reports that honestly.** The GPU indicator beside the version was decided when the app opened, by checking what this part of the app could reach. The cleaning happens in a separate part that chooses for itself and quietly falls back to the processor if the graphics card cannot load the AI model. So the indicator could show green for an entire run that never touched your card. It now comes from the part doing the work, and corrects itself if they disagree.
+- **The Star Trail tab says where to go for more depth.** The star trail it builds is a JPG. If you want more room to edit, stack your cleaned frames in your own editor, and choose TIFF when cleaning.
+- **Smoke tests:** 315 passing.
+
 ## v2.86-beta
 - **Fixed: the one-click update on Windows never actually installed anything.** Clicking "update" downloaded the right file and then did nothing with it, so the app stayed on the old version with no error and no explanation. The update feed was pointing Windows at a zip archive, and Windows opens an archive rather than installing it. It now points at the installer itself. This has been broken since the Windows updater first shipped, which is why several earlier fixes to "the Windows updater" never seemed to help: they all fixed the app finding an update, and the part that failed was running it. On Windows the update now opens the normal installer window, which you click through as you would a fresh install.
 - **The app can now tell us whether an update worked.** The first time you run a new version, the anonymous report says which version you came from and whether you got there by clicking update in the app or by downloading it yourself. Nothing else is added, and it is still off unless you opted in. This exists because there was no way to tell a working updater from people quietly re-downloading the app, which is how the Windows problem above stayed hidden for months.
