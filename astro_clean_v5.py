@@ -2144,13 +2144,45 @@ def main():
         ]
         print("\nTiming summary:")
         print(f"  {'Step':<26} {'Calls':>6}  {'Total':>8}  {'Avg':>8}")
+        _listed = set()
         for _key, _label in _STEP_ORDER:
+            _listed.add(_key)
             if _key not in _timing:
                 print(f"  {_label:<26} {'0':>6}  {'--':>8}  {'--':>8}")
                 continue
             _cnt, _tot = _timing[_key]
             _avg = _tot / _cnt if _cnt else 0.0
             print(f"  {_label:<26} {_cnt:>6}  {_fmt_s(_tot):>8}  {_fmt_s(_avg):>8}")
+
+        # ANYTHING THAT RAN AND IS NOT IN THE LIST ABOVE. The list is written by
+        # hand, so a stage added to the pipeline later has no row and its time
+        # simply disappears from every report -- while still counting inside its
+        # parent, which makes the parent look mysteriously slow.
+        #
+        # That is not hypothetical. `prune_phantoms` has been the LARGEST stage
+        # in detection (44% of it on a 44MP frame, more than the AI inference
+        # itself) and appeared in no summary, no Star Log and no support
+        # conversation. A user spent two rounds of emails helping us chase a
+        # slowdown while nearly half of detect was invisible (Kari Tuomi,
+        # 2026-08-25). Timing you cannot see is worse than no timing, because it
+        # sends you looking in the wrong place.
+        for _key in sorted(_timing):
+            if _key in _listed:
+                continue
+            _cnt, _tot = _timing[_key]
+            _avg = _tot / _cnt if _cnt else 0.0
+            _name = "  " + _key[3:-2] if _key.startswith("dp_") else _key[:-2]
+            print(f"  {_name:<26} {_cnt:>6}  {_fmt_s(_tot):>8}  {_fmt_s(_avg):>8}")
+
+        # And prove the parts add up. A gap here means time is going somewhere
+        # nothing measures, which is the state this whole section exists to
+        # prevent from ever being invisible again.
+        _parent = _timing.get("new_pipeline_s", (0, 0.0))[1]
+        _kids = sum(v[1] for k, v in _timing.items() if k.startswith("dp_"))
+        if _parent > 0:
+            _gap = _parent - _kids
+            print(f"  {'  (detect unaccounted)':<26} {'':>6}  {_fmt_s(max(0.0, _gap)):>8}  "
+                  f"{100.0 * _gap / _parent:>7.0f}%")
 
     elapsed = time.time() - t_total
     mins, secs = divmod(int(elapsed), 60)
