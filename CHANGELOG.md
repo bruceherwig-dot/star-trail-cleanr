@@ -2,6 +2,11 @@
 
 ---
 
+## v2.89-beta
+- **Fixed: black and white frames stopped the clean with an error.** If your images hold a single channel instead of colour, which is what you get from a telescope's sub-frames converted from FITS, or from a black and white astronomy camera, every batch failed. The repair step compares the three colours at each point to work out where the sky is, and there was only one to compare. Black and white frames now clean normally, and are saved back black and white rather than as a colour file three times the size. Reported by a user working with SeeStar sub-frames.
+- **The Star Log now says when stuck-pixel repair cannot run.** That step tells a dead pixel from a star by its colour, one channel far brighter than the other two, which is how it avoids marking your stars. Black and white frames give it nothing to compare, so it cannot run at all, and the log says so rather than quietly reporting that nothing was found. Removing hot pixels and specks from the finished star trail is unaffected.
+- **Smoke tests:** 332 passing.
+
 ## v2.88-beta
 - **Fixed: 8-bit TIFFs could open as a screen of static in Photoshop and Lightroom.** The same files looked perfectly normal in Finder and stacked correctly in StarStaX, which made it a confusing thing to hit. The cause was ours: when your source images came from Lightroom, we copied a setting out of them that describes how Lightroom had compressed its own file, and our 8-bit TIFFs are written uncompressed. Photoshop believed the setting and rebuilt every row of the picture wrongly. Anyone whose cleaned 8-bit TIFFs looked like noise can simply clean the frames again with this version. Your originals were never touched. 16-bit TIFF and JPG were never affected.
 - **The run's timing report now lists every step.** It had a fixed list of steps to print, so a step added to the app later did not appear at all, and its time silently landed inside the total for whatever contained it. That made runs look slower than the listed steps could explain, and sent us looking in the wrong place when a user asked why his were taking so long. The report now shows everything that ran and states plainly if any time is unaccounted for.
