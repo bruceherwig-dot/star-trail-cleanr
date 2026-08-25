@@ -1248,16 +1248,36 @@ def main():
         return None  # save without EXIF rather than crash; originals are untouched
 
     def _fit_exif_for_tiff(exif_bytes):
-        """Strip tags that libtiff owns on the output file and MakerNote from TIFF EXIF.
-        Structural tags (width, height, compression, etc.) describe the source file's
-        geometry and conflict with libtiff's internal state on a new file. MakerNote
-        contains proprietary binary data with internal offsets into the source file.
-        Returns cleaned bytes; on any error returns the original so the save still runs.
+        """Strip every tag that describes HOW the source file stored its pixels,
+        plus MakerNote, before copying EXIF onto a TIFF we encode ourselves.
+
+        We re-encode the pixels, so any tag describing the source's storage is a
+        lie about our file. Two kinds of harm: some make libtiff refuse the save
+        outright ("RuntimeError: Error setting from dictionary"), and some are
+        accepted and silently corrupt the result.
+
+        THE ONE THAT CORRUPTED FILES (Steven Labkoff, 2026-08-23): Lightroom
+        exports TIFFs compressed with a horizontal PREDICTOR (tag 317). We write
+        our 8-bit TIFFs UNCOMPRESSED (since v2.26, for Sequator), but 317 rode
+        along in the copied EXIF, so the file said "these rows are differenced"
+        over data that never was. Any reader that honours the tag runs a
+        cumulative sum along every row and renders a screenful of static.
+        Photoshop and Lightroom honour it. Finder's preview and StarStaX ignore
+        it when compression is NONE, which is why the same file looked perfect
+        in one place and destroyed in another, on 600 frames.
+
+        It hit 8-bit only because the 16-bit path writes via tifffile and does
+        not embed EXIF at all.
+
+        So the rule is not "strip what libtiff complains about" but "strip
+        everything about encoding, keep only what describes the PHOTOGRAPH"
+        (capture time, camera, lens, exposure). Returns cleaned bytes; on any
+        error returns the original so the save still runs.
         """
         if not exif_bytes:
             return exif_bytes
-        # Tags libtiff sets itself when writing a new TIFF — passing them causes
-        # RuntimeError: Error setting from dictionary
+        # Tags describing the SOURCE file's storage. None of them can be
+        # inherited by a file whose pixels we encode ourselves.
         _TIFF_STRUCTURAL = {
             256,  # ImageWidth
             257,  # ImageLength
@@ -1269,10 +1289,14 @@ def main():
             278,  # RowsPerStrip
             279,  # StripByteCounts
             284,  # PlanarConfiguration
+            317,  # Predictor — THE static-image bug; see the docstring
+            320,  # ColorMap — palette data for a palette image, which ours is not
             322,  # TileWidth
             323,  # TileLength
             324,  # TileOffsets
             325,  # TileByteCounts
+            338,  # ExtraSamples — describes alpha channels our RGB output lacks
+            339,  # SampleFormat — int/float layout of the source's samples
             0x927C,  # MakerNote — proprietary binary with source-file offsets
         }
         try:
