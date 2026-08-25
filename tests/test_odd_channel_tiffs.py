@@ -8,6 +8,15 @@ detector and OpenCV threw when it tried to convert the colours. The Sentry alert
 that surfaced it was only Pillow's own log line about a file it never had to read.
 
 These lock the trim in place. Offline: the TIFFs are generated here.
+
+UPDATED 2026-08-25. Two of these used to assert that a one-channel file came
+back one-channel, and grey-plus-alpha came back as plain grey. That expectation
+was itself the bug: a flat (H,W) array is a shape the pipeline cannot use, and a
+user's folder of greyscale telescope subs crashed every batch in Star Bridge
+repair (`AxisError: axis 2 is out of bounds`). The reader now promotes any
+single-channel photo to three channels, so the expectations below say three.
+The purpose of the tests is unchanged -- an odd channel count must come back as
+something the rest of the app can actually work on. See tests/test_mono_input.py.
 """
 import sys
 from pathlib import Path
@@ -67,8 +76,10 @@ def test_trimmed_channels_survive_an_opencv_colour_conversion():
         cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)    # raised before the trim
 
 
-def test_grey_plus_alpha_tiff_comes_back_as_plain_grey():
-    """Two channels is grey plus alpha; it hit the same untrimmed path."""
+def test_grey_plus_alpha_tiff_comes_back_usable():
+    """Two channels is grey plus alpha; it hit the same untrimmed path. The
+    alpha is dropped and the grey is promoted, so what arrives downstream is an
+    ordinary three-channel photo."""
     import tempfile
     from modules.io_safe import robust_imread_diag
     with tempfile.TemporaryDirectory() as d:
@@ -76,15 +87,17 @@ def test_grey_plus_alpha_tiff_comes_back_as_plain_grey():
         _write_tiff(p, 2)
         img, diag = robust_imread_diag(str(p), _retry_delays=())
         assert img is not None, f"a grey+alpha TIFF must still load: {diag}"
-        assert img.ndim == 2, f"expected a plain grey image, got {img.shape}"
+        assert img.ndim == 3 and img.shape[2] == 3, (
+            f"expected a usable three-channel image, got {img.shape}")
 
 
 def test_normal_tiffs_are_untouched():
-    """The trim must not disturb the ordinary cases."""
+    """The trim must not disturb the ordinary cases. One channel is promoted to
+    three (see the note at the top of this file); three and four are unchanged."""
     import tempfile
     from modules.io_safe import robust_imread_diag
     with tempfile.TemporaryDirectory() as d:
-        for channels, want_ndim, want_ch in ((1, 2, None), (3, 3, 3), (4, 3, 4)):
+        for channels, want_ndim, want_ch in ((1, 3, 3), (3, 3, 3), (4, 3, 4)):
             p = Path(d) / f"normal_{channels}.tif"
             _write_tiff(p, channels)
             img, diag = robust_imread_diag(str(p), _retry_delays=())

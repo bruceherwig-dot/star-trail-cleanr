@@ -194,7 +194,7 @@ def _raw_labeled_from_state(state, h, w):
             rz = cv2.resize(bm.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST)
             raw[rz > 0] = label_id
     return raw
-from modules.io_safe import robust_imread, robust_imread_diag, robust_imwrite
+from modules.io_safe import robust_imread, robust_imread_diag, robust_imwrite, is_single_channel
 from modules.frame_list import dedupe_frames, natural_key, IMAGE_EXTS, RAW_EXTS
 from modules.workspace import WORKSPACE_NAME   # the run-artifact folder (in the output folder)
 
@@ -996,6 +996,24 @@ def main():
             )
             sys.exit(2)
 
+    def _grey_plane(rgb: np.ndarray):
+        """The single channel to write back when the source frames were black and
+        white, or None to write colour as usual.
+
+        The reader promotes a one-channel file to three so the pipeline can work
+        on it, and writing those three back would hand a telescope user files
+        three times the size of the ones they gave us. Star Bridge borrows from
+        neighbouring frames that were equally grey, so the channels come out
+        identical -- but this CHECKS rather than assuming, because writing a real
+        colour photo as one channel would throw away data that is actually there.
+        """
+        if not _mono_source or rgb.ndim != 3 or rgb.shape[2] != 3:
+            return None
+        if not (np.array_equal(rgb[:, :, 0], rgb[:, :, 1])
+                and np.array_equal(rgb[:, :, 1], rgb[:, :, 2])):
+            return None
+        return np.ascontiguousarray(rgb[:, :, 0])
+
     def _write_output_inner(stem: str, img: np.ndarray, icc_profile=None, exif_bytes=None, dpi=None):
         """Encode and write one cleaned frame in the chosen output format.
 
@@ -1009,6 +1027,11 @@ def main():
         ICC profile and DPI are embedded when supplied. After writing, stamps the
         Software string into the macOS Finder comment. `img` is a BGR array;
         OpenCV/PIL color order conversions happen here.
+
+        Both TIFF branches write a single greyscale channel instead of three when
+        the source frames were black and white (see `_grey_plane`), so telescope
+        subs and mono-camera frames come back the size they went in. JPEG is
+        always written as RGB.
         """
         from PIL import Image
         if args.output_format == "jpg":
@@ -1028,7 +1051,9 @@ def main():
         elif args.output_format == "tif8":
             out = img if img.dtype == np.uint8 else (img >> 8).astype(np.uint8)
             rgb = cv2.cvtColor(out, cv2.COLOR_BGR2RGB)
-            pil = Image.fromarray(rgb, mode="RGB")
+            _grey = _grey_plane(rgb)
+            pil = (Image.fromarray(_grey, mode="L") if _grey is not None
+                   else Image.fromarray(rgb, mode="RGB"))
             save_kwargs = {}
             if icc_profile:
                 save_kwargs["icc_profile"] = icc_profile
@@ -1054,6 +1079,9 @@ def main():
             else:
                 out = img.astype(np.uint16) * 257
             rgb = cv2.cvtColor(out, cv2.COLOR_BGR2RGB)
+            _grey = _grey_plane(rgb)
+            if _grey is not None:
+                rgb = _grey
             extratags = []
             if icc_profile:
                 # TIFF tag 34675 = InterColorProfile (ICC). 'B' = byte array.
@@ -1082,7 +1110,9 @@ def main():
             # source's rotate tag must not ride along (would double-rotate).
             extratags.append((274, 'H', 1, 1, True))
             tiff_kwargs = {
-                "photometric": "rgb",
+                # "minisblack" = a single greyscale channel, black at zero. A
+                # black-and-white source is written back the way it arrived.
+                "photometric": "minisblack" if _grey is not None else "rgb",
                 "software": _stamp,
                 "extratags": extratags,
             }
@@ -1318,6 +1348,13 @@ def main():
     _tread = time.perf_counter()
     _raw_decode_s = 0.0   # cumulative RAW debayer time (rawpy); 0 for JPG/TIFF
     _raw_decode_n = 0
+    # Black-and-white sources (telescope subs converted from FITS, mono astro
+    # cameras) are promoted to three channels by the reader so the pipeline can
+    # work on them. Remember what the FILE was, so the writer can hand back a
+    # greyscale TIFF instead of one three times the size. Counted over core
+    # frames only -- those are the frames this batch writes.
+    _mono_src_n = 0
+    _core_loaded_n = 0
     for fi, fp in enumerate(frame_files_all):
         is_core = core_start <= fi < core_end
         is_before_core = fi < core_start
@@ -1386,12 +1423,26 @@ def main():
         if is_core:
             core_pos = fi - core_start + 1
             h, w = img.shape[:2]
-            ch = img.shape[2] if img.ndim == 3 else 1
+            _core_loaded_n += 1
+            # Report the channels the FILE has, not the promoted array's three,
+            # or a greyscale source would read back as colour in the Star Log.
+            _mono = is_single_channel(fp)
+            if _mono:
+                _mono_src_n += 1
+            ch = 1 if _mono else (img.shape[2] if img.ndim == 3 else 1)
             print(f"  loading {core_pos}/{n}: {fp.name} ({w}x{h}, {ch}ch)", flush=True)
 
         frames_all.append(img)
         files_kept.append(fp)
     _read_s = time.perf_counter() - _tread
+
+    # Every core frame black and white -> hand the cleaned frames back the same
+    # way. One colour frame in the batch and we write colour for all of them, so
+    # a mixed folder can never come out half one thing and half the other.
+    _mono_source = _core_loaded_n > 0 and _mono_src_n == _core_loaded_n
+    if _mono_source:
+        print("  These frames are black and white. They are cleaned normally "
+              "and saved black and white.", flush=True)
 
     # Rebind to kept-only lists with adjusted core pointers so downstream
     # indexing stays correct even when one or more files were skipped.
@@ -1511,6 +1562,17 @@ def main():
     _thot = time.perf_counter()
     if fg_mask is not None:
         from modules.hot_pixels import build_hot_pixel_map
+
+        # Stuck-pixel detection convicts a pixel on COLOUR: one channel towering
+        # over the other two is a sensor defect, while a star is roughly neutral
+        # (build_hot_pixel_map requires both the brightness pattern AND the colour
+        # imbalance). Black-and-white frames have no channels to disagree, so the
+        # colour half can never fire and the map always comes back empty. Say so
+        # rather than let it look like a clean bill of health.
+        if _mono_source:
+            print("  Skipping stuck-pixel repair: it tells a defect from a star "
+                  "by their colours, and these frames are black and white.",
+                  flush=True)
 
         # Build THIS batch's stuck-pixel map, then accumulate it into the shared
         # map file so detections build up across batches instead of freezing on

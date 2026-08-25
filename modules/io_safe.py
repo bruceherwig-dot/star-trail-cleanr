@@ -378,18 +378,44 @@ def _apply_orientation(path: Union[str, Path], img: np.ndarray) -> np.ndarray:
     return np.ascontiguousarray(op(img)) if op is not None else img
 
 
+def _promote_grey(img: np.ndarray, flags: int) -> np.ndarray:
+    """Give a single-channel photo the three channels the rest of the app assumes.
+
+    Black-and-white sources exist in the wild: telescope sub-frames converted from
+    FITS without debayering (SeeStar and friends), mono astro cameras, and any
+    greyscale TIFF export. IMREAD_UNCHANGED hands those back as a flat (H,W)
+    array, and every stage downstream is written for (H,W,3): Star Bridge repair
+    asks for the brightest of the three colours at a pixel, and the 16-bit TIFF
+    writer converts BGR to RGB. Both crash on a two-dimensional array -- the
+    field crash of 2026-08-25 (`AxisError: axis 2 is out of bounds`) on a folder
+    of greyscale telescope subs.
+
+    Promoting here, next to the central orientation fix, means one edit covers the
+    worker, the detector and the tools instead of each growing its own guard.
+
+    IMREAD_GRAYSCALE is left alone: callers asking for it (the foreground mask,
+    the hot-pixel map) want a single channel and would break if handed three.
+    """
+    if flags == cv2.IMREAD_GRAYSCALE or img.ndim != 2:
+        return img
+    return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+
+
 def robust_imread_diag(
     path: Union[str, Path],
     flags: int = cv2.IMREAD_UNCHANGED,
     *,
     _retry_delays: Tuple[float, ...] = (1.0, 3.0),
 ) -> Tuple[Optional[np.ndarray], Optional[str]]:
-    """Read with fallbacks, then apply EXIF orientation centrally so every
-    backend/flag returns upright pixels. RAW files are oriented by rawpy already,
-    so they are left untouched here."""
+    """Read with fallbacks, then apply EXIF orientation and the single-channel
+    promotion centrally, so every backend/flag returns upright pixels with the
+    channel count the rest of the app expects. RAW files are oriented by rawpy
+    already, so orientation is left untouched here."""
     img, diag = _imread_diag_inner(path, flags, _retry_delays=_retry_delays)
     if img is not None and Path(str(path)).suffix.lower() not in RAW_EXTS:
         img = _apply_orientation(path, img)
+    if img is not None:
+        img = _promote_grey(img, flags)
     return img, diag
 
 
@@ -466,6 +492,37 @@ def image_size(path: Union[str, Path]) -> Optional[Tuple[int, int]]:
         except Exception:
             return None
     return None
+
+
+def is_single_channel(path: Union[str, Path]) -> bool:
+    """True when the FILE on disk holds one channel (a black-and-white photo).
+
+    The reader promotes such frames to three channels so the pipeline can work on
+    them (see `_promote_grey`), which means nothing downstream can tell afterwards
+    what the source actually was. The writer needs to know: a greyscale telescope
+    sub written back as RGB is three times the size it arrived as, and hundreds of
+    subs is real disk. Reads the header only, never the pixels.
+
+    False for RAW (always debayered to colour), and False on any doubt -- writing
+    colour is the safe direction to be wrong in.
+    """
+    p = str(path)
+    if Path(p).suffix.lower() in RAW_EXTS:
+        return False
+    try:
+        from PIL import Image
+        with Image.open(p) as im:
+            return im.mode in ("L", "I", "I;16", "I;16B", "I;16L", "1", "F", "LA")
+    except Exception:
+        pass
+    if Path(p).suffix.lower() in _TIFF_EXTS:
+        try:
+            import tifffile
+            with tifffile.TiffFile(p) as tf:
+                return int(tf.pages[0].samplesperpixel) == 1
+        except Exception:
+            return False
+    return False
 
 
 def capture_time(path: Union[str, Path]):

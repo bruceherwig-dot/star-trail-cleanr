@@ -194,5 +194,19 @@ runs.
   `prune_phantoms`, the largest stage in detection, through two rounds of
   support emails about a slow machine. The summary now prints anything timed
   that has no row, and states any remaining gap.
+- **Every stage assumes a three-channel photo, so the reader guarantees one.**
+  Black-and-white sources are real: telescope sub-frames converted from FITS
+  without debayering, and mono astro cameras. Those files hold a single channel,
+  and the pipeline is written throughout for (height, width, 3) -- repair asks
+  for the brightest of the three colours at a pixel, the 16-bit TIFF writer
+  converts BGR to RGB. A user's folder of greyscale subs crashed every batch
+  (`AxisError: axis 2 is out of bounds`, 2026-08-25). The promotion happens once
+  in `modules/io_safe.py` (`_promote_grey`), beside the central orientation fix,
+  so the worker, the detector and the tools all inherit it; do not add per-stage
+  guards instead. Two consequences worth knowing: the writer asks the FILE on
+  disk what it was (`is_single_channel`) so a greyscale source is handed back
+  greyscale rather than at triple the size, and stuck-pixel detection is a
+  genuine no-op on such frames because it tells a defect from a star by their
+  colours. Guarded by `tests/test_mono_input.py`.
 - **Sacred data.** Original source images are never modified, and manually
   reviewed annotation files are never regenerated.
