@@ -178,5 +178,21 @@ runs.
 - **Thresholds on pixel brightness must be relative to the local sky**, never a
   fixed number. A fixed bar is one camera on one night: the same code then behaves
   completely differently on a dark sky and a bright one.
+- **Per-component work must slice to the component's bounding box.** Writing
+  `mask == i` over a full frame inside a loop over components looks harmless and
+  is catastrophic: on a 44MP frame with 183 components that is roughly 16 billion
+  element operations to inspect blobs a few hundred pixels across.
+  `connectedComponentsWithStats` already returns the box, and the surrounding
+  code is usually reading it for width and height anyway. This has cost real
+  users twice: `sky_dots._fill_specks` (minutes of waiting on a 30MP stack,
+  2026-08-09) and `detect_pipeline.stage_prune_phantoms` (57% of the largest
+  stage in detection, 2.62s to 0.00s on one frame with byte-identical output,
+  2026-08-25). Guarded by `tests/test_no_fullframe_per_component.py`.
+- **Anything timed must appear in the timing summary.** The summary's rows used
+  to be a hand-written list, so a stage added later had no row and its time
+  vanished from every report while still counting inside its parent. That hid
+  `prune_phantoms`, the largest stage in detection, through two rounds of
+  support emails about a slow machine. The summary now prints anything timed
+  that has no row, and states any remaining gap.
 - **Sacred data.** Original source images are never modified, and manually
   reviewed annotation files are never regenerated.

@@ -631,6 +631,13 @@ def stage_prune_phantoms(state: PipelineState, cfg: StageConfig,
                          log: StageLog) -> PipelineState:
     """Stage 1b: remove thin, dotted phantom detections that sit on empty sky.
 
+    THIS IS THE LARGEST STAGE IN DETECTION on a big frame -- bigger than the AI
+    inference itself (44% of detect on a 44MP frame, against 42% for inference).
+    That was invisible for months because the run summary had no row for it, so
+    if you are here for speed, measure before and after and keep the output
+    byte-identical: this stage decides which detections are dropped, so a subtle
+    change silently alters what gets cleaned.
+
     Builds the union of the raw SAHI masks, keeps only the THIN parts (union
     minus its morphological opening) that have NO real light under them in the
     source, bridges those dots into lines, and removes only the elongated lines.
@@ -676,14 +683,30 @@ def stage_prune_phantoms(state: PipelineState, cfg: StageConfig,
     phantom_records = []   # one per removed phantom line -> hard-negative training data
     for i in range(1, n):
         extent = max(st[i, cv2.CC_STAT_WIDTH], st[i, cv2.CC_STAT_HEIGHT])
-        comp = (lab == i) & (ph > 0)
-        ink = int(comp.sum())
-        if extent < _PHANTOM_MIN_EXTENT or ink < _PHANTOM_MIN_INK:
+        # CHEAPEST TEST FIRST. A component that is too short is dropped without
+        # touching a single pixel; only the survivors get examined.
+        if extent < _PHANTOM_MIN_EXTENT:
             continue
-        kill[comp] = True
+        # WORK INSIDE THE COMPONENT'S OWN BOX, not across the whole frame.
+        # This used to be `comp = (lab == i) & (ph > 0)`: two full-frame
+        # comparisons per component. On a 44MP frame with 183 components that is
+        # roughly 16 BILLION element operations to inspect blobs a few hundred
+        # pixels across, and it was 57% of this stage -- itself the largest
+        # stage in detection. The bounding box comes free from
+        # connectedComponentsWithStats and the line above already reads it.
+        # Same arithmetic, same result, a fraction of the memory traffic.
+        x0, y0 = int(st[i, cv2.CC_STAT_LEFT]), int(st[i, cv2.CC_STAT_TOP])
+        bw, bh = int(st[i, cv2.CC_STAT_WIDTH]), int(st[i, cv2.CC_STAT_HEIGHT])
+        sub = (lab[y0:y0 + bh, x0:x0 + bw] == i) & (ph[y0:y0 + bh, x0:x0 + bw] > 0)
+        ink = int(sub.sum())
+        if ink < _PHANTOM_MIN_INK:
+            continue
+        kill[y0:y0 + bh, x0:x0 + bw] |= sub
         n_lines += 1
         if cfg.log_phantom_negatives:   # dev-only hard-negative mining
-            cys, cxs = np.where(comp)
+            cys, cxs = np.where(sub)
+            cys = cys + y0
+            cxs = cxs + x0
             phantom_records.append({
                 "cx": int(cxs.mean()), "cy": int(cys.mean()),
                 "bbox": [int(cxs.min()), int(cys.min()), int(cxs.max()), int(cys.max())],
