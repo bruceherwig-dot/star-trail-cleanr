@@ -2,6 +2,12 @@
 
 ---
 
+## v2.88-beta
+- **Fixed: 8-bit TIFFs could open as a screen of static in Photoshop and Lightroom.** The same files looked perfectly normal in Finder and stacked correctly in StarStaX, which made it a confusing thing to hit. The cause was ours: when your source images came from Lightroom, we copied a setting out of them that describes how Lightroom had compressed its own file, and our 8-bit TIFFs are written uncompressed. Photoshop believed the setting and rebuilt every row of the picture wrongly. Anyone whose cleaned 8-bit TIFFs looked like noise can simply clean the frames again with this version. Your originals were never touched. 16-bit TIFF and JPG were never affected.
+- **The run's timing report now lists every step.** It had a fixed list of steps to print, so a step added to the app later did not appear at all, and its time silently landed inside the total for whatever contained it. That made runs look slower than the listed steps could explain, and sent us looking in the wrong place when a user asked why his were taking so long. The report now shows everything that ran and states plainly if any time is unaccounted for.
+- **Detection is faster on large images, with identical results.** One step examined each detected shape by scanning the entire photograph rather than just the area the shape occupies. On a 44 megapixel frame with 183 shapes that was billions of needless comparisons. On a test frame that step went from 2.6 seconds to effectively nothing, and the frames it produces are identical, pixel for pixel.
+- **Smoke tests:** 325 passing.
+
 ## v2.87-beta
 - **Fixed: a folder name with accented or non-English letters could stop your star trail from being saved.** The cleaning finished normally and then the export failed at the last step, which is a miserable way to lose a run. Reported by a user in Finland whose folder name contained the letter a with dots above. It now saves correctly, at full quality, whatever your folders are called.
 - **The app now tells you which processor is doing the work, and means it.** The Star Log says "Using your NVIDIA graphics card" and names the card, or explains why the card is not being used and what to do about it. Before this, the app only spoke up when something was wrong, so there was no way to confirm your graphics card was actually helping before committing to an hours-long run.
