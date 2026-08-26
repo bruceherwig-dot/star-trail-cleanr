@@ -828,6 +828,16 @@ def stage_fit_polygons(state: PipelineState, cfg: StageConfig,
     for _i, pred in enumerate(preds):
         _t = time.perf_counter()
         m = cached_masks[_i] if cached_masks else None
+        if cached_masks:
+            # HAND THE MASK OVER, DO NOT KEEP A SECOND COPY OF THE LIST'S HOLD
+            # ON IT. Sharing masks between the stages saves real time, but 53
+            # detections on a 44MP frame is about 2.3 GB, and keeping all of it
+            # alive until the stage ends is trading memory we may not have for
+            # speed we already banked. Measured 2026-08-26: peak went UP after
+            # the sharing change. `m` keeps this one alive for the iteration and
+            # it is released when the next iteration rebinds m, so only one mask
+            # is held at a time instead of all of them.
+            cached_masks[_i] = None
         if m is None:
             m = _pred_to_mask(pred, h, w)
         t_premask += time.perf_counter() - _t
@@ -946,6 +956,10 @@ def stage_fit_polygons(state: PipelineState, cfg: StageConfig,
                   (final > 0).astype(np.uint8))[0] - 1))
     state.det_list = det_list
     state.groups = groups
+    # The shared masks have served their purpose: this is the last stage that
+    # reads them, so let the memory go rather than carrying it through the rest
+    # of the pipeline and back out to the caller.
+    state.pred_masks = []
     state.polygons, state.polygon_segs = _polys_and_segs_deduped(polygons, h, w)
     state.final_mask = final
     return state
