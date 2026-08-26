@@ -1,0 +1,92 @@
+name: Processor stage benchmark (Windows vs Mac)
+
+# WHY THIS EXISTS.
+#
+# A Windows user's PC runs the same 20 frames as Bruce's Mac in twice the time,
+# and the gap is not spread evenly. The graphics card keeps up (1.3x), RAW
+# decoding keeps up (1.3x), repair is close (1.7x) -- but phantom pruning is 4x
+# slower and polygon fitting is 5x slower. Those two are the stages that do
+# thousands of SMALL operations instead of a few large ones.
+#
+# We do not own a Windows machine, which is exactly the situation that let the
+# Windows updater stay broken for a hundred days. The fix there was to stop
+# theorising and rent a free Windows box for six minutes. Same trick here.
+#
+# The benchmark needs no photographs and no model -- it synthesises a frame of
+# the right size with the right number of detections -- so it runs anywhere.
+#
+# WHAT THE ANSWER LOOKS LIKE:
+#   * Windows runner is ALSO 4-5x slower than the Mac on those two stages
+#       -> it is our code on Windows, not Kari's machine. We fix it.
+#   * Windows runner is roughly as fast as the Mac
+#       -> it is something about HIS machine (power plan, security software,
+#          background load) and the next move is a question to him, not a patch.
+#   * Pinning OpenCV to one thread helps on Windows and hurts on the Mac
+#       -> thread dispatch overhead on small arrays is the mechanism.
+#
+# Run it by hand from the Actions tab, or:
+#     gh workflow run cpu_stage_bench.yml
+# It changes nothing, publishes nothing, and costs nothing.
+
+on:
+  workflow_dispatch:
+    inputs:
+      width:
+        description: "Frame width in pixels"
+        required: true
+        default: "8152"
+      height:
+        description: "Frame height in pixels"
+        required: true
+        default: "5432"
+      trails:
+        description: "Real trails per frame (Kari's skies run about 24)"
+        required: true
+        default: "24"
+      repeats:
+        description: "Timed repeats, fastest wins"
+        required: true
+        default: "3"
+
+jobs:
+  bench:
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-14 is Apple Silicon, the same family as Bruce's machine, so the
+        # two rows are directly comparable. Both run identical code and identical
+        # library versions, which the field logs did not: his run was the frozen
+        # app on Python 3.11, Bruce's was live source on 3.9.
+        os: [windows-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install only what the benchmark needs
+        # Not the whole app: no torch, no PySide6. The stages under test are
+        # OpenCV, NumPy and scikit-image work, and a lean install keeps this
+        # under a minute. scikit-image is NOT optional -- the detection pipeline
+        # imports it at module level for connected-component measurement.
+        run: >
+          python -m pip install --quiet
+          opencv-python-headless numpy scipy scikit-image shapely psutil
+
+      - name: Run the benchmark
+        run: >
+          python scripts/bench_cpu_stages.py
+          --width ${{ inputs.width }}
+          --height ${{ inputs.height }}
+          --trails ${{ inputs.trails }}
+          --repeats ${{ inputs.repeats }}
+          | tee bench-${{ matrix.os }}.txt
+
+      - name: Keep the numbers
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-${{ matrix.os }}
+          path: bench-${{ matrix.os }}.txt
+          retention-days: 30

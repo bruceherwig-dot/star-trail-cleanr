@@ -73,6 +73,107 @@ function clean_camera($s) {
     return implode(' ', $out);
 }
 
+// Work out who MADE a lens, so "Most-used lenses" reads "Sony FE 16-35mm F4 ZA
+// OSS" rather than a model name with no maker on it.
+//
+// The EXIF LensMake field would answer this outright, but it is almost never
+// filled in: 8 of 171 runs as of 2026-08-25. So when it is absent we read the
+// maker out of the lens NAME, which usually announces it one way or another --
+// Canon's "RF"/"EF", Sony's "FE", Fujifilm's "XF", Sigma's "| Art".
+//
+// Deliberately conservative. A name that identifies nobody is left alone rather
+// than borrowed from the camera body: several Nikon-body entries report as bare
+// specs ("14.0-24.0 mm f/2.8"), and a Sigma Art mounted on a Nikon would then be
+// published as a Nikon. An unbranded row is honest; a wrong one is not.
+function lens_maker($lens, $lens_make) {
+    $l = trim($lens);
+    if ($l === '') return '';
+
+    // 1. Already names its maker (either the brand word, or a house lens line
+    //    that is unmistakable). Prefixing these would give "Nikon NIKKOR".
+    $already = array('nikon', 'canon', 'sony', 'fujifilm', 'fujinon',
+                     'sigma', 'tamron', 'samyang', 'rokinon', 'viltrox', 'zeiss',
+                     'sirui', 'laowa', 'venus optics', 'irix',
+                     'panasonic', 'lumix', 'leica', 'olympus', 'pentax',
+                     'tokina', 'ttartisan', '7artisans', 'meike', 'yongnuo',
+                     'nisi', 'kipon', 'astrhori', 'brightin');
+    foreach ($already as $b) {
+        if (stripos($l, $b) !== false) return '';
+    }
+
+    // 2. The camera told us outright. Rare, but authoritative when present.
+    $lm = trim((string) $lens_make);
+    if ($lm !== '') {
+        // Normalise the shouty EXIF spellings ("NIKON" -> "Nikon").
+        $lm = preg_replace('/\b(corporation|company|imaging|optical|co\.?|ltd\.?|inc\.?)\b/i', '', $lm);
+        $lm = preg_replace('/\s+/', ' ', trim($lm));
+        if ($lm === '') return '';
+        if (stripos($l, $lm) !== false) return '';       // name already carries it
+        return (strtoupper($lm) === $lm) ? ucfirst(strtolower($lm)) : $lm;
+    }
+
+    // 3. Read the maker out of the naming convention. Order matters: the
+    //    third-party markers are checked before the mount prefixes, because a
+    //    Sigma for E-mount can still carry "DG DN" alongside nothing Sony-ish.
+    if (preg_match('/\|\s*(art|contemporary|sports)\b/i', $l)) return 'Sigma';
+    if (preg_match('/\bdg\s+(dn|hsm)\b/i', $l))                return 'Sigma';
+    if (preg_match('/\bdi\s*(iii|ii|)\b/i', $l))               return 'Tamron';
+    if (preg_match('/^yn\d/i', $l))                            return 'Yongnuo';
+    if (preg_match('/^(rf|ef)[\s\-]?\d/i', $l))                return 'Canon';
+    if (preg_match('/^fe\s+\d/i', $l))                         return 'Sony';
+    if (preg_match('/^(xf|xc)\s?\d/i', $l))                    return 'Fujifilm';
+    if (preg_match('/^(m\.)?zuiko/i', $l))                     return 'Olympus';
+    // House lens lines that name the line but not the maker. Nikon and Zeiss
+    // both do this, and the retailers spell them out ("Nikon NIKKOR Z 20mm"),
+    // so the list stays consistent with the Sony and Canon rows above.
+    if (preg_match('/^nikkor\b/i', $l))                        return 'Nikon';
+    if (preg_match('/^(batis|loxia|touit|otus|milvus)\b/i', $l)) return 'Zeiss';
+    return '';
+}
+
+// One spelling per lens. Nikon's own EXIF says "NIKKOR" on some bodies and
+// "Nikkor" on others, which split one lens into two rows on the page and halved
+// its vote. Fold the line name to a single spelling before anything is counted.
+function lens_canonical($lens) {
+    $l = preg_replace('/\bnikkor\b/i', 'NIKKOR', trim($lens));
+    // Makers shout their own name in EXIF to different degrees, so the same
+    // brand arrived as both "Viltrox" (from LensMake) and "VILTROX" (from the
+    // lens name) and printed as two different things on one list. Title-case a
+    // LEADING all-caps brand word only; model codes further along the name
+    // ("GM", "OSS", "DG DN", "SEL24F14GM") must keep their capitals.
+    $shouty = array('VILTROX', 'SAMYANG', 'SIRUI', 'ZEISS', 'ROKINON', 'TAMRON',
+                    'SIGMA', 'TOKINA', 'LAOWA', 'IRIX', 'MEIKE', 'YONGNUO',
+                    'NIKON', 'CANON', 'SONY', 'FUJIFILM', 'PANASONIC', 'OLYMPUS',
+                    'PENTAX', 'LEICA', 'TTARTISAN');
+    foreach ($shouty as $b) {
+        if (strpos($l, $b . ' ') === 0) {
+            return ucfirst(strtolower($b)) . substr($l, strlen($b));
+        }
+    }
+    return $l;
+}
+
+// The display name for the lenses list: maker in front where we know it.
+function lens_label($lens, $lens_make) {
+    $l = lens_canonical($lens);
+    $maker = lens_maker($l, $lens_make);
+    return $maker === '' ? $l : $maker . ' ' . $l;
+}
+
+// True for a lens string that carries no actual lens in it. The camera wrote
+// SOMETHING into the field, so the row is not empty and reaches the page looking
+// like a broken entry: "----", "0.0 mm", "f/0.0", a lone "-". Seen live on the
+// public page 2026-08-25.
+function lens_is_junk($lens) {
+    $l = trim($lens);
+    if ($l === '') return true;
+    if (preg_match('/^0+(\.0+)?\s*mm/i', $l)) return true;
+    if (stripos($l, 'f/0') !== false) return true;
+    if (preg_match('/^[\-\_\.\s]+$/', $l)) return true;      // "----", "-", "..."
+    if (!preg_match('/[0-9a-z]/i', $l)) return true;         // nothing readable at all
+    return false;
+}
+
 // Best-effort sensor size from the camera model name. Used to jumpstart the
 // full-frame-vs-crop split from the cameras we already collect, before the more
 // exact crop-factor method (focal_35mm / focal_length) has data. An unfamiliar
@@ -173,6 +274,8 @@ $orient = array('Landscape' => 0, 'Portrait' => 0);   // per-run framing, by wid
 $gpu_cpu = array();   // compute device, ONE VOTE PER PHOTOGRAPHER (not per run)
 $cam = array(); $brand = array(); $lens = array(); $focal = array(); $country = array();
 $cam_users = array();   // photographers who reported a camera name on at least one real run
+$lens_users = array();  // photographers who reported a usable lens name at least once
+$focal_users = array(); // photographers who reported a real focal length at least once
 $sensor = array();      // full frame / APS-C / etc., ONE VOTE PER PHOTOGRAPHER
 $sensor_users = array();// photographers we could classify by sensor size at least once
 $iso = array(); $shutter = array(); $aperture = array();   // EXIF exposure settings
@@ -285,9 +388,24 @@ if (is_readable($REPORTS)) {
             }
             if (!empty($r['lens'])) {
                 $ln = trim($r['lens']);
-                if ($ln !== '' && !preg_match('/^0+(\.0+)?\s*mm/i', $ln) && stripos($ln, 'f/0') === false) add_user($lens, $ln, $id);
+                // Rank by the LABEL, so the same lens reported with and without
+                // its maker counts as one lens rather than two.
+                if (!lens_is_junk($ln)) {
+                    add_user($lens, lens_label($ln, isset($r['lens_make']) ? $r['lens_make'] : ''), $id);
+                    if ($id !== '') $lens_users[$id] = true;
+                }
             }
-            if (isset($r['focal_length'])) add_user($focal, ((int) round($r['focal_length'])) . ' mm', $id);
+            // A lens with no electronic contacts (manual, adapted, a telescope)
+            // leaves the body nothing to report, so it writes zeros. Those are
+            // not a 0 mm focal length, they are an absent one: they belong in the
+            // Unknown row with everyone else we could not read, not as a "0 mm"
+            // entry that reads like a bug. Seen live on the page 2026-08-25 with
+            // three photographers behind it, all of whom also reported aperture 0
+            // and either no lens name or "----".
+            if (isset($r['focal_length']) && round($r['focal_length']) > 0) {
+                add_user($focal, ((int) round($r['focal_length'])) . ' mm', $id);
+                if ($id !== '') $focal_users[$id] = true;
+            }
             if (!empty($r['iso']))          add_user($iso, (string) (int) $r['iso'], $id);
             if (!empty($r['exposure_sec']) && shutter_label($r['exposure_sec']) !== '') add_user($shutter, shutter_label($r['exposure_sec']), $id);
             if (!empty($r['aperture']))     add_user($aperture, aperture_label($r['aperture']), $id);
@@ -385,6 +503,21 @@ $brand_unknown = count($users) - count($cam_users);
 $brands_list = ranked($brand);
 if ($brand_unknown > 0) $brands_list[] = array('name' => 'Unknown', 'count' => $brand_unknown);
 
+// Lenses and focal lengths get the same treatment, and it matters more here than
+// anywhere else on the page: about HALF our photographers never report a lens at
+// all. Without the row the lists just look short, and the page quietly understates
+// how much RAW files, stripped JPEGs and contact-free lenses hide from us.
+$lens_unknown = count($users) - count($lens_users);
+$lenses_list = ranked($lens);
+if ($lens_unknown > 0) $lenses_list[] = array('name' => 'Unknown', 'count' => $lens_unknown);
+
+// Ranked FIRST, then the Unknown row appended, so it sits at the bottom whatever
+// its count -- exactly like the brands and country rows. Ranking it inline would
+// float it to the top, since Unknown outnumbers every single focal length.
+$focal_unknown = count($users) - count($focal_users);
+$focal_list = ranked($focal, 'numeric');
+if ($focal_unknown > 0) $focal_list[] = array('name' => 'Unknown', 'count' => $focal_unknown);
+
 // Full frame vs crop: ranked by photographers, with a "Not determined" row for
 // people we couldn't classify (no camera name and no crop factor), pinned to the
 // bottom so the split reconciles with the full photographer count.
@@ -474,8 +607,8 @@ echo json_encode(array(
     'cameras'               => ranked($cam),
     'camera_brands'         => $brands_list,
     'sensor'                => $sensor_list,
-    'lenses'                => ranked($lens),
-    'focal_lengths'         => ranked($focal, 'numeric'),
+    'lenses'                => $lenses_list,
+    'focal_lengths'         => $focal_list,
     'iso'                   => ranked($iso, 'numeric'),
     'shutter'               => ranked($shutter, 'numeric'),
     'aperture'              => ranked($aperture),
