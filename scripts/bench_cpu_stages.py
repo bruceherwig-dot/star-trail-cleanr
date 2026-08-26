@@ -158,6 +158,10 @@ def run_suite(img, preds, repeats):
 
 
 def main():
+    """Print the machine's identity, then every timing twice: OpenCV threading as
+    shipped, then pinned to one thread. The identity block matters as much as the
+    numbers -- these results are only meaningful compared against another
+    machine's run of the same frame size and trail count."""
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--width", type=int, default=8152, help="frame width (Kari's camera)")
     ap.add_argument("--height", type=int, default=5432, help="frame height")

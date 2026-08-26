@@ -2,6 +2,11 @@
 
 ---
 
+## v2.90-beta
+- **Finding trails is much faster, and the results are identical.** On a set of 20 photos at 44 megapixels the whole run went from 11 minutes 18 seconds to 8 minutes 19 seconds on the same computer. Three things were wasting time. The app was asking the AI for each trail it found in a form eight times larger than it needed, it was rebuilding the same thing a second time later in the run, and one step was measuring across the entire photograph when only a small part of it mattered. All three are fixed. Every cleaned file is byte for byte what the previous version produced, so this is the same work done in less time, not different work. Slower computers gain the most: a Windows user whose run took 22 minutes 55 seconds should see about 17 minutes.
+- **It also needs about a gigabyte less memory while finding trails**, which matters most on computers that were already running close to full.
+- **Smoke tests:** 337 passing.
+
 ## v2.89-beta
 - **Fixed: black and white frames stopped the clean with an error.** If your images hold a single channel instead of colour, which is what you get from a telescope's sub-frames converted from FITS, or from a black and white astronomy camera, every batch failed. The repair step compares the three colours at each point to work out where the sky is, and there was only one to compare. Black and white frames now clean normally, and are saved back black and white rather than as a colour file three times the size. Reported by a user working with SeeStar sub-frames.
 - **The Star Log now says when stuck-pixel repair cannot run.** That step tells a dead pixel from a star by its colour, one channel far brighter than the other two, which is how it avoids marking your stars. Black and white frames give it nothing to compare, so it cannot run at all, and the log says so rather than quietly reporting that nothing was found. Removing hot pixels and specks from the finished star trail is unaffected.

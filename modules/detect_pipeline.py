@@ -640,12 +640,26 @@ def stage_prune_phantoms(state: PipelineState, cfg: StageConfig,
                          log: StageLog) -> PipelineState:
     """Stage 1b: remove thin, dotted phantom detections that sit on empty sky.
 
-    THIS IS THE LARGEST STAGE IN DETECTION on a big frame -- bigger than the AI
-    inference itself (44% of detect on a 44MP frame, against 42% for inference).
-    That was invisible for months because the run summary had no row for it, so
-    if you are here for speed, measure before and after and keep the output
-    byte-identical: this stage decides which detections are dropped, so a subtle
-    change silently alters what gets cleaned.
+    WHAT IT IS FOR: the AI sometimes traces a faint dotted line across empty sky
+    where there is no trail at all. Left alone, repair would paint over that
+    stretch of sky for no reason. This stage finds those and removes them before
+    anything downstream sees them.
+
+    IF YOU ARE HERE FOR SPEED, READ THIS FIRST. This used to be the largest
+    stage in detection, bigger than the AI inference itself (44% of detect on a
+    44MP frame against 42% for inference), and it was invisible for months
+    because the run summary had no row for it. Two rounds of work in August 2026
+    took it to roughly a quarter of that: 10.30s to 4.25s over four 44MP frames.
+    Both wins came from the same place, and neither changed a single output
+    pixel:
+      * per-component work now slices to the component's own bounding box,
+        twice -- the label loop and the trim loop below it
+      * detection masks are built ONCE per frame and shared with polygon
+        fitting through state.pred_masks, instead of each stage building its own
+    Whatever you try next, MEASURE BEFORE AND AFTER AND KEEP THE OUTPUT
+    BYTE-IDENTICAL. This stage decides which detections are dropped, so a subtle
+    change silently alters what gets cleaned, and nobody would see it until a
+    user's sky came back wrong.
 
     Builds the union of the raw SAHI masks, keeps only the THIN parts (union
     minus its morphological opening) that have NO real light under them in the
@@ -800,7 +814,20 @@ def stage_fit_polygons(state: PipelineState, cfg: StageConfig,
                        log: StageLog) -> PipelineState:
     """Stage 2: filter raw SAHI detections, group fragments that belong to the
     same trail, and fit a polygon per group (strip-based fit for curved trails).
-    No gap bridging here -- that is a later, deliberate stage."""
+    No gap bridging here -- that is a later, deliberate stage.
+
+    WHAT COMES OUT: state.polygons (the corner sets a human would draw around
+    each trail), state.polygon_segs (one mask per polygon, which repair walks),
+    and state.final_mask (every trail pixel in one image). Everything after this
+    point works from those, not from the AI's raw output.
+
+    MASKS ARE BORROWED, NOT BUILT, where phantom pruning already made them (see
+    PipelineState.pred_masks). This stage is the last reader, so it releases each
+    mask as it takes it and clears the list at the end: holding all 53 of them to
+    the end of the stage cost about 2.3 GB on a 44MP frame for no benefit. A
+    cache entry of None, or a list whose length does not match the detections,
+    means "build it here" -- the shortcut can never produce a different answer
+    from doing the work."""
     preds = state.raw_detections
     h, w = state.image.shape[:2]
     final = np.zeros((h, w), dtype=np.uint8)

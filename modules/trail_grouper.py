@@ -150,6 +150,17 @@ def _pred_to_mask(pred, h, w):
     SAHI stores the mask at the tile's own resolution, so if it does not already
     match the requested frame size it is nearest-neighbor resized up to (h, w).
     Nearest-neighbor keeps the mask strictly binary (no interpolated gray edges).
+
+    THIS IS A HOT PATH: it runs once per detection per stage, and a busy frame
+    carries 50+ detections, so on a 44MP frame a wasted pass here is tens of
+    megabytes of memory traffic multiplied by fifty. It was the single largest
+    cost in BOTH of the big detection stages until 2026-08-26. Two rules follow
+    from that, and the comments in the body explain why each one matters:
+      * take the OUTLINE from the prediction and fill it yourself; never ask
+        SAHI for the rendered version
+      * allocate once -- no astype-then-multiply, no intermediate copies
+    Callers only ever test the result for non-zero, but it is kept at 0/255
+    because OpenCV calls downstream expect a conventional binary image.
     """
     if pred.mask is None:
         return None
