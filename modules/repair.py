@@ -306,6 +306,18 @@ def _detect_shift(gp, gn):
     gp, gn: 8-bit grayscale patches (prev, next). Returns ((dx,dy) or None, n_agreeing).
     """
     def streaks(g):
+        """Find the stars in one patch and return where each one sits.
+
+        A star in a long exposure is a short bright smear, not a point, so this
+        looks for small bright blobs standing above the local sky and takes each
+        one's brightness-weighted centre. Blobs too small to be a star or too
+        large to be one are ignored, and only the brightest handful are kept:
+        the caller needs a few stars that agree on how far the sky moved, not
+        every speck of noise, and keeping the list short is what stops the
+        pairing that follows from becoming unusably slow on a busy sky.
+
+        Returns a list of (x, y, total brightness), one per star.
+        """
         sky = np.median(g)
         thr = max(sky + 22, np.percentile(g, 92))
         b = cv2.morphologyEx((g > thr).astype(np.uint8), cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))

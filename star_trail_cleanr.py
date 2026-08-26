@@ -2464,6 +2464,15 @@ class ShareRenderThread(QThread):
         self._out_path = out_path
 
     def run(self):
+        """Do the share-output job on a background thread so the window never
+        freezes while it works.
+
+        A frozen app has no separate Python to call, so it re-launches ITSELF in
+        worker mode to run the script (see --cleanr-worker in the module header).
+        Running from source calls Python normally. Either way the work happens in
+        another process, and success or failure comes back as a signal rather
+        than blocking the interface.
+        """
         import subprocess
         try:
             os.makedirs(os.path.dirname(self._out_path), exist_ok=True)
@@ -6709,6 +6718,13 @@ class MainWindow(QMainWindow):
         t.start()
 
     def _on_share_render_done(self, kind, out_path):
+        """Tell the user, in the run log, that one of the extras finished.
+
+        After a clean the app also builds a star trail, a preview and a short
+        video from the stacks it made along the way. Each reports here as it
+        lands, so the log shows them arriving one by one instead of going quiet
+        after the frames are done.
+        """
         label = _SHARE_KIND_LABELS.get(kind, "share output")
         try:
             self._status_out.append(f"Your {label} is ready.")
@@ -7423,6 +7439,10 @@ class TimelapsePanel(QWidget):
         self._tl_idx = 0
 
         def _row(text, combo):
+            """One settings line: a right-aligned label of fixed width, then its
+            control. The fixed width is what makes every label in this panel end
+            at the same place, so the controls line up in a column instead of
+            stepping in and out with the length of each word."""
             r = QHBoxLayout()
             _l = QLabel(text)
             _l.setFixedWidth(90)
@@ -7623,6 +7643,14 @@ class TimelapsePanel(QWidget):
             QDesktopServices.openUrl(QUrl.fromLocalFile(self._play_path))
 
     def _restore_choices(self):
+        """Put the timelapse settings back the way the user last left them.
+
+        Source, size, frame rate, blending and format are remembered between
+        sessions, so somebody who always renders 4K at 30 frames a second does
+        not reselect it every night. A remembered value that no longer exists is
+        ignored rather than forced, so an option removed in a later version
+        cannot leave the window in a state it cannot render from.
+        """
         for cb, key, is_int in ((self._source_cb, "timelapse_source", False),
                                 (self._size_cb, "timelapse_size", False),
                                 (self._fps_cb, "timelapse_fps", True),
@@ -7667,6 +7695,14 @@ class TimelapsePanel(QWidget):
         self._set_poster()
 
     def _calc(self):
+        """Work out what the timelapse will be before rendering it: the finished
+        pixel size, the frame rate, the estimated file size, and how much disk
+        space is actually free.
+
+        Drives both the summary line the user reads and the low-disk warning, so
+        they learn a 12 GB render will not fit BEFORE waiting through it rather
+        than after. Returns those five values together.
+        """
         from timelapse_maker import target_size, estimate_output_bytes
         size_key = self._size_cb.currentData() or "4k"
         fps = int(self._fps_cb.currentData() or 30)
@@ -7712,6 +7748,19 @@ class TimelapsePanel(QWidget):
             self._proc.kill()
 
     def _start_render(self):
+        """Render the timelapse video, in the background, from the chosen frames.
+
+        WHAT THE USER GETS: a video that plays their whole night in a few
+        seconds, built from either the cleaned frames or the untouched originals,
+        at the size, frame rate and format they picked. Blending, when they ask
+        for it, carries each frame's trails a little way into the next so the
+        motion reads as smooth rather than as a flicker book.
+
+        Checks free disk space first and asks before starting if the estimate is
+        close to what is left, since running out partway through wastes the whole
+        render. The encoding runs as a SEPARATE PROGRAM so the window stays
+        responsive; this method only prepares the job and launches it.
+        """
         if self._n_frames < 2:
             self._status_lbl.setText("Need at least 2 frames.")
             return
@@ -7791,6 +7840,12 @@ class TimelapsePanel(QWidget):
             f"{chars[self._spin_idx]}  {getattr(self, '_phase_text', 'Rendering…')}  {t}")
 
     def _on_proc_output(self):
+        """Turn the video encoder's chatter into a moving progress bar, and keep
+        its last few lines.
+
+        Those kept lines are what let a failed render report the encoder's real
+        complaint in the Star Log instead of a bare "it did not finish".
+        """
         data = bytes(self._proc.readAllStandardOutput()).decode("utf-8", "replace")
         # Keep the tail of the renderer's output so a failure can put the real
         # reason in the Star Log instead of a bare "didn't finish".
@@ -7805,6 +7860,14 @@ class TimelapsePanel(QWidget):
                     pass
 
     def _on_proc_finished(self, code, _status):
+        """Put the window back in order when the timelapse render ends.
+
+        Re-enables the controls, then tells the user where they stand. A success
+        makes the new video the one the play button and Open Video point at. A
+        cancelled render deletes the half-written file, because a truncated video
+        left in their folder looks like a finished one until they try to play it.
+        A failure keeps the encoder's own last words for the Star Log.
+        """
         if getattr(self, "_spin_timer", None) is not None:
             self._spin_timer.stop()          # stop the spinner/timer before final status
         self._render_btn.setText("Create Timelapse")
@@ -7943,6 +8006,10 @@ class StarTrailPanel(QWidget):
         _LABEL_W = 112     # wide enough for "Trail Thickness"
 
         def _row(text, w):
+            """One settings line: a right-aligned label of fixed width, then its
+            control. The fixed width is what makes every label in this panel end
+            at the same place, so the controls line up in a column instead of
+            stepping in and out with the length of each word."""
             r = QHBoxLayout()
             _l = QLabel(text)
             _l.setFixedWidth(_LABEL_W)
@@ -8147,6 +8214,22 @@ class StarTrailPanel(QWidget):
         return _unique_path(base)
 
     def _start_build(self):
+        """Build the finished star trail picture, in the background, from the
+        frames the user picked.
+
+        WHAT THE USER GETS: one image where every frame in the folder is laid on
+        top of the others so the stars draw continuous arcs across the sky.
+        Their choices decide the flavour: cleaned frames or their untouched
+        originals, plain trails or comet tails that fade out behind each star,
+        thicker lines for a bolder look, and whether to remove leftover coloured
+        specks first. The file is named after those choices, so a second build
+        with different settings never overwrites the first.
+
+        The stacking itself runs as a SEPARATE PROGRAM (make_share_clip.py) so a
+        build that takes minutes cannot freeze the window. This method only
+        assembles the job and launches it. Progress arrives in _on_proc_output
+        and the finished file is picked up in _on_proc_finished.
+        """
         # Comet length is a FRACTION of the frame count (0.5/0.75/1.0); make_share_clip
         # turns it into a real frame count. 0 = plain trail (Blending Mode = Normal).
         comet = (float(self._comet_len_cb.currentData() or 0.5)
@@ -8237,6 +8320,18 @@ class StarTrailPanel(QWidget):
             self._bar.setValue(v)
 
     def _on_proc_output(self):
+        """Turn the star trail builder's chatter into a moving progress bar.
+
+        The builder prints a line for each frame it stacks and each stage it
+        finishes. This reads those lines and advances the bar, so the user sees
+        steady movement through a build that can run for minutes, instead of a
+        bar that sits still and then jumps.
+
+        It also keeps the last few lines of output. If the build fails, that is
+        what puts the real reason in the Star Log rather than a bare "it did not
+        finish", and it records how long each stage took ON THIS COMPUTER so the
+        next build's bar is paced by measurement instead of assumption.
+        """
         # Every phase of make_share_clip reports as it works: stacking prints
         # "<label>: i/n" per frame, hot-pixel removal "finding specks: i/n",
         # thickening a start marker, and the final save "wrote ...". Each
@@ -8330,6 +8425,16 @@ class StarTrailPanel(QWidget):
         self._refresh_builds()
 
     def _on_proc_finished(self, code, _status):
+        """Put the window back in order when the star trail build ends.
+
+        Re-enables every control the build had locked and stops the spinner, then
+        decides what the user is told. A success points the preview and the Open
+        buttons at the file just made, and saves how long each stage took so the
+        next build's bar is paced by this machine. A cancelled build says so
+        plainly. A failure surfaces the builder's own last words instead of a
+        generic message, because "it did not finish" tells a user nothing they
+        can act on.
+        """
         if getattr(self, "_spin_timer", None) is not None:
             self._spin_timer.stop()          # stop the spinner/timer before final status
         self._build_btn.setText("Create Star Trail")
