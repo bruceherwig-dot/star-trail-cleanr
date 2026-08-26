@@ -184,10 +184,24 @@ runs.
   element operations to inspect blobs a few hundred pixels across.
   `connectedComponentsWithStats` already returns the box, and the surrounding
   code is usually reading it for width and height anyway. This has cost real
-  users twice: `sky_dots._fill_specks` (minutes of waiting on a 30MP stack,
-  2026-08-09) and `detect_pipeline.stage_prune_phantoms` (57% of the largest
-  stage in detection, 2.62s to 0.00s on one frame with byte-identical output,
-  2026-08-25). Guarded by `tests/test_no_fullframe_per_component.py`.
+  users THREE times: `sky_dots._fill_specks` (minutes of waiting on a 30MP
+  stack, 2026-08-09), `detect_pipeline.stage_prune_phantoms`'s component loop
+  (57% of the largest stage in detection, 2.62s to 0.00s with byte-identical
+  output, 2026-08-25), and the trim loop DIRECTLY BELOW that one, walked past
+  while fixing it and found a day later (2026-08-26). When you fix one of these,
+  read the whole function, not the loop you came for. Guarded by
+  `tests/test_no_fullframe_per_component.py` and `tests/test_detect_mask_cost.py`.
+- **Ask the AI's detection for its OUTLINE, never for its raster.** SAHI's
+  `prediction.mask.bool_mask` is a property, so it re-renders on every access,
+  and despite the name it returns float64: `np.zeros([h, w])` with no dtype,
+  filled, then an `.astype(bool)` whose result is discarded without being
+  assigned. On a 44MP frame that is 354 MB where 44 MB would do, once per
+  detection, in every stage that asks. `trail_grouper._pred_to_mask` now fills
+  the outline into uint8 itself, copying SAHI's own rounding so the pixels are
+  identical, and the stages share one set of masks through
+  `PipelineState.pred_masks` instead of each building its own. Together with the
+  trim-loop fix that took phantom pruning and polygon fitting from 15.27s to
+  7.16s over four 44MP frames, output byte-identical.
 - **Anything timed must appear in the timing summary.** The summary's rows used
   to be a hand-written list, so a stage added later had no row and its time
   vanished from every report while still counting inside its parent. That hid

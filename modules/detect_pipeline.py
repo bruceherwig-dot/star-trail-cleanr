@@ -171,6 +171,15 @@ class PipelineState:
     image: np.ndarray
     foreground_mask: Optional[np.ndarray] = None
     raw_detections: list[Any] = field(default_factory=list)   # SAHI predictions
+    # One full-frame mask per raw detection, in the same order, built ONCE and
+    # handed between stages. Turning a detection into a mask is the single most
+    # expensive thing either of the two big stages does (the AI stores an
+    # outline, so asking for the mask redraws it across the whole frame), and
+    # phantom pruning and polygon fitting were each building the same 53 masks
+    # from the same detections, one after the other. An entry may be None,
+    # meaning "not cached, work it out" -- a consumer must fall back, never
+    # assume. Empty when no stage has populated it.
+    pred_masks: list[Any] = field(default_factory=list)
     det_list: list[Any] = field(default_factory=list)         # filtered detection props
     groups: list[Any] = field(default_factory=list)           # grouped detection indices
     polygons: list[Any] = field(default_factory=list)         # fitted trail polygon corner sets
@@ -657,6 +666,7 @@ def stage_prune_phantoms(state: PipelineState, cfg: StageConfig,
         if m is not None:
             union[m > 0] = 1
     if union.sum() == 0:
+        state.pred_masks = pred_masks     # built already; the next stage needs them
         return state
 
     sky = _phantom_local_sky(gray)
@@ -674,6 +684,7 @@ def stage_prune_phantoms(state: PipelineState, cfg: StageConfig,
             fm = cv2.resize(fm, (w, h), interpolation=cv2.INTER_NEAREST)
         ph[fm > 0] = 0
     if ph.sum() == 0:
+        state.pred_masks = pred_masks     # built already; the next stage needs them
         return state
 
     bridged = cv2.dilate(ph, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15)))
@@ -714,18 +725,43 @@ def stage_prune_phantoms(state: PipelineState, cfg: StageConfig,
                 "note": "thin FP over empty sky; nothing to see here (hard negative)",
             })
     if not kill.any():
+        state.pred_masks = pred_masks     # built already; the next stage needs them
         return state
 
     new_preds = []
+    new_masks = []
     n_dropped = n_trimmed = 0
     notkill = ~kill
     for pred, m in zip(preds, pred_masks):
         if m is None:
             new_preds.append(pred)
+            new_masks.append(None)
             continue
-        orig = int((m > 0).sum())
-        trimmed = (m > 0) & notkill
-        kept = int(trimmed.sum())
+        # WORK INSIDE THE DETECTION'S OWN BOX. This loop used to sweep the WHOLE
+        # photograph three times per detection: (m > 0).sum(), (m > 0) & notkill,
+        # and trimmed.sum(). With 53 detections on a 44MP frame that is roughly
+        # 7 billion element operations to weigh blobs a few hundred pixels
+        # across, and it measured as a third of this stage. Every lit pixel is
+        # inside the box by definition, so the counts are identical.
+        #
+        # THIS IS THE THIRD TIME THIS PATTERN HAS COST USERS -- sky_dots on
+        # 2026-08-09, the component loop directly above on 2026-08-25, and this
+        # one, which I walked straight past while fixing that one. See the sharp
+        # edges list in ARCHITECTURE.md.
+        rows = np.any(m, axis=1)
+        if not rows.any():
+            new_preds.append(pred)
+            new_masks.append(m)
+            continue
+        cols = np.any(m, axis=0)
+        rr = np.where(rows)[0]
+        cc = np.where(cols)[0]
+        r0, r1 = int(rr[0]), int(rr[-1]) + 1
+        c0, c1 = int(cc[0]), int(cc[-1]) + 1
+        sub = m[r0:r1, c0:c1] > 0
+        orig = int(sub.sum())
+        sub_kept = sub & notkill[r0:r1, c0:c1]
+        kept = int(sub_kept.sum())
         if orig > 0 and kept < orig * _PHANTOM_KEEP_FRAC:
             n_dropped += 1
             continue
@@ -734,12 +770,22 @@ def stage_prune_phantoms(state: PipelineState, cfg: StageConfig,
                 conf = float(pred.score.value)
             except Exception:
                 conf = 0.5
+            # The synthetic prediction still needs a FULL-frame mask, but only
+            # the trimmed ones pay for that allocation now, not all 53.
+            trimmed = np.zeros(m.shape, dtype=bool)
+            trimmed[r0:r1, c0:c1] = sub_kept
             new_preds.append(_SyntheticPred(trimmed, conf))
+            # Deliberately NOT cached: let the next stage derive this one the
+            # normal way, so the cache can never disagree with what the pipeline
+            # would have produced on its own.
+            new_masks.append(None)
             n_trimmed += 1
         else:
             new_preds.append(pred)
+            new_masks.append(m)
 
     state.raw_detections = new_preds
+    state.pred_masks = new_masks
     log.count("phantom_lines", n_lines)
     log.count("detections_dropped", n_dropped)
     log.count("detections_trimmed", n_trimmed)
@@ -772,9 +818,18 @@ def stage_fit_polygons(state: PipelineState, cfg: StageConfig,
     n_split_fired = 0
     n_kept_whole = 0
     rescued_blobs = []   # (crop_mask, row0, col0) of kept-whole crossing tangles
-    for pred in preds:
+    # Reuse the masks phantom pruning already built for these same detections
+    # rather than redrawing all 53 of them from their outlines a second time.
+    # The lengths must match exactly or the pairing is meaningless, and a None
+    # entry means "not cached" -- both fall back to building it here, so this is
+    # only ever a shortcut, never a different answer.
+    cached_masks = (state.pred_masks
+                    if len(state.pred_masks) == len(preds) else [])
+    for _i, pred in enumerate(preds):
         _t = time.perf_counter()
-        m = _pred_to_mask(pred, h, w)
+        m = cached_masks[_i] if cached_masks else None
+        if m is None:
+            m = _pred_to_mask(pred, h, w)
         t_premask += time.perf_counter() - _t
         if m is None:
             continue
