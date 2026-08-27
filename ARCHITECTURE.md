@@ -184,11 +184,20 @@ runs.
   element operations to inspect blobs a few hundred pixels across.
   `connectedComponentsWithStats` already returns the box, and the surrounding
   code is usually reading it for width and height anyway. This has cost real
-  users THREE times: `sky_dots._fill_specks` (minutes of waiting on a 30MP
+  users FOUR times: `sky_dots._fill_specks` (minutes of waiting on a 30MP
   stack, 2026-08-09), `detect_pipeline.stage_prune_phantoms`'s component loop
   (57% of the largest stage in detection, 2.62s to 0.00s with byte-identical
-  output, 2026-08-25), and the trim loop DIRECTLY BELOW that one, walked past
-  while fixing it and found a day later (2026-08-26). When you fix one of these,
+  output, 2026-08-25), the trim loop DIRECTLY BELOW that one, walked past while
+  fixing it and found a day later, and `repair.py`'s per-polygon path plus
+  `_split_component`, which together were half of the repair stage (2026-08-26,
+  7.6s to 3.9s a frame, byte-identical).
+
+  THE CHEAP QUESTIONS. Most of these ask `np.where` for the coordinates of every
+  lit pixel when they only need the count and the corners of the box.
+  `np.count_nonzero` plus `np.any` along each axis answers that 25x faster on a
+  44MP frame (90ms to 3.5ms, measured) with the identical result. Where the
+  coordinates really are needed -- fitting a rectangle to the point cloud --
+  crop to the box first and shift them back: same rectangle, 3x cheaper. When you fix one of these,
   read the whole function, not the loop you came for. Guarded by
   `tests/test_no_fullframe_per_component.py` and `tests/test_detect_mask_cost.py`.
 - **Ask the AI's detection for its OUTLINE, never for its raster.** SAHI's
