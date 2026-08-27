@@ -977,48 +977,47 @@ def _leader_gear_exif(frames):
         ext = os.path.splitext(frames[0])[1].lstrip(".").lower()
         if ext:
             out["file_format"] = ext
-        from PIL import Image, ExifTags
-        with Image.open(frames[0]) as im:
-            try:
-                out["megapixels"] = round(im.width * im.height / 1_000_000, 1)
-            except Exception:
-                pass
-            ex = im.getexif()
-            if not ex:
-                return out
-            cam = " ".join(
-                str(x).strip() for x in (ex.get(0x010F), ex.get(0x0110)) if x
-            ).strip()
-            if cam:
-                out["camera"] = cam
-            try:
-                sub = ex.get_ifd(ExifTags.IFD.Exif)
-            except Exception:
-                sub = {}
-            lens = sub.get(0xA434)            # LensModel
-            if lens:
-                out["lens"] = str(lens).strip()
-            lens_make = sub.get(0xA433)       # LensMake (lens brand)
-            if lens_make:
-                out["lens_make"] = str(lens_make).strip()
-            for tag, key, conv in (
-                (0x920A, "focal_length", lambda v: round(float(v), 1)),   # FocalLength
-                (0xA405, "focal_35mm",   lambda v: int(round(float(v)))), # FocalLengthIn35mmFilm (crop factor vs focal_length)
-                (0x829A, "exposure_sec", lambda v: round(float(v), 4)),   # ExposureTime
-                (0x829D, "aperture",     lambda v: round(float(v), 1)),   # FNumber
-            ):
-                val = sub.get(tag)
-                if val is not None:
-                    try:
-                        out[key] = conv(val)
-                    except Exception:
-                        pass
-            iso = sub.get(0x8827)             # ISOSpeedRatings / PhotographicSensitivity
-            if iso is not None:
+        # Size comes from the header reader, which understands RAW; the tags come
+        # from the shared EXIF reader, which finds them in a RAW's embedded
+        # preview. Opening the photograph with PIL used to do both and could do
+        # NEITHER for a RAW, so a third of all runs reported no camera and no
+        # lens (81% and 96% of RAW runs, measured 2026-08-27).
+        from modules.io_safe import exif_tags as _exif_tags, image_size as _size
+        wh = _size(frames[0])
+        if wh:
+            out["megapixels"] = round(wh[0] * wh[1] / 1_000_000, 1)
+        tags = _exif_tags(frames[0])
+        if not tags:
+            return out
+        cam = " ".join(
+            str(x).strip() for x in (tags.get("Make"), tags.get("Model")) if x
+        ).strip()
+        if cam:
+            out["camera"] = cam
+        lens = tags.get("LensModel")
+        if lens:
+            out["lens"] = str(lens).strip()
+        lens_make = tags.get("LensMake")
+        if lens_make:
+            out["lens_make"] = str(lens_make).strip()
+        for name, key, conv in (
+            ("FocalLength",            "focal_length", lambda v: round(float(v), 1)),
+            ("FocalLengthIn35mmFilm",  "focal_35mm",   lambda v: int(round(float(v)))),
+            ("ExposureTime",           "exposure_sec", lambda v: round(float(v), 4)),
+            ("FNumber",                "aperture",     lambda v: round(float(v), 1)),
+        ):
+            val = tags.get(name)
+            if val is not None:
                 try:
-                    out["iso"] = int(iso[0] if isinstance(iso, (tuple, list)) else iso)
+                    out[key] = conv(val)
                 except Exception:
                     pass
+        iso = tags.get("ISOSpeedRatings") or tags.get("PhotographicSensitivity")
+        if iso is not None:
+            try:
+                out["iso"] = int(iso[0] if isinstance(iso, (tuple, list)) else iso)
+            except Exception:
+                pass
     except Exception:
         pass
     return out
@@ -6996,8 +6995,7 @@ class MainWindow(QMainWindow):
             """Return a dict of camera/lens/date/f-stop/ISO read from the first
             image's EXIF, for the "Camera Info" block of the run summary. Every
             field defaults to "Unknown" and any read failure is swallowed."""
-            from PIL import Image as _PILImage
-            from PIL.ExifTags import TAGS
+            from modules.io_safe import exif_tags as _exif_tags
             from modules.frame_list import IMAGE_EXTS as exts
             first = next(
                 (p for p in sorted(os.listdir(folder))
@@ -7014,13 +7012,12 @@ class MainWindow(QMainWindow):
             if first is None:
                 return fields
             try:
-                with _PILImage.open(os.path.join(folder, first)) as _im:
-                    raw = _im.getexif()
-                    if not raw:
-                        return fields
-                    tag_map = {TAGS.get(k, k): v for k, v in raw.items()}
-                    # get_ifd() must be called while the file is still open.
-                    sub_map = {TAGS.get(k, k): v for k, v in raw.get_ifd(0x8769).items()}
+                # One reader for every format. A RAW carries its tags in the
+                # small preview picture inside it, which is why opening the RAW
+                # itself used to return nothing and print "Unknown" five times.
+                tag_map = sub_map = _exif_tags(os.path.join(folder, first))
+                if not tag_map:
+                    return fields
                 make  = str(tag_map.get("Make",  "")).strip()
                 model = str(tag_map.get("Model", "")).strip()
                 if make or model:
@@ -7030,7 +7027,8 @@ class MainWindow(QMainWindow):
                         fields["camera"] = f"{make} {model}".strip() or "Unknown"
                 lens = str(sub_map.get("LensModel", "")).strip()
                 fields["lens"] = lens or "Unknown"
-                taken = str(sub_map.get("DateTimeOriginal", "")).strip()
+                taken = (str(sub_map.get("DateTimeOriginal", "")).strip()
+                         or str(tag_map.get("DateTime", "")).strip())
                 fields["taken"] = taken or "Unknown"
                 fnum = sub_map.get("FNumber")
                 if fnum is not None:
