@@ -2,6 +2,13 @@
 
 ---
 
+## v2.91-beta
+- **Cleaning is faster again, on top of the speed-up in 2.90, and the results are identical.** Two more places were doing far more work than they needed to. Repairing a trail measured it by scanning the entire photograph instead of the small part the trail actually occupies, twice over, for every trail in every frame. That step is now about half the time it was. On a 44 megapixel set the whole run went from 20 seconds a frame to 15.
+- **If you use a foreground mask, the run is faster still.** The step that learns where your camera's stuck pixels are ran sixty picture-sized filters one after another while the rest of your processor sat idle. They now run together. On a 100 photo set that step went from 18 seconds per group of 20 photos to 9. It only ever ran when you painted a mask, which is why it took a masked sequence to notice it at all.
+- **Every cleaned file is byte for byte what the previous version produced.** Both changes were checked by cleaning the same photographs with the old and new versions and comparing the finished files, on two different photographers' sequences.
+- **The Star Log now lists the versions of the outside software the app was built with**, next to the Python version. If one of those ever changes how your photos come out, your log is the evidence that finds it.
+- **Smoke tests:** 344 passing, and they now run on the machines that build the app rather than only on the developer's Mac.
+
 ## v2.90-beta
 - **Finding trails is much faster, and the results are identical.** On a set of 20 photos at 44 megapixels the whole run went from 11 minutes 18 seconds to 8 minutes 19 seconds on the same computer. Three things were wasting time. The app was asking the AI for each trail it found in a form eight times larger than it needed, it was rebuilding the same thing a second time later in the run, and one step was measuring across the entire photograph when only a small part of it mattered. All three are fixed. Every cleaned file is byte for byte what the previous version produced, so this is the same work done in less time, not different work. Slower computers gain the most: a Windows user whose run took 22 minutes 55 seconds should see about 17 minutes.
 - **It also needs about a gigabyte less memory while finding trails**, which matters most on computers that were already running close to full.
