@@ -94,15 +94,33 @@ jobs:
         # disables Sparkle updates -- which stranded a real user (2026-06-10,
         # on 2.45, reinstalling from the website every release). ditto, not
         # cp -R: cp corrupts code-signing seals and symlinks.
+        #
+        # RETRIED, because hdiutil fails transiently on Apple's runners with
+        # "Resource busy": the disk image is still held by the OS when create
+        # runs. It cost a v2.91 release attempt on 2026-08-26 with everything
+        # else already green -- the app had built and its tests had passed, and
+        # the run died wrapping it. Three attempts with a pause between, and the
+        # stage folder rebuilt each time so a half-written image cannot poison
+        # the retry.
         run: |
-          mkdir dmg_stage
-          ditto dist/StarTrailCleanR.app dmg_stage/StarTrailCleanR.app
-          ln -s /Applications dmg_stage/Applications
-          cp "installers/open_me_first_mac.txt" "dmg_stage/Open Me First.txt"
-          hdiutil create -volname "Star Trail CleanR" \
-            -srcfolder dmg_stage \
-            -ov -format UDZO \
-            StarTrailCleanR-Mac-AppleSilicon.dmg
+          for attempt in 1 2 3; do
+            rm -rf dmg_stage "StarTrailCleanR-Mac-AppleSilicon.dmg"
+            mkdir dmg_stage
+            ditto dist/StarTrailCleanR.app dmg_stage/StarTrailCleanR.app
+            ln -s /Applications dmg_stage/Applications
+            cp "installers/open_me_first_mac.txt" "dmg_stage/Open Me First.txt"
+            if hdiutil create -volname "Star Trail CleanR" \
+                 -srcfolder dmg_stage \
+                 -ov -format UDZO \
+                 "StarTrailCleanR-Mac-AppleSilicon.dmg"; then
+              echo "DMG built on attempt $attempt"
+              exit 0
+            fi
+            echo "hdiutil failed on attempt $attempt; waiting before retry"
+            sleep 20
+          done
+          echo "hdiutil failed three times - this is not the usual transient"
+          exit 1
       - uses: actions/upload-artifact@v4
         with:
           name: StarTrailCleanR-Mac
@@ -158,15 +176,33 @@ jobs:
         # Same drag-to-install layout as the Apple Silicon DMG: app icon next
         # to an Applications-folder shortcut, so users install it properly
         # instead of running it off the DMG (which kills Sparkle updates).
+        #
+        # RETRIED, because hdiutil fails transiently on Apple's runners with
+        # "Resource busy": the disk image is still held by the OS when create
+        # runs. It cost a v2.91 release attempt on 2026-08-26 with everything
+        # else already green -- the app had built and its tests had passed, and
+        # the run died wrapping it. Three attempts with a pause between, and the
+        # stage folder rebuilt each time so a half-written image cannot poison
+        # the retry.
         run: |
-          mkdir dmg_stage
-          ditto dist/StarTrailCleanR.app dmg_stage/StarTrailCleanR.app
-          ln -s /Applications dmg_stage/Applications
-          cp "installers/open_me_first_mac.txt" "dmg_stage/Open Me First.txt"
-          hdiutil create -volname "Star Trail CleanR" \
-            -srcfolder dmg_stage \
-            -ov -format UDZO \
-            StarTrailCleanR-Mac-Intel.dmg
+          for attempt in 1 2 3; do
+            rm -rf dmg_stage "StarTrailCleanR-Mac-Intel.dmg"
+            mkdir dmg_stage
+            ditto dist/StarTrailCleanR.app dmg_stage/StarTrailCleanR.app
+            ln -s /Applications dmg_stage/Applications
+            cp "installers/open_me_first_mac.txt" "dmg_stage/Open Me First.txt"
+            if hdiutil create -volname "Star Trail CleanR" \
+                 -srcfolder dmg_stage \
+                 -ov -format UDZO \
+                 "StarTrailCleanR-Mac-Intel.dmg"; then
+              echo "DMG built on attempt $attempt"
+              exit 0
+            fi
+            echo "hdiutil failed on attempt $attempt; waiting before retry"
+            sleep 20
+          done
+          echo "hdiutil failed three times - this is not the usual transient"
+          exit 1
       - uses: actions/upload-artifact@v4
         with:
           name: StarTrailCleanR-Mac-Intel
