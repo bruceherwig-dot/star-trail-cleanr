@@ -866,6 +866,54 @@ def fmt_estimate(seconds):
     return f"{m}m {s}s"
 
 
+def _library_versions():
+    """The versions of the outside libraries whose behaviour can change a RESULT,
+    for the Star Log's technical block.
+
+    WHY IT IS WORTH A LINE. The build installs about fifteen other projects'
+    software, and most of them are asked for by name with no version, so two
+    builds of the same release can legitimately carry different ones. If one of
+    those ever changes what the detector finds, a user's Star Log is the only
+    evidence we get -- and without this it would not say which versions they had.
+    Established 2026-08-26, when a fresh install of the same libraries a few days
+    apart produced PyTorch 2.13.0 where the shipped Windows build carries 2.11.0.
+
+    Reads the version records rather than loading the libraries, so it costs
+    nothing: importing PyTorch alone takes seconds. PyTorch ships no version
+    record inside our frozen app, so its version is read out of the small file it
+    keeps for the purpose. Anything unreadable is simply left out -- a missing
+    line here must never be able to break a run's log.
+    """
+    out = []
+    for label, pkg in (("torch", "torch"), ("opencv", "opencv-contrib-python-headless"),
+                       ("numpy", "numpy"), ("ultralytics", "ultralytics")):
+        v = None
+        try:
+            from importlib.metadata import version as _v
+            v = _v(pkg)
+        except Exception:
+            pass
+        if v is None and pkg == "torch":
+            # Frozen bundles carry torch's own version.py but not its metadata.
+            try:
+                import re as _re
+                for base in (getattr(sys, "_MEIPASS", None), os.path.dirname(__file__)):
+                    if not base:
+                        continue
+                    p = os.path.join(base, "torch", "version.py")
+                    if os.path.isfile(p):
+                        m = _re.search(r"__version__\s*=\s*['\"]([^'\"]+)",
+                                       open(p, encoding="utf-8", errors="replace").read())
+                        if m:
+                            v = m.group(1)
+                            break
+            except Exception:
+                pass
+        if v:
+            out.append(f"{label} {v}")
+    return ", ".join(out)
+
+
 def _is_engine_noise(line):
     """True if `line` is raw library/engine output (warnings, errors,
     tracebacks) that must never reach the user-facing Star Log. A stray
@@ -7093,6 +7141,11 @@ class MainWindow(QMainWindow):
             f"Hardware:              {hw_line}",
             f"Compute device:        {compute_pretty}",
             f"Python:                {_platform.python_version()}",
+        ]
+        _libs = _library_versions()
+        if _libs:
+            lines.append(f"Libraries:             {_libs}")
+        lines += [
             "",
             "================================================",
         ]

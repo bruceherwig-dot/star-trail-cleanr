@@ -2,7 +2,7 @@
 
 **Remove the Trails. Keep the Stars.**
 
-A free desktop app for Mac and Windows that removes airplane and satellite trails from wide-field star trail sequences while preserving the real stars. The result is a clean set of frames you can stack into a perfect star trail composite.
+A free desktop app for Mac, Windows and Linux that removes airplane and satellite trails from wide-field star trail sequences while preserving the real stars. The result is a clean set of frames you can stack into a perfect star trail composite.
 
 Website: [www.startrailcleanr.com](https://www.startrailcleanr.com)
 
@@ -36,7 +36,10 @@ Star Trail CleanR runs in two steps:
 
 ## Quick Start
 
-1. **Browse.** Choose your folder of frames.
+1. **Browse.** Choose your folder of frames. RAW files work directly, including
+   .CR2, .CR3, .NEF, .ARW, .RW2, .ORF, .RAF and .DNG, and so do JPG and TIFF.
+   Feed it RAW where you have it: the app develops the file itself at full bit
+   depth, so nothing is thrown away before the trails come out.
 2. **Mask (optional).** Paint over ground, buildings, and rocks so the AI ignores them. Trees can be left unmasked.
 3. **Format.** Pick output format (JPG / TIFF 8-bit / TIFF 16-bit) and JPEG quality.
 4. **Run.** Sit back. Cleaned frames land in a `cleaned/` folder next to your originals.
@@ -74,7 +77,6 @@ missing from the cleaned folder. The Star Log will say why.
 
 - **Trail variety is bounded by the AI's training data.** If a type of trail isn't being detected well in your sequences, you can help train the next version: zip 300+ frames from that scene and email them to bruceherwig+startrailcleanr@gmail.com. For large folders, share a Dropbox, Google Drive, or WeTransfer link instead. The model gets smarter every time the community contributes.
 - **Meteors will be removed too.** Their streaks look similar to airplane and satellite trails, so the detector cannot tell them apart. If you want to keep them, use your originals to mask them back in.
-- **RAW files (.CR2, .NEF, .ARW, etc.) are not yet supported.** Convert your sequence to JPG or TIFF first, then run Star Trail CleanR on the converted frames.
 - **Not a one-click fix.** You'll still want to touch up the final composite in Photoshop or your editor of choice. But if we did our job right, it's a fraction of the time you used to spend.
 - **Designed for wide-field star trail sequences,** not deep-sky tracked exposures.
 
@@ -108,9 +110,27 @@ Got a before-and-after you'd like to share? Got an idea or feedback to make Star
 
 ---
 
-## Crash Reports
+## Crash Reports and Usage Data
 
-The first time you launch Star Trail CleanR you'll be asked whether you'd like to send anonymous crash reports. If you say yes, the app sends an automatic report (stack trace, operating system, app version) when it crashes, so the bug can be found and fixed. If you say no, nothing is sent. Either way, no images, no folder paths, and no personal information are ever collected.
+The first time you launch Star Trail CleanR it asks one question: may it send
+anonymous crash reports and usage data. You can change your answer any time in
+Settings, and if you say no, nothing is sent at all.
+
+If you say yes, two things go out. When the app crashes it sends the technical
+details of the crash, the operating system and the app version, so the bug can
+be found and fixed. And at the end of a run it sends a short summary of the run
+itself: how many frames, how large, what file format, how long it took, whether
+your graphics card was used, and what the files themselves report about the
+camera, the lens, and the exposure you shot at. That
+summary is what powers the community totals on
+[startrailcleanr.com](https://www.startrailcleanr.com), and it is how a problem
+affecting one kind of camera gets noticed at all.
+
+**Never collected, whatever you choose:** your images, your file or folder
+names, your name, your email, or your location beyond the country. Nothing sent
+is tied to you: the app makes up a random identifier for the install so two runs
+from the same computer can be counted once, and that identifier means nothing to
+anyone, including us.
 
 ---
 

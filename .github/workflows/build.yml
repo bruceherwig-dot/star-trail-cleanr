@@ -45,6 +45,17 @@ jobs:
           pip uninstall -y opencv-python opencv-python-headless opencv-contrib-python opencv-contrib-python-headless || true
           pip install 'opencv-contrib-python-headless==4.11.0.86'
           python -c "import numpy,cv2,sys; print('numpy',numpy.__version__,'cv2',cv2.__version__,'xphoto' if hasattr(cv2,'xphoto') else 'NO-XPHOTO'); sys.exit(0 if (hasattr(cv2,'xphoto') and numpy.__version__[0]=='1') else 1)"
+      # Run the smoke tests ON THE MACHINE THAT BUILDS THE APP, using the
+      # libraries it just installed. Until 2026-08-26 they only ever ran on
+      # Bruce's Mac, on a different Python and different library versions, so we
+      # tested one program and shipped another. That is the shape of the v1.81
+      # failure, where every new install died on Batch 1 while the tests were
+      # green. Costs about three seconds and blocks the build on a failure.
+      - name: Smoke tests on the build machine
+        run: |
+          pip install pyflakes
+          python tests/run_all.py
+
       - name: Bake Sentry DSN
         env:
           SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
@@ -117,6 +128,17 @@ jobs:
           pip uninstall -y opencv-python opencv-python-headless opencv-contrib-python opencv-contrib-python-headless || true
           pip install 'opencv-contrib-python-headless==4.11.0.86'
           python -c "import numpy,cv2,sys; print('numpy',numpy.__version__,'cv2',cv2.__version__,'xphoto' if hasattr(cv2,'xphoto') else 'NO-XPHOTO'); sys.exit(0 if (hasattr(cv2,'xphoto') and numpy.__version__[0]=='1') else 1)"
+      # Run the smoke tests ON THE MACHINE THAT BUILDS THE APP, using the
+      # libraries it just installed. Until 2026-08-26 they only ever ran on
+      # Bruce's Mac, on a different Python and different library versions, so we
+      # tested one program and shipped another. That is the shape of the v1.81
+      # failure, where every new install died on Batch 1 while the tests were
+      # green. Costs about three seconds and blocks the build on a failure.
+      - name: Smoke tests on the build machine
+        run: |
+          pip install pyflakes
+          python tests/run_all.py
+
       - name: Bake Sentry DSN
         env:
           SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
@@ -179,6 +201,17 @@ jobs:
         # torch version this build ships, using the app's own URL builder so it
         # tests exactly what users will request. Fails the build on a dead link.
         run: python scripts/check_gpu_wheels.py
+      # Run the smoke tests ON THE MACHINE THAT BUILDS THE APP, using the
+      # libraries it just installed. Until 2026-08-26 they only ever ran on
+      # Bruce's Mac, on a different Python and different library versions, so we
+      # tested one program and shipped another. That is the shape of the v1.81
+      # failure, where every new install died on Batch 1 while the tests were
+      # green. Costs about three seconds and blocks the build on a failure.
+      - name: Smoke tests on the build machine
+        run: |
+          pip install pyflakes
+          python tests/run_all.py
+
       - name: Bake Sentry DSN
         env:
           SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
@@ -297,6 +330,17 @@ jobs:
           pip uninstall -y opencv-python opencv-python-headless opencv-contrib-python opencv-contrib-python-headless || true
           pip install 'opencv-contrib-python-headless==4.11.0.86'
           python -c "import numpy,cv2,sys; print('numpy',numpy.__version__,'cv2',cv2.__version__,'xphoto' if hasattr(cv2,'xphoto') else 'NO-XPHOTO'); sys.exit(0 if (hasattr(cv2,'xphoto') and numpy.__version__[0]=='1') else 1)"
+      # Run the smoke tests ON THE MACHINE THAT BUILDS THE APP, using the
+      # libraries it just installed. Until 2026-08-26 they only ever ran on
+      # Bruce's Mac, on a different Python and different library versions, so we
+      # tested one program and shipped another. That is the shape of the v1.81
+      # failure, where every new install died on Batch 1 while the tests were
+      # green. Costs about three seconds and blocks the build on a failure.
+      - name: Smoke tests on the build machine
+        run: |
+          pip install pyflakes
+          python tests/run_all.py
+
       - name: Bake Sentry DSN
         env:
           SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
