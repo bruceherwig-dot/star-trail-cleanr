@@ -23,7 +23,7 @@ sys.path.insert(0, str(REPO))
 
 
 def _worker_src():
-    return (REPO / "astro_clean_v5.py").read_text()
+    return (REPO / "astro_clean_v5.py").read_text(encoding="utf-8")
 
 
 def test_same_shape_mask_is_scaled_not_refused():
@@ -61,7 +61,7 @@ def test_aspect_tolerance_matches_the_field_case():
 
 
 def test_mask_editor_paints_on_the_majority_resolution():
-    src = (REPO / "star_trail_cleanr.py").read_text()
+    src = (REPO / "star_trail_cleanr.py").read_text(encoding="utf-8")
     i = src.index("def _open_mask_editor")
     body = src[i:i + 4000]
     assert "image_size" in body, (

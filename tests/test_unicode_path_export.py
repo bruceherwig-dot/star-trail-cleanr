@@ -103,7 +103,7 @@ def test_no_shipping_code_writes_images_with_bare_cv2():
         f = REPO / rel
         if not f.exists() or f.name == "io_safe.py":
             continue          # io_safe IS the wrapper; it calls cv2 on purpose
-        for n, line in enumerate(f.read_text().splitlines(), 1):
+        for n, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
             code = line.split("#")[0]
             if "cv2.imwrite" in code and "robust_imwrite" not in code:
                 offenders.append(f"{rel}:{n}")

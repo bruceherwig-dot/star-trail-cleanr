@@ -61,7 +61,7 @@ def test_both_guards_name_httpexception():
     # Lock the fix in the source too, so a future refactor of the except tuple
     # cannot silently drop the IncompleteRead family and reopen the crash.
     for fname in ("update_check.py", "model_update.py"):
-        src = (REPO / "modules" / fname).read_text()
+        src = (REPO / "modules" / fname).read_text(encoding="utf-8")
         assert "http.client.HTTPException" in src, \
             f"{fname} must catch http.client.HTTPException (covers IncompleteRead)"
 

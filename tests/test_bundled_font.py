@@ -34,13 +34,13 @@ def test_ofl_license_present():
     license alongside the binaries. Missing this is a license violation."""
     lic = REPO / "assets" / "fonts" / "Inter-LICENSE.txt"
     assert lic.exists(), "missing assets/fonts/Inter-LICENSE.txt"
-    text = lic.read_text()
+    text = lic.read_text(encoding="utf-8")
     assert "SIL Open Font License" in text, \
         "Inter-LICENSE.txt does not look like the OFL we shipped"
 
 
 def test_startup_loads_inter_and_sets_app_font():
-    src = (REPO / "star_trail_cleanr.py").read_text()
+    src = (REPO / "star_trail_cleanr.py").read_text(encoding="utf-8")
     assert "QFontDatabase.addApplicationFont" in src, \
         "GUI must register Inter via addApplicationFont at startup"
     assert "Inter-Regular.ttf" in src and "Inter-Bold.ttf" in src, \
@@ -55,7 +55,7 @@ def test_html_widgets_use_inter_first():
     """The FAQ and About panels render HTML in QTextBrowser. Their CSS must
     list Inter first so they match the rest of the app, with platform fonts
     as fallback if Inter ever fails to load."""
-    src = (REPO / "star_trail_cleanr.py").read_text()
+    src = (REPO / "star_trail_cleanr.py").read_text(encoding="utf-8")
     assert "font-family: Inter," in src, \
         "HTML body styles must list Inter as the first font-family entry"
     assert "font-family: -apple-system, sans-serif" not in src, \

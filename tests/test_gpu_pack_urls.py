@@ -57,7 +57,7 @@ def test_version_lock_matches_pin_and_known_good():
     through as a quiet one-line edit in build.yml.
     """
     from modules.gpu_pack import GPU_PACK_TORCH_LOCK, _KNOWN_GOOD_CU128
-    workflow = (REPO / ".github" / "workflows" / "build.yml").read_text()
+    workflow = (REPO / ".github" / "workflows" / "build.yml").read_text(encoding="utf-8")
     m = re.search(r"pip install torch==([\d.]+) torchvision==([\d.]+) "
                   r"--index-url https://download\.pytorch\.org/whl/cpu", workflow)
     assert m, "could not find the pinned Windows torch install line in build.yml"
@@ -76,7 +76,7 @@ def test_known_good_first_matches_ci_pin():
     list doesn't know about. Cross-checks the two so they can't drift apart."""
     from modules.gpu_pack import _KNOWN_GOOD_CU128
     pin_torch, pin_tv = _KNOWN_GOOD_CU128[0]
-    workflow = (REPO / ".github" / "workflows" / "build.yml").read_text()
+    workflow = (REPO / ".github" / "workflows" / "build.yml").read_text(encoding="utf-8")
     m = re.search(r"pip install torch==([\d.]+) torchvision==([\d.]+) "
                   r"--index-url https://download\.pytorch\.org/whl/cpu", workflow)
     assert m, "could not find the pinned Windows torch install line in build.yml"

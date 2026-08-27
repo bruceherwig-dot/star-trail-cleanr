@@ -79,8 +79,8 @@ def test_incomplete_download_leaves_the_working_pack_alone():
         ok, err = swap_staged_into_place()
         assert not ok, "an incomplete download must never be swapped in"
         assert err, "a refusal must come with a reason"
-        assert (live / "torch" / "which.txt").read_text() == "working"
-        assert (live / "torchvision" / "which.txt").read_text() == "working"
+        assert (live / "torch" / "which.txt").read_text(encoding="utf-8") == "working"
+        assert (live / "torchvision" / "which.txt").read_text(encoding="utf-8") == "working"
         assert (live / "torch_version.txt").is_file()
 
 
@@ -94,8 +94,8 @@ def test_complete_download_replaces_the_old_pack():
 
         ok, err = swap_staged_into_place()
         assert ok, f"a complete download should swap in cleanly: {err}"
-        assert (live / "torch" / "which.txt").read_text() == "new"
-        assert (live / "torchvision" / "which.txt").read_text() == "new"
+        assert (live / "torch" / "which.txt").read_text(encoding="utf-8") == "new"
+        assert (live / "torchvision" / "which.txt").read_text(encoding="utf-8") == "new"
         assert not get_staging_dir().exists(), "staging should be consumed by the swap"
         assert not get_backup_dir().exists(), "the old pack should be cleaned up"
 
@@ -107,14 +107,14 @@ def test_first_ever_install_needs_no_existing_pack():
         _make_pack(get_staging_dir(), "first")
         ok, err = swap_staged_into_place()
         assert ok, f"a first install should succeed: {err}"
-        assert (get_override_dir() / "torch" / "which.txt").read_text() == "first"
+        assert (get_override_dir() / "torch" / "which.txt").read_text(encoding="utf-8") == "first"
 
 
 def test_installer_refuses_a_version_the_app_wont_load():
     """The installer must not fall back to an older torch version. The runtime
     hook only loads a pack matching the running build, so a substituted version
     would mean a ~4 GB download the app then ignores at every launch."""
-    src = (REPO / "star_trail_cleanr.py").read_text()
+    src = (REPO / "star_trail_cleanr.py").read_text(encoding="utf-8")
     start = src.index("class GpuPackInstallThread")
     end = src.index("class _XCloseButton")
     body = src[start:end]

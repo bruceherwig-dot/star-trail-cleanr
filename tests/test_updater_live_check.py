@@ -20,7 +20,7 @@ sys.path.insert(0, str(REPO))
 
 
 def test_app_has_the_live_check_mode():
-    src = (REPO / "star_trail_cleanr.py").read_text()
+    src = (REPO / "star_trail_cleanr.py").read_text(encoding="utf-8")
     assert "STC_UPDATER_CHECK" in src, "the built app must expose the live-check mode"
     block = src[src.index("STC_UPDATER_CHECK"):][:2000]
     assert "check_for_updates_quiet" in block, "it must run a real check"
@@ -32,7 +32,7 @@ def test_exit_codes_distinguish_the_outcomes():
     """A Windows GUI program detaches from the console, so printed output never
     reaches the CI log. The exit code is the only channel that survives, and the
     interesting cases must not collapse into one number."""
-    src = (REPO / "star_trail_cleanr.py").read_text()
+    src = (REPO / "star_trail_cleanr.py").read_text(encoding="utf-8")
     m = re.search(r'"found":\s*(\d+),\s*"up-to-date":\s*(\d+),\s*"error":\s*(\d+)'
                   r'\s*\}\s*\.get\(\s*_outcome\s*,\s*(\d+)\s*\)', src)
     assert m, "expected the outcome-to-exit-code mapping"
@@ -43,7 +43,7 @@ def test_exit_codes_distinguish_the_outcomes():
 
 
 def test_ci_runs_the_live_check_on_windows_and_blocks():
-    workflow = (REPO / ".github" / "workflows" / "build.yml").read_text()
+    workflow = (REPO / ".github" / "workflows" / "build.yml").read_text(encoding="utf-8")
     assert "STC_UPDATER_CHECK" in workflow, "CI must run the live check"
     assert "Updater live-check gate" in workflow, "the step needs a findable name"
     step = workflow[workflow.index("Updater live-check gate"):][:1800]
@@ -65,7 +65,7 @@ def test_appcast_url_is_passed_narrow():
     check failed instantly for every user while the dialog blamed their
     connection. Proven and fixed 2026-07-27 on a clean CI machine.
     """
-    src = (REPO / "modules" / "winsparkle_updater.py").read_text()
+    src = (REPO / "modules" / "winsparkle_updater.py").read_text(encoding="utf-8")
     assert re.search(r"win_sparkle_set_appcast_url\.argtypes\s*=\s*"
                      r"\[ctypes\.c_char_p\]", src), (
         "win_sparkle_set_appcast_url must be declared c_char_p (narrow); "
@@ -76,7 +76,7 @@ def test_appcast_url_is_passed_narrow():
 
 def test_the_live_check_uses_the_feed_users_actually_read():
     """Checking a different feed than shipped users read would prove nothing."""
-    src = (REPO / "star_trail_cleanr.py").read_text()
+    src = (REPO / "star_trail_cleanr.py").read_text(encoding="utf-8")
     m = re.search(r'appcast_url="([^"]+)"', src)
     assert m, "could not find the Windows feed URL"
     assert m.group(1).startswith("https://"), m.group(1)

@@ -25,7 +25,7 @@ from pathlib import Path
 REPO = Path(__file__).parent.parent
 sys.path.insert(0, str(REPO))
 
-ENGINE = (REPO / "astro_clean_v5.py").read_text()
+ENGINE = (REPO / "astro_clean_v5.py").read_text(encoding="utf-8")
 
 
 def test_every_timed_stage_is_printed_even_without_a_row():
@@ -61,7 +61,7 @@ def test_prune_phantoms_really_is_enabled_in_the_real_run():
 def test_the_pipeline_stage_list_and_the_summary_cannot_drift_silently():
     """Every stage detect_frame can run should either have a row or be caught by
     the catch-all. This checks the catch-all exists for the ones without rows."""
-    pipeline = (REPO / "modules" / "detect_pipeline.py").read_text()
+    pipeline = (REPO / "modules" / "detect_pipeline.py").read_text(encoding="utf-8")
     stages = set(re.findall(r'with flog\.stage\("([a-z_]+)"\)', pipeline))
     assert stages, "could not find the pipeline's stages"
     rows = set(re.findall(r'\("dp_([a-z_]+)_s"', ENGINE))

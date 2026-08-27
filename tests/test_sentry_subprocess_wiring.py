@@ -25,7 +25,7 @@ sys.path.insert(0, str(REPO))
 
 
 def _read(p: str) -> str:
-    return (REPO / p).read_text()
+    return (REPO / p).read_text(encoding="utf-8")
 
 
 def test_worker_initializes_sentry_only_when_dsn_env_var_present():

@@ -34,8 +34,8 @@ import numpy as np
 REPO = Path(__file__).parent.parent
 sys.path.insert(0, str(REPO))
 
-GROUPER = (REPO / "modules" / "trail_grouper.py").read_text()
-PIPELINE = (REPO / "modules" / "detect_pipeline.py").read_text()
+GROUPER = (REPO / "modules" / "trail_grouper.py").read_text(encoding="utf-8")
+PIPELINE = (REPO / "modules" / "detect_pipeline.py").read_text(encoding="utf-8")
 
 
 def _strip_comments(src):

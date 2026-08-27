@@ -110,8 +110,8 @@ def test_normal_tiffs_are_untouched():
 def test_handled_image_library_logging_is_not_reported_as_a_crash():
     """Pillow's refusals are expected (io_safe tries readers in turn), so they
     must not reach Sentry as events in either process."""
-    gui = (REPO / "star_trail_cleanr.py").read_text()
-    worker = (REPO / "astro_clean_v5.py").read_text()
+    gui = (REPO / "star_trail_cleanr.py").read_text(encoding="utf-8")
+    worker = (REPO / "astro_clean_v5.py").read_text(encoding="utf-8")
     for name, src in (("star_trail_cleanr.py", gui), ("astro_clean_v5.py", worker)):
         assert "ignore_logger" in src, f"{name} must silence handled PIL logging"
         assert '"PIL"' in src or "'PIL'" in src, (

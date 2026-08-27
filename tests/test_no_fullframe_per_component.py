@@ -41,7 +41,7 @@ def _function_body(text, name, code_only=True):
 
 
 def test_phantom_pruning_slices_to_the_bounding_box():
-    src = (REPO / "modules" / "detect_pipeline.py").read_text()
+    src = (REPO / "modules" / "detect_pipeline.py").read_text(encoding="utf-8")
     body = _function_body(src, "stage_prune_phantoms")
     assert "CC_STAT_LEFT" in body and "CC_STAT_TOP" in body, (
         "the per-component loop must slice to the component's bounding box; "
@@ -53,7 +53,7 @@ def test_phantom_pruning_slices_to_the_bounding_box():
 
 
 def test_the_speck_fill_still_slices_too():
-    src = (REPO / "modules" / "sky_dots.py").read_text()
+    src = (REPO / "modules" / "sky_dots.py").read_text(encoding="utf-8")
     body = _function_body(src, "_fill_specks")
     assert "CC_STAT_LEFT" in body, \
         "the speck fill must keep working inside each blob's bounding box"
@@ -64,7 +64,7 @@ def test_the_speck_fill_still_slices_too():
 def test_the_cheap_test_comes_first():
     """A component too short to matter should be rejected before any pixel work.
     Ordering the tests cheapest-first is free and skips most components."""
-    src = (REPO / "modules" / "detect_pipeline.py").read_text()
+    src = (REPO / "modules" / "detect_pipeline.py").read_text(encoding="utf-8")
     body = _function_body(src, "stage_prune_phantoms")
     i_extent = body.index("_PHANTOM_MIN_EXTENT")
     i_slice = body.index("CC_STAT_LEFT")

@@ -70,6 +70,6 @@ def test_missing_originals_are_dropped_loudly_not_silently():
 
 
 def test_panel_passes_match_cleaned_for_original_source():
-    src = (REPO / "star_trail_cleanr.py").read_text()
+    src = (REPO / "star_trail_cleanr.py").read_text(encoding="utf-8")
     assert "--match-cleaned" in src, \
         "the Star Trail tab must request shot matching when stacking originals"

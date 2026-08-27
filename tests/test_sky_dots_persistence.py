@@ -179,7 +179,7 @@ def test_a_sequence_whose_motion_cannot_be_read_loses_no_stars():
     wrong pixels and would condemn stars. Removing nothing beats that."""
     from modules import sky_dots
 
-    src = (REPO / "modules" / "sky_dots.py").read_text()
+    src = (REPO / "modules" / "sky_dots.py").read_text(encoding="utf-8")
     i = src.index("def _sky_motion")
     body = src[i:i + 3000]
     assert "return None" in body, "an unreadable motion fit must bail, not guess"
@@ -214,7 +214,7 @@ def test_sky_glow_is_not_mistaken_for_a_stuck_pixel():
 
 def test_the_blob_pass_actually_consults_the_frames():
     """Guard the wiring: the check is worthless if the pass stops calling it."""
-    src = (REPO / "modules" / "sky_dots.py").read_text()
+    src = (REPO / "modules" / "sky_dots.py").read_text(encoding="utf-8")
     i = src.index("def _detect_map")
     body = src[i:i + 6000]
     assert "_persistence_count" in body, \

@@ -200,18 +200,18 @@ def test_the_engine_announces_the_device_it_really_used():
     from pathlib import Path
     repo = Path(__file__).parent.parent
 
-    engine = (repo / "astro_clean_v5.py").read_text()
+    engine = (repo / "astro_clean_v5.py").read_text(encoding="utf-8")
     assert "STC_DEVICE:" in engine, \
         "the engine must report the device it actually loaded the model on"
     assert "Using your NVIDIA graphics card" in engine, \
         "the engine must confirm success in plain words, not only warn on failure"
 
-    detect = (repo / "modules" / "detect_trails.py").read_text()
+    detect = (repo / "modules" / "detect_trails.py").read_text(encoding="utf-8")
     assert "return model, device" in detect, \
         "load_model must hand back the device it ended up on, including after a " \
         "silent fallback to the processor"
 
-    app = (repo / "star_trail_cleanr.py").read_text()
+    app = (repo / "star_trail_cleanr.py").read_text(encoding="utf-8")
     assert "_worker_device" in app, \
         "the app must record what the engine reported"
     assert "STC_DEVICE:" in app, \
@@ -221,7 +221,7 @@ def test_the_engine_announces_the_device_it_really_used():
 def test_the_usage_report_states_the_engines_device_not_a_guess():
     """Otherwise the numbers we make decisions from are about the wrong process."""
     from pathlib import Path
-    app = (Path(__file__).parent.parent / "star_trail_cleanr.py").read_text()
+    app = (Path(__file__).parent.parent / "star_trail_cleanr.py").read_text(encoding="utf-8")
     i = app.find('_ugpu = ')
     assert i > 0, "the usage report's gpu field vanished"
     window = app[i - 400:i + 400]
@@ -242,7 +242,7 @@ def test_the_header_badge_is_corrected_by_the_engine():
     because he would have believed it.
     """
     from pathlib import Path
-    app = (Path(__file__).parent.parent / "star_trail_cleanr.py").read_text()
+    app = (Path(__file__).parent.parent / "star_trail_cleanr.py").read_text(encoding="utf-8")
 
     assert "device_in_use = Signal(str)" in app, \
         "the worker must be able to tell the window which device it really used"

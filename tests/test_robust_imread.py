@@ -173,7 +173,7 @@ def test_robust_imwrite_handles_grayscale_and_uint16():
 def test_production_writes_use_robust_imwrite():
     """Lock in v1.992: every cv2.imwrite call site in production code now
     routes through robust_imwrite so non-ASCII output paths are safe."""
-    text = (REPO / "astro_clean_v5.py").read_text()
+    text = (REPO / "astro_clean_v5.py").read_text(encoding="utf-8")
     assert "robust_imwrite(args.hot_pixel_map" in text, (
         "hot-pixel-map write regressed to bare cv2.imwrite — would fail "
         "on Windows with non-ASCII folder paths"
@@ -181,7 +181,7 @@ def test_production_writes_use_robust_imwrite():
     assert "robust_imwrite(masks_dir" in text, (
         "saved-mask write regressed to bare cv2.imwrite"
     )
-    gui_text = (REPO / "star_trail_cleanr.py").read_text()
+    gui_text = (REPO / "star_trail_cleanr.py").read_text(encoding="utf-8")
     assert "robust_imwrite(mask_path, mask_np)" in gui_text, (
         "foreground-mask write regressed to bare cv2.imwrite"
     )
@@ -256,7 +256,7 @@ def test_grayscale_flag_through_tifffile_fallback():
 def test_production_callsites_use_robust_imread():
     """Lock in the Warren v1.98 fix: the frame-load loop and 16-bit hot
     pixel reload must use the wrapper, not bare cv2.imread."""
-    text = (REPO / "astro_clean_v5.py").read_text()
+    text = (REPO / "astro_clean_v5.py").read_text(encoding="utf-8")
     assert "from modules.io_safe import robust_imread, robust_imread_diag" in text, (
         "astro_clean_v5.py no longer imports the io_safe helpers"
     )
@@ -268,7 +268,7 @@ def test_production_callsites_use_robust_imread():
         "16-bit hot-pixel reload regressed to bare cv2.imread"
     )
 
-    dt_text = (REPO / "modules" / "detect_trails.py").read_text()
+    dt_text = (REPO / "modules" / "detect_trails.py").read_text(encoding="utf-8")
     assert "from .io_safe import robust_imread" in dt_text, (
         "modules/detect_trails.py no longer imports robust_imread"
     )
@@ -281,7 +281,7 @@ def test_worker_prompts_gui_on_unreadable_file():
     """The worker must hand the bad-file decision to the GUI rather than
     silently skipping or sys.exit-ing. Lock in the sentinel + stdin protocol
     so the GUI can show the user a real modal."""
-    text = (REPO / "astro_clean_v5.py").read_text()
+    text = (REPO / "astro_clean_v5.py").read_text(encoding="utf-8")
     assert "STC_BAD_FILE_PROMPT:" in text, (
         "worker no longer emits the bad-file prompt sentinel — GUI can't "
         "show a modal without it"
@@ -306,7 +306,7 @@ def test_worker_captures_unreadable_files_to_sentry():
     diagnostic data even from users who never email us. Fingerprint must be
     set so a tester with many bad files doesn't flood the Sentry inbox with
     distinct issues."""
-    text = (REPO / "astro_clean_v5.py").read_text()
+    text = (REPO / "astro_clean_v5.py").read_text(encoding="utf-8")
     assert "_capture_unreadable_file_to_sentry" in text, (
         "Sentry capture helper is missing — we'd never see these failures"
     )
@@ -322,7 +322,7 @@ def test_worker_captures_unreadable_files_to_sentry():
 
 def test_gui_wires_bad_file_dialog():
     """The GUI side of the dialog protocol: signal, slot, stdin response."""
-    text = (REPO / "star_trail_cleanr.py").read_text()
+    text = (REPO / "star_trail_cleanr.py").read_text(encoding="utf-8")
     assert "bad_file_prompt = Signal(str, str)" in text, (
         "CleanerWorker is missing the bad_file_prompt signal"
     )
@@ -364,7 +364,7 @@ def test_frames_filter_prompt_wired():
     resolutions or with unreadable headers, it must surface a modal so
     the user knows what's about to be skipped before the run starts.
     Lock in the signal, the slot, the wiring, and the abort path."""
-    text = (REPO / "star_trail_cleanr.py").read_text()
+    text = (REPO / "star_trail_cleanr.py").read_text(encoding="utf-8")
     assert "frames_filter_prompt = Signal(dict)" in text, (
         "CleanerWorker is missing the frames_filter_prompt signal"
     )
@@ -388,7 +388,7 @@ def test_frames_filter_prompt_wired():
 
 def test_run_summary_includes_skipped_count_when_present():
     """If frames were skipped, the saved run summary text must say so."""
-    text = (REPO / "star_trail_cleanr.py").read_text()
+    text = (REPO / "star_trail_cleanr.py").read_text(encoding="utf-8")
     assert "_run_filter_info" in text, (
         "MainWindow no longer remembers the filter info for the run summary"
     )
@@ -403,7 +403,7 @@ def test_run_summary_appends_star_log_with_head_tail_trim():
     is enough to diagnose any run issue. For very large runs the log is
     trimmed head+tail so the file stays human-scrollable; small logs
     pass through whole."""
-    text = (REPO / "star_trail_cleanr.py").read_text()
+    text = (REPO / "star_trail_cleanr.py").read_text(encoding="utf-8")
     assert "self._status_out.toPlainText()" in text, (
         "run summary writer no longer reads the live log widget"
     )
@@ -434,7 +434,7 @@ def test_alpha_channel_tiff_stripped_in_loading_loop():
     import tifffile
 
     # Structural: confirm the strip is wired into the loader
-    text = (REPO / "astro_clean_v5.py").read_text()
+    text = (REPO / "astro_clean_v5.py").read_text(encoding="utf-8")
     assert "img.shape[2] == 4" in text, (
         "alpha-channel stripping is missing from the frame loader — "
         "4-channel TIFFs will crash Star Bridge repair"
@@ -478,13 +478,13 @@ def test_gui_scan_uses_tifffile_fallback_for_unreadable_tiffs():
     # must mirror the worker's reader ladder (PIL, then tifffile for TIFFs PIL
     # can't parse, plus rawpy for RAW) so files we can actually process don't
     # land in the unreadable bucket.
-    gui = (REPO / "star_trail_cleanr.py").read_text()
+    gui = (REPO / "star_trail_cleanr.py").read_text(encoding="utf-8")
     assert "from modules.io_safe import image_size" in gui, (
         "GUI pre-flight scan no longer uses the shared image_size() helper — "
         "the size scan may diverge from the worker's reader coverage"
     )
 
-    io_src = (REPO / "modules" / "io_safe.py").read_text()
+    io_src = (REPO / "modules" / "io_safe.py").read_text(encoding="utf-8")
     start = io_src.index("def image_size(")
     end = io_src.index("def robust_imwrite(", start)
     fn_src = io_src[start:end]

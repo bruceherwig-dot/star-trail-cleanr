@@ -24,7 +24,7 @@ from pathlib import Path
 REPO = Path(__file__).parent.parent
 sys.path.insert(0, str(REPO))
 
-SRC = (REPO / "star_trail_cleanr.py").read_text()
+SRC = (REPO / "star_trail_cleanr.py").read_text(encoding="utf-8")
 
 
 def _pos(needle):
@@ -130,7 +130,7 @@ def test_a_batch_of_the_right_frames_survives_the_loader():
 
 def test_the_engine_says_why_a_batch_came_up_empty():
     """The message a user sees must name the cause, not just the count."""
-    worker = (REPO / "astro_clean_v5.py").read_text()
+    worker = (REPO / "astro_clean_v5.py").read_text(encoding="utf-8")
     i = worker.find("if n < 3:")
     assert i > 0, "the frame-count guard vanished"
     body = worker[i:i + 1200]

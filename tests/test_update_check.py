@@ -138,7 +138,7 @@ def test_pre_window_check_respects_per_version_dismissal():
     popup nor the in-app orange banner should appear again until a newer
     tag ships. Both code paths must read AND write the same QSettings key
     so they share state."""
-    src = (REPO / "star_trail_cleanr.py").read_text()
+    src = (REPO / "star_trail_cleanr.py").read_text(encoding="utf-8")
 
     # The pre-window popup checks the dismissed tag before showing.
     pre = src[src.index("def _pre_window_update_check"):src.index("def _handle_launch_failure")]

@@ -113,7 +113,7 @@ def test_collapsing_back_returns_the_original_pixels():
 def test_the_engine_still_has_both_greyscale_write_branches():
     """Guard the writer wiring itself: the greyscale branch must exist in both
     TIFF paths, or the fix silently reverts to 3x-size colour output."""
-    engine = (REPO / "astro_clean_v5.py").read_text()
+    engine = (REPO / "astro_clean_v5.py").read_text(encoding="utf-8")
     assert "_grey_plane" in engine, "the greyscale collapse helper is gone"
     assert "minisblack" in engine, (
         "the 16-bit TIFF writer no longer has a greyscale photometric; a mono "

@@ -16,29 +16,29 @@ def test_iss_file_exists():
 
 
 def test_iss_references_pyinstaller_output():
-    text = ISS.read_text()
+    text = ISS.read_text(encoding="utf-8")
     assert "dist\\StarTrailCleanR\\*" in text, \
         "Installer script does not reference dist\\StarTrailCleanR\\* as source"
 
 
 def test_iss_uses_version_placeholder():
-    text = ISS.read_text()
+    text = ISS.read_text(encoding="utf-8")
     assert "{#AppVersion}" in text, "Installer script does not use {#AppVersion} placeholder"
 
 
 def test_iss_references_app_icon():
-    text = ISS.read_text()
+    text = ISS.read_text(encoding="utf-8")
     assert "StarTrailCleanR.ico" in text, "Installer script does not reference the app icon"
 
 
 def test_workflow_invokes_inno_setup():
-    text = WORKFLOW.read_text().lower()
+    text = WORKFLOW.read_text(encoding="utf-8").lower()
     assert "innosetup" in text or "iscc" in text, \
         "build.yml does not install or invoke Inno Setup"
 
 
 def test_workflow_uploads_setup_zip():
-    text = WORKFLOW.read_text()
+    text = WORKFLOW.read_text(encoding="utf-8")
     assert "StarTrailCleanRSetup.zip" in text, \
         "build.yml does not reference the Setup.zip artifact"
 
@@ -47,7 +47,7 @@ def test_workflow_wraps_installer_in_zip():
     # Edge SmartScreen quarantines unsigned .exe downloads behind a hidden
     # Keep dropdown. Wrapping the installer in a zip skips that gate.
     # Regressing this back to a bare .exe upload would break the user UX.
-    text = WORKFLOW.read_text()
+    text = WORKFLOW.read_text(encoding="utf-8")
     assert "Compress-Archive" in text, \
         "build.yml is missing the Compress-Archive step that wraps the installer in a zip"
     assert "StarTrailCleanRSetup.zip" in text, \
@@ -57,7 +57,7 @@ def test_workflow_wraps_installer_in_zip():
 def test_iss_parameterizes_output_name():
     """The .iss supports /DOutputName= override so variant installers
     (e.g. StarTrailCleanRSetup-NVIDIA) can reuse the same script."""
-    text = ISS.read_text()
+    text = ISS.read_text(encoding="utf-8")
     assert "#ifndef OutputName" in text or "#define OutputName" in text, \
         "Installer script does not define OutputName as an overridable symbol"
     assert "OutputBaseFilename={#OutputName}" in text, \
@@ -68,7 +68,7 @@ def test_workflow_has_mac_intel_build():
     """Intel Mac build job present, runs on Intel runner, produces its own DMG.
     DMG instead of ZIP because macOS App Translocation silently disables
     Sparkle auto-updates when the .app is launched from a downloaded ZIP."""
-    text = WORKFLOW.read_text()
+    text = WORKFLOW.read_text(encoding="utf-8")
     assert "build-mac-intel:" in text, "build.yml is missing the Mac Intel build job"
     assert "macos-15-intel" in text or "macos-26-intel" in text, \
         "Mac Intel job does not select an Intel macOS runner"
@@ -79,7 +79,7 @@ def test_workflow_has_mac_intel_build():
 def test_workflow_has_linux_build():
     """Linux build job present, pinned to ubuntu-22.04 (not -latest) so the binary
     works on older distros, and produces a tar.gz to preserve the exec bit."""
-    text = WORKFLOW.read_text()
+    text = WORKFLOW.read_text(encoding="utf-8")
     assert "build-linux:" in text, "build.yml is missing the Linux build job"
     assert "ubuntu-22.04" in text, \
         "Linux job is not pinned to ubuntu-22.04 (would break older-distro support)"
@@ -94,7 +94,7 @@ def test_release_job_includes_all_four_artifacts():
     per-file asset cap. When NVIDIA comes back (todo #1), add its filename
     here and rename this test accordingly.
     """
-    text = WORKFLOW.read_text()
+    text = WORKFLOW.read_text(encoding="utf-8")
     for needed in (
         "StarTrailCleanR-Mac-AppleSilicon.dmg",
         "StarTrailCleanR-Mac-Intel.dmg",
@@ -109,7 +109,7 @@ def test_build_helper_strips_unused_cuda_libs():
     the pipeline is single-GPU and reads images via OpenCV on the CPU. Ensure the
     build cleanup keeps targeting them."""
     build_helper = REPO / "build_helper.py"
-    text = build_helper.read_text()
+    text = build_helper.read_text(encoding="utf-8")
     for token in ("nccl", "nvjpeg"):
         assert token in text.lower(), \
             f"build_helper.py does not reference {token} for CUDA library cleanup"

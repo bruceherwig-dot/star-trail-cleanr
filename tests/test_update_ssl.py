@@ -30,15 +30,15 @@ def test_model_update_context_verifies_against_certifi():
 
 
 def test_both_checks_pass_the_context_to_urlopen():
-    uc = (REPO / "modules" / "update_check.py").read_text()
-    mu = (REPO / "modules" / "model_update.py").read_text()
+    uc = (REPO / "modules" / "update_check.py").read_text(encoding="utf-8")
+    mu = (REPO / "modules" / "model_update.py").read_text(encoding="utf-8")
     for src, name in ((uc, "update_check.py"), (mu, "model_update.py")):
         assert "context=_verified_ssl_context()" in src, \
             f"{name} must pass the verified context to urlopen"
 
 
 def test_certifi_is_collected_in_the_frozen_build():
-    bh = (REPO / "build_helper.py").read_text()
+    bh = (REPO / "build_helper.py").read_text(encoding="utf-8")
     assert "'--collect-all', 'certifi'" in bh, \
         "build_helper must --collect-all certifi so the CA bundle ships in the frozen app"
 
@@ -49,7 +49,7 @@ def test_sparkle_delegate_has_no_bool_arg_selector_without_signature():
     # whole app whenever Sparkle showed an update (v2.56-v2.57 regression, fixed v2.58).
     # It must NOT be defined as a plain method again. If re-added, it needs an explicit
     # objc.selector signature (BOOL encoding is arch-specific). Guard against the naive form.
-    src = (REPO / "modules" / "sparkle_updater.py").read_text()
+    src = (REPO / "modules" / "sparkle_updater.py").read_text(encoding="utf-8")
     if "def standardUserDriverWillHandleShowingUpdate_forUpdate_state_" in src:
         assert "objc.selector" in src, \
             "the BOOL-arg Sparkle delegate method must carry an objc.selector signature"

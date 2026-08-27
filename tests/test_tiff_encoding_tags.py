@@ -44,7 +44,7 @@ ENCODING_TAGS = {
 def _strip_list_from_source():
     """The real set the engine strips, read out of the source so the test cannot
     drift away from the code it is defending."""
-    src = (REPO / "astro_clean_v5.py").read_text()
+    src = (REPO / "astro_clean_v5.py").read_text(encoding="utf-8")
     i = src.index("_TIFF_STRUCTURAL = {")
     block = src[i:src.index("}", i)]
     tags = set()

@@ -150,7 +150,7 @@ def test_mixed_batch_normalizes_to_uniform_dtype():
 # ── source guards: old crash gone, new wiring present ──────────────────────
 
 def test_old_hard_stop_message_removed():
-    text = (REPO / "astro_clean_v5.py").read_text()
+    text = (REPO / "astro_clean_v5.py").read_text(encoding="utf-8")
     assert "mixes 8-bit and 16-bit images" not in text, (
         "The old hard-stop that aborted the run on a mixed-depth folder is back. "
         "Mixed depth must be evened out, not refused."
@@ -158,7 +158,7 @@ def test_old_hard_stop_message_removed():
 
 
 def test_worker_accepts_expected_bitdepth_flag():
-    text = (REPO / "astro_clean_v5.py").read_text()
+    text = (REPO / "astro_clean_v5.py").read_text(encoding="utf-8")
     assert '"--expected-bitdepth"' in text, (
         "astro_clean_v5.py no longer defines --expected-bitdepth; the GUI relies "
         "on it to pin the sequence-wide target depth."
@@ -166,7 +166,7 @@ def test_worker_accepts_expected_bitdepth_flag():
 
 
 def test_gui_passes_expected_bitdepth():
-    text = (REPO / "star_trail_cleanr.py").read_text()
+    text = (REPO / "star_trail_cleanr.py").read_text(encoding="utf-8")
     assert "--expected-bitdepth" in text, (
         "The GUI no longer passes --expected-bitdepth to the worker, so batches "
         "would each guess their own target and could disagree across a run."

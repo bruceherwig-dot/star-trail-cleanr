@@ -18,7 +18,7 @@ def _import_windows_helper():
     """Pull `_windows_release_label` out of star_trail_cleanr.py without
     importing the whole GUI (which needs PySide6 + display)."""
     src_path = REPO / "star_trail_cleanr.py"
-    src = src_path.read_text()
+    src = src_path.read_text(encoding="utf-8")
     start = src.index("def _windows_release_label():")
     end = src.index("\nclass CleanerWorker", start)
     snippet = src[start:end]
@@ -59,7 +59,7 @@ def test_callsites_use_helper_not_bare_release():
     """Both the support email body and the run summary must call the
     helper. If either regresses to platform.release(), Warren's bug
     is back."""
-    src = (REPO / "star_trail_cleanr.py").read_text()
+    src = (REPO / "star_trail_cleanr.py").read_text(encoding="utf-8")
     # Two replacement spots: support email body + run summary.
     assert src.count("Windows {_windows_release_label()}") >= 1, (
         "support email body no longer uses the helper"

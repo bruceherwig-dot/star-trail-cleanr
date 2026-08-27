@@ -38,19 +38,19 @@ def test_version_file_exists():
     """The GUI reads version.txt at startup."""
     vf = REPO / "version.txt"
     assert vf.exists(), f"version.txt missing: {vf}"
-    assert vf.read_text().strip(), "version.txt is empty"
+    assert vf.read_text(encoding="utf-8").strip(), "version.txt is empty"
 
 
 def test_build_helper_bundles_assets():
     """build_helper.py must include assets/ in the PyInstaller data list."""
     bh = REPO / "build_helper.py"
     assert bh.exists(), "build_helper.py missing"
-    text = bh.read_text()
+    text = bh.read_text(encoding="utf-8")
     assert "assets" in text, "build_helper.py does not reference assets/ folder"
 
 
 def test_build_helper_bundles_model():
     """build_helper.py must explicitly bundle best.pt."""
     bh = REPO / "build_helper.py"
-    text = bh.read_text()
+    text = bh.read_text(encoding="utf-8")
     assert "best.pt" in text, "build_helper.py does not bundle best.pt"

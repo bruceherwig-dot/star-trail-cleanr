@@ -181,7 +181,7 @@ def test_production_call_site_passes_array_not_path():
     8-bit array, not the path. Re-loading inside detect_frame is wasteful
     AND the v1.91 crash source — the default cv2.imread does not reliably
     downcast 16-bit on every Windows + TIFF combination."""
-    text = (REPO / "astro_clean_v5.py").read_text()
+    text = (REPO / "astro_clean_v5.py").read_text(encoding="utf-8")
     assert "image=frames_8bit_all[i]" in text, (
         "astro_clean_v5.py no longer hands the detector (detect_pipeline."
         "detect_frame) the pre-loaded 8-bit array via image=frames_8bit_all[i]. "
