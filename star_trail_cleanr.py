@@ -533,9 +533,15 @@ def _secondary_btn_css():
 
 def _star_trail_builds(baseline_path, cleaned_folder):
     """Every existing star trail for this workspace, newest first: the run's
-    instant baseline (STC_cleaned_star_trail.jpg), the matching original-source
-    trail (STC_original_star_trail.jpg), plus each Build output
-    (STC_star_trail_*.jpg). Empty list when none exist yet. The preview's
+    instant baseline (STC_cleaned_star_trail), the matching original-source
+    trail (STC_original_star_trail), plus each Build output (STC_star_trail_*).
+    Empty list when none exist yet.
+
+    EVERY ONE OF THOSE CAN BE EITHER FORMAT. Since 2.93 a star trail is saved to
+    match the cleaned frames, so a folder cleaned to JPEG holds .jpg trails and
+    one cleaned to TIFF holds .tif -- and a folder cleaned both ways at different
+    times can hold both. This looks for each name in every star-trail format
+    rather than assuming one. The preview's
     left/right arrows page through exactly this list. The original-source name
     has to be listed explicitly -- it matches neither the baseline path nor the
     Build glob, so leaving it out made the run's second trail invisible."""
@@ -546,10 +552,53 @@ def _star_trail_builds(baseline_path, cleaned_folder):
     if baseline_path:
         cands.append(baseline_path)
     if ws and os.path.isdir(ws):
-        cands += glob.glob(os.path.join(ws, "STC_star_trail_*.jpg"))
-        cands.append(os.path.join(ws, "STC_original_star_trail.jpg"))
+        # Both formats: a folder can hold a JPEG trail from an older clean and a
+        # TIFF one from a newer, and the arrows must page through whatever is there.
+        from make_share_clip import STAR_TRAIL_EXTS
+        for _ext in STAR_TRAIL_EXTS:
+            cands += glob.glob(os.path.join(ws, "STC_star_trail_*" + _ext))
+            cands.append(os.path.join(ws, "STC_original_star_trail" + _ext))
     return sorted({c for c in cands if os.path.isfile(c)},
                   key=os.path.getmtime, reverse=True)
+
+
+def cleaned_star_ext(cleaned_folder):
+    """The extension a star trail built from `cleaned_folder` should use.
+
+    ASKS THE FILES, not the app's current setting. This window can be opened on a
+    folder cleaned months ago, in a different session, with a different format
+    chosen -- the frames on disk are the only thing that knows what they are.
+
+    TIFF frames give a .tif trail, anything else a .jpg. Whether that TIFF ends up
+    8-bit or 16-bit is decided later by the depth of the stacked pixels
+    themselves (see make_share_clip.write_star_trail), so this only has to answer
+    the coarse question."""
+    try:
+        from modules.frame_list import IMAGE_EXTS
+        for n in sorted(os.listdir(cleaned_folder or "")):
+            e = os.path.splitext(n)[1].lower()
+            if e in IMAGE_EXTS:
+                return ".tif" if e in (".tif", ".tiff") else ".jpg"
+    except OSError:
+        pass
+    return ".jpg"
+
+
+def star_trail_in(folder, stem):
+    """The star trail named `stem` in `folder`'s workspace, whatever format it was
+    saved in, or the .jpg path when none exists yet.
+
+    Since 2.93 the star trail follows the cleaned frames' format, so this file is
+    a .jpg for a JPEG clean and a .tif for a TIFF one. Seven places used to name
+    ".jpg" outright, which would quietly find nothing the moment somebody cleaned
+    to TIFF -- the preview would say there was no star trail while the file sat
+    right there in the folder."""
+    from make_share_clip import STAR_TRAIL_EXTS
+    for ext in STAR_TRAIL_EXTS:
+        p = workspace_path(folder, stem + ext)
+        if os.path.isfile(p):
+            return p
+    return workspace_path(folder, stem + STAR_TRAIL_EXTS[0])
 
 
 def _newest_star_trail(baseline_path, cleaned_folder):
@@ -2480,9 +2529,15 @@ class ShareStackThread(QThread):
                     break
             if self._aborted:
                 return
-            star = os.path.join(self._ws_dir, "STC_cleaned_star_trail.jpg")
+            # The star trail is saved in whatever format the cleaned frames were,
+            # so a 16-bit clean keeps its depth all the way to the editor. The
+            # video stays .mp4 regardless -- an encoder cannot use more than 8
+            # bits, so there is nothing to preserve there.
+            from make_share_clip import star_trail_ext
+            _ste = star_trail_ext(self.output_format)
+            star = os.path.join(self._ws_dir, "STC_cleaned_star_trail" + _ste)
             vid = os.path.join(self._ws_dir, "STC_share_video.mp4")
-            orig_star = (os.path.join(self._ws_dir, "STC_original_star_trail.jpg")
+            orig_star = (os.path.join(self._ws_dir, "STC_original_star_trail" + _ste)
                          if self._want_original_star else None)
             result = self._stacker.finalize(star_out=star, video_out=vid,
                                             should_abort=self._abort_check,
@@ -6551,7 +6606,7 @@ class MainWindow(QMainWindow):
         (the in-run stacker just finished). Falls back to the old standalone summary
         popup only if the creator window fails to open, so the user is never stranded."""
         folder = getattr(self, "_done_output_folder", "") or self._output_input.text().strip()
-        star_path = (workspace_path(folder, "STC_cleaned_star_trail.jpg") if folder else "")
+        star_path = (star_trail_in(folder, "STC_cleaned_star_trail") if folder else "")
         try:
             self._open_creator_window(folder, star_path, "summary")
         except Exception as e:
@@ -7244,7 +7299,7 @@ class MainWindow(QMainWindow):
             self._error_label.setText("No cleaned frames yet. Run cleaning first.")
             return
         try:
-            star_path = workspace_path(folder, "STC_cleaned_star_trail.jpg")
+            star_path = star_trail_in(folder, "STC_cleaned_star_trail")
             self._open_creator_window(folder, star_path, "star")
         except Exception as e:
             _log_app_error("open Star Trail & Timelapse window (setup page)",
@@ -7285,7 +7340,7 @@ class MainWindow(QMainWindow):
                        f"(it may have been moved, or the drive disconnected):\n\n{folder}")
             return
         try:
-            star_path = workspace_path(folder, "STC_cleaned_star_trail.jpg")
+            star_path = star_trail_in(folder, "STC_cleaned_star_trail")
             self._open_creator_window(folder, star_path, "star")
         except Exception as e:
             _log_app_error("open Star Trail & Timelapse window (run page)",
@@ -8036,7 +8091,7 @@ class StarTrailPanel(QWidget):
         self._original = original_folder if (original_folder and
                                              os.path.isdir(original_folder)) else None
         # Preview the MOST RECENT star trail: the run's instant baseline OR any Build
-        # output (STC_star_trail_*.jpg). Since Build stopped overwriting the baseline
+        # output (STC_star_trail_*, either format). Since Build stopped overwriting the baseline
         # (option-named files now), the newest existing file is the right preview.
         self._star_path = _newest_star_trail(star_path, cleaned_folder)
         self._proc = None
@@ -8224,20 +8279,13 @@ class StarTrailPanel(QWidget):
         _open_row.addStretch(1)
         lay.addLayout(_open_row)
 
-        # The star trail this tab builds is a JPG. That is the right default and
-        # it is what most people want, so this does NOT apologise for it -- it
-        # answers the one question the people who need more will ask, and points
-        # at the only place the answer can come from: the bit depth is fixed when
-        # the frames are CLEANED, not here, so a TIFF export from this tab could
-        # never hold more than the frames already carry. Asked for by Kari Tuomi
-        # (2026-08-23), who wanted more headroom to paint out the trails the
-        # detector missed.
-        _depth_note = QLabel("Want more depth for editing? Stack your cleaned "
-                             "frames yourself, and choose TIFF when cleaning.")
-        _depth_note.setAlignment(Qt.AlignCenter)
-        _depth_note.setWordWrap(True)
-        _depth_note.setStyleSheet(f"color: {MUTED_TEXT}; font-size: 12px;")
-        lay.addWidget(_depth_note)
+        # There was a line here telling people to stack their frames themselves
+        # if they wanted more depth, because this tab only ever wrote a JPG. That
+        # stopped being true in 2.93: the star trail now follows whatever format
+        # the frames were cleaned in, so a 16-bit clean gives a 16-bit trail and
+        # there is nothing left to send anyone away for. Asked for by Kari Tuomi
+        # (2026-08-23) and by Jon Bertsch (2026-08-27); answered rather than
+        # explained away.
 
         _make_labels_selectable(self)   # house rule: all GUI text is copy/paste-able
 
@@ -8287,8 +8335,13 @@ class StarTrailPanel(QWidget):
 
     def _build_out_path(self):
         """A new, option-named output file so each Build keeps its own version instead
-        of overwriting. The run's instant trail (STC_cleaned_star_trail.jpg) is left as
-        the plain baseline. A rebuild with the same options gets a _2, _3 counter."""
+        of overwriting. The run's instant trail (STC_cleaned_star_trail) is left as
+        the plain baseline. A rebuild with the same options gets a _2, _3 counter.
+
+        The extension follows the CLEANED FRAMES, read off the files themselves --
+        somebody who cleaned to 16-bit TIFF and then builds a comet-mode version
+        wants that in TIFF too, and this window may be looking at a folder cleaned
+        long ago under a different setting."""
         ws = os.path.dirname(self._star_path) if self._star_path else self._cleaned
         tokens = []
         if self._mode_comet.isChecked():
@@ -8307,7 +8360,10 @@ class StarTrailPanel(QWidget):
         # The caption under the preview shows this filename as the record of the
         # settings used, so the source is always named -- cleaned or original.
         tokens.append(self._src_cb.currentData() or "cleaned")
-        base = os.path.join(ws, "STC_star_trail_" + "_".join(tokens) + ".jpg")
+        # Builds follow the cleaned frames' format too -- somebody who cleaned to
+        # TIFF and then builds a comet-mode version wants that in TIFF as well.
+        base = os.path.join(ws, "STC_star_trail_" + "_".join(tokens)
+                            + cleaned_star_ext(self._cleaned))
         return _unique_path(base)
 
     def _start_build(self):
@@ -8341,7 +8397,9 @@ class StarTrailPanel(QWidget):
                 if self._src_cb.currentData() == "original" and self._original
                 else self._cleaned)
         args = ["--star-trail", "--cleaned", _src, "--out", self._pending_out,
-                "--comet-tail", str(comet), "--thicken", str(thick)]
+                "--comet-tail", str(comet), "--thicken", str(thick),
+                "--out-format", ("tif16" if self._pending_out.lower().endswith(".tif")
+                                 else "jpg")]
         if _src is not self._cleaned:
             # Building from originals: match the shot list to the cleaned build
             # (same shots, same skip, one file per shot even with RAW+JPG twins)

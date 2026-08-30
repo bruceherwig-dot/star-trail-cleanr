@@ -216,6 +216,78 @@ def _stack(dirpath, names, cw, ch, label):
     return acc
 
 
+# ── The star trail's file format follows the CLEANED FRAMES ──────────────────
+# Asked for by Jon Bertsch, 2026-08-27: "maybe save the star trail output as a
+# TIFF rather than a jpg to avoid data loss."
+#
+# The rule Bruce settled on is simple and needs no new setting: whatever you
+# chose for your cleaned frames is what the star trail is saved as. A JPEG clean
+# gets a JPEG trail; a 16-bit TIFF clean gets a 16-bit TIFF trail.
+#
+# WRITING A TIFF IS ONLY HALF OF IT, and the other half is the point. The frames
+# have to be READ at their real depth too -- forcing them to 8-bit first and then
+# saving a 16-bit file would be a bigger file holding exactly the same
+# information, which is worse than the JPEG because it looks like the feature
+# while delivering none of it.
+#
+# Measured 2026-08-27 on a 44MP frame: keeping the full depth is FASTER than
+# converting it down (44ms a frame against 69ms), because the conversion costs
+# more than stacking the bigger numbers. The only real cost is memory -- the
+# running stack goes from 133 MB to 266 MB -- and it falls only on people who
+# chose 16-bit, since reading a JPEG at "full depth" still gives 8 bits.
+STAR_TRAIL_EXTS = (".jpg", ".tif")
+
+
+def star_trail_ext(output_format):
+    """The file extension a star trail should use for a given cleaned-frame
+    format. Anything unrecognised falls back to .jpg, which is what every
+    version before 2.93 always wrote."""
+    return ".tif" if str(output_format or "").lower().startswith("tif") else ".jpg"
+
+
+def write_star_trail(out_path, stack):
+    """Save a finished star trail, choosing the writer from the file extension
+    and the data's own depth.
+
+    16-bit RGB has no first-class PIL mode, so it goes through tifffile, exactly
+    as the cleaned-frame writer does in astro_clean_v5. 8-bit of either kind goes
+    through the normal writer. Returns True on success."""
+    ext = os.path.splitext(out_path)[1].lower()
+    if ext in (".tif", ".tiff") and stack.dtype == np.uint16:
+        import tifffile
+        tifffile.imwrite(out_path, cv2.cvtColor(stack, cv2.COLOR_BGR2RGB),
+                         photometric="rgb")
+        return os.path.isfile(out_path)
+    if ext in (".tif", ".tiff"):
+        return robust_imwrite(out_path, stack)
+    return robust_imwrite(out_path, stack, [cv2.IMWRITE_JPEG_QUALITY, 95])
+
+
+def drop_stale_twin(out_path):
+    """Delete the same star trail saved in the OTHER format, if one is there.
+
+    The two automatic trails are meant to be THIS run's result, and before this
+    change a re-clean simply overwrote them. Once the extension follows the
+    format, a JPEG trail and a TIFF trail have different names, so nothing gets
+    replaced and the older one would sit there for good -- looking current while
+    coming from a different clean. Bruce's call, 2026-08-27: delete the twin, so
+    there is still exactly one.
+
+    Only ever removes a file with the same name and a DIFFERENT star-trail
+    extension; it cannot touch anything else."""
+    stem, ext = os.path.splitext(out_path)
+    for other in STAR_TRAIL_EXTS:
+        if other == ext.lower():
+            continue
+        twin = stem + other
+        if os.path.isfile(twin):
+            try:
+                os.remove(twin)
+                print(f"  replaced the previous {other} star trail", flush=True)
+            except OSError:
+                pass
+
+
 def _stack_fullres(dirpath, names, label):
     """Lighten/maximum stack of `names` at FULL native resolution (no canvas
     resize). Only one frame plus the running accumulator are held in memory at a
@@ -232,7 +304,12 @@ def _stack_fullres(dirpath, names, label):
         if not os.path.exists(p):
             missing.append(n)
             continue
-        im = robust_imread(p, cv2.IMREAD_COLOR)     # upright 8-bit BGR (16-bit TIFF -> 8-bit)
+        # FULL DEPTH on purpose: this stack becomes the star trail people take
+        # into an editor, so a 16-bit clean must stay 16-bit all the way through.
+        # A JPEG or 8-bit TIFF still comes back as 8 bits, so nothing changes for
+        # those users. (The VIDEO canvas stack below stays 8-bit -- an encoder
+        # cannot use more, and it would only cost time.)
+        im = robust_imread(p, cv2.IMREAD_UNCHANGED)
         if im is None:
             unreadable.append(n)
             continue
@@ -295,7 +372,10 @@ class IncrementalStack:
         if not os.path.exists(path):
             self.missing.append(name)
             return
-        im = robust_imread(path, cv2.IMREAD_COLOR)
+        # canvas=None means this is the full-res star trail stack, which keeps the
+        # frames' real depth; a canvas means the video, which stays 8-bit.
+        im = robust_imread(path, cv2.IMREAD_COLOR if self.canvas is not None
+                           else cv2.IMREAD_UNCHANGED)
         if im is None:
             self.unreadable.append(name)
             return
@@ -753,12 +833,17 @@ def _thicken(img, px, fg_mask=None):
 
 def make_star_trail(cleaned_dir, out_path=None, stack=None, comet_tail=0,
                     thicken_px=0, remove_hotpix=False, reverse=False,
-                    match_cleaned=None):
+                    match_cleaned=None, out_format="jpg"):
     """OUTPUT 1 — the quick-and-dirty full-resolution STAR TRAIL (`--star-trail`).
 
     `stack`: optional pre-built full-resolution lighten-max stack from the in-run
     incremental stacker. When given, the cleaned folder is NOT re-read -- the stack
-    is saved straight to JPG. When None (the CLI path) the folder is stacked here.
+    is saved straight out. When None (the CLI path) the folder is stacked here.
+
+    `out_format`: the format the CLEANED FRAMES were saved as ("jpg", "tif8",
+    "tif16"). The star trail follows it, so a 16-bit clean yields a 16-bit trail
+    with nothing thrown away. Only used when out_path is not given; an explicit
+    out_path already carries its own extension.
 
     A lighten/maximum stack of the CLEANED frames (trails already removed) written
     as a JPG. This is NOT a comet-mode / gap-filled StarStaX stack -- just the
@@ -875,9 +960,10 @@ def make_star_trail(cleaned_dir, out_path=None, stack=None, comet_tail=0,
         print(f"  thicken phase: {time.time() - _t_th:.0f}s", flush=True)
 
     if out_path is None:
-        out_path = os.path.join(cleaned_dir, "STC_cleaned_star_trail.jpg")
+        out_path = os.path.join(cleaned_dir, "STC_cleaned_star_trail" + star_trail_ext(out_format))
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    ok = robust_imwrite(out_path, stack, [cv2.IMWRITE_JPEG_QUALITY, 95])
+    drop_stale_twin(out_path)
+    ok = write_star_trail(out_path, stack)
     if not ok:
         raise SystemExit(f"could not write {out_path}")
     h, w = stack.shape[:2]
@@ -910,6 +996,8 @@ if __name__ == "__main__":
                     help="star trail: widen the trails by this many pixels (0 = leave as shot)")
     ap.add_argument("--remove-hotpix", action="store_true",
                     help="star trail: remove sky hot pixels / colored specks (re-reads every frame)")
+    ap.add_argument("--out-format", default="jpg", choices=["jpg", "tif8", "tif16"],
+                    help="what the CLEANED FRAMES were saved as; the star trail matches it")
     ap.add_argument("--reverse", action="store_true",
                     help="star trail (comet only): process frames in reverse order to flip the tail direction")
     ap.add_argument("--match-cleaned", default=None,
@@ -929,7 +1017,8 @@ if __name__ == "__main__":
         st_cleaned = args.cleaned or (os.path.join(args.original, "cleaned") if args.original else None)
         if not st_cleaned:
             ap.error("--star-trail needs --cleaned (or --original to default to <original>/cleaned)")
-        make_star_trail(st_cleaned, args.out, comet_tail=args.comet_tail,
+        make_star_trail(st_cleaned, args.out, out_format=args.out_format,
+                        comet_tail=args.comet_tail,
                         match_cleaned=args.match_cleaned,
                         thicken_px=args.thicken, remove_hotpix=args.remove_hotpix,
                         reverse=args.reverse)
