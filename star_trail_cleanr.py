@@ -7522,13 +7522,9 @@ class TimelapsePanel(QWidget):
         self._style_cb = QComboBox()
         self._style_cb.addItem("Moving Stars (traditional timelapse)", "plain")
         self._style_cb.addItem("Building Trails (star accumulation)", "accumulate")
+        # No explanatory line under this one: the option names say what each
+        # style does. Smoothing keeps its note because "3 frames" does not.
         _row("Style", self._style_cb)
-        _style_hint = QLabel("Moving Stars plays your night as it happened. "
-                             "Building Trails draws the star trail on screen, "
-                             "one photo at a time.")
-        _style_hint.setStyleSheet(f"color: {MUTED_TEXT};")
-        _style_hint.setWordWrap(True)
-        lay.addWidget(_style_hint)
 
         self._size_cb = QComboBox()
         # No "Full resolution" option: H.264 (and QuickTime) won't play frames
