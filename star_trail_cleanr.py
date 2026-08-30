@@ -7513,6 +7513,23 @@ class TimelapsePanel(QWidget):
             self._source_cb.addItem("Original", "original")
         _row("Source", self._source_cb)
 
+        # Style: what the finished video SHOWS, not how it is encoded.
+        # "Moving Stars" is the timelapse this window has always made -- one
+        # photo per movie frame, the sky drifting. "Building Trails" keeps every
+        # photo so far, so the trails draw themselves and the last frame is the
+        # finished star trail. Suggested by Jon Bertsch, 2026-08-27, who noticed
+        # the app already computes every intermediate stack during a run.
+        self._style_cb = QComboBox()
+        self._style_cb.addItem("Moving Stars (traditional timelapse)", "plain")
+        self._style_cb.addItem("Building Trails (star accumulation)", "accumulate")
+        _row("Style", self._style_cb)
+        _style_hint = QLabel("Moving Stars plays your night as it happened. "
+                             "Building Trails draws the star trail on screen, "
+                             "one photo at a time.")
+        _style_hint.setStyleSheet(f"color: {MUTED_TEXT};")
+        _style_hint.setWordWrap(True)
+        lay.addWidget(_style_hint)
+
         self._size_cb = QComboBox()
         # No "Full resolution" option: H.264 (and QuickTime) won't play frames
         # wider than ~4K, and full-frame sources (5000-6000px) are over that
@@ -7541,12 +7558,20 @@ class TimelapsePanel(QWidget):
             self._blend_cb.addItem(f"{v} frames", v)
         self._blend_cb.setCurrentIndex(self._blend_cb.findData(3))  # default 3; _restore_choices overrides if saved
         _row("Smoothing", self._blend_cb)
-        _blend_hint = QLabel("Smooth blends each movie frame with the previous ones. "
-                             "Higher values smooth out flicker, but stretch "
-                             "each star into a slightly longer streak.")
-        _blend_hint.setStyleSheet(f"color: {MUTED_TEXT};")
-        _blend_hint.setWordWrap(True)
-        lay.addWidget(_blend_hint)
+        self._blend_hint = QLabel("Smooth blends each movie frame with the previous ones. "
+                                  "Higher values smooth out flicker, but stretch "
+                                  "each star into a slightly longer streak.")
+        self._blend_hint.setStyleSheet(f"color: {MUTED_TEXT};")
+        self._blend_hint.setWordWrap(True)
+        lay.addWidget(self._blend_hint)
+
+        # Smoothing has no meaning in Building Trails: that style keeps EVERY
+        # earlier photo permanently, so a rolling window of 3 is neither more nor
+        # less than what it already does. Grey it out rather than leave a control
+        # that silently does nothing -- the same thing the Star Trail tab does
+        # with Length when Blending Mode is Normal.
+        self._style_cb.currentIndexChanged.connect(self._sync_style)
+        self._sync_style()
 
         self._fmt_cb = QComboBox()
         self._fmt_cb.addItem(".mp4", "mp4")
@@ -7693,6 +7718,20 @@ class TimelapsePanel(QWidget):
         if self._play_path and os.path.isfile(self._play_path):
             QDesktopServices.openUrl(QUrl.fromLocalFile(self._play_path))
 
+    def _sync_style(self):
+        """Grey out Smoothing when Building Trails is chosen.
+
+        That style keeps EVERY earlier photo permanently, so a rolling window of
+        3 frames is neither more nor less than what it already does -- the
+        control would sit there looking adjustable while changing nothing. The
+        Star Trail tab does the same with Length when Blending Mode is Normal.
+        """
+        on = self._style_cb.currentData() == "plain"
+        self._blend_cb.setEnabled(on)
+        self._blend_hint.setEnabled(on)
+        if hasattr(self, "_blend_label"):
+            self._blend_label.setEnabled(on)
+
     def _restore_choices(self):
         """Put the timelapse settings back the way the user last left them.
 
@@ -7703,6 +7742,7 @@ class TimelapsePanel(QWidget):
         cannot leave the window in a state it cannot render from.
         """
         for cb, key, is_int in ((self._source_cb, "timelapse_source", False),
+                                (self._style_cb, "timelapse_style", False),
                                 (self._size_cb, "timelapse_size", False),
                                 (self._fps_cb, "timelapse_fps", True),
                                 (self._blend_cb, "timelapse_blend", True),
@@ -7719,6 +7759,7 @@ class TimelapsePanel(QWidget):
 
     def _save_choices(self):
         SETTINGS.setValue("timelapse_source", self._source_cb.currentData())
+        SETTINGS.setValue("timelapse_style", self._style_cb.currentData())
         SETTINGS.setValue("timelapse_size", self._size_cb.currentData())
         SETTINGS.setValue("timelapse_fps", self._fps_cb.currentData())
         SETTINGS.setValue("timelapse_blend", self._blend_cb.currentData())
@@ -7831,14 +7872,23 @@ class TimelapsePanel(QWidget):
         # Option-named output in the cleaned folder's STC Extras workspace, so a
         # re-render keeps its own file instead of overwriting; identical options get a
         # _2, _3 counter. (source tag + size + fps + smoothing.)
-        _name = f"STC_timelapse_{tag}{size_key}_{fps}fps"
-        if blend >= 2:
+        # The style goes in the NAME so the two kinds never overwrite each other
+        # and a glance at the folder says which is which.
+        _style = self._style_cb.currentData() or "plain"
+        _style_tag = "accumulation" if _style == "accumulate" else "traditional"
+        _name = f"STC_timelapse_{tag}{_style_tag}_{size_key}_{fps}fps"
+        if blend >= 2 and _style == "plain":
             _name += f"_blend{blend}"
         self._out_path = _unique_path(workspace_path(self._cleaned, f"{_name}.{ext}"))
         script = os.path.join(_base, "timelapse_maker.py")
         args = [frames_dir, "-o", self._out_path, "--size", size_key,
                 "--fps", str(fps)]
-        if blend >= 2:
+        # Building Trails ignores Smoothing on purpose: it already keeps every
+        # earlier photo, so a rolling window would be meaningless. The control is
+        # greyed out for the same reason (see _sync_style).
+        if _style == "accumulate":
+            args += ["--style", "accumulate"]
+        elif blend >= 2:
             args += ["--style", "blended", "--blend-window", str(blend)]
         else:
             args += ["--style", "plain"]

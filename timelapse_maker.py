@@ -13,6 +13,9 @@ Versioned independently of the app: bump TIMELAPSE_VERSION as this tool grows
 Styles
 ------
 plain    -- one cleaned frame per movie frame (a straight timelapse).
+accumulate -- each movie frame is a Lighten stack of EVERY photo so far, so the
+            trails draw themselves as the video plays and the last frame is the
+            finished star trail. Suggested by a user, 2026-08-27.
 blended  -- each movie frame is a Lighten (brightest-pixel) stack of the last
             N frames, the same blend used stacking a star-trail still. Smooths
             per-frame artifacts and flicker at the cost of the stars trailing
@@ -169,6 +172,7 @@ def render(frames_dir, out_path, size_key="4k", fps=30, style="plain",
     print(f"  encoder: {writer.backend}", flush=True)
 
     buf = []
+    acc = None          # the running star-accumulation stack
     n = len(frames)
     written = 0
     for i, f in enumerate(frames):
@@ -177,7 +181,25 @@ def render(frames_dir, out_path, size_key="4k", fps=30, style="plain",
             continue
         if img.dtype != np.uint8:
             img = np.clip(img / 256.0, 0, 255).astype(np.uint8) if img.max() > 255 else img.astype(np.uint8)
-        if style == "blended":
+        if style == "accumulate":
+            # STAR ACCUMULATION: keep the brightest value each pixel has ever
+            # had, so the trails DRAW THEMSELVES as the video plays -- one photo
+            # added per frame, nothing ever forgotten. It is the same arithmetic
+            # as the finished star trail still, shown one step at a time, and the
+            # final video frame IS that still.
+            #
+            # Suggested by Jon Bertsch, 2026-08-27. There is no rolling window
+            # here on purpose: "blended" forgets frames older than blend_window,
+            # which is what makes it a smoother rather than an accumulator.
+            if acc is None:
+                acc = img.copy()
+            else:
+                if img.shape != acc.shape:
+                    img = cv2.resize(img, (acc.shape[1], acc.shape[0]),
+                                     interpolation=cv2.INTER_AREA)
+                np.maximum(acc, img, out=acc)
+            frame = acc
+        elif style == "blended":
             buf.append(img)
             if len(buf) > max(1, blend_window):
                 buf.pop(0)
@@ -206,7 +228,8 @@ def main():
     ap.add_argument("-o", "--out", required=True, help="Output video path (.mp4 or .mov)")
     ap.add_argument("--size", default="4k", help="full | 4k | 2k | 1080p")
     ap.add_argument("--fps", type=int, default=30)
-    ap.add_argument("--style", choices=["plain", "blended"], default="plain")
+    ap.add_argument("--style", choices=["plain", "blended", "accumulate"],
+                    default="plain")
     ap.add_argument("--blend-window", type=int, default=3)
     ap.add_argument("--limit", type=int, default=0, help="Only render the first N frames (0 = all)")
     args = ap.parse_args()
