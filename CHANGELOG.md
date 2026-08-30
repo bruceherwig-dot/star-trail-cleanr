@@ -2,6 +2,12 @@
 
 ---
 
+## v2.92-beta
+- **New: watch your star trail draw itself.** The Timelapse tab has a Style choice. "Moving Stars" is the timelapse it has always made, one photo per frame, your night playing back. "Building Trails" keeps every photo as it goes, so the trails grow across the screen and the last frame of the video is your finished star trail. The style is recorded in the filename, so you can make both from the same photos without one replacing the other. Suggested by Jon Bertsch.
+- **Fixed: RAW files now report your camera, lens and settings.** If you shoot RAW, the Star Log's Camera Info read "Unknown" for everything, even though your files carried the information all along. We were looking for it in a way that cannot read a RAW file. The camera, lens, date, aperture and ISO now show up the way they always did for JPEG and TIFF. Reported by Kari Tuomi.
+- **Releases are less likely to be held up by a hiccup on the build machines.** The step that packages the Mac download occasionally failed for reasons outside the app, and twice that delayed a release. It now retries.
+- **Smoke tests:** 356 passing.
+
 ## v2.91-beta
 - **Cleaning is faster again, on top of the speed-up in 2.90, and the results are identical.** Two more places were doing far more work than they needed to. Repairing a trail measured it by scanning the entire photograph instead of the small part the trail actually occupies, twice over, for every trail in every frame. That step is now about half the time it was. On a 44 megapixel set the whole run went from 20 seconds a frame to 15.
 - **If you use a foreground mask, the run is faster still.** The step that learns where your camera's stuck pixels are ran sixty picture-sized filters one after another while the rest of your processor sat idle. They now run together. On a 100 photo set that step went from 18 seconds per group of 20 photos to 9. It only ever ran when you painted a mask, which is why it took a masked sequence to notice it at all.
