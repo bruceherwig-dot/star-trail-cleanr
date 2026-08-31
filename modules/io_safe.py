@@ -596,11 +596,27 @@ def _named(ex, sub, TAGS):
 
 
 def capture_time(path: Union[str, Path]):
-    """Return the photo's capture time (EXIF DateTimeOriginal, else DateTime) as
-    a datetime, or None if unavailable. Used to order frames by true shooting
-    order, so a camera file-number rollover or a two-card merge can't scramble
-    the sequence. RAW reads the time from its embedded preview (PIL can't open a
-    RAW directly); everything else reads it straight. Never raises.
+    """Return the moment the SHUTTER FIRED (EXIF DateTimeOriginal) as a datetime,
+    or None. RAW reads it from the embedded preview (PIL cannot open a RAW
+    directly); everything else reads it straight. Never raises.
+
+    ONLY THE SHUTTER TIME COUNTS, and it used to fall back to the plain file date
+    (EXIF DateTime) when there was no shutter time. That fallback is not a
+    capture time at all -- an editor stamps it when it EXPORTS the file -- and it
+    silently reordered a real sequence (2026-08-30).
+
+    Cheryl's frames came out of Camera Raw, which finished exporting 004 two
+    seconds before 003. Her originals still carry the true shutter times, a
+    minute apart and in order, but cleaning to 16-bit TIFF drops the EXIF block,
+    so the cleaned frames had only the export stamps left. The timelapse
+    faithfully sorted by those and played 001, 002, 004, 003 -- a visible
+    hesitation early in the video, which is how Bruce found it.
+
+    The callers (this is used ONLY for ordering, never for display) treat a None
+    as "no reliable time" and keep the filename order, which is right far more
+    often than an export stamp is. The one thing filename order cannot handle is
+    a camera file-number rollover mid-shoot or two cards merged, and those frames
+    do carry real shutter times, so they are still put right.
     """
     from datetime import datetime
     p = str(path)
@@ -619,7 +635,7 @@ def capture_time(path: Union[str, Path]):
                     sub = ex.get_ifd(0x8769)
                 except Exception:
                     sub = {}
-                raw_s = sub.get(0x9003) or ex.get(0x0132)
+                raw_s = sub.get(0x9003)   # DateTimeOriginal ONLY -- see above
         else:
             from PIL import Image
             with Image.open(p) as im:
@@ -628,7 +644,7 @@ def capture_time(path: Union[str, Path]):
                     sub = ex.get_ifd(0x8769)
                 except Exception:
                     sub = {}
-                raw_s = sub.get(0x9003) or ex.get(0x0132)
+                raw_s = sub.get(0x9003)   # DateTimeOriginal ONLY -- see above
     except Exception:
         return None
     if not raw_s:
