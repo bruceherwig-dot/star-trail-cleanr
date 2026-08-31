@@ -10,8 +10,14 @@ How it overlaps with the run:
   run starts, so build_before() can run immediately and finish early.
 - The AFTER stack folds in CLEANED frames as the run produces them. scan_cleaned() is
   called at each batch boundary; it folds any newly-cleaned frames that aren't yet in.
-- Each frame is read ONCE and fed into every stack that's enabled (full-res star trail,
-  video canvas), so there is no duplicate reading.
+- Each CLEANED frame is read once and fed to every stack that wants it. The star trail
+  needs the frame at its real depth and the video needs 8 bits, so the video is handed a
+  converted copy rather than the file being opened a second time.
+- The ORIGINALS are NOT read once. build_before feeds the video stack and the
+  original-frames trail separately, so each original is opened twice when both are
+  wanted. Measured, not assumed (2026-08-30). Nobody has fixed it because the originals
+  are read at the very start of a run, in parallel with the cleaning, where there is
+  time to spare -- but do not repeat the old claim that nothing here reads twice.
 
 Skip + no-silent-drop: _list_frames already drops the first/last few test shots from
 whatever is present. During a run "present" is a growing prefix of the sorted order, so
@@ -25,6 +31,7 @@ import time
 import subprocess
 
 import cv2
+import numpy as np
 
 from modules.io_safe import robust_imread, robust_imwrite
 # robust_imWRITE: cv2 cannot write non-ASCII paths on Windows.
@@ -105,9 +112,19 @@ class ShareStacker:
 
     # ── before stack (originals, available at run start) ───────────────────────
     def build_before(self, should_abort=None):
-        """Read the ORIGINALS once and fold them into the before stacks the enabled
-        outputs need. Only the video needs a before-stack; the star trail does not.
-        Safe to call once at the very start of a run."""
+        """Walk the ORIGINAL frames and fold them into the two "before" stacks.
+
+        TWO different pictures come out of the untouched frames:
+          * the video's before-half -- the trails still in, shrunk to the canvas;
+          * a full-resolution star trail of the originals, so the Star Trail tab
+            can show the before picture next to the cleaned one.
+
+        Either can be off. A run wanting neither does nothing here and returns at
+        once. Called once, at the very start of a run: every original is already
+        on disk then, so this finishes early and costs the cleaning nothing.
+
+        Each frame is opened once PER STACK, so both being on means two reads of
+        every original. See the note in the module docstring above."""
         if not (self.want_video or self.want_original_star):
             self.before_built = True
             return
@@ -128,6 +145,26 @@ class ShareStacker:
         self.before_built = True
 
     # ── after stack (cleaned, arrives during the run) ──────────────────────────
+    def _written_by_this_run(self, path):
+        """True when this cleaned file came from the run in progress.
+
+        The worker overwrites the cleaned folder in place rather than clearing
+        it, so a folder can still hold output from a previous session. The star
+        trail at the end of a run has to show what THIS run produced -- somebody
+        who just watched 142 trails come out should not be handed last week's
+        picture, still with those trails in it. So age decides: anything older
+        than the moment this run began is a leftover and is ignored until the run
+        rewrites it. (2 seconds of slack absorbs filesystem timestamp coarseness.)
+
+        Handed to _list_frames as its `keep` test, which applies it BEFORE picking
+        one file per shot -- see the ordering note there. A file we cannot read a
+        timestamp for is treated as not ours, which is the safe way to be wrong:
+        a missing frame is reported loudly, a wrong frame is not."""
+        try:
+            return os.path.getmtime(path) >= self._run_start - 2.0
+        except OSError:
+            return False
+
     def scan_cleaned(self, should_abort=None):
         """Fold any newly-cleaned frames into the after stacks. Call at each batch
         boundary and once more at the end. _list_frames already drops the current
@@ -141,18 +178,22 @@ class ShareStacker:
             self.after_full = msc.IncrementalStack("after-full")              # full-res
         if self.want_video and self.after_vid is None:
             self.after_vid = msc.IncrementalStack("after", canvas=(self._cw, self._img_h))
-        for n in msc._list_frames(self.cleaned_dir):
+        for n in msc._list_frames(self.cleaned_dir, keep=self._written_by_this_run):
             if n in self._after_folded:
                 continue
             p = os.path.join(self.cleaned_dir, n)
-            try:
-                if os.path.getmtime(p) < self._run_start - 2.0:
-                    continue   # leftover from a prior run; skip until THIS run rewrites it
-            except OSError:
-                continue
             if should_abort and should_abort():
                 return
-            im = robust_imread(p, cv2.IMREAD_COLOR)
+            # ONE read serves both stacks, and they want different things.
+            # The star trail must keep the frames' real depth -- this is the
+            # path a real run actually takes, and it read IMREAD_COLOR (which
+            # forces 8 bits) until 2026-08-30, so a 16-bit clean produced a
+            # 16-bit FILE holding 8-bit DATA: the feature's name without any of
+            # its substance. The video stays 8-bit because an encoder cannot use
+            # more, so it gets a converted copy rather than a second read.
+            im = msc._to_bgr(robust_imread(
+                p, cv2.IMREAD_UNCHANGED if self.after_full is not None
+                else cv2.IMREAD_COLOR))
             if im is None:
                 # Record the miss on whichever stack exists; report() warns loudly later.
                 (self.after_full or self.after_vid).unreadable.append(n)
@@ -161,12 +202,14 @@ class ShareStacker:
             if self.after_full is not None:
                 self.after_full.feed_image(im, n)
             if self.after_vid is not None:
-                self.after_vid.feed_image(im, n)
+                # >>8 is the same 16-to-8 conversion the cleaning engine uses.
+                self.after_vid.feed_image(
+                    im if im.dtype == np.uint8 else (im >> 8).astype(np.uint8), n)
             self._after_folded.add(n)
 
     # ── finalize: render the enabled outputs from the finished stacks ──────────
     def finalize(self, star_out=None, video_out=None, should_abort=None,
-                 original_star_out=None):
+                 original_star_out=None, out_format="jpg"):
         """One last scan, then render each enabled output from the finished in-memory
         stacks (no re-read). The star trail is saved in-process (just an image write);
         the video is encoded in a SEPARATE process (ffmpeg via imageio stalls inside a
@@ -197,7 +240,7 @@ class ShareStacker:
                 t0 = time.time()
                 produced["original_star_trail"] = msc.make_star_trail(
                     self.original_dir, out_path=original_star_out,
-                    stack=self.before_full.result())
+                    stack=self.before_full.result(), out_format=out_format)
                 timings["original_star_trail"] = time.time() - t0
             else:
                 skipped["original_star_trail"] = _stack_reason(
@@ -208,7 +251,8 @@ class ShareStacker:
                 t0 = time.time()
                 produced["star_trail"] = msc.make_star_trail(
                     self.cleaned_dir, out_path=star_out, stack=self.after_full.result(),
-                    comet_tail=self.comet_tail, thicken_px=self.thicken_px)
+                    comet_tail=self.comet_tail, thicken_px=self.thicken_px,
+                    out_format=out_format)
                 timings["star_trail"] = time.time() - t0
             else:
                 skipped["star_trail"] = _stack_reason(self.after_full, "cleaned-frames")

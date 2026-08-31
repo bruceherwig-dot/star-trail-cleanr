@@ -90,6 +90,39 @@ IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff"} | RAW_EXTS
 MIN_FRAME_SHORT_SIDE = 1280
 
 
+def is_image_name(name):
+    """True when a filename should be treated as one of the user's photos.
+
+    THE EXTENSION IS NOT ENOUGH, and a real user lost a run to that (Jon B,
+    2026-08-30). On a drive that cannot store extended attributes natively --
+    exFAT, FAT, most network shares -- macOS writes a small hidden companion file
+    beside each real file to hold them, named "._" plus the original name. It
+    carries the SAME extension, so "._JBA7985.tif" looks exactly like a photo to
+    any scan that only checks the ending, and the leading dot sorts it FIRST.
+
+    His 399-frame sequence therefore listed as 798 photos, and the timelapse asked
+    the first one for its dimensions, got nothing back, and died with
+    "cannot unpack non-iterable NoneType object". The star trail survived only
+    because it tolerates a frame it cannot read.
+
+    The app helps create them: it writes a Finder comment onto every cleaned
+    frame, which on such a drive has nowhere to live but a companion file. Copying
+    from a Mac onto exFAT, or unpacking a Mac-made zip, does the same.
+
+    Also skips any other dot-file, which is never a photo the user chose, and the
+    "Icon\\r" file the Finder leaves in folders with a custom icon.
+
+    Every folder scan in the app goes through this, so the rule lives in one place
+    rather than being remembered separately by the cleaner, the star trail, and
+    the timelapse -- which is how they came to disagree in the first place."""
+    base = os.path.basename(str(name))
+    if base.startswith("."):
+        return False
+    if base.startswith("Icon"):          # Finder's custom-icon file ("Icon\r")
+        return False
+    return os.path.splitext(base)[1].lower() in IMAGE_EXTS
+
+
 def frame_too_small(width, height):
     """True if a frame is too small for reliable trail detection: its shorter
     side is under MIN_FRAME_SHORT_SIDE pixels."""
@@ -214,8 +247,9 @@ def gather_frames(folder):
     """
     out = []
     for name in os.listdir(folder):
-        ext = os.path.splitext(name)[1].lower()
-        if ext in IMAGE_EXTS:
+        # is_image_name, not a bare extension test: macOS companion files carry
+        # the same extension as the photo they shadow. See is_image_name.
+        if is_image_name(name):
             full = os.path.join(folder, name)
             if os.path.isfile(full):
                 out.append(full)

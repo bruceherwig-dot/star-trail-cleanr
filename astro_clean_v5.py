@@ -1242,9 +1242,74 @@ def main():
         (see _stamp_exif)."""
         return _source_metadata(path)[0]
 
+    def _volume_keeps_xattrs(out_path: str) -> bool:
+        """Can this folder's drive store an extended attribute WITHOUT leaving a
+        hidden companion file behind?
+
+        Tested by doing it, not by guessing from the filesystem's name: write a
+        throwaway file in the folder, tag it, and look for the "._" twin macOS
+        creates when it has nowhere native to put the tag. Both files are removed
+        either way. Answered once per folder -- a run writes hundreds of frames
+        and the answer cannot change between them.
+
+        Any surprise counts as "no". Declining to write a cosmetic comment costs
+        the user nothing; littering their drive with files that every frame count
+        in the app would then have to see past costs them a run.
+
+        Uses the /usr/bin/xattr TOOL, not os.setxattr -- the latter does not exist
+        on macOS (it is Linux-only), so an earlier version of this probe raised
+        every time and would have quietly switched the comment off for every Mac
+        user rather than only the ones who needed it off."""
+        folder = os.path.dirname(out_path) or "."
+        cache = _volume_keeps_xattrs.__dict__.setdefault("_cache", {})
+        if folder in cache:
+            return cache[folder]
+        ok = False
+        probe = os.path.join(folder, ".stc_xattr_probe")
+        twin = os.path.join(folder, "._.stc_xattr_probe")
+        try:
+            import subprocess as _sp
+            with open(probe, "wb") as _f:
+                _f.write(b"x")
+            _r = _sp.run(["/usr/bin/xattr", "-w",
+                          "com.apple.metadata:kMDItemFinderComment", "probe", probe],
+                         capture_output=True, timeout=5)
+            ok = _r.returncode == 0 and not os.path.exists(twin)
+        except Exception:
+            ok = False
+        finally:
+            for _p in (probe, twin):
+                try:
+                    os.remove(_p)
+                except OSError:
+                    pass
+        if not ok:
+            print("  note: this drive cannot store file comments without leaving "
+                  "hidden companion files, so the app/version stamp is skipped",
+                  flush=True)
+        cache[folder] = ok
+        return ok
+
     def _write_finder_comment(out_path: str) -> None:
-        """Write _stamp to macOS Finder Comments field via Finder AppleScript. No-op if not macOS."""
+        """Stamp the app and version into the file's Finder Comments field, so a
+        cleaned frame carries its own provenance. macOS only; a no-op elsewhere.
+
+        SKIPPED ON DRIVES THAT CANNOT HOLD IT, and that matters more than the
+        comment does. A Finder comment is an extended attribute. On exFAT, FAT and
+        most network shares there is nowhere native to keep one, so macOS invents
+        a hidden companion file called "._" plus the original name -- same
+        extension, sorts first. A user cleaning 399 frames to a portable drive
+        ended up with 399 real photos and 399 lookalikes, which doubled every
+        frame count and crashed the timelapse renderer (Jon B, 2026-08-30).
+
+        The listing rule (frame_list.is_image_name) now ignores those files, so
+        this is the second line of defence rather than the only one -- but leaving
+        litter across a user's drive for a cosmetic stamp is not a trade worth
+        making. If the volume cannot store the attribute, the comment is dropped
+        and nothing else changes."""
         if sys.platform != 'darwin':
+            return
+        if not _volume_keeps_xattrs(out_path):
             return
         try:
             import subprocess as _sp

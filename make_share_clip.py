@@ -70,7 +70,8 @@ from modules.io_safe import robust_imread, robust_imwrite  # noqa: E402
 # robust_imWRITE, not cv2.imwrite: cv2 cannot write to a path containing
 # non-ASCII characters on Windows. A user with Scandinavian letters in his
 # folder name could not export a star trail at all (2026-08-23).
-from modules.frame_list import natural_key, IMAGE_EXTS  # noqa: E402
+from modules.frame_list import (natural_key, IMAGE_EXTS, dedupe_frames,  # noqa: E402
+                                is_image_name)
 
 TAGLINE = "Remove the Trails. Keep the Stars."
 URL = "www.StarTrailCleanR.com"
@@ -117,14 +118,44 @@ def _fill_canvas(img, cw, ch):
     return r[y0:y0 + ch, x0:x0 + cw]
 
 
-def _list_frames(folder):
-    """Sorted image frames in `folder`, dropping the first/last few test shots
-    (SKIP_FIRST / SKIP_LAST), in true capture order via natural_key."""
-    exts = tuple(IMAGE_EXTS)
-    fs = sorted(
+def _list_frames(folder, keep=None):
+    """Sorted image frames in `folder`, ONE PER SHOT, dropping the first/last few
+    test shots (SKIP_FIRST / SKIP_LAST), in true capture order via natural_key.
+
+    `keep`: an optional test, given each file's full path, for which files count
+    at all. IT IS APPLIED BEFORE anything else, and the order matters. The
+    end-of-run stacker uses it to consider only the frames THIS run wrote, and if
+    that test ran after the one-per-shot pick instead of before it, a run writing
+    JPEGs into a folder holding last week's TIFFs would produce no star trail:
+    the TIFF copy of every shot wins the pick, is then rejected as stale, and the
+    fresh JPEGs were never in the running (proven, 2026-08-30). Filtering first
+    means the pick happens among the files that actually qualify. The 3-and-3
+    test-shot skip lands on those too, which is what it should count.
+
+    ONE PER SHOT is the important part. A folder can easily hold the same shot
+    twice under different extensions:
+
+      * an ORIGINALS folder shot as RAW+JPG has a twin for every frame;
+      * a CLEANED folder cleaned once as JPG and again as TIFF keeps both, since
+        the two runs write different filenames (2026-08-30).
+
+    Stacking both copies of a shot is wrong in three separate ways. The shot
+    counts double, so the 3-and-3 test-shot skip cuts real photos instead of test
+    shots. Comet mode fades each shot twice. And worst of all, the twins can be
+    different DEPTHS -- an 8-bit JPEG beside a 16-bit TIFF -- which used to
+    corrupt the stack silently before _match_depth was added below.
+
+    dedupe_frames is the same shot-picking rule the engine already applies to
+    input folders, so the trail is built from the same shots the run cleaned.
+    prefer_raw=False because this is for STACKING, not cleaning: a TIFF or JPEG
+    holds the same picture as its RAW twin and reads far faster, so RAW is used
+    only when it is the sole copy of a shot. Between a TIFF and a JPEG the TIFF
+    wins -- same picture, more of it kept."""
+    fs = dedupe_frames(
         [f for f in os.listdir(folder)
-         if os.path.splitext(f)[1].lower() in exts and os.path.isfile(os.path.join(folder, f))],
-        key=natural_key,
+         if is_image_name(f) and os.path.isfile(os.path.join(folder, f))
+         and (keep is None or keep(os.path.join(folder, f)))],
+        prefer_raw=False,
     )
     end = len(fs) - SKIP_LAST                       # drop the trailing test shots
     return fs[SKIP_FIRST:end] if end > SKIP_FIRST else fs[SKIP_FIRST:]
@@ -260,6 +291,16 @@ def write_star_trail(out_path, stack):
         return os.path.isfile(out_path)
     if ext in (".tif", ".tiff"):
         return robust_imwrite(out_path, stack)
+    if stack.dtype != np.uint8:
+        # A JPEG cannot hold more than 8 bits, and asking it to simply fails --
+        # no file, no star trail, no explanation. Better a real 8-bit trail than
+        # none, so bring the depth down the same way the cleaned-frame writer
+        # does (divide by 256) and say so. Callers should not reach here:
+        # cleaned_star_ext gives a .tif whenever a 16-bit stack is possible.
+        print("  NOTE: the stacked star trail is deeper than 8-bit but is being "
+              "saved as a JPEG, which cannot hold that. Saving it as 8-bit.",
+              flush=True)
+        stack = (stack // 256).astype(np.uint8)
     return robust_imwrite(out_path, stack, [cv2.IMWRITE_JPEG_QUALITY, 95])
 
 
@@ -288,6 +329,56 @@ def drop_stale_twin(out_path):
                 pass
 
 
+def _to_bgr(im):
+    """Drop a transparency channel if the frame has one, leaving plain BGR.
+
+    Reading at full depth (IMREAD_UNCHANGED, needed to keep 16-bit frames 16-bit)
+    also keeps an alpha channel that the old 8-bit read used to discard. A
+    Photoshop-exported TIFF or a PNG can carry one, and a 4-channel frame among
+    3-channel ones would be resized to match by shape and stack as nonsense.
+    Nothing downstream has any use for transparency in a star trail."""
+    if im is not None and im.ndim == 3 and im.shape[2] == 4:
+        return im[:, :, :3]
+    return im
+
+
+def _match_depth(im, acc):
+    """Bring one incoming frame and the running accumulator to a COMMON depth,
+    returning (im, acc). Either one may come back rebuilt; neither loses data.
+
+    WHY THIS EXISTS. Lighten-max compares raw numbers, and 8-bit and 16-bit
+    frames do not share a scale: mid-grey is 128 in one and 32768 in the other.
+    Mixing them does not raise an error, it produces a wrong picture in silence.
+    Both ways round are bad. Feed a 16-bit frame into an 8-bit accumulator and
+    numpy truncates it -- 40000 lands as 64, so a bright star reads as near
+    black. Feed an 8-bit frame into a 16-bit accumulator and it can never win a
+    single pixel, because 255 is below anything the 16-bit frames hold, so that
+    photo contributes nothing to the trail at all.
+
+    This normally cannot happen -- a run writes one format, and _list_frames now
+    keeps one file per shot. It became reachable on 2026-08-30, when the star
+    trail started following the cleaned frames' format: a folder cleaned as JPEG
+    and then re-cleaned as TIFF holds both, and a run still in progress holds a
+    part-finished mix of the two even after deduplication.
+
+    THE SHALLOW SIDE IS ALWAYS THE ONE THAT MOVES. Whichever is deeper sets the
+    depth and the other is scaled up to meet it, so no brightness is ever thrown
+    away. 257 is the correct multiplier rather than 256: it maps 255 exactly onto
+    65535, so white stays white instead of landing 255 short of it. This is the
+    same convention the cleaning engine itself uses (_to_dtype in astro_clean_v5:
+    *257 going up, >>8 coming down), and the two must not drift apart -- a frame
+    cleaned by the engine and a frame promoted here have to land on one scale."""
+    if im.dtype == acc.dtype:
+        return im, acc
+    if acc.dtype == np.uint8 and im.dtype == np.uint16:
+        return im, (acc.astype(np.uint16) * 257)
+    if acc.dtype == np.uint16 and im.dtype == np.uint8:
+        return (im.astype(np.uint16) * 257), acc
+    # Anything else (a float or signed frame) -- match the accumulator rather
+    # than guess at a scale, so the stack still completes.
+    return im.astype(acc.dtype), acc
+
+
 def _stack_fullres(dirpath, names, label):
     """Lighten/maximum stack of `names` at FULL native resolution (no canvas
     resize). Only one frame plus the running accumulator are held in memory at a
@@ -298,7 +389,7 @@ def _stack_fullres(dirpath, names, label):
     frame beats a silently shorter trail)."""
     acc = None
     used = 0
-    missing, unreadable, resized = [], [], []
+    missing, unreadable, resized, redepth = [], [], [], []
     for i, n in enumerate(names):
         p = os.path.join(dirpath, n)
         if not os.path.exists(p):
@@ -309,7 +400,7 @@ def _stack_fullres(dirpath, names, label):
         # A JPEG or 8-bit TIFF still comes back as 8 bits, so nothing changes for
         # those users. (The VIDEO canvas stack below stays 8-bit -- an encoder
         # cannot use more, and it would only cost time.)
-        im = robust_imread(p, cv2.IMREAD_UNCHANGED)
+        im = _to_bgr(robust_imread(p, cv2.IMREAD_UNCHANGED))
         if im is None:
             unreadable.append(n)
             continue
@@ -319,6 +410,9 @@ def _stack_fullres(dirpath, names, label):
             if im.shape != acc.shape:
                 im = cv2.resize(im, (acc.shape[1], acc.shape[0]), interpolation=cv2.INTER_AREA)
                 resized.append(n)
+            if im.dtype != acc.dtype:
+                im, acc = _match_depth(im, acc)      # never mix 8-bit with 16-bit
+                redepth.append(n)
             np.maximum(acc, im, out=acc)
         used += 1
         if i % 50 == 0:
@@ -337,6 +431,11 @@ def _stack_fullres(dirpath, names, label):
     if resized:
         print(f"  NOTE [{label}]: {len(resized)} frame(s) had a different size and "
               f"were resized to match the first frame.", flush=True)
+    if redepth:
+        print(f"  NOTE [{label}]: {len(redepth)} frame(s) were a different bit depth "
+              f"than the rest (an 8-bit and a 16-bit clean of the same shots in one "
+              f"folder). They were brought to the deeper of the two so none of them "
+              f"was lost from the stack.", flush=True)
     return acc
 
 
@@ -364,6 +463,7 @@ class IncrementalStack:
         self.missing = []
         self.unreadable = []
         self.resized = []
+        self.redepth = []
 
     def feed_path(self, path):
         """Stack one frame by path. A missing or unreadable frame is RECORDED (not
@@ -379,7 +479,7 @@ class IncrementalStack:
         if im is None:
             self.unreadable.append(name)
             return
-        self.feed_image(im, name)
+        self.feed_image(_to_bgr(im), name)
 
     def feed_image(self, im, name=""):
         """Stack one already-decoded upright BGR frame -- lets a caller fold in a
@@ -397,6 +497,12 @@ class IncrementalStack:
                                     interpolation=cv2.INTER_AREA)
                     if name:
                         self.resized.append(name)
+                if im.dtype != self.acc.dtype:
+                    # Never mix 8-bit with 16-bit -- see _match_depth. Silent
+                    # corruption otherwise, not an error.
+                    im, self.acc = _match_depth(im, self.acc)
+                    if name:
+                        self.redepth.append(name)
                 np.maximum(self.acc, im, out=self.acc)
         self.used += 1
 
@@ -416,9 +522,15 @@ class IncrementalStack:
         if self.resized:
             print(f"  NOTE [{self.label}]: {len(self.resized)} frame(s) had a different "
                   f"size and were resized to match the first frame.", flush=True)
+        if self.redepth:
+            print(f"  NOTE [{self.label}]: {len(self.redepth)} frame(s) were a different "
+                  f"bit depth than the rest (an 8-bit and a 16-bit clean of the same "
+                  f"shots in one folder). They were brought to the deeper of the two so "
+                  f"none of them was lost from the stack.", flush=True)
 
     def result(self):
-        """The finished stacked image (BGR uint8), or None if nothing was fed yet."""
+        """The finished stacked image, or None if nothing was fed yet. BGR, 8-bit
+        for the video canvas; BGR at the frames' own depth for the star trail."""
         return self.acc
 
 
@@ -840,10 +952,19 @@ def make_star_trail(cleaned_dir, out_path=None, stack=None, comet_tail=0,
     incremental stacker. When given, the cleaned folder is NOT re-read -- the stack
     is saved straight out. When None (the CLI path) the folder is stacked here.
 
-    `out_format`: the format the CLEANED FRAMES were saved as ("jpg", "tif8",
-    "tif16"). The star trail follows it, so a 16-bit clean yields a 16-bit trail
-    with nothing thrown away. Only used when out_path is not given; an explicit
-    out_path already carries its own extension.
+    `out_format`: the format the finished trail should be SAVED AS ("jpg", "tif8",
+    "tif16"). At the end of a run that is whatever the frames were cleaned to, so
+    a 16-bit clean yields a 16-bit trail with nothing thrown away. From the Star
+    Trail window it is whatever the user picked, which may be LOWER than the
+    frames hold -- a JPEG to post, or an 8-bit TIFF to keep the file manageable.
+    It is never higher: 8-bit frames cannot fill a 16-bit file with anything real.
+
+    IT MATTERS EVEN WHEN out_path IS GIVEN. It names the file only when out_path
+    is absent, but it always decides the DEPTH, because a file extension cannot
+    tell an 8-bit TIFF from a 16-bit one. Callers that pass an explicit .tif path
+    and forget this argument get the default, "jpg", and their 16-bit trail is
+    quietly flattened -- which is exactly what happened to the end-of-run trail on
+    2026-08-30 until finalize() was made to pass the run's format through.
 
     A lighten/maximum stack of the CLEANED frames (trails already removed) written
     as a JPG. This is NOT a comet-mode / gap-filled StarStaX stack -- just the
@@ -961,6 +1082,16 @@ def make_star_trail(cleaned_dir, out_path=None, stack=None, comet_tail=0,
 
     if out_path is None:
         out_path = os.path.join(cleaned_dir, "STC_cleaned_star_trail" + star_trail_ext(out_format))
+    # ASKING FOR LESS IS ALLOWED. The depth used to be whatever the frames
+    # happened to be, so somebody stacking 16-bit frames could not choose an
+    # 8-bit file even when that was what they wanted -- the request was simply
+    # ignored and they got 16-bit anyway. Going the other way is still refused
+    # everywhere: no amount of scaling turns 8-bit frames into real 16-bit data.
+    # >>8 is the same conversion the cleaning engine uses (_to_dtype).
+    if str(out_format or "").lower() in ("jpg", "tif8") and stack.dtype == np.uint16:
+        print(f"  saving as 8-bit ({out_format}) from 16-bit frames, as asked",
+              flush=True)
+        stack = (stack >> 8).astype(np.uint8)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     drop_stale_twin(out_path)
     ok = write_star_trail(out_path, stack)
@@ -997,7 +1128,10 @@ if __name__ == "__main__":
     ap.add_argument("--remove-hotpix", action="store_true",
                     help="star trail: remove sky hot pixels / colored specks (re-reads every frame)")
     ap.add_argument("--out-format", default="jpg", choices=["jpg", "tif8", "tif16"],
-                    help="what the CLEANED FRAMES were saved as; the star trail matches it")
+                    help="star trail: what to SAVE it as. Decides the depth, not just "
+                         "the extension, so pass it even with --out. May be lower than "
+                         "the frames hold (16-bit frames -> a JPEG is fine); it is never "
+                         "raised, since 8-bit frames cannot fill 16 bits with real data")
     ap.add_argument("--reverse", action="store_true",
                     help="star trail (comet only): process frames in reverse order to flip the tail direction")
     ap.add_argument("--match-cleaned", default=None,

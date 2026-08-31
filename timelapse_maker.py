@@ -48,7 +48,8 @@ import numpy as np
 if not getattr(sys, "frozen", False):
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from modules.io_safe import robust_imread, image_size, capture_time
-from modules.frame_list import IMAGE_EXTS, order_by_capture_time, natural_key
+from modules.frame_list import (IMAGE_EXTS, order_by_capture_time, natural_key,
+                                is_image_name)
 
 TIMELAPSE_VERSION = "1.2"   # 1.2: encoder fallback (missing bundled ffmpeg can no longer crash)
 
@@ -74,8 +75,12 @@ VIDEO_FFMPEG_PARAMS = [
 def ordered_frames(frames_dir):
     """Every image in the folder, in true capture order (EXIF time, filename
     fallback) -- the same ordering rule the cleaning pipeline uses."""
+    # is_image_name, not a bare extension test: on a drive that cannot hold
+    # extended attributes, macOS writes a hidden "._name" companion beside every
+    # file with the SAME extension. Counting those doubled a user's 399-frame
+    # sequence and crashed this renderer on the first one (2026-08-30).
     files = [os.path.join(frames_dir, n) for n in os.listdir(frames_dir)
-             if os.path.splitext(n)[1].lower() in IMAGE_EXTS
+             if is_image_name(n)
              and os.path.isfile(os.path.join(frames_dir, n))]
     files = sorted(files, key=natural_key)
     times = {f: capture_time(f) for f in files}
@@ -162,7 +167,27 @@ def render(frames_dir, out_path, size_key="4k", fps=30, style="plain",
         print("ERROR: need at least 2 frames to build a timelapse", flush=True)
         return 2
 
-    nw, nh = image_size(frames[0])
+    # The video's size comes from the frames, so SOME frame has to give up its
+    # dimensions. Ask the first one that will, rather than the first one in the
+    # list: a single unreadable file used to end the whole render with a bare
+    # "cannot unpack non-iterable NoneType object" and no hint of which file or
+    # why (Jon B, 2026-08-30 -- a macOS companion file that ordered_frames now
+    # filters out, but the next unreadable thing should not cost him a run
+    # either). If NONE of them will, say so in words a person can act on.
+    nw = nh = None
+    for _i, _f in enumerate(frames):
+        _sz = image_size(_f)
+        if _sz is not None:
+            nw, nh = _sz
+            if _i:
+                print(f"  note: skipped {_i} unreadable file(s) while looking for "
+                      f"the frame size; using {os.path.basename(_f)}", flush=True)
+            break
+    if nw is None:
+        print(f"ERROR: none of the {len(frames)} files in {frames_dir} could be "
+              f"read as an image, so there is no frame size to build a video from",
+              flush=True)
+        return 2
     tw, th = target_size(nw, nh, size_key)
     print(f"Timelapse Maker v{TIMELAPSE_VERSION}: {len(frames)} frames -> "
           f"{tw}x{th} @ {fps}fps, style={style}", flush=True)

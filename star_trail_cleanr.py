@@ -537,14 +537,29 @@ def _star_trail_builds(baseline_path, cleaned_folder):
     trail (STC_original_star_trail), plus each Build output (STC_star_trail_*).
     Empty list when none exist yet.
 
-    EVERY ONE OF THOSE CAN BE EITHER FORMAT. Since 2.93 a star trail is saved to
-    match the cleaned frames, so a folder cleaned to JPEG holds .jpg trails and
-    one cleaned to TIFF holds .tif -- and a folder cleaned both ways at different
-    times can hold both. This looks for each name in every star-trail format
-    rather than assuming one. The preview's
-    left/right arrows page through exactly this list. The original-source name
-    has to be listed explicitly -- it matches neither the baseline path nor the
-    Build glob, so leaving it out made the run's second trail invisible."""
+    EVERY ONE OF THOSE CAN BE EITHER FORMAT, so each name is looked for in every
+    star-trail format rather than assuming one. Since 2.93 the run's two trails
+    follow the cleaned frames, and the Star Trail window's builds follow whatever
+    format the user chose there.
+
+    The two run-made trails never pile up across formats: writing one deletes its
+    other-format twin (drop_stale_twin), so a re-clean replaces the old trail
+    instead of leaving a stale one that still looks current. BUILDS do accumulate
+    on purpose -- each carries its settings in its name, format included -- so a
+    JPEG build and a TIFF build of the same look sit side by side.
+
+    The preview's left/right arrows page through exactly this list, newest first.
+
+    BOTH RUN-MADE NAMES ARE LISTED EXPLICITLY, and that is the whole point of this
+    function. Neither matches the Build glob, so each has to be asked for by name.
+    `baseline_path` is only a hint about WHERE to look, never the sole listing of
+    anything -- the caller moves that pointer to whatever is on screen as the user
+    pages, so a name that depends on it disappears the moment you browse past it.
+    That is exactly what happened: the cleaned trail was listed only through this
+    argument, so paging onto the original trail dropped the cleaned one from the
+    list, hid the arrows, and stranded the user on one picture with no way back
+    (reported 2026-08-30). The original-source name had already been given the
+    same treatment for the same reason."""
     import glob
     ws = os.path.dirname(baseline_path) if baseline_path else \
         os.path.dirname(workspace_path(cleaned_folder, "x")) if cleaned_folder else None
@@ -557,7 +572,8 @@ def _star_trail_builds(baseline_path, cleaned_folder):
         from make_share_clip import STAR_TRAIL_EXTS
         for _ext in STAR_TRAIL_EXTS:
             cands += glob.glob(os.path.join(ws, "STC_star_trail_*" + _ext))
-            cands.append(os.path.join(ws, "STC_original_star_trail" + _ext))
+            for _stem in ("STC_cleaned_star_trail", "STC_original_star_trail"):
+                cands.append(os.path.join(ws, _stem + _ext))
     return sorted({c for c in cands if os.path.isfile(c)},
                   key=os.path.getmtime, reverse=True)
 
@@ -572,16 +588,68 @@ def cleaned_star_ext(cleaned_folder):
     TIFF frames give a .tif trail, anything else a .jpg. Whether that TIFF ends up
     8-bit or 16-bit is decided later by the depth of the stacked pixels
     themselves (see make_share_clip.write_star_trail), so this only has to answer
-    the coarse question."""
+    the coarse question.
+
+    ONE TIFF ANYWHERE IN THE FOLDER IS ENOUGH. A folder cleaned once as JPEG and
+    again as TIFF holds both, and this has to give the SAME answer the stacker
+    does or the trail cannot be saved at all. The stacker keeps the TIFF copy of
+    a shot (see make_share_clip._list_frames), so its stack is 16-bit -- and a
+    16-bit picture cannot be written into a JPEG. Answering from whichever file
+    happened to sort first would have failed exactly that way, since "IMG_2946.jpg"
+    sorts ahead of "IMG_2946.tif"."""
     try:
         from modules.frame_list import IMAGE_EXTS
+        found = False
         for n in sorted(os.listdir(cleaned_folder or "")):
             e = os.path.splitext(n)[1].lower()
-            if e in IMAGE_EXTS:
-                return ".tif" if e in (".tif", ".tiff") else ".jpg"
+            if e in (".tif", ".tiff"):
+                return ".tif"
+            found = found or e in IMAGE_EXTS
+        if found:
+            return ".jpg"
     except OSError:
         pass
     return ".jpg"
+
+
+def source_bitdepth(folder):
+    """The depth the frames in `folder` can actually supply: 8, 16, or None when
+    it cannot be told. Used to decide which star-trail output formats are worth
+    offering -- a 16-bit file built from 8-bit frames is thirty times the size
+    for the same picture.
+
+    ASKS THE FRAMES THAT WOULD BE STACKED, via the same shot list the stacker
+    uses, so a folder holding both a JPEG and a TIFF copy of every shot is judged
+    on the copy that would actually be read.
+
+    An all-JPEG folder needs nothing opened -- JPEG is 8-bit by definition. A
+    TIFF's name tells us nothing about its depth, so those are read from the file
+    header (cheap, no pixels decoded). At most 25 frames spread across the
+    sequence are sampled: reading hundreds would stall the window, and the stack
+    settles at the deepest frame it sees, so the sample takes the maximum.
+
+    Returns None when nothing could be read, and the caller must then leave every
+    format enabled -- taking a choice away on a guess is worse than offering one
+    that turns out oversized."""
+    try:
+        import make_share_clip as _msc
+        names = _msc._list_frames(folder)
+    except Exception:
+        return None
+    if not names:
+        return None
+    exts = {os.path.splitext(n)[1].lower() for n in names}
+    if exts <= {".jpg", ".jpeg"}:
+        return 8
+    step = max(1, len(names) // 25)
+    sample = names[::step][:25]
+    try:
+        from modules.io_safe import image_bitdepth
+    except Exception:
+        return None
+    depths = [d for d in (image_bitdepth(os.path.join(folder, n)) for n in sample)
+              if d is not None]
+    return max(depths) if depths else None
 
 
 def star_trail_in(folder, stem):
@@ -2483,7 +2551,7 @@ class ShareStackThread(QThread):
 
     def __init__(self, original_dir, cleaned_dir, ws_dir, want_star, want_video,
                  video_cmd_prefix=None, parent=None, comet_tail=0, thicken_px=0,
-                 want_original_star=False):
+                 want_original_star=False, output_format="jpg"):
         super().__init__(parent)
         from modules.share_stacker import ShareStacker   # lazy: keeps GUI startup light
         self._stacker = ShareStacker(original_dir, cleaned_dir, want_star, want_video,
@@ -2491,6 +2559,11 @@ class ShareStackThread(QThread):
                                      comet_tail=comet_tail, thicken_px=thicken_px,
                                      want_original_star=want_original_star)
         self._want_original_star = want_original_star
+        # The run's chosen format, so the trail is saved the same way the frames
+        # were. It must be HANDED IN: run() used to read self.output_format,
+        # which nothing ever set, so the star trail step raised AttributeError at
+        # the end of every run and no trail was written (2026-08-30).
+        self._output_format = output_format
         self._ws_dir = ws_dir
         self._q = queue.Queue()
         self._aborted = False
@@ -2534,14 +2607,15 @@ class ShareStackThread(QThread):
             # video stays .mp4 regardless -- an encoder cannot use more than 8
             # bits, so there is nothing to preserve there.
             from make_share_clip import star_trail_ext
-            _ste = star_trail_ext(self.output_format)
+            _ste = star_trail_ext(self._output_format)
             star = os.path.join(self._ws_dir, "STC_cleaned_star_trail" + _ste)
             vid = os.path.join(self._ws_dir, "STC_share_video.mp4")
             orig_star = (os.path.join(self._ws_dir, "STC_original_star_trail" + _ste)
                          if self._want_original_star else None)
             result = self._stacker.finalize(star_out=star, video_out=vid,
                                             should_abort=self._abort_check,
-                                            original_star_out=orig_star)
+                                            original_star_out=orig_star,
+                                            out_format=self._output_format)
             if not self._aborted:
                 self.done.emit(result)
         except Exception as e:
@@ -4615,6 +4689,12 @@ class MainWindow(QMainWindow):
         self._format_combo = QComboBox()
         self._format_combo.addItems(["JPG", "TIFF 8-bit", "TIFF 16-bit"])
         self._format_combo.setFixedWidth(130)
+        # Set while WE change the format (see _sync_format_options): tells the
+        # persist hook below not to mistake our own switch for the user's choice.
+        self._format_auto_change = False
+        # What the user actually picked, kept aside while 16-bit is unavailable
+        # so their real preference comes back with the next 16-bit-capable folder.
+        self._format_user_choice = None
         hp_row.addWidget(self._format_combo)
         hp_row.addSpacing(12)
 
@@ -4645,14 +4725,6 @@ class MainWindow(QMainWindow):
         # and the combined Star Trail & Timelapse window opens automatically at the
         # finish, where the user creates the star trail and timelapse videos on demand.
         # The before-after clip is offered on that window's Summary tab.
-        share_note = QLabel(
-            "When cleaning finishes, the Star Trail & Timelapse window opens "
-            "automatically, where you can create your star trail and timelapse videos.")
-        share_note.setFont(step_font)
-        share_note.setWordWrap(True)
-        share_note.setStyleSheet(f"color: {MUTED_TEXT};")
-        share_note.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        layout.addWidget(share_note)
         layout.addSpacing(16)
 
         # ── Step 6: Run ──────────────────────────────────────────────────────
@@ -4662,6 +4734,18 @@ class MainWindow(QMainWindow):
         )
         step6.setTextFormat(Qt.RichText)
         layout.addWidget(step6)
+
+        # This describes what happens AFTER cleaning, so it belongs under the
+        # run step, next to the button that starts it -- not under the output
+        # format step above, where it read as part of choosing a file format.
+        share_note = QLabel(
+            "When cleaning finishes, the Star Trail & Timelapse window opens "
+            "automatically, where you can create your star trail and timelapse videos.")
+        share_note.setFont(step_font)
+        share_note.setWordWrap(True)
+        share_note.setStyleSheet(f"color: {MUTED_TEXT};")
+        share_note.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(share_note)
 
         self._error_label = QLabel("")
         self._error_label.setStyleSheet("color: red; font-size: 13px;")
@@ -4737,9 +4821,12 @@ class MainWindow(QMainWindow):
         else:
             self._frame_limit.setCurrentText(last_frame_limit)
 
-        # Persist on change
+        # Persist on change -- but only the USER's changes. When a JPEG folder
+        # forces 16-bit off, _sync_format_options moves the dropdown itself, and
+        # saving that would overwrite the user's real preference for good.
         self._format_combo.currentTextChanged.connect(
-            lambda t: SETTINGS.setValue("output_format", t))
+            lambda t: None if self._format_auto_change
+            else SETTINGS.setValue("output_format", t))
         self._jpeg_quality.valueChanged.connect(
             lambda v: SETTINGS.setValue("jpeg_quality", int(v)))
         self._frame_limit.currentTextChanged.connect(
@@ -5211,8 +5298,12 @@ class MainWindow(QMainWindow):
         current input folder, and grey out frame-limit dropdown choices that
         exceed the available count. Counts files by image extension and reads
         the first frame's dimensions for the size hint. Handles empty / missing
-        / no-image folders with their own messages."""
+        / no-image folders with their own messages.
+
+        Also re-checks which output formats make sense for these frames (see
+        _sync_format_options), since this already runs on every folder change."""
         folder = self._folder_input.text().strip()
+        self._sync_format_options(folder)
         from modules.frame_list import IMAGE_EXTS as exts
         count = None
         if not folder:
@@ -5262,6 +5353,82 @@ class MainWindow(QMainWindow):
                 else:
                     item.setFlags(flags & ~Qt.ItemIsEnabled)
             self._frame_limit.view().setRowHidden(i, not enabled)
+
+    # A JPEG holds 8 bits per channel and cannot hold more -- that is the format,
+    # not a property of any particular file. So an all-JPEG input folder is known
+    # to be 8-bit from the file names alone, with nothing opened and no delay.
+    _EIGHT_BIT_ONLY_EXTS = {".jpg", ".jpeg"}
+
+    # The dropdown shows people words; the engine takes a short key. ONE place
+    # translates between them, because two places did and they disagreed: the
+    # star-trail builder was left reading a setting nobody ever gave it, and the
+    # trail step raised on every single run (2026-08-30).
+    _FORMAT_KEYS = {"JPG": "jpg", "TIFF 8-bit": "tif8", "TIFF 16-bit": "tif16"}
+
+    def _current_output_format(self):
+        """The output format the next run will use, as the engine's key: 'jpg',
+        'tif8' or 'tif16'. Anything unrecognised falls back to 'jpg'.
+
+        Everything that needs to know the format asks HERE -- the cleaning run,
+        and the star trail that has to be saved in the same format as the frames
+        the run wrote. They cannot be allowed to disagree."""
+        return self._FORMAT_KEYS.get(self._format_combo.currentText(), "jpg")
+
+    def _sync_format_options(self, folder):
+        """Grey out "TIFF 16-bit" when every source frame is a JPEG.
+
+        WHY. 16-bit output cannot recover detail the source never captured. The
+        engine simply scales 8-bit values up by 257 to fill the range, so a
+        16-bit TIFF made from JPEGs holds exactly 256 distinct levels in a file
+        roughly thirty times larger. Measured on a real 5472x3648 frame on
+        2026-08-30: 120 MB, 256 levels, and not one value in 59.8 million that
+        8 bits could not have held -- including inside the repaired areas, so
+        even Star Bridge's blending stays on the 8-bit grid. The option is all
+        cost and no benefit here, and nothing on screen said so.
+
+        TIFF 8-bit STAYS AVAILABLE, because it earns its place: it avoids
+        re-compressing as JPEG on the way out, worth about half a level of
+        difference on a real frame.
+
+        Only a folder that is ENTIRELY JPEG disables it. One RAW or TIFF among
+        the frames and all three options stay, since those frames can carry real
+        depth that the run would otherwise throw away."""
+        from modules.frame_list import IMAGE_EXTS
+        try:
+            exts = {os.path.splitext(n)[1].lower()
+                    for n in os.listdir(folder or "")
+                    if os.path.splitext(n)[1].lower() in IMAGE_EXTS}
+        except OSError:
+            exts = set()
+        # An empty or unreadable folder proves nothing -- leave every option open.
+        all_jpeg = bool(exts) and exts <= self._EIGHT_BIT_ONLY_EXTS
+
+        idx = self._format_combo.findText("TIFF 16-bit")
+        if idx < 0:
+            return
+        item = self._format_combo.model().item(idx)
+        if item is None:
+            return
+        flags = item.flags()
+        item.setFlags((flags & ~Qt.ItemIsEnabled) if all_jpeg
+                      else (flags | Qt.ItemIsEnabled))
+        item.setToolTip(
+            "Your frames are JPEG, which is already 8-bit. A 16-bit file would "
+            "be about thirty times larger without holding any more detail."
+            if all_jpeg else "")
+
+        self._format_auto_change = True
+        try:
+            if all_jpeg and self._format_combo.currentText() == "TIFF 16-bit":
+                # They asked for a TIFF, so they still get one -- just not the
+                # pointlessly large kind. Their real choice is kept for later.
+                self._format_user_choice = "TIFF 16-bit"
+                self._format_combo.setCurrentText("TIFF 8-bit")
+            elif not all_jpeg and self._format_user_choice:
+                self._format_combo.setCurrentText(self._format_user_choice)
+                self._format_user_choice = None
+        finally:
+            self._format_auto_change = False
 
     def _browse_output(self):
         """Step 2 Browse button. Open a folder picker (starting at the last
@@ -5925,8 +6092,7 @@ class MainWindow(QMainWindow):
         # Set output folder now so the "Open Cleaned Folder" button works during the run
         self._done_output_folder = output
 
-        fmt_map = {"JPG": "jpg", "TIFF 8-bit": "tif8", "TIFF 16-bit": "tif16"}
-        out_fmt = fmt_map.get(self._format_combo.currentText(), "jpg")
+        out_fmt = self._current_output_format()
         self._run_cancelled = False
         frame_start = self._dev_start_frame.value() if self._dev_start_frame is not None else 0
         frame_end = self._dev_end_frame.value() if self._dev_end_frame is not None else 0
@@ -6204,10 +6370,17 @@ class MainWindow(QMainWindow):
 
     def _on_format_changed(self, text):
         """Step 5 output-format change handler. Enable the JPEG-quality spinbox
-        only when the format is JPG (it's meaningless for TIFF output)."""
+        only when the format is JPG (it's meaningless for TIFF output).
+
+        A change the USER made also retires any format we were holding for them
+        (see _sync_format_options). Without this, somebody moved off 16-bit by a
+        JPEG folder who then deliberately picks JPG would be dragged back to
+        16-bit by the next RAW folder, overriding the choice they just made."""
         is_jpg = text == "JPG"
         self._jpeg_quality.setEnabled(is_jpg)
         self._jpeg_quality_label.setEnabled(is_jpg)
+        if not getattr(self, "_format_auto_change", False):
+            self._format_user_choice = None
 
     def _on_trail_count_update(self, count):
         """Worker signal with the running total of trails cleaned so far.
@@ -6692,7 +6865,8 @@ class MainWindow(QMainWindow):
             t = ShareStackThread(original_dir, cleaned_dir, ws_dir,
                                  want_star, want_video, video_cmd_prefix=video_cmd, parent=self,
                                  comet_tail=comet_tail, thicken_px=thicken_px,
-                                 want_original_star=want_original_star)
+                                 want_original_star=want_original_star,
+                                 output_format=self._current_output_format())
             t.done.connect(self._on_share_stack_done)
             t.failed.connect(self._on_share_stack_failed)
             self._share_stack_thread = t
@@ -8075,13 +8249,35 @@ class TimelapsePanel(QWidget):
 
 
 class StarTrailPanel(QWidget):
-    """Star Trail -- the Star Trail tab inside CreatorWindow (was its own dialog),
-    opened at run end on the cleaned frames when the user asked for a star trail.
-    Shows the instant trail (built during the run) with an Open link, then optional
-    look choices -- comet tail, star size, and hot-pixel/colored-speck removal --
-    that rebuild the trail on demand via make_share_clip.py (a subprocess) with a
-    live progress bar; the Build button doubles as Stop. Only the frame-re-reading
-    options (comet, hot pixels) cost time; a plain trail is already sitting there."""
+    """The Star Trail tab inside CreatorWindow, opened when a clean finishes.
+
+    WHAT A PERSON SEES. A star trail is already waiting: the run stacked one while
+    it cleaned, so the tab opens on a finished picture rather than a blank box.
+    The arrows page through every trail this folder holds, newest first.
+
+    WHAT THEY CAN CHANGE, and what each choice costs:
+      Source     -- the cleaned frames (default) or their untouched originals,
+                    which is how you get a before-and-after pair.
+      Style      -- plain trails, or Comet Mode where each trail fades out behind
+                    the star. Comet is order-dependent, so it cannot reuse the
+                    stack the run built and must re-read every frame.
+      Length     -- how far a comet tail reaches; meaningless without Comet Mode,
+                    so it greys out.
+      Thickness  -- widen the trails. The foreground is protected if a mask was
+                    painted, so the landscape does not fatten with the stars.
+      Format     -- JPG, 8-bit TIFF, or 16-bit TIFF. Offers only what the chosen
+                    frames can actually fill: you may always ask for LESS depth
+                    than they hold, never more (see _sync_format_choices).
+      Specks     -- remove hot pixels and coloured flecks from the sky. Re-reads
+                    every frame, so it is the slowest option here.
+
+    EVERY BUILD IS A NEW FILE. The settings are written into the filename, so a
+    second build never overwrites the first and the arrows let you compare them.
+
+    The stacking itself runs as a separate program (make_share_clip.py) so a build
+    that takes minutes cannot freeze the window; the button becomes Stop while it
+    works. Only the options that re-read frames cost real time -- a plain trail in
+    the frames' own format is already sitting on disk."""
 
     def __init__(self, cleaned_folder, star_path, original_folder=None, parent=None):
         super().__init__(parent)
@@ -8093,6 +8289,13 @@ class StarTrailPanel(QWidget):
         # Preview the MOST RECENT star trail: the run's instant baseline OR any Build
         # output (STC_star_trail_*, either format). Since Build stopped overwriting the baseline
         # (option-named files now), the newest existing file is the right preview.
+        # TWO POINTERS, ON PURPOSE, and they must not be confused again.
+        # _baseline_star is where the run's own trail lives and never moves; it
+        # only tells _star_trail_builds which workspace to look in. _star_path is
+        # whatever is on SCREEN right now, and the arrows move it as the user
+        # pages. Using the moving one to find the list is what made the cleaned
+        # trail vanish once you paged past it (2026-08-30).
+        self._baseline_star = star_path
         self._star_path = _newest_star_trail(star_path, cleaned_folder)
         self._proc = None
         self._build_cancelled = False
@@ -8239,6 +8442,25 @@ class StarTrailPanel(QWidget):
             self._size_cb.addItem(label, v)
         _row("Trail Thickness", self._size_cb)
 
+        # Output format. You may always go DOWN in quality from what the frames
+        # hold -- an 8-bit file from 16-bit frames is a perfectly reasonable ask.
+        # You may never go up: _sync_format_choices greys out any depth the
+        # chosen frames cannot supply, because scaling 8-bit values into a 16-bit
+        # file makes a much larger file holding exactly the same picture.
+        self._fmt_cb = QComboBox()
+        for _lab, _v in (("JPG", "jpg"), ("TIFF 8-bit", "tif8"),
+                         ("TIFF 16-bit", "tif16")):
+            self._fmt_cb.addItem(_lab, _v)
+        _row("Format", self._fmt_cb)
+        # Whichever frames are selected decide what is on offer, and Cleaned and
+        # Original can differ (JPEG originals cleaned out to TIFF, say), so this
+        # is re-checked whenever the Source changes -- not just once at startup.
+        # Once they pick a format themselves, stop re-defaulting it under them.
+        self._fmt_touched = False
+        self._fmt_cb.activated.connect(lambda _i: setattr(self, "_fmt_touched", True))
+        self._src_cb.currentIndexChanged.connect(self._sync_format_choices)
+        self._sync_format_choices()
+
         # Hot-pixel / colored-speck removal. Composes with Comet mode (the backend runs
         # speck removal on the comet result), so only grayed while a build is running.
         self._hotpix_chk = QCheckBox("Remove hot pixels && colored specks (will take extra time)")
@@ -8360,11 +8582,62 @@ class StarTrailPanel(QWidget):
         # The caption under the preview shows this filename as the record of the
         # settings used, so the source is always named -- cleaned or original.
         tokens.append(self._src_cb.currentData() or "cleaned")
-        # Builds follow the cleaned frames' format too -- somebody who cleaned to
-        # TIFF and then builds a comet-mode version wants that in TIFF as well.
+        # The chosen format is part of the name so a JPG build and a TIFF build of
+        # otherwise identical settings sit side by side instead of colliding on
+        # one name. Defaults to the frames' own format (see _sync_format_choices),
+        # so somebody who cleaned to TIFF still gets TIFF without touching this.
+        from make_share_clip import star_trail_ext
+        _fmt = self._fmt_cb.currentData() or "jpg"
+        if _fmt != "jpg":
+            tokens.append("16bit" if _fmt == "tif16" else "8bit")
         base = os.path.join(ws, "STC_star_trail_" + "_".join(tokens)
-                            + cleaned_star_ext(self._cleaned))
+                            + star_trail_ext(_fmt))
         return _unique_path(base)
+
+    def _selected_source_dir(self):
+        """The frames folder the Source dropdown currently points at."""
+        return (self._original
+                if self._src_cb.currentData() == "original" and self._original
+                else self._cleaned)
+
+    def _sync_format_choices(self):
+        """Offer only the formats the SELECTED frames can actually fill.
+
+        Going down is always allowed: 16-bit frames can be saved as an 8-bit TIFF
+        or a JPEG, and someone who wants a smaller file should be able to say so.
+        Going up is not, because it is not real -- 8-bit frames written into a
+        16-bit file give a file roughly thirty times larger holding exactly the
+        same 256 levels (measured on a real frame, 2026-08-30).
+
+        TIFF 8-bit is never greyed out. It is not an upgrade over JPEG, it is the
+        same depth without the compression, which is worth having.
+
+        When the frames cannot be read at all, everything stays enabled. Removing
+        a choice on a guess is worse than offering one that turns out oversized."""
+        bits = source_bitdepth(self._selected_source_dir() or "")
+        allow16 = bits is None or bits >= 16
+        idx = self._fmt_cb.findData("tif16")
+        item = self._fmt_cb.model().item(idx) if idx >= 0 else None
+        if item is not None:
+            f = item.flags()
+            item.setFlags((f | Qt.ItemIsEnabled) if allow16 else (f & ~Qt.ItemIsEnabled))
+            item.setToolTip("" if allow16 else
+                            "These frames are 8-bit, so a 16-bit file would be far "
+                            "larger without holding any more detail.")
+        # Default to the frames' own format, which is what this window has always
+        # produced -- nobody who ignores this dropdown sees any change.
+        if not getattr(self, "_fmt_touched", False):
+            self._fmt_cb.setCurrentIndex(self._fmt_cb.findData(
+                "tif16" if allow16 and (self._selected_source_ext() == ".tif")
+                else "tif8" if self._selected_source_ext() == ".tif" else "jpg"))
+        elif not allow16 and self._fmt_cb.currentData() == "tif16":
+            # Their choice cannot be honoured by these frames; keep them on a TIFF
+            # rather than dropping them all the way back to JPEG.
+            self._fmt_cb.setCurrentIndex(self._fmt_cb.findData("tif8"))
+
+    def _selected_source_ext(self):
+        """'.tif' when the selected frames are TIFFs, otherwise '.jpg'."""
+        return cleaned_star_ext(self._selected_source_dir() or "")
 
     def _start_build(self):
         """Build the finished star trail picture, in the background, from the
@@ -8393,13 +8666,13 @@ class StarTrailPanel(QWidget):
         # Stack whichever frames the Source choice points at. The flag name
         # stays --cleaned (it is just the frames folder to the script); output
         # lands in the same STC Extras workspace either way.
-        _src = (self._original
-                if self._src_cb.currentData() == "original" and self._original
-                else self._cleaned)
+        _src = self._selected_source_dir()
+        # The format the user actually chose, not one inferred back out of the
+        # filename. The extension alone cannot tell 8-bit TIFF from 16-bit, so
+        # inferring it made "TIFF 8-bit" impossible to ask for.
         args = ["--star-trail", "--cleaned", _src, "--out", self._pending_out,
                 "--comet-tail", str(comet), "--thicken", str(thick),
-                "--out-format", ("tif16" if self._pending_out.lower().endswith(".tif")
-                                 else "jpg")]
+                "--out-format", (self._fmt_cb.currentData() or "jpg")]
         if _src is not self._cleaned:
             # Building from originals: match the shot list to the cleaned build
             # (same shots, same skip, one file per shot even with RAW+JPG twins)
@@ -8452,7 +8725,7 @@ class StarTrailPanel(QWidget):
         self._spin_timer.start(200)
         self._tick_spinner()
         for w in (self._hotpix_chk, self._mode_normal, self._mode_comet, self._comet_len_cb,
-                  self._reverse_chk, self._size_cb, self._src_cb,
+                  self._reverse_chk, self._size_cb, self._src_cb, self._fmt_cb,
                   self._open_img_btn, self._open_dir_btn):
             w.setEnabled(False)
         self._proc = QProcess(self)
@@ -8544,7 +8817,9 @@ class StarTrailPanel(QWidget):
         ‹ arrow pages to older builds, › back toward the newest. Arrows appear
         only when there are at least two. With no builds at all, the placeholder
         shows and the hint hides."""
-        self._builds = _star_trail_builds(self._star_path, self._cleaned)
+        # The fixed baseline, NOT the on-screen path -- see __init__. Listing from
+        # whatever is displayed shrinks the list as the user pages through it.
+        self._builds = _star_trail_builds(self._baseline_star, self._cleaned)
         if select_newest:
             self._build_idx = 0
         self._build_idx = max(0, min(self._build_idx, len(self._builds) - 1))
@@ -8595,7 +8870,7 @@ class StarTrailPanel(QWidget):
         self._build_btn.setText("Create Star Trail")
         self._build_btn.setEnabled(True)
         for w in (self._hotpix_chk, self._mode_normal, self._mode_comet, self._comet_len_cb,
-                  self._reverse_chk, self._size_cb, self._src_cb,
+                  self._reverse_chk, self._size_cb, self._src_cb, self._fmt_cb,
                   self._open_img_btn, self._open_dir_btn):
             w.setEnabled(True)
         self._sync_comet_len()   # re-gray Length if Blending Mode is Normal
