@@ -7958,37 +7958,26 @@ class TimelapsePanel(QWidget):
             self._blend_label.setEnabled(on)
 
     def _restore_choices(self):
-        """Put the timelapse settings back the way the user last left them.
+        """Deliberately does nothing. Both creator tabs open at their defaults.
 
-        Source, size, frame rate, blending and format are remembered between
-        sessions, so somebody who always renders 4K at 30 frames a second does
-        not reselect it every night. A remembered value that no longer exists is
-        ignored rather than forced, so an option removed in a later version
-        cannot leave the window in a state it cannot render from.
-        """
-        for cb, key, is_int in ((self._source_cb, "timelapse_source", False),
-                                (self._style_cb, "timelapse_style", False),
-                                (self._size_cb, "timelapse_size", False),
-                                (self._fps_cb, "timelapse_fps", True),
-                                (self._blend_cb, "timelapse_blend", True),
-                                (self._fmt_cb, "timelapse_format", False)):
-            v = SETTINGS.value(key)
-            if v is None:
-                continue
-            try:
-                idx = cb.findData(int(v) if is_int else v)
-            except (ValueError, TypeError):
-                idx = -1
-            if idx >= 0:
-                cb.setCurrentIndex(idx)
+        These settings used to be remembered between sessions while the Star
+        Trail tab's did not, so the two tabs behaved differently for no reason a
+        user could see: pick Comet Mode and a thickness you like and you re-pick
+        them every time, but set 30 frames a second once and it stuck forever.
+        Bruce chose to make them match by having BOTH reset (2026-08-30) -- a
+        window that always opens the same way is predictable, and a remembered
+        setting you have forgotten choosing is the kind that quietly produces a
+        file you did not expect.
+
+        Kept as a method, called from the same place, so the shape of the window
+        setup does not change and there is one obvious spot to undo this."""
+        return
 
     def _save_choices(self):
-        SETTINGS.setValue("timelapse_source", self._source_cb.currentData())
-        SETTINGS.setValue("timelapse_style", self._style_cb.currentData())
-        SETTINGS.setValue("timelapse_size", self._size_cb.currentData())
-        SETTINGS.setValue("timelapse_fps", self._fps_cb.currentData())
-        SETTINGS.setValue("timelapse_blend", self._blend_cb.currentData())
-        SETTINGS.setValue("timelapse_format", self._fmt_cb.currentData())
+        """Deliberately does nothing -- see _restore_choices. Any previously
+        saved values are simply never read again; they are left in place rather
+        than deleted, so undoing this restores the user's old choices intact."""
+        return
 
     def _current_folder(self):
         """The frame folder for the selected source (Cleaned by default)."""
@@ -8383,13 +8372,10 @@ class StarTrailPanel(QWidget):
         self._src_cb.addItem("Cleaned", "cleaned")
         if self._original:
             self._src_cb.addItem("Original", "original")
-            _saved_src = SETTINGS.value("startrail_source")
-            _si = self._src_cb.findData(_saved_src) if _saved_src else -1
-            if _si >= 0:
-                self._src_cb.setCurrentIndex(_si)
-            self._src_cb.currentIndexChanged.connect(
-                lambda *_: SETTINGS.setValue("startrail_source",
-                                             self._src_cb.currentData()))
+            # Source is NOT remembered between sessions: this tab opens on
+            # Cleaned every time, matching the Timelapse tab, which no longer
+            # remembers its own choices either (see _restore_choices there).
+            # Both windows opening the same way every time is the point.
             _row("Source", self._src_cb)
 
         from PySide6.QtWidgets import QRadioButton, QButtonGroup
