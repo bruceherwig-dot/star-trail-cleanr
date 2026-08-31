@@ -2,6 +2,17 @@
 
 ---
 
+## v2.93-beta
+- **Fixed: the timelapse could fail with an error on some external drives.** If your photos live on a drive formatted for use with other computers, rather than a Mac-formatted one, macOS quietly stores a small hidden companion file beside each of your images. Those companions carry the same file ending as the photo, so the app counted them as photos: a 399 frame sequence looked like 798, and the timelapse stopped with an error before it began. The app now ignores them, including any already sitting on your drive, so there is nothing for you to clean up. It also no longer creates them in the first place, and a single unreadable file no longer stops a timelapse. Reported by Jon Bertsch.
+- **Fixed: the star trail could fail to appear after a run.** The step that saves your star trail at the end of a clean could stop before writing anything, leaving the Star Trail window showing nothing newer than a previous session. This affected the last version only.
+- **Fixed: cleaning to 16-bit TIFF now really keeps 16 bits.** The star trail built during a run was being assembled at 8 bits and then saved into a 16-bit file, so it was a larger file holding no more detail. It now keeps the full depth all the way through.
+- **You can choose the format of a star trail you build.** The Star Trail window has a Format choice: JPG, 8-bit TIFF or 16-bit TIFF. You can always ask for less than your frames hold, so 16-bit frames can give you a JPEG to post. You cannot ask for more, because there is no more to give: any option your photos cannot fill is greyed out. Left alone it makes the same file it always did.
+- **16-bit TIFF output is greyed out when your photos are JPEGs.** A JPEG holds 8 bits and cannot hold more, so saving one as a 16-bit TIFF gives a file about thirty times larger with exactly the same detail in it. If any of your frames are RAW or TIFF the option stays available.
+- **Fixed: cleaning the same folder twice in different formats.** If a folder held both a JPG and a TIFF version of every photo, from cleaning it once each way, every photo was stacked twice and the two mixed together incorrectly, which could visibly darken the stars in your star trail. Each photo is now used once. Cleaning to JPG into a folder that already held TIFFs could also produce no star trail at all.
+- **Fixed: the arrows beside the star trail preview could disappear.** Stepping across to the second picture removed the first one from the list, leaving you stuck with no way back.
+- **The note about the Star Trail window** now sits with the button that starts the clean, rather than up with the file format choice.
+- **Smoke tests:** 444 passing.
+
 ## v2.92-beta
 - **New: watch your star trail draw itself.** The Timelapse tab has a Style choice. "Moving Stars" is the timelapse it has always made, one photo per frame, your night playing back. "Building Trails" keeps every photo as it goes, so the trails grow across the screen and the last frame of the video is your finished star trail. The style is recorded in the filename, so you can make both from the same photos without one replacing the other. Suggested by Jon Bertsch.
 - **Fixed: RAW files now report your camera, lens and settings.** If you shoot RAW, the Star Log's Camera Info read "Unknown" for everything, even though your files carried the information all along. We were looking for it in a way that cannot read a RAW file. The camera, lens, date, aperture and ISO now show up the way they always did for JPEG and TIFF. Reported by Kari Tuomi.
