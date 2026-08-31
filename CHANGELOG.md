@@ -2,6 +2,12 @@
 
 ---
 
+## v2.94-beta
+- **Fixed: a timelapse could stumble, playing one pair of frames out of order.** It looked like the video went forward, then briefly back. Frames are put in shooting order using the time your camera recorded when the shutter fired. When that was missing, the app fell back to the file's own date, which your editor stamps when it finishes exporting the file, not when you took the picture. Those export times can be out of order. The app now uses only the shutter time, and falls back to your filenames, which are almost always right. Frames from a camera that rolled over mid-shoot, or from two cards merged together, are still sorted correctly.
+- **Fixed: cleaning to 16-bit TIFF no longer loses when your photos were taken.** The shutter time was being replaced with the date your editor exported the file, so cleaned 16-bit TIFFs could claim to be taken days after the shoot, and the Star Log showed that wrong date. Your capture time is now carried through. Your originals were never affected.
+- **Both creator windows now open with the same settings every time.** The Timelapse tab remembered your last choices while the Star Trail tab reset, which meant one window changed under you and the other did not. Both now open at their defaults.
+- **Smoke tests:** 457 passing.
+
 ## v2.93-beta
 - **Fixed: the timelapse could fail with an error on some external drives.** If your photos live on a drive formatted for use with other computers, rather than a Mac-formatted one, macOS quietly stores a small hidden companion file beside each of your images. Those companions carry the same file ending as the photo, so the app counted them as photos: a 399 frame sequence looked like 798, and the timelapse stopped with an error before it began. The app now ignores them, including any already sitting on your drive, so there is nothing for you to clean up. It also no longer creates them in the first place, and a single unreadable file no longer stops a timelapse. Reported by Jon Bertsch.
 - **Fixed: the star trail could fail to appear after a run.** The step that saves your star trail at the end of a clean could stop before writing anything, leaving the Star Trail window showing nothing newer than a previous session. This affected the last version only.
