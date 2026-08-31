@@ -1095,11 +1095,36 @@ def main():
                 if exif_bytes:
                     from PIL import Image as _PILImage
                     _ex = _PILImage.Exif(); _ex.load(exif_bytes)
-                    _dt = _ex.get(306)      # DateTime  (capture time)
+                    # THE SHUTTER TIME FIRST, and this order matters. 306 is the
+                    # file's own date, which an editor stamps when it EXPORTS the
+                    # file -- not when the picture was taken. Copying that was
+                    # putting an export stamp on the cleaned frame and throwing
+                    # the real capture time away, because the shutter time
+                    # (DateTimeOriginal, 0x9003) lives in the EXIF sub-block that
+                    # this writer cannot carry across.
+                    #
+                    # Cheryl's frames came out of Camera Raw two days after the
+                    # shoot, seconds apart and NOT in shooting order, so the
+                    # cleaned files claimed to be taken then. Her Star Log showed
+                    # the export date, and her timelapse played 001, 002, 004,
+                    # 003 -- a visible stumble Bruce spotted (2026-08-30).
+                    #
+                    # 306 is defined as the date the image was created, so for a
+                    # photograph the shutter is the honest value to put there.
+                    try:
+                        _sub = _ex.get_ifd(0x8769)
+                    except Exception:
+                        _sub = {}
+                    _dt = _sub.get(0x9003) or _ex.get(306)
                     _mk = _ex.get(271)      # Make
                     _md = _ex.get(272)      # Model
                     if _dt:
                         extratags.append((306, 's', 0, str(_dt), True))
+                        # Also written where a photo's capture time BELONGS, so
+                        # anything that looks for the shutter time specifically
+                        # (our own frame ordering, exiftool, Lightroom) finds it
+                        # rather than falling back to the file date.
+                        extratags.append((0x9003, 's', 0, str(_dt), True))
                     if _mk:
                         extratags.append((271, 's', 0, str(_mk), True))
                     if _md:

@@ -132,5 +132,50 @@ def test_the_fallback_is_gone_from_both_read_paths():
     assert "0x0132" not in code, (
         "capture_time falls back to the plain file date again; an editor's "
         "export stamp will reorder a correct sequence")
-    assert code.count("0x9003") == 2, (
-        "expected the shutter time to be read on both the RAW and non-RAW paths")
+    # Two read paths (RAW's embedded preview, and everything else), and each
+    # looks in two places: the EXIF sub-block a camera writes, and the top level
+    # where our own 16-bit TIFF writer has to put it. Four references in total.
+    assert code.count("sub.get(0x9003) or ex.get(0x9003)") == 2, (
+        "the shutter time must be looked for in BOTH places on BOTH read paths; "
+        "dropping the top-level lookup makes our own 16-bit TIFFs unorderable, "
+        "dropping a read path does the same for RAW")
+
+
+# ── the other half: stop LOSING the shutter time on 16-bit TIFF ────────────
+
+def test_the_16bit_writer_carries_the_shutter_time_not_the_file_date():
+    """Cleaning to 16-bit TIFF used to replace the capture time with an export
+    stamp, permanently. The writer copied tag 306 (the file's own date, which an
+    editor stamps on export) and never looked at the shutter time, which lives in
+    an EXIF sub-block this writer cannot carry across.
+
+    Cheryl's cleaned frames therefore claimed to be taken two days after the
+    shoot, seconds apart and out of order. Verified fixed on a real clean of her
+    actual frames (2026-08-30): all five kept their true shutter times."""
+    src = (REPO / "astro_clean_v5.py").read_text(encoding="utf-8")
+    i = src.index('_mk = _ex.get(271)')
+    body = src[i - 2500:i]
+    assert "0x9003" in body, (
+        "the 16-bit TIFF writer is back to copying only the file date, so the "
+        "real capture time is thrown away on every 16-bit clean")
+    assert "_sub.get(0x9003) or _ex.get(306)" in body, (
+        "the shutter time must be PREFERRED over the file date, not the reverse")
+
+
+def test_a_shutter_time_written_at_the_top_level_is_read_back():
+    """tifffile cannot build an EXIF sub-block, so the writer puts the shutter
+    time at the top level of the TIFF. The reader has to look there or the write
+    is pointless."""
+    import tempfile
+    import numpy as np
+    import tifffile
+    from modules.io_safe import capture_time
+    d = tempfile.mkdtemp()
+    p = os.path.join(d, "003.tif")
+    tifffile.imwrite(p, np.zeros((20, 30, 3), np.uint16), photometric="rgb",
+                     extratags=[(306, 's', 0, "2025:05:01 20:47:22", True),
+                                (0x9003, 's', 0, "2025:04:29 23:38:38", True)])
+    got = capture_time(p)
+    assert got is not None and str(got) == "2025-04-29 23:38:38", (
+        f"read {got!r}; the shutter time at the top level was not found, or the "
+        f"export stamp won")

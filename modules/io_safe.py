@@ -635,7 +635,11 @@ def capture_time(path: Union[str, Path]):
                     sub = ex.get_ifd(0x8769)
                 except Exception:
                     sub = {}
-                raw_s = sub.get(0x9003)   # DateTimeOriginal ONLY -- see above
+                # DateTimeOriginal ONLY -- see above. Looked for in the EXIF
+                # sub-block where a camera puts it, and at the top level,
+                # where our own 16-bit TIFF writer has to put it (tifffile
+                # cannot build a sub-block).
+                raw_s = sub.get(0x9003) or ex.get(0x9003)
         else:
             from PIL import Image
             with Image.open(p) as im:
@@ -644,7 +648,11 @@ def capture_time(path: Union[str, Path]):
                     sub = ex.get_ifd(0x8769)
                 except Exception:
                     sub = {}
-                raw_s = sub.get(0x9003)   # DateTimeOriginal ONLY -- see above
+                # DateTimeOriginal ONLY -- see above. Looked for in the EXIF
+                # sub-block where a camera puts it, and at the top level,
+                # where our own 16-bit TIFF writer has to put it (tifffile
+                # cannot build a sub-block).
+                raw_s = sub.get(0x9003) or ex.get(0x9003)
     except Exception:
         return None
     if not raw_s:
