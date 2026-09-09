@@ -138,3 +138,49 @@ def test_the_engine_says_why_a_batch_came_up_empty():
         "the guard must know how many frames the resolution filter removed"
     assert "different size" in body, \
         "when the size filter emptied the batch, the message must say so"
+
+
+def test_the_plan_rechecks_the_count_after_every_filter():
+    """Fewer than 3 usable frames must stop the run in the GUI, not the engine.
+
+    Field case, 2026-09-04 (Sentry fbaf8485, a Windows user on 2.94): the Main
+    page's "needs at least 3 frames" check counts the FILES in the folder, before
+    the duplicate merge, the resolution filter and the unreadable filter have
+    each taken their cut. Nothing re-checked the total afterwards -- the only
+    test was `if not frames`, which catches zero and lets 1 and 2 straight
+    through. The run started, and the engine died mid-batch with its own wording
+    ("this batch has only 1 frame(s)"), which reached the user as "Batch 1
+    failed".
+    """
+    guard = _pos("if total < 3:")
+    size_filter = _pos("frames = matching")
+    plan = _pos("starts = list(range(0, total, batch_size))")
+
+    assert guard > size_filter, (
+        "the count must be re-checked AFTER the resolution filter, where it is "
+        "finally real")
+    assert guard < plan, \
+        "the guard must stop the run before any batch is planned or launched"
+
+    body = SRC[guard:guard + 2600]
+    assert "self.error.emit" in body, \
+        "the guard must end the run with a message, not fall through"
+    for cause, phrase in (
+            ("duplicate merge", "merged as duplicate"),
+            ("resolution filter", "different size"),
+            ("unreadable filter", "could not be read")):
+        assert phrase in body, (
+            f"the message must name the {cause} as a possible cause; without it "
+            "the user is sent back to a folder that visibly holds plenty of "
+            "photos")
+
+
+def test_the_crash_report_records_how_the_frame_list_shrank():
+    """A short-batch report that cannot say WHICH step emptied the folder makes
+    the next one of these guesswork all over again."""
+    i = _pos('scope.set_tag("component", "gui_worker_capture")')
+    body = SRC[i:i + 2000]
+    for tag in ("folder_files", "frames_planned", "merged_dupes",
+                "skipped_size", "skipped_unreadable"):
+        assert f'"{tag}"' in body, \
+            f"the worker-failure crash report must carry the {tag} tag"

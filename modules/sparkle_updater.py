@@ -164,6 +164,21 @@ def init_sparkle(on_update_found=None):
                 Sparkle's native window. Any error in that callback is logged and
                 swallowed so it can't crash the update flow."""
                 _log("delegate: updater_didFindValidUpdate_ fired")
+                # THIS is where the in-app updater is recorded, not at our own
+                # Check for Updates button (moved here 2026-09-04). Sparkle's own
+                # once-a-day timer finds an update, shows its native install
+                # window and updates in place without our Python ever running, so
+                # a marker written at the button missed every one of those and
+                # the next report called it "manual". Three transitions had been
+                # recorded, all "manual", and that was the instrument, not the
+                # truth. This callback fires on ANY confirmed find, whatever
+                # started the check. Wrapped: telemetry must never break an
+                # update.
+                try:
+                    from modules.usage_report import note_updater_engaged
+                    note_updater_engaged()
+                except Exception:
+                    pass
                 cb = _on_update_found_callback
                 if cb is not None:
                     try:
@@ -243,14 +258,11 @@ def check_for_updates():
         return False
     _log("check_for_updates: invoking checkForUpdates_(None)")
     try:
-        # Note that the in-app updater was used, so the next run's usage report
-        # can distinguish a one-click update from a hand-downloaded installer.
-        # Wrapped: telemetry must never be able to break an update.
-        try:
-            from modules.usage_report import note_updater_engaged
-            note_updater_engaged()
-        except Exception:
-            pass
+        # The in-app-updater marker is NOT written here. Pressing this button is
+        # not evidence of an update: it is evidence of a question being asked,
+        # and most checks find nothing. It is written in
+        # updater_didFindValidUpdate_ above, which fires only on a confirmed
+        # find and fires for every trigger including Sparkle's own timer.
         _updater_controller.checkForUpdates_(None)
         _log("check_for_updates: returned")
         return True

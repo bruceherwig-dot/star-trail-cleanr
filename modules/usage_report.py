@@ -93,8 +93,18 @@ def _is_dev():
 
 
 def note_updater_engaged():
-    """Record that the IN-APP updater was just used. Called the moment the user
-    sets an update going; harmless and silent if it can't be written.
+    """Record that the update engine confirmed a newer version. Harmless and
+    silent if it can't be written.
+
+    Called from the engines' did-find-update callbacks (Sparkle's
+    updater:didFindValidUpdate:, WinSparkle's did_find_update), NOT from our own
+    Check for Updates button. Moved there 2026-09-04: both engines run their own
+    periodic check, and when that one finds an update the native install window
+    opens and the app updates in place without our Python ever running. A marker
+    written at the button missed every one of those, so the next report called a
+    real one-click update "manual" -- which is why the three transitions on
+    record all read "manual" and the count of confirmed in-app updates sat at
+    zero. The button is a question; a confirmed find is the event.
 
     Without this we cannot tell an in-place update from someone downloading the
     installer again by hand: both look identical in the data (same install,

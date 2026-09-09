@@ -540,6 +540,15 @@ def _match_bitdepth(img, target_dtype):
 
 _CENTROID_MOTION_PX = 20   # centroid offset above which a neighbor is a different object
 _BRIGHT_TRAIL_RATIO  = 2.5  # 90th-pct inside brightness / median surrounding; above = real trail
+# Static certainty that the brightness veto cannot override. Set well above the 70% match
+# threshold: 70-85% is the ordinary same-object range where a real bright trail might overlap
+# something by chance, so the veto still rules there. Two or more neighbours at 90%+, each
+# already within _CENTROID_MOTION_PX of the same spot, is a fixed object -- a moving trail
+# cannot sit that still. Measured reference points: Sompting Church rooflines 78-97%, the UofR
+# chapel detections the veto wrongly rescued had a median of 94%, and the Green Park real trail
+# that earlier logic wrongly suppressed matched at 2.4%, nowhere near this bar.
+_VETO_OVERRIDE_IOU_PCT = 90.0
+_VETO_OVERRIDE_MATCHES = 2
 
 
 def _is_bright_trail(comp_pixels, img_bgr):
@@ -778,11 +787,31 @@ def _suppress_static_fps(masks_all, core_start, core_end,
                 })
 
             if len(matched_neighbors) >= min_matches:
+                # ── Static certainty overrides the brightness veto (2026-09-06) ──
+                # The veto below assumes "brighter than its surroundings" means a real trail.
+                # That holds against a DARK sky. Against a light-polluted sky with a floodlit
+                # building it describes the building, and the veto then cancels any amount of
+                # static evidence. On the UofR Memorial Chapel set it rescued 1,065 detections
+                # whose median overlap with their neighbours was 94% -- a roofline, kept every
+                # time, then "repaired" by borrowing sky over it.
+                #
+                # So above a high bar the veto no longer gets a say. Note what the bar already
+                # requires of every match counted here: at least iou_threshold overlap AND a
+                # centroid within _CENTROID_MOTION_PX (checked above). Position, not just size.
+                # A trail is a moving object; it cannot hold this much overlap, in the same
+                # place, across this many frames. The veto keeps working in the middle ground,
+                # where a genuinely bright trail may overlap something by chance.
+                #
+                # KNOWN COST, accepted: a geostationary satellite really is fixed against a
+                # tripod, so it now suppresses like a roofline and stays in the picture.
+                _strong = [m for m in matched_neighbors
+                           if m["iou_pct"] >= _VETO_OVERRIDE_IOU_PCT]
+                _certain_static = len(_strong) >= _VETO_OVERRIDE_MATCHES
                 # Bright-trail veto: if pixels inside the component are
                 # significantly brighter than the surrounding sky, it is a
                 # real trail (nav light, strobe, or bright streak) -- keep it
-                # regardless of the neighbor match count.
-                if frames_all is not None and i < len(frames_all):
+                # unless the static evidence above is overwhelming.
+                if frames_all is not None and i < len(frames_all) and not _certain_static:
                     _comp_pixels_full = np.zeros(mask.shape, dtype=bool)
                     _comp_pixels_full[y1:y2 + 1, x1:x2 + 1] = comp_crop
                     is_bright, bright_ratio = _is_bright_trail(_comp_pixels_full, frames_all[i])
@@ -958,6 +987,34 @@ def main():
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
 
+    # ── Can we actually write where we were told to? Ask now, not in 20 minutes ──
+    # Every later step assumes the output folder exists and accepts files: the run
+    # log folder below, cleaned_dir, masks_dir, and every frame written. Each of
+    # those was an unguarded mkdir, so an unwritable folder produced a raw Python
+    # traceback -- and it did so AFTER the frames were loaded and detection had
+    # run, throwing away the slowest part of the job to report something knowable
+    # in the first second. (Found 2026-09-08 while reproducing Sean's write
+    # failure: pointing a run at a read-only folder crashed in pathlib.mkdir.)
+    #
+    # The probe is a real create-write-delete, not a permissions inspection: on
+    # Windows an ACL can look permissive and still refuse, and a network share can
+    # accept the folder and reject the file. Only writing proves writability.
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        _probe = output_dir / ".stc_write_probe"
+        _probe.write_bytes(b"stc")
+        _probe.unlink()
+    except (PermissionError, OSError) as _err:
+        print(
+            f"\nERROR: Cannot write to the output folder:\n  {output_dir}\n\n"
+            "The folder may be on a read-only drive, synced by OneDrive, or you "
+            "may not have permission to write there. Pick a different output "
+            "folder and try again.\n\n"
+            f"(Detail: {type(_err).__name__}: {_err})",
+            flush=True,
+        )
+        sys.exit(2)
+
     # ── Dev-only run logger ───────────────────────────────────────────────────
     # Written to {output_dir}/STC Extras/run_log_{timestamp}.jsonl.
     # Dev-only: sys.frozen is True in the frozen bundle, so users never get this file.
@@ -975,26 +1032,60 @@ def main():
     def _write_output(stem: str, img: np.ndarray, icc_profile=None, exif_bytes=None, dpi=None):
         """Save one cleaned frame, turning a write failure into a clear user message.
 
-        Wraps _write_output_inner so that the common "can't write here" failures
-        (read-only drive, OneDrive sync lock, file open in another app) print a
-        plain-English instruction and exit cleanly with code 2 instead of dumping a
-        raw traceback. `stem` is the output filename without extension; `img` is the
+        Wraps _write_output_inner so that a write failure prints a plain-English
+        instruction and exits cleanly with code 2 instead of dumping a raw
+        traceback. `stem` is the output filename without extension; `img` is the
         BGR image array; `icc_profile`/`exif_bytes`/`dpi` are metadata to embed.
+
+        THE MESSAGE DEPENDS ON WHETHER ANY FRAME GOT THROUGH, and that distinction
+        is the whole point of the counter below. Sentry 2026-09-08 (Sean, Windows,
+        writing to a D: drive): the run wrote five frames and then failed on the
+        sixth with "Invalid argument", and we told him the folder might be
+        read-only, synced by OneDrive, or open in another app. All three were
+        impossible -- five files had just landed in that same folder. He was sent
+        hunting the wrong thing.
+
+        Nothing written yet really is a permissions/sync problem. Failing partway
+        means the drive stopped accepting files: full, disconnected, or blocked by
+        security software. Free space at that moment is the number that separates
+        them, so it is reported rather than guessed at -- the same text reaches the
+        user on screen and us in the crash report, so it has to be true for both.
         """
         from PIL import Image
         try:
-            return _write_output_inner(stem, img, icc_profile=icc_profile,
-                                       exif_bytes=exif_bytes, dpi=dpi)
+            _r = _write_output_inner(stem, img, icc_profile=icc_profile,
+                                     exif_bytes=exif_bytes, dpi=dpi)
+            _write_output.written += 1
+            return _r
         except (PermissionError, OSError) as _err:
+            _done = _write_output.written
+            try:
+                import shutil as _sh
+                _free = _sh.disk_usage(str(cleaned_dir)).free
+                _free_txt = f"{_free / 1_073_741_824:.1f} GB free on that drive"
+            except Exception:
+                _free_txt = "could not read the free space on that drive"
+            if _done == 0:
+                _why = ("The output folder may be on a read-only drive, synced by "
+                        "OneDrive, or a file there may be open in another app. "
+                        "Pick a different output folder and try again.")
+            else:
+                _why = (f"{_done} frame(s) were written to this folder first, so it "
+                        "is not a permissions problem. The drive stopped accepting "
+                        "files partway through: it may be full, it may have "
+                        "disconnected, or security software may be blocking it. "
+                        "Check the free space, then try a folder on your main "
+                        "internal drive.")
             print(
                 f"\nERROR: Cannot write cleaned frame to:\n  {output_dir}\n\n"
-                "The output folder may be on a read-only drive, synced by "
-                "OneDrive, or a file there may be open in another app. "
-                "Pick a different output folder and try again.\n\n"
-                f"(Detail: {type(_err).__name__}: {_err})",
+                f"{_why}\n\n"
+                f"(Detail: {type(_err).__name__}: {_err}; "
+                f"{_done} frame(s) already written; {_free_txt})",
                 flush=True,
             )
             sys.exit(2)
+
+    _write_output.written = 0     # frames successfully written this batch
 
     def _grey_plane(rgb: np.ndarray):
         """The single channel to write back when the source frames were black and

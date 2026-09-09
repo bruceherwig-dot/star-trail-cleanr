@@ -152,6 +152,29 @@ _COLLAR_SKY_FRAC = 0.5
 _DARKEN_FOREGROUND   = True
 _DARKEN_WINDOW       = 3     # reach +/-N neighbor frames for the darken(min); clamped at set ends
 _DARKEN_FG_FRAC      = 0.72  # a masked pixel darker than this * local sky is dark foreground
+# BRIGHTEN restore: the mirror of the darken one, for foreground that is BRIGHTER than the sky
+# instead of darker -- a floodlit building, a lit sign, a moonlit wall. The darken rule can never
+# reach these: it only accepts pixels below _DARKEN_FG_FRAC of the local sky, and lit stonework is
+# far above it. Reported 2026-09-05 on the UofR Memorial Chapel set, where the repair borrowed sky
+# over a floodlit chapel and left cloned pieces of the building behind.
+#
+# The value used is the per-pixel MEDIAN across the window, not the max: a trail crosses any given
+# pixel in only a minority of the window's frames, so the median is the building with the trail
+# rejected -- the same argument the darken rule makes with the min, which works there only because
+# the foreground is the darkest thing present.
+#
+# WHY THIS CANNOT EAT STARS, which is the failure that got the warm-pixel scrub disabled (98% of
+# what it removed was a correctly placed star): every gate below reads the MEDIAN, never this
+# frame's pixel. A star sits at a given pixel in one frame of the window and has moved on by the
+# next, so the median there is plain sky, the brightness gate fails, and the star is left alone.
+# Only content that is bright in MOST of the window -- something that does not move -- qualifies.
+_BRIGHTEN_FOREGROUND = True
+_BRIGHTEN_FG_FRAC    = 1.60  # a masked pixel whose MEDIAN is brighter than this * local sky is lit
+                             # structure. Well clear of 1.0 on purpose: bright sky (light pollution
+                             # near the horizon, the Milky Way core) sits just above the local sky
+                             # level, while lit stonework runs several times it.
+_BRIGHTEN_AGREE_TOL  = 12    # a window frame within this of the median "agrees" at that pixel
+_BRIGHTEN_AGREE_FRAC = 0.60  # ...and this share of the window must agree before we call it static
 # Reach-further-for-crossings: at a crossing BOTH immediate neighbors carry the trail, so N-1 and
 # N+1 have no clean sky at that spot. But the trail is moving, so by N-2/N+2 (or a little further)
 # it has usually cleared off, leaving real sky to borrow. Rather than paste a still-dirty neighbor,
@@ -517,6 +540,55 @@ def _darken_fill(patch_now, dmin, dmed, comp_mask, collar, maxv, dt):
     return out, int(fg.sum()), sky
 
 
+def _brighten_fill(patch_now, wstack, dmed, comp_mask, sky):
+    """Restore BRIGHT static foreground under a trail with a median replace.
+
+    The mirror of _darken_fill. That one rescues foreground darker than the sky by taking
+    the per-pixel minimum; a floodlit building is brighter than the sky, so it can never
+    pass that gate and the sky slide erases it, leaving cloned pieces of the building
+    behind (UofR Memorial Chapel, 2026-09-05).
+
+    Two gates, and BOTH read the median rather than this frame's pixel:
+
+      1. BRIGHT: the median across the window is above _BRIGHTEN_FG_FRAC * the local sky
+         level, so the underlying content really is lit structure and not merely bright sky.
+      2. STATIC: at least _BRIGHTEN_AGREE_FRAC of the window's frames sit within
+         _BRIGHTEN_AGREE_TOL of that median. A wall reads the same in nearly every frame.
+         A trail or a star passes through a pixel in only a minority of them, so it cannot
+         drag the median and cannot make a pixel look static.
+
+    Gate 2 is what keeps this off moving things, and gate 1 being median-based is what
+    keeps it off stars: a star is at a pixel in one frame and gone the next, so the median
+    there is plain sky and the brightness gate never opens. That is the failure mode that
+    got the warm-pixel scrub disabled, and it is designed out rather than tuned around.
+
+    Args:
+        patch_now: the repaired patch so far (modified copy is returned).
+        wstack: the window of neighbor patches stacked on axis 0.
+        dmed: per-pixel median of that window (gate and replacement value).
+        comp_mask: the trail pixels being repaired.
+        sky: local sky level from the collar, as measured by _darken_fill.
+
+    Returns (repaired_patch, bright_foreground_px_filled).
+    """
+    if sky is None or sky <= 0 or wstack.shape[0] < 2:
+        return patch_now, 0
+    med_max = dmed.max(axis=2).astype(np.float32)
+    bright = comp_mask & (med_max > _BRIGHTEN_FG_FRAC * sky)
+    if not bright.any():
+        return patch_now, 0
+    # Static test: how many frames of the window agree with the median at each pixel.
+    agree = (np.abs(wstack.max(axis=3).astype(np.int16)
+                    - med_max.astype(np.int16)[None, ...]) <= _BRIGHTEN_AGREE_TOL).sum(axis=0)
+    static = agree >= max(2, int(np.ceil(_BRIGHTEN_AGREE_FRAC * wstack.shape[0])))
+    fg = bright & static
+    if not fg.any():
+        return patch_now, 0
+    out = patch_now.copy()
+    out[fg] = dmed[fg]
+    return out, int(fg.sum())
+
+
 def repair_frame(frame: np.ndarray, mask: np.ndarray,
                  frame_idx: int,
                  neighbor_frames: list,
@@ -553,7 +625,8 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
             per-pixel handling for a dirty neighbor is identical under both modes.
         debug_out (dict, optional): filled with a "components" list. Each entry
             has id, area, bbox, split_into, and a "segments" list. Each segment
-            has tracking_ok, dx, dy, n_stars, method, still_trail_px,
+            has tracking_ok, dx, dy, n_stars, method, still_held_px (pixels the
+            still-vs-moving routing kept exactly in place rather than sliding),
             edge_still_px, fg_darken_px (dark static foreground pixels restored by
             the darken-min blend instead of being erased by the sky slide),
             union_zeroed_px, ring_off (the per-channel B,G,R brightness nudge
@@ -1002,6 +1075,17 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
             # foreground stays exactly put (the slide would displace it, stepping a horizon line).
             # Where they differ, something moved (a star) -- keep the slid fill so it lands right.
             # Judges by motion, not brightness, so light foreground is kept like dark.
+            #
+            # COUNTED since 2026-09-06 (_still_held_px). This is the protection that stands
+            # between a static building and a displaced copy of itself, and until now it wrote
+            # down nothing at all -- so when a user reported cloned building parts the log could
+            # not say whether it had engaged and failed or never run. Note it is SKIPPED wherever
+            # both neighbors are dirty, which is exactly what a static false positive causes
+            # (the same roofline is detected in every frame), so a zero here on a foreground
+            # component is the signal, not a bug. Do not confuse this with the old
+            # `still_trail_px`, which belonged to the disabled warm-pixel scrub and was hard-wired
+            # to zero forever; that field is gone.
+            _still_held_px = 0
             if (_STILL_ROUTING and _rp is not None and _rn is not None
                     and raw_clean is not None):
                 _still = ((~_pdirty) & (~_ndirty) &
@@ -1021,6 +1105,9 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                             _still[_lab == _k] = False        # keep this slid star
                 if _still.any():
                     synth[_still] = raw_clean[_still]
+                    # Count only inside the trail itself: the window is bigger than the
+                    # component, and pixels outside it are never written to the result.
+                    _still_held_px = int((_still & comp_mask).sum())
 
             _tp = time.perf_counter()
             # Paste the borrowed neighbor sky as-is. Brightness is corrected AFTER
@@ -1038,8 +1125,11 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
             # source. Disabling it restores those stars -- the visible breaks in bright arcs,
             # and the black/holed notches in single frames that hurt timelapse. Genuine
             # both-dirty crossings are still handled by the AND-union block below.
-            still_trail = np.zeros(comp_mask.shape, dtype=bool)
-            _still_trail_px = 0
+            # (The dead `still_trail` scratch mask and its `_still_trail_px` counter lived here
+            # until 2026-09-06. Both belonged to the disabled scrub above: the mask was never
+            # read and the counter was logged as a permanent zero, which reads like the still
+            # routing never fires. The real counter is _still_held_px, set where the routing
+            # actually runs.)
 
             # ── AND union mask: BOTH neighbors have the trail here (the crossing) ──
             # Pixels in only one neighbor's trail are already repaired above. Where both
@@ -1160,7 +1250,7 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
             # true foreground with the trail rejected. _darken_fill replaces only the masked pixels
             # darker than a fraction of the local sky with that min (a hard replace, no feather);
             # brighter sky pixels keep the slide so moving stars stay put.
-            _fg_darken_px, _fg_sky = 0, None
+            _fg_darken_px, _fg_sky, _fg_bright_px = 0, None, 0
             if _DARKEN_FOREGROUND and N > 1:
                 _w0 = max(0, frame_idx - _DARKEN_WINDOW)
                 _w1 = min(N, frame_idx + _DARKEN_WINDOW + 1)
@@ -1172,6 +1262,15 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                     _res_d, _fg_darken_px, _fg_sky = _darken_fill(
                         result[y0:y1, x0:x1], _dmin, _dmed, comp_mask, _collar, _maxv, frame.dtype)
                     result[y0:y1, x0:x1] = _res_d
+                    # Then the same rescue for foreground BRIGHTER than the sky, which the
+                    # darken gate above cannot reach by construction. The two are mutually
+                    # exclusive -- one takes pixels below 0.72x the local sky, the other above
+                    # 1.60x -- so this can only touch pixels the darken pass left alone. It
+                    # reuses the window and the sky level already computed here.
+                    if _BRIGHTEN_FOREGROUND:
+                        _res_b, _fg_bright_px = _brighten_fill(
+                            result[y0:y1, x0:x1], _wstack, _dmed, comp_mask, _fg_sky)
+                        result[y0:y1, x0:x1] = _res_b
 
             if seg_info is not None:
                 seg_info.update({
@@ -1181,9 +1280,10 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                     "dy":              round(_dy, 2),
                     "n_stars":         _n_stars,
                     "method":          _method,
-                    "still_trail_px":  _still_trail_px,
+                    "still_held_px":   _still_held_px,
                     "edge_still_px":   _edge_still_px,
                     "fg_darken_px":    _fg_darken_px,
+                    "fg_bright_px":    _fg_bright_px,
                     "union_zeroed_px": _union_zeroed_px,
                     "cross_reach_px":  _cross_reach_px,
                     "ring_off":        _ring_off,

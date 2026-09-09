@@ -165,3 +165,47 @@ def test_telemetry_cannot_break_an_update():
         usage_report.note_updater_engaged()      # must not raise
     finally:
         restore()
+
+
+def test_the_marker_is_written_where_the_engine_confirms_an_update():
+    """Both engines must record the in-app updater from their did-find-update
+    callback, never from our own Check for Updates button.
+
+    Sparkle and WinSparkle each run their own periodic check. When THAT one
+    finds an update, the engine's native install window opens and the app
+    updates in place without our Python ever running. A marker written at the
+    button therefore missed every engine-driven update, and the next usage
+    report called it "manual" -- which is why all three transitions on record
+    read "manual" and the confirmed in-app count sat at zero. Pressing the
+    button is a question, not an update; most checks find nothing.
+    """
+    import re
+    from pathlib import Path
+    repo = Path(__file__).parent.parent
+
+    mac = (repo / "modules" / "sparkle_updater.py").read_text(encoding="utf-8")
+    win = (repo / "modules" / "winsparkle_updater.py").read_text(encoding="utf-8")
+
+    def _body(src, header):
+        i = src.find(header)
+        assert i > 0, f"anchor vanished: {header!r}"
+        nxt = re.search(r"\n(?:def |            def |    def )", src[i + len(header):])
+        return src[i: i + len(header) + (nxt.start() if nxt else 2000)]
+
+    found_mac = _body(mac, "def updater_didFindValidUpdate_(self, updater, item):")
+    assert "note_updater_engaged" in found_mac, (
+        "Sparkle's did-find-update callback must write the in-app marker; it is "
+        "the only hook that fires for Sparkle's own timer as well as our button")
+
+    found_win = _body(win, "def _on_winsparkle_found():")
+    assert "_note_updater_engaged" in found_win, (
+        "WinSparkle's did-find-update callback must write the in-app marker")
+
+    check_mac = _body(mac, "def check_for_updates():")
+    assert "note_updater_engaged" not in check_mac, (
+        "the marker must NOT be written when the user merely presses Check for "
+        "Updates: a check that finds nothing would then label a later "
+        "hand-download as a one-click update")
+    check_win = _body(win, "def check_for_updates():")
+    assert "_note_updater_engaged" not in check_win, (
+        "same on Windows: the button is a question, not an update")

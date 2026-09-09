@@ -89,8 +89,19 @@ _notfound_handler = None
 
 
 def _on_winsparkle_found():
-    """Engine thread: a quiet check confirmed a newer version exists."""
+    """Engine thread: a check confirmed a newer version exists.
+
+    Registered with win_sparkle_set_did_find_update_callback, so it fires for
+    EVERY check that finds something -- the quiet user-initiated one, the one
+    with the engine's own window, and WinSparkle's periodic timer alike. That is
+    why the in-app-updater marker is written here (moved from the Settings
+    button, 2026-09-04): an update the engine found and installed on its own
+    never touched our button, and the next report therefore called it "manual".
+    """
     global _user_initiated
+    # Outside the _user_initiated test on purpose: an update the user did not
+    # personally ask for is exactly the case the button-time marker missed.
+    _note_updater_engaged()
     try:
         if _user_initiated and _found_handler is not None:
             _found_handler()
@@ -267,7 +278,9 @@ def check_for_updates():
     try:
         global _user_initiated
         _user_initiated = True   # so a failure surfaces the manual-download fallback
-        _note_updater_engaged()
+        # No marker here: pressing the button is a question, not an update, and
+        # most checks find nothing. _on_winsparkle_found writes it on a confirmed
+        # find, for this path and the engine's own timer alike.
         _dll.win_sparkle_check_update_with_ui()
         return True
     except Exception:

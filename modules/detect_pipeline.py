@@ -1377,6 +1377,12 @@ _SFP_PIXEL_DIFF_THRESH = 8.0   # mean abs pixel diff below this = "same content"
 _SFP_MIN_MATCHES       = 1     # min neighbor matches to trigger suppression
 _SFP_EDGE_PX           = 20    # frame edge veto zone (px)
 _SFP_BRIGHT_RATIO      = 2.5   # 90th-pct inside / median surround; above = real trail
+# Static certainty the brightness veto cannot override (see stage_suppress_fp). The ordinary
+# "same content" bar is _SFP_PIXEL_DIFF_THRESH; this is a much tighter one, so 3-8 stays the
+# middle ground where a bright trail can still win. A patch this close to identical, in two or
+# more neighbours, is a fixed object.
+_SFP_CERTAIN_DIFF      = 3.0
+_SFP_CERTAIN_MATCHES   = 2
 
 
 def _tile_coord(cx, cy, stride):
@@ -1523,10 +1529,22 @@ def stage_suppress_fp(state: PipelineState, cfg: StageConfig,
             log.count("kept_no_match")
             continue
 
+        # --- Static certainty overrides the brightness veto (2026-09-06) ----- #
+        # Mirrors the same change in astro_clean_v5._suppress_static_fps; the two
+        # suppressors must agree or behaviour depends on which path a scene takes.
+        # There the certainty test is overlap; here it is pixel content, so the bar is
+        # a near-identical patch (well under the ordinary match threshold) in two or
+        # more neighbours. "Brighter than its surroundings" identifies a real trail
+        # against a DARK sky; against light pollution with a floodlit building it
+        # describes the building, and it must not cancel evidence this strong.
+        _certain_static = (
+            sum(1 for m in matched if m["mean_diff"] <= _SFP_CERTAIN_DIFF)
+            >= _SFP_CERTAIN_MATCHES)
+
         # --- Veto 2: bright trail ---------------------------------------- #
         img_crop = image[y1:y2 + 1, x1:x2 + 1]
         is_bright, bright_ratio = _is_bright_trail(comp_crop, img_crop)
-        if is_bright:
+        if is_bright and not _certain_static:
             match_str = ", ".join(
                 f"nb{m['neighbor_idx']} diff={m['mean_diff']}"
                 for m in matched)

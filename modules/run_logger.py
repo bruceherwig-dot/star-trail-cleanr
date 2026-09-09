@@ -85,7 +85,16 @@ LOG_LEGEND = {
             "was not slid.",
         "n_stars": "How many star streaks agreed on the measured shift (more = more trustworthy).",
         "dx / dy": "The measured star shift in pixels between the previous and next frame.",
-        "still_trail_px": "Always 0 now (the old warm-pixel scrub that used this is disabled).",
+        "still_held_px": "Pixels the still-vs-moving routing held EXACTLY IN PLACE instead of "
+            "sliding them. Where the two clean neighbors agree, nothing moved between them "
+            "(ground, hill, trunk, wall) so the slide would displace it -- a building copied a few "
+            "pixels sideways. A big number here means that protection did real work on this trail. "
+            "A ZERO on a trail sitting over foreground is the thing to notice: the routing is "
+            "skipped wherever BOTH neighbors carry the trail too, which is exactly what a static "
+            "false positive on a roofline causes (the same edge is detected in every frame), and "
+            "those pixels fall through to the union / cross-reach fill instead. Replaced the old "
+            "still_trail_px on 2026-09-06, which was a permanent 0 from the disabled warm-pixel "
+            "scrub and read like this protection never fires.",
         "edge_still_px": "First/last frame of the set only: pixels the edge-frame foreground "
             "protection kept UNSHIFTED (a static object like a tree trunk, detected by reaching "
             "to the second same-side neighbor because the normal two-neighbor routing can't run "
@@ -97,6 +106,14 @@ LOG_LEGEND = {
             "pixel every frame while the trail is bright, so the per-pixel minimum recovers it. Only pixels "
             "darker than a fraction of the local sky are touched; sky pixels keep the Star Bridge slide so "
             "moving stars stay put. >0 means foreground was saved on this frame.",
+        "fg_bright_px": "The mirror of fg_darken_px, for foreground BRIGHTER than the sky: a floodlit "
+            "building, a lit sign, a moonlit wall. The darken rule above only accepts pixels darker than "
+            "the local sky, so lit stonework fell through it and the sky slide erased it, leaving cloned "
+            "pieces of the building behind (reported on a floodlit chapel, 2026-09-05). These pixels were "
+            "restored with the per-pixel MEDIAN across the window: a trail crosses any one pixel in only a "
+            "minority of frames, so the median is the building with the trail rejected. Both of its gates "
+            "read that median rather than this frame's pixel, which is why a star -- present in one frame "
+            "and moved on by the next -- can never trigger it. >0 means lit foreground was saved.",
         "union_zeroed_px": "Pixels where BOTH immediate neighbors (N-1 and N+1) carried the trail (a "
             "crossing), so there was no clean sky next door. The repair reaches out to farther frames "
             "for clean sky where it can (see cross_reach_px); any pixels left over are filled from the "
