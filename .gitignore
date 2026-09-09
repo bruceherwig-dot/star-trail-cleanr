@@ -18,6 +18,13 @@ tools/*
 !tools/tile_fixr.py
 !tools/trail_fixr.py
 !tools/mask_viewr.py
+# dataset_paths.py maps a CVAT task NAME to the folder its frames live in, for the
+# sets kept in the photo library instead of under "star trail images". All three
+# review apps above import it, so an entry missing here makes every one of them
+# report "image folder NOT FOUND" (which is what CVAT task 68 did on 2026-09-06).
+# It holds nothing but names and paths -- no credentials -- and losing it would
+# silently break tools that ARE backed up, so it is tracked with them.
+!tools/dataset_paths.py
 
 # Generic pretrained models (we only ship trail_detector.pt)
 yolov8n-seg.pt
