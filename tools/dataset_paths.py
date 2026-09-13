@@ -35,6 +35,12 @@ TASK_ABS_FOLDERS = {
         "/Volumes/T7 Shield/Photos/Astrophotography/_2026/26.8 Star Trail UofR Memorial Chapel/EOS R Left Side/Before",
     "Bruce Herwig - UofR Memorial Chapel - Canon 6D Right Side":
         "/Volumes/T7 Shield/Photos/Astrophotography/_2026/26.8 Star Trail UofR Memorial Chapel/Canon 6D Right Side/Before",
+    # Bruce's April 2026 shoot, rocks in the foreground, dark sky (CVAT task 70).
+    # The camera counter ROLLS OVER inside this set: IMG_9799-9999 were shot first,
+    # then IMG_0001-0245. Anything that walks these frames by filename gets the
+    # order wrong at the seam, so the CVAT task was built in capture-time order.
+    "Bruce Herwig - Joshua Tree 26.4 Star Trails":
+        "/Volumes/T7 Shield/Photos/Astrophotography/_2026/26.4 Astro Adventure Joshua Tree Borrego Death Valley/Joshua Tree/Star Trails/JPGS",
 }
 
 
