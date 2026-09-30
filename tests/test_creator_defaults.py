@@ -31,7 +31,10 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 # What each control must show when a window opens, whatever is on disk.
-TIMELAPSE_DEFAULTS = {"source": "cleaned", "style": "plain", "size": "4k",
+# 2K, not 4K (Bruce, 2026-08-30): the size most people actually want to share,
+# quicker to render and a far smaller file. The menu still lists 4K first, so
+# this only holds while the default is set explicitly rather than by ordering.
+TIMELAPSE_DEFAULTS = {"source": "cleaned", "style": "plain", "size": "2k",
                       "fps": 24, "blend": 3, "format": "mp4"}
 
 

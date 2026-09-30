@@ -89,7 +89,10 @@ def test_gui_forwards_worker_stderr_to_sentry_on_failure():
     src = _read("star_trail_cleanr.py")
     fail_idx = src.find("if self._proc.returncode != 0:")
     assert fail_idx != -1
-    fail_block = src[fail_idx:fail_idx + 4000]
+    # Window sized to hold the whole failure branch, not trimmed to fit it.
+    # 4000 stopped 159 characters short the moment the frame-count tags were
+    # added on 2026-09-04, failing on the window rather than on the wiring.
+    fail_block = src[fail_idx:fail_idx + 8000]
     assert "sentry_sdk.capture_message" in fail_block, (
         "When the worker exits non-zero, the GUI must forward the captured "
         "stderr to Sentry. This is the only path that catches crashes that "

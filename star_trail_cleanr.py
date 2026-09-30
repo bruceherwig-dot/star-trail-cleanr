@@ -1140,6 +1140,38 @@ def _leader_gear_exif(frames):
     return out
 
 
+def worker_error_message(stderr_text, stdout_lines):
+    """The message to show the user when an engine batch exits non-zero.
+
+    KEEPS THE WHOLE ERROR BLOCK, not just its first line. The engine writes a
+    heading and then the part that actually helps: which folder, whether any
+    frames were already written, what that rules out, how much space is free.
+    This used to take only the last line starting with "ERROR:", so all of that
+    was discarded and the user got a sentence fragment.
+
+    Sean's Sentry report on 2026-09-08 is titled "Worker exited 2: ERROR: Cannot
+    write cleaned frame to:" and stops at the colon. That is not Sentry
+    truncating anything -- it is everything the app kept. Every multi-line
+    message the engine has ever printed reached users the same way.
+
+    stderr wins when it has content (a real crash, where the last line is the
+    exception). Otherwise the engine printed a handled error to stdout, and
+    everything from the last "ERROR:" line onward is the message; the engine
+    exits immediately after printing one, so nothing unrelated follows it.
+    """
+    err_lines = [l for l in (stderr_text or "").splitlines() if l.strip()]
+    if err_lines:
+        return err_lines[-1]
+    lines = list(stdout_lines or [])
+    start = None
+    for i, line in enumerate(lines):
+        if line.startswith("ERROR:"):
+            start = i
+    if start is not None:
+        return "\n".join(l.rstrip() for l in lines[start:]).strip()
+    return lines[-1] if lines else "unknown error"
+
+
 class CleanerWorker(QThread):
     """Background thread that drives an entire cleaning run, end to end.
 
@@ -1459,8 +1491,48 @@ class CleanerWorker(QThread):
 
             frames = matching
             total = len(frames)
-            if not frames:
-                self.error.emit("No image files matched the dominant resolution.")
+            if total < 3:
+                # THE COUNT IS ONLY REAL HERE. The check on the Main page counts
+                # the FILES in the folder, before anything has been thrown away.
+                # Between there and here, three separate steps shrink the list:
+                # the duplicate merge (a JPG/TIFF/RAW of one shot becomes one
+                # frame), the dominant-resolution filter, and the unreadable
+                # filter. Until 2026-09-04 nothing re-checked the total after
+                # them -- the only test was "is the list completely empty" -- so
+                # a folder that came out at 1 or 2 frames sailed into the engine,
+                # which then died mid-batch with its own wording ("this batch has
+                # only 1 frame(s)"). That is Sentry fbaf8485, a Windows user on
+                # 2.94 whose folder reduced to a single usable frame.
+                #
+                # Name the step that emptied it. "Not enough frames" alone sends
+                # someone back to a folder that visibly holds plenty of photos.
+                _why = []
+                _merged = getattr(self, "_deduped_pairs_count", 0)
+                if _merged:
+                    _why.append(
+                        f"{_merged} merged as duplicate copies of the same shot "
+                        f"(a JPG, TIFF and RAW of one photo count as one frame)")
+                if mismatched:
+                    _why.append(
+                        f"{len(mismatched)} skipped for being a different size "
+                        f"than {dominant[0]} × {dominant[1]}")
+                if unreadable_sorted:
+                    _why.append(
+                        f"{len(unreadable_sorted)} skipped because they "
+                        f"could not be read")
+                _msg = (
+                    "Star Trail CleanR needs at least 3 frames to run. Each "
+                    "frame is repaired using the frames on either side of it, "
+                    "so three is the minimum.\n\n"
+                    f"This folder holds {_pre_dedup} image file"
+                    f"{'s' if _pre_dedup != 1 else ''}, but only {total} "
+                    f"can be used")
+                _msg += (":\n\n" + "\n".join(f"• {r}" for r in _why)
+                         if _why else ".")
+                _msg += ("\n\nStar Trail CleanR works on the individual frames "
+                         "you shot, before they are stacked, not on a finished "
+                         "star trail image.")
+                self.error.emit(_msg)
                 return
 
             # NOW write the manifest: the frame range, the frame limit and the
@@ -2042,16 +2114,7 @@ class CleanerWorker(QThread):
                     return
                 if self._proc.returncode != 0:
                     stderr_text = self._proc.stderr.read().strip()
-                    err_lines = [l for l in stderr_text.splitlines() if l.strip()]
-                    if err_lines:
-                        err_msg = err_lines[-1]
-                    else:
-                        # Error was printed to stdout (e.g. mixed bit-depth check).
-                        # Find the last ERROR: line, or fall back to last stdout line.
-                        stdout_err = [l for l in proc_stdout_lines if l.startswith("ERROR:")]
-                        err_msg = stdout_err[-1] if stdout_err else (
-                            proc_stdout_lines[-1] if proc_stdout_lines else "unknown error"
-                        )
+                    err_msg = worker_error_message(stderr_text, proc_stdout_lines)
 
                     def _head_tail(lines, n=50):
                         """Return first n + last n lines joined, with a marker
@@ -2089,11 +2152,33 @@ class CleanerWorker(QThread):
                                 scope.set_tag("image_h", str(dominant[1]))
                                 scope.set_tag("output_format", str(self.output_format))
                                 scope.set_tag("os", os_tag)
+                                # How the frame list got to its final size. Without
+                                # these, a report that a batch came up short says
+                                # nothing about WHICH step emptied the folder --
+                                # exactly the guesswork Sentry fbaf8485 forced.
+                                scope.set_tag("folder_files", str(_pre_dedup))
+                                scope.set_tag("frames_planned", str(total))
+                                scope.set_tag("merged_dupes",
+                                              str(getattr(self, "_deduped_pairs_count", 0)))
+                                scope.set_tag("skipped_size", str(len(mismatched)))
+                                scope.set_tag("skipped_unreadable",
+                                              str(len(unreadable_sorted)))
                                 scope.set_extra("stderr_preview", stderr_preview or "")
                                 scope.set_extra("stdout_preview", stdout_preview or "")
                                 scope.set_extra("stderr_full", stderr_text or "")
+                                # TITLE = FIRST LINE ONLY, and that is deliberate.
+                                # Sentry groups issues by this string, and err_msg
+                                # is now the engine's whole error block: the user's
+                                # folder path, how many frames they wrote, how much
+                                # space is on their drive. Passing all that here
+                                # would give every occurrence its own group, so ten
+                                # users hitting one bug would look like ten bugs.
+                                # The full text goes in an extra instead, where it
+                                # is read but does not shape the grouping.
+                                scope.set_extra("user_message", err_msg or "")
+                                _title = (err_msg or "unknown error").splitlines()[0]
                                 sentry_sdk.capture_message(
-                                    f"Worker exited {self._proc.returncode}: {err_msg}",
+                                    f"Worker exited {self._proc.returncode}: {_title}",
                                     level="error",
                                 )
                         except Exception:
@@ -7761,9 +7846,14 @@ class TimelapsePanel(QWidget):
         # ceiling -- the file renders but the player shows one frame and freezes.
         # Each preset is an UPPER bound; target_size() never upscales, so on a
         # sub-4K source "4K" simply yields the native size, which plays fine.
-        # 4K is first, so it is the default.
+        # Listed largest first so the menu reads top to bottom, but 2K is the
+        # DEFAULT (Bruce, 2026-08-30): it is the size most people actually want
+        # to share, renders quicker and makes a far smaller file, and anyone who
+        # wants 4K can say so. The default is set explicitly rather than by
+        # ordering, so the menu can stay in size order.
         for key, label in (("4k", "4K"), ("2k", "2K"), ("1080p", "1080p")):
             self._size_cb.addItem(label, key)
+        self._size_cb.setCurrentIndex(self._size_cb.findData("2k"))
         _row("Size", self._size_cb)
 
         self._fps_cb = QComboBox()
@@ -9210,19 +9300,116 @@ class MaskEditorWindow(QMainWindow):
         self.close()
 
 
-if __name__ == '__main__':
-    # Cross-platform single-instance check (Mac, Windows, Linux)
+# ── Single instance ───────────────────────────────────────────────────────────
+# One copy of the app at a time, enforced by claiming a local port: the first
+# copy holds it, a second copy finds it taken.
+#
+# FIELD REPORT 2026-09-07 (Steve): "it says it is already running but I cannot
+# seem to use it", and reinstalling changed nothing. The old check claimed port
+# 49173 and treated ANY bind failure as proof that a second copy was running.
+# Two things were wrong with that:
+#
+#   1. 49173 sits INSIDE the operating system's dynamic port range (49152-65535
+#      on Windows, macOS and Linux alike). That is the pool the OS hands out at
+#      random for outgoing connections, so any program on the machine -- a
+#      browser tab, a mail client, a backup tool -- can be given 49173 by pure
+#      chance and lock the user out of Star Trail CleanR completely. Nothing the
+#      user can do about it, and reinstalling cannot help. Present since
+#      v1.0-beta, 2026-04-15.
+#   2. It only BOUND the port, never listened on it, so it could not tell our own
+#      second copy from a stranger. A guess, presented to the user as a fact.
+#
+# So: a fixed port BELOW the dynamic range, which the OS never assigns on its
+# own, and an actual handshake. The running copy listens and answers; a starting
+# copy that cannot bind asks who is there. A correct answer means a real second
+# copy, so refuse. Anything else means the port belongs to some other program,
+# so start normally WITHOUT the lock -- refusing to run is far worse than running
+# without single-instance protection.
+SINGLE_INSTANCE_PORT = 45173
+_SINGLE_INSTANCE_HELLO = b"STC?"
+_SINGLE_INSTANCE_REPLY = b"STC-RUNNING"
+
+
+def _serve_single_instance_probes(sock):
+    """Answer "are you Star Trail CleanR?" probes from copies trying to start.
+
+    Runs on a daemon thread so it can never hold up quitting. Every failure is
+    swallowed: this is a courtesy to the next launch, and must never be able to
+    disturb the running app."""
+    def _serve():
+        while True:
+            try:
+                conn, _ = sock.accept()
+            except OSError:
+                return                      # socket closed (quit or relaunch)
+            try:
+                conn.settimeout(1.0)
+                conn.recv(64)
+                conn.sendall(_SINGLE_INSTANCE_REPLY)
+            except Exception:
+                pass
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    threading.Thread(target=_serve, daemon=True).start()
+
+
+def acquire_single_instance(port=SINGLE_INSTANCE_PORT):
+    """Claim the single-instance port.
+
+    Returns (lock_socket, another_copy_is_running):
+      (socket, False) -- we hold the lock and are answering probes.
+      (None,   True)  -- a real Star Trail CleanR answered; refuse to start.
+      (None,   False) -- the port belongs to something else, or the check could
+                         not complete. START ANYWAY, without a lock.
+
+    The last case is the whole point: an unanswered port is not evidence of a
+    second copy, and the user must never be locked out by a stranger's socket."""
     import socket
-    _lock_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
-        _lock_socket.bind(('127.0.0.1', 49173))
+        s.bind(('127.0.0.1', port))
+        s.listen(8)
+        _serve_single_instance_probes(s)
+        return s, False
     except OSError:
+        try:
+            s.close()
+        except Exception:
+            pass
+    # Someone holds the port. Ask whether it is us.
+    try:
+        probe = socket.create_connection(('127.0.0.1', port), timeout=1.0)
+        try:
+            probe.settimeout(1.0)
+            probe.sendall(_SINGLE_INSTANCE_HELLO)
+            if _SINGLE_INSTANCE_REPLY in probe.recv(64):
+                return None, True
+        finally:
+            probe.close()
+    except Exception:
+        pass                                # not us, or no answer -> start anyway
+    return None, False
+
+
+if __name__ == '__main__':
+    _lock_socket, _already_running = acquire_single_instance()
+    if _already_running:
         app = QApplication(sys.argv)
-        QMessageBox.warning(None, "Star Trail CleanR",
-                            "Star Trail CleanR is already running.")
+        QMessageBox.warning(
+            None, "Star Trail CleanR",
+            "Star Trail CleanR is already open.\n\n"
+            "Look for it in your other windows. If you can't find it, quit it "
+            "from Task Manager on Windows or Force Quit on a Mac, then open it "
+            "again. Restarting the computer also clears it.")
         sys.exit(1)
 
     app = QApplication(sys.argv)
+    # May be None when the port belonged to another program: we started anyway,
+    # and _relaunch already tolerates a missing socket.
     app._lock_socket = _lock_socket  # exposed so _relaunch can close it before spawning
 
     # Bundle our own font so widgets render at the same widths on every OS.

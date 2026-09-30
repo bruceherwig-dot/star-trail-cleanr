@@ -958,6 +958,34 @@ def main():
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
 
+    # ── Can we actually write where we were told to? Ask now, not in 20 minutes ──
+    # Every later step assumes the output folder exists and accepts files: the run
+    # log folder below, cleaned_dir, masks_dir, and every frame written. Each of
+    # those was an unguarded mkdir, so an unwritable folder produced a raw Python
+    # traceback -- and it did so AFTER the frames were loaded and detection had
+    # run, throwing away the slowest part of the job to report something knowable
+    # in the first second. (Found 2026-09-08 while reproducing Sean's write
+    # failure: pointing a run at a read-only folder crashed in pathlib.mkdir.)
+    #
+    # The probe is a real create-write-delete, not a permissions inspection: on
+    # Windows an ACL can look permissive and still refuse, and a network share can
+    # accept the folder and reject the file. Only writing proves writability.
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        _probe = output_dir / ".stc_write_probe"
+        _probe.write_bytes(b"stc")
+        _probe.unlink()
+    except (PermissionError, OSError) as _err:
+        print(
+            f"\nERROR: Cannot write to the output folder:\n  {output_dir}\n\n"
+            "The folder may be on a read-only drive, synced by OneDrive, or you "
+            "may not have permission to write there. Pick a different output "
+            "folder and try again.\n\n"
+            f"(Detail: {type(_err).__name__}: {_err})",
+            flush=True,
+        )
+        sys.exit(2)
+
     # ── Dev-only run logger ───────────────────────────────────────────────────
     # Written to {output_dir}/STC Extras/run_log_{timestamp}.jsonl.
     # Dev-only: sys.frozen is True in the frozen bundle, so users never get this file.
@@ -975,26 +1003,60 @@ def main():
     def _write_output(stem: str, img: np.ndarray, icc_profile=None, exif_bytes=None, dpi=None):
         """Save one cleaned frame, turning a write failure into a clear user message.
 
-        Wraps _write_output_inner so that the common "can't write here" failures
-        (read-only drive, OneDrive sync lock, file open in another app) print a
-        plain-English instruction and exit cleanly with code 2 instead of dumping a
-        raw traceback. `stem` is the output filename without extension; `img` is the
+        Wraps _write_output_inner so that a write failure prints a plain-English
+        instruction and exits cleanly with code 2 instead of dumping a raw
+        traceback. `stem` is the output filename without extension; `img` is the
         BGR image array; `icc_profile`/`exif_bytes`/`dpi` are metadata to embed.
+
+        THE MESSAGE DEPENDS ON WHETHER ANY FRAME GOT THROUGH, and that distinction
+        is the whole point of the counter below. Sentry 2026-09-08 (Sean, Windows,
+        writing to a D: drive): the run wrote five frames and then failed on the
+        sixth with "Invalid argument", and we told him the folder might be
+        read-only, synced by OneDrive, or open in another app. All three were
+        impossible -- five files had just landed in that same folder. He was sent
+        hunting the wrong thing.
+
+        Nothing written yet really is a permissions/sync problem. Failing partway
+        means the drive stopped accepting files: full, disconnected, or blocked by
+        security software. Free space at that moment is the number that separates
+        them, so it is reported rather than guessed at -- the same text reaches the
+        user on screen and us in the crash report, so it has to be true for both.
         """
         from PIL import Image
         try:
-            return _write_output_inner(stem, img, icc_profile=icc_profile,
-                                       exif_bytes=exif_bytes, dpi=dpi)
+            _r = _write_output_inner(stem, img, icc_profile=icc_profile,
+                                     exif_bytes=exif_bytes, dpi=dpi)
+            _write_output.written += 1
+            return _r
         except (PermissionError, OSError) as _err:
+            _done = _write_output.written
+            try:
+                import shutil as _sh
+                _free = _sh.disk_usage(str(cleaned_dir)).free
+                _free_txt = f"{_free / 1_073_741_824:.1f} GB free on that drive"
+            except Exception:
+                _free_txt = "could not read the free space on that drive"
+            if _done == 0:
+                _why = ("The output folder may be on a read-only drive, synced by "
+                        "OneDrive, or a file there may be open in another app. "
+                        "Pick a different output folder and try again.")
+            else:
+                _why = (f"{_done} frame(s) were written to this folder first, so it "
+                        "is not a permissions problem. The drive stopped accepting "
+                        "files partway through: it may be full, it may have "
+                        "disconnected, or security software may be blocking it. "
+                        "Check the free space, then try a folder on your main "
+                        "internal drive.")
             print(
                 f"\nERROR: Cannot write cleaned frame to:\n  {output_dir}\n\n"
-                "The output folder may be on a read-only drive, synced by "
-                "OneDrive, or a file there may be open in another app. "
-                "Pick a different output folder and try again.\n\n"
-                f"(Detail: {type(_err).__name__}: {_err})",
+                f"{_why}\n\n"
+                f"(Detail: {type(_err).__name__}: {_err}; "
+                f"{_done} frame(s) already written; {_free_txt})",
                 flush=True,
             )
             sys.exit(2)
+
+    _write_output.written = 0     # frames successfully written this batch
 
     def _grey_plane(rgb: np.ndarray):
         """The single channel to write back when the source frames were black and
