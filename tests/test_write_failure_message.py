@@ -91,11 +91,17 @@ def test_an_unwritable_output_folder_fails_immediately_and_cleanly():
 
     src = Path(tempfile.mkdtemp())
     ro = Path(tempfile.mkdtemp())
-    os.chmod(ro, 0o500)                      # read + execute, no write
+    # A folder cannot be created underneath a plain FILE, on any operating system.
+    # (chmod 0o500 was the first attempt: Windows ignores it, so on the Windows
+    # build machine the folder stayed writable and the run went on to fail
+    # somewhere else.)
+    blocker = ro / "blocker"
+    blocker.write_bytes(b"x")
+    out_dir = blocker / "cleaned"
     try:
         proc = subprocess.run(
             [sys.executable, str(REPO / "astro_clean_v5.py"), str(src),
-             "-o", str(ro / "cleaned"), "--model", "nonexistent.pt",
+             "-o", str(out_dir), "--model", "nonexistent.pt",
              "--start", "0", "--batch", "3"],
             capture_output=True, text=True, timeout=120)
         out = proc.stdout + proc.stderr
@@ -107,7 +113,6 @@ def test_an_unwritable_output_folder_fails_immediately_and_cleanly():
         assert "Traceback" not in out, \
             f"a raw traceback must never reach the user:\n{out[-1500:]}"
     finally:
-        os.chmod(ro, 0o700)
         for d in (src, ro):
             try:
                 import shutil

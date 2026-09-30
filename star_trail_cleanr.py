@@ -9370,6 +9370,12 @@ def acquire_single_instance(port=SINGLE_INSTANCE_PORT):
     second copy, and the user must never be locked out by a stranger's socket."""
     import socket
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    if os.name != 'nt':
+        # Without this, on Linux a launch right after quitting can find the port
+        # still held by connections lingering from the last copy's handshakes, and
+        # start without the lock. Not set on Windows, where it would let a second
+        # copy bind the same port instead of being refused.
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         s.bind(('127.0.0.1', port))
         s.listen(8)
