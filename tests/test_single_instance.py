@@ -107,7 +107,7 @@ def test_the_lock_is_released_when_the_first_copy_goes():
     port = _free_port()
     first, _ = S.acquire_single_instance(port)
     assert first is not None
-    first.close()
+    S.release_single_instance(first)
     second, already = S.acquire_single_instance(port)
     try:
         assert already is False and second is not None, \

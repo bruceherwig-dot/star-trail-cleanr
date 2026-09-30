@@ -4569,11 +4569,7 @@ class MainWindow(QMainWindow):
         import subprocess
         from PySide6.QtWidgets import QApplication as _QApp
         _sock = getattr(_QApp.instance(), '_lock_socket', None)
-        if _sock is not None:
-            try:
-                _sock.close()
-            except Exception:
-                pass
+        release_single_instance(_sock)
         if getattr(sys, 'frozen', False):
             subprocess.Popen([sys.executable, '--cleanr-relaunch'])
         else:
@@ -9355,6 +9351,27 @@ def _serve_single_instance_probes(sock):
                     pass
 
     threading.Thread(target=_serve, daemon=True).start()
+
+
+def release_single_instance(sock):
+    """Give the single-instance port back, immediately, on every platform.
+
+    A bare close() is not enough on Linux: the listener thread is blocked in
+    accept(), the kernel keeps the socket alive until that call returns, and the
+    port stays taken -- so a relaunch would find our own dying copy still
+    answering and refuse to start. shutdown() wakes the blocked accept() first.
+    macOS refuses shutdown() on a listening socket; that is harmless."""
+    if sock is None:
+        return
+    import socket
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except Exception:
+        pass
+    try:
+        sock.close()
+    except Exception:
+        pass
 
 
 def acquire_single_instance(port=SINGLE_INSTANCE_PORT):

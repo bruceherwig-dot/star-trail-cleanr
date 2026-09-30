@@ -38,7 +38,10 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install CPU-only PyTorch
-        run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+        # PINNED to the pair v2.94 shipped with. Unpinned, the runner picked up torch 2.14.0 /
+        # torchvision 0.29.0 on 2026-09-30 and the bundled app died with
+        # 'operator torchvision::nms does not exist'.
+        run: pip install torch==2.13.0 torchvision==0.28.0 --index-url https://download.pytorch.org/whl/cpu
       - name: Install dependencies
         run: |
           pip install pyinstaller 'numpy<2' pillow PySide6 ultralytics sahi nvidia-ml-py sentry-sdk tifffile scikit-image imageio imageio-ffmpeg pyobjc-core rawpy
@@ -359,7 +362,7 @@ jobs:
             libxcb-shape0 libxcb-sync1 libxcb-xfixes0 libxcb-xinerama0 libegl1 \
             libfontconfig1 libdbus-1-3
       - name: Install CPU-only PyTorch
-        run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+        run: pip install torch==2.13.0 torchvision==0.28.0 --index-url https://download.pytorch.org/whl/cpu
       - name: Install dependencies
         run: |
           pip install pyinstaller 'numpy<2' pillow PySide6 ultralytics sahi nvidia-ml-py sentry-sdk tifffile scikit-image imageio imageio-ffmpeg rawpy
