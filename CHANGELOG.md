@@ -2,6 +2,15 @@
 
 ---
 
+## v2.95-beta
+- **Fixed: "Remove hot pixels & colored specks" failed on the Star Trail tab and kept the plain trail.** If you painted a foreground mask, the speck step crashed with a "sizes of input arguments do not match" message every time, in both Normal and Comet modes. It now works, and it checks each speck against your frames before removing it. Reported by a user on Windows.
+- **Fixed: the app could refuse to open, claiming it was already running.** To make sure only one copy runs, the app claimed a fixed network port, and that port sat in the range your computer hands out at random to other programs. A browser tab or backup tool could take it and lock you out, and reinstalling changed nothing. It now uses a port your computer never hands out, and it asks whoever holds it whether they are really Star Trail CleanR. If it is anything else, the app simply opens. Reported by Steve.
+- **Fixed: a misleading message when a drive stopped accepting files partway through a run.** The old message blamed a read-only drive, OneDrive or another app, even when several frames had just been saved to that same folder. It now says whether anything was saved first, and how much free space the drive has, which is what tells a full drive from one that disconnected. The app also checks up front that it can write to your output folder, instead of finding out twenty minutes in. Reported by Sean.
+- **Fixed: error messages arrived cut off.** Any error with more than one line reached you as its first line only, ending mid-sentence. You now get the whole message.
+- **Fixed: a folder that boiled down to one or two usable frames.** After duplicate copies of a shot are merged and wrong-sized or unreadable files are skipped, too few frames can be left to run. The app now checks the final count and tells you which of those steps removed your frames. Reported by Shawn.
+- **The Timelapse tab now opens at 2K.** It is the size most people share, it renders faster and it makes a much smaller file. 4K is still one click away.
+- **Smoke tests:** 476 passing.
+
 ## v2.94-beta
 - **Fixed: a timelapse could stumble, playing one pair of frames out of order.** It looked like the video went forward, then briefly back. Frames are put in shooting order using the time your camera recorded when the shutter fired. When that was missing, the app fell back to the file's own date, which your editor stamps when it finishes exporting the file, not when you took the picture. Those export times can be out of order. The app now uses only the shutter time, and falls back to your filenames, which are almost always right. Frames from a camera that rolled over mid-shoot, or from two cards merged together, are still sorted correctly.
 - **Fixed: cleaning to 16-bit TIFF no longer loses when your photos were taken.** The shutter time was being replaced with the date your editor exported the file, so cleaned 16-bit TIFFs could claim to be taken days after the shoot, and the Star Log showed that wrong date. Your capture time is now carried through. Your originals were never affected.
