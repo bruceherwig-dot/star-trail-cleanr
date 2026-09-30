@@ -233,7 +233,10 @@ def _detect_map(big, sample_frames, run_map=None, cand=None, fleck_ids=None):
         sample_frames, center_threshold=22, inner_threshold=11, min_fraction=0.6)
     wh = build_hot_pixel_map_white(
         sample_frames, center_threshold=18, inner_threshold=9, min_fraction=0.6)
-    hot = cv2.bitwise_or(ch, wh)
+    # Either detector answers None when it was given no frames; that means "found
+    # nothing", not "fail".
+    zero = np.zeros((H, W), np.uint8)
+    hot = cv2.bitwise_or(zero if ch is None else ch, zero if wh is None else wh)
 
     cand_lab, pts = _blob_candidates(big) if cand is None else cand
     # THE decision, and the only one this pass can make on its own: do the frames
@@ -410,10 +413,14 @@ def _scan_frames(paths, read_frame, hw, want_sample=40, pts=None, build_map=True
                 ev_before[brighter] = prev_pred[brighter]   # ... or come from there
                 peak[brighter] = v_dot[brighter]
                 just_peaked, prev_pred = brighter, v_prev
+            # The sample feeds the persistence detectors, which are the evidence
+            # that a dot is a sensor defect. It is needed even when the run's saved
+            # map is used (build_map False): without it they see nothing, and the
+            # step crashed on every masked run (2026-09-29).
+            if k in keep:
+                sample.append(f)
             if build_map:
                 batch.append(f)
-                if k in keep:
-                    sample.append(f)
         if build_map and len(batch) >= _BATCH:
             acc = cv2.bitwise_or(acc, build_hot_pixel_map(batch))
             batch = []
