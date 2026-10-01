@@ -8342,6 +8342,7 @@ class FrameRangeSlider(QWidget):
 
     changed = Signal(int, int)
     _GRIP_W = 12
+    _BAR_INSET = 5      # how far each grip sticks out above and below the bar
 
     def __init__(self, total, min_keep, parent=None):
         super().__init__(parent)
@@ -8350,7 +8351,7 @@ class FrameRangeSlider(QWidget):
         self._start = 0
         self._end = 0
         self._drag = None          # "start" or "end" while a grip is held
-        self.setFixedHeight(26)
+        self.setFixedHeight(36)
         self.setMinimumWidth(160)
         self.setCursor(Qt.SizeHorCursor)
         self.setToolTip("Drag a grip inward to leave out frames at that end")
@@ -8420,27 +8421,29 @@ class FrameRangeSlider(QWidget):
         p.setRenderHint(QPainter.Antialiasing)
         pal = self.palette()
         accent = QColor(BRAND_HEADING_BLUE)
-        h, gw = self.height(), self._GRIP_W
+        h, gw, inset = self.height(), self._GRIP_W, self._BAR_INSET
+        bh = h - 2 * inset                  # the bar is shorter than the widget...
         xs = self._x_of_start()
         xe = self._x_of_end()
         # whole sequence, then the part that is used
         p.setPen(pal.color(QPalette.Mid))
         p.setBrush(pal.color(QPalette.Base))
-        p.drawRoundedRect(QRectF(0.5, 0.5, self.width() - 1, h - 1), 6, 6)
+        p.drawRoundedRect(QRectF(0.5, inset + 0.5, self.width() - 1, bh - 1), 6, 6)
         tint = QColor(accent); tint.setAlpha(45)
         p.setPen(Qt.NoPen)
         p.setBrush(tint)
-        p.drawRoundedRect(QRectF(xs + gw / 2, 1, max(0.0, xe - xs), h - 2), 5, 5)
-        # the two grips, drawn BEFORE the pill, so a grip passing under the count never hides it
+        p.drawRoundedRect(QRectF(xs + gw / 2, inset + 1, max(0.0, xe - xs), bh - 2), 5, 5)
+        # ...and the grips are the full height, so they stand out above and below it
+        # and stay visible and easy to grab even when they pass under the count.
         p.setPen(Qt.NoPen)
         p.setBrush(accent)
         for x in (xs, xe):
             p.drawRoundedRect(QRectF(x, 0, gw, h), 5, 5)
-        # the count, in a small pill on top of everything else
+        # the count, in a small pill on top of everything else (inside the bar)
         txt = f"Using {self.used()} of {self._total} frames"
         fm = p.fontMetrics()
         tw = fm.horizontalAdvance(txt) + 20
-        pill = QRectF((self.width() - tw) / 2, 3, tw, h - 6)
+        pill = QRectF((self.width() - tw) / 2, inset + 3, tw, bh - 6)
         p.setPen(pal.color(QPalette.Mid))
         p.setBrush(pal.color(QPalette.Window))
         p.drawRoundedRect(pill, 5, 5)
