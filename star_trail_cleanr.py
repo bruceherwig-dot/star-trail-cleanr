@@ -7815,12 +7815,16 @@ class TimelapsePanel(QWidget):
             r.addWidget(combo, 1)
             lay.addLayout(r)
 
-        # Source: cleaned frames (default) or the original, uncleaned frames.
-        # "Original" is only offered when we actually have that folder.
+        # Source: the original, uncleaned frames (default when we have them) or the
+        # cleaned frames. "Original" is only offered when we actually have that
+        # folder; without it the only choice is Cleaned. Bruce's call, 2026-09-30:
+        # the originals carry the most movement, so a timelapse of them is the most
+        # interesting one. The Star Trail tab still opens on Cleaned.
         self._source_cb = QComboBox()
         self._source_cb.addItem("Cleaned", "cleaned")
         if original_folder and os.path.isdir(original_folder):
             self._source_cb.addItem("Original", "original")
+            self._source_cb.setCurrentIndex(self._source_cb.findData("original"))
         _row("Source", self._source_cb)
 
         # Style: what the finished video SHOWS, not how it is encoded.
@@ -7931,7 +7935,7 @@ class TimelapsePanel(QWidget):
         for cb in (self._size_cb, self._fps_cb, self._blend_cb, self._fmt_cb):
             cb.currentIndexChanged.connect(self._update_estimate)
         self._source_cb.currentIndexChanged.connect(self._reload_frames)
-        self._reload_frames()   # load the (default Cleaned) frames + fill the estimate + poster
+        self._reload_frames()   # load the default-source frames (Original when offered) + estimate + poster
         self._refresh_play_state()   # enable Play video if a rendered timelapse already exists
         _make_labels_selectable(self)   # house rule: all GUI text is copy/paste-able
 
@@ -8066,7 +8070,7 @@ class TimelapsePanel(QWidget):
         return
 
     def _current_folder(self):
-        """The frame folder for the selected source (Cleaned by default)."""
+        """The frame folder for the selected source (Original by default when offered)."""
         if self._source_cb.currentData() == "original" and self._original:
             return self._original
         return self._cleaned

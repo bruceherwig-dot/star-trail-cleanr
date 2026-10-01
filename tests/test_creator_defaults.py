@@ -34,7 +34,10 @@ if str(REPO) not in sys.path:
 # 2K, not 4K (Bruce, 2026-08-30): the size most people actually want to share,
 # quicker to render and a far smaller file. The menu still lists 4K first, so
 # this only holds while the default is set explicitly rather than by ordering.
-TIMELAPSE_DEFAULTS = {"source": "cleaned", "style": "plain", "size": "2k",
+#
+# The Timelapse tab opens on Original when the originals are on disk (Bruce,
+# 2026-09-30: they carry the most movement). The Star Trail tab stays on Cleaned.
+TIMELAPSE_DEFAULTS = {"source": "original", "style": "plain", "size": "2k",
                       "fps": 24, "blend": 3, "format": "mp4"}
 
 
@@ -58,7 +61,7 @@ def _with_planted_settings(fn):
     QApplication.instance() or QApplication([])
     import star_trail_cleanr as S
 
-    planted = {"timelapse_source": "original", "timelapse_style": "accumulate",
+    planted = {"timelapse_source": "cleaned", "timelapse_style": "accumulate",
                "timelapse_size": "1080p", "timelapse_fps": 60,
                "timelapse_blend": 5, "timelapse_format": "mov",
                "startrail_source": "original"}
