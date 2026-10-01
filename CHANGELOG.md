@@ -2,6 +2,10 @@
 
 ---
 
+## v2.96-beta
+- **Fixed: "Remove hot pixels & colored specks" drew a bright yellow outline around the foreground.** On a photo with dark silhouettes against a bright sky, such as cacti against an aurora, the soft edge of every silhouette was mistaken for a ring of specks. The cleanup then painted that ring with one bright colour taken from somewhere else in the picture, even where the sky nearby was red or purple. Any flagged area too big to be a real speck is now left exactly as you shot it. Reported by Sean Parker.
+- **Smoke tests:** 478 passing.
+
 ## v2.95-beta
 - **Fixed: "Remove hot pixels & colored specks" failed on the Star Trail tab and kept the plain trail.** If you painted a foreground mask, the speck step crashed with a "sizes of input arguments do not match" message every time, in both Normal and Comet modes. It now works, and it checks each speck against your frames before removing it. Reported by a user on Windows.
 - **Fixed: the app could refuse to open, claiming it was already running.** To make sure only one copy runs, the app claimed a fixed network port, and that port sat in the range your computer hands out at random to other programs. A browser tab or backup tool could take it and lock you out, and reinstalling changed nothing. It now uses a port your computer never hands out, and it asks whoever holds it whether they are really Star Trail CleanR. If it is anything else, the app simply opens. Reported by Steve.
