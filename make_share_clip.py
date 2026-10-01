@@ -77,6 +77,12 @@ TAGLINE = "Remove the Trails. Keep the Stars."
 URL = "www.StarTrailCleanR.com"
 SKIP_FIRST = 3        # drop the first N frames (test shots) from the sequence
 SKIP_LAST = 3         # drop the last N frames (test shots) from the sequence
+# The Star Trail tab's Frame Range slider lets a person cut more frames off either
+# end. The slider counts frames as the person sees them (every shot found, the
+# automatic 3-and-3 not mentioned), and never lets fewer than this many remain.
+# _apply_trim holds the same line on the program side, so a hand-typed command
+# cannot build a trail from a handful of frames either.
+MIN_FRAMES_SHOWN = 20
 FPS = 30
 BOX_FRAC = 0.13       # bottom BLACK text box height, as a fraction of canvas height
 
@@ -159,6 +165,32 @@ def _list_frames(folder, keep=None):
     )
     end = len(fs) - SKIP_LAST                       # drop the trailing test shots
     return fs[SKIP_FIRST:end] if end > SKIP_FIRST else fs[SKIP_FIRST:]
+
+
+def _apply_trim(names, trim_start=0, trim_end=0):
+    """Cut `trim_start` frames off the front and `trim_end` off the back of an
+    already-listed (3-and-3 skipped) shot list, and return what is left.
+
+    The numbers are what the Frame Range slider shows, counted from the frames the
+    person sees: every shot found, with the automatic test-shot skip not part of
+    the count. So the floor is checked on that same scale -- the shots listed here
+    plus the SKIP_FIRST + SKIP_LAST already dropped, minus the trims, must still be
+    at least MIN_FRAMES_SHOWN. If it would not be, the trim is IGNORED and said so
+    out loud (no silent drops either way): a star trail from a few frames is the
+    one result nobody asked for."""
+    ts, te = max(0, int(trim_start or 0)), max(0, int(trim_end or 0))
+    if not ts and not te:
+        return names
+    shown_after = len(names) + SKIP_FIRST + SKIP_LAST - ts - te
+    if shown_after < MIN_FRAMES_SHOWN:
+        print(f"  WARNING: cutting {ts} from the start and {te} from the end would "
+              f"leave only {max(shown_after, 0)} frames (the minimum is "
+              f"{MIN_FRAMES_SHOWN}) -- using every frame instead.", flush=True)
+        return names
+    kept = names[ts:len(names) - te] if te else names[ts:]
+    print(f"  frame range: cut {ts} from the start and {te} from the end "
+          f"({len(kept)} of {len(names)} frames used)", flush=True)
+    return kept
 
 
 def _list_frames_matched(original_dir, cleaned_dir):
@@ -945,8 +977,14 @@ def _thicken(img, px, fg_mask=None):
 
 def make_star_trail(cleaned_dir, out_path=None, stack=None, comet_tail=0,
                     thicken_px=0, remove_hotpix=False, reverse=False,
-                    match_cleaned=None, out_format="jpg"):
+                    match_cleaned=None, out_format="jpg",
+                    trim_start=0, trim_end=0):
     """OUTPUT 1 — the quick-and-dirty full-resolution STAR TRAIL (`--star-trail`).
+
+    `trim_start` / `trim_end`: extra frames to leave out of the front / back of the
+    sequence, on top of the automatic first-3-and-last-3 skip (the Star Trail tab's
+    Frame Range slider). 0 = use every frame. Only applies when this function does
+    the stacking itself; a `stack` handed in by the in-run stacker is saved as is.
 
     `stack`: optional pre-built full-resolution lighten-max stack from the in-run
     incremental stacker. When given, the cleaned folder is NOT re-read -- the stack
@@ -987,6 +1025,7 @@ def make_star_trail(cleaned_dir, out_path=None, stack=None, comet_tail=0,
                  if match_cleaned else _list_frames(cleaned_dir))
         if not names:
             raise SystemExit(f"no cleaned frames found in {cleaned_dir}")
+        names = _apply_trim(names, trim_start, trim_end)   # before reverse: trim = capture order
         if reverse:
             names = names[::-1]      # flip which end of each comet tail fades
             print("  comet: processing frames in reverse order", flush=True)
@@ -1001,6 +1040,7 @@ def make_star_trail(cleaned_dir, out_path=None, stack=None, comet_tail=0,
                  if match_cleaned else _list_frames(cleaned_dir))
         if not names:
             raise SystemExit(f"no cleaned frames found in {cleaned_dir}")
+        names = _apply_trim(names, trim_start, trim_end)
         print(f"{len(names)} frames (first {SKIP_FIRST} and last {SKIP_LAST} "
               f"skipped) -> full-res lighten-max star trail", flush=True)
         stack = _stack_fullres(cleaned_dir, names, "star trail")
@@ -1132,6 +1172,13 @@ if __name__ == "__main__":
                          "the extension, so pass it even with --out. May be lower than "
                          "the frames hold (16-bit frames -> a JPEG is fine); it is never "
                          "raised, since 8-bit frames cannot fill 16 bits with real data")
+    ap.add_argument("--trim-start", type=int, default=0,
+                    help="star trail: leave out this many MORE frames from the start, "
+                         "on top of the automatic first-3 skip (never fewer than "
+                         f"{MIN_FRAMES_SHOWN} frames remain)")
+    ap.add_argument("--trim-end", type=int, default=0,
+                    help="star trail: leave out this many MORE frames from the end, "
+                         "on top of the automatic last-3 skip")
     ap.add_argument("--reverse", action="store_true",
                     help="star trail (comet only): process frames in reverse order to flip the tail direction")
     ap.add_argument("--match-cleaned", default=None,
@@ -1155,7 +1202,8 @@ if __name__ == "__main__":
                         comet_tail=args.comet_tail,
                         match_cleaned=args.match_cleaned,
                         thicken_px=args.thicken, remove_hotpix=args.remove_hotpix,
-                        reverse=args.reverse)
+                        reverse=args.reverse,
+                        trim_start=args.trim_start, trim_end=args.trim_end)
     elif args.red_map:
         if not args.original:
             ap.error("--red-map needs --original")

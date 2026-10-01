@@ -8327,6 +8327,128 @@ class TimelapsePanel(QWidget):
             self._remove_partial()
 
 
+class FrameRangeSlider(QWidget):
+    """One bar with two grips: how many frames to leave out at each end.
+
+    The left grip counts frames cut from the START, the right grip frames cut from
+    the END; both rest at 0 and move inward. The bar is the whole sequence, the
+    tinted part is what goes into the star trail, and the middle of the bar says
+    how many that is ("Using 536 of 572 frames").
+
+    `total` is every frame the person has -- the automatic test-shot skip is not
+    part of it and is never shown. `min_keep` is the fewest frames that may remain:
+    a grip stops when the other would be squeezed below it. `changed(start, end)`
+    fires whenever either number moves."""
+
+    changed = Signal(int, int)
+    _GRIP_W = 12
+
+    def __init__(self, total, min_keep, parent=None):
+        super().__init__(parent)
+        self._total = max(1, int(total))
+        self._min_keep = int(min_keep)
+        self._start = 0
+        self._end = 0
+        self._drag = None          # "start" or "end" while a grip is held
+        self.setFixedHeight(26)
+        self.setMinimumWidth(160)
+        self.setCursor(Qt.SizeHorCursor)
+        self.setToolTip("Drag a grip inward to leave out frames at that end")
+
+    def start(self):
+        return self._start
+
+    def end(self):
+        return self._end
+
+    def used(self):
+        return self._total - self._start - self._end
+
+    def _room(self):
+        """Most frames that can still be cut, in total, from both ends."""
+        return max(0, self._total - self._min_keep)
+
+    def _span(self):
+        return max(1, self.width() - self._GRIP_W)
+
+    def _x_of_start(self):
+        return self._start / self._total * self._span()
+
+    def _x_of_end(self):
+        return self._GRIP_W + (1 - self._end / self._total) * self._span() - self._GRIP_W
+
+    def _frames_at(self, x):
+        """Frames-from-the-edge a mouse x corresponds to (clamped, rounded)."""
+        return int(round(min(1.0, max(0.0, x / self._span())) * self._total))
+
+    def mousePressEvent(self, e):
+        x = e.position().x() - self._GRIP_W / 2
+        # Pick the nearer grip; when they sit on top of each other (both at 0 on a
+        # tiny bar) the side of the bar the click lands on decides.
+        d_start = abs(x - self._x_of_start())
+        d_end = abs(x - self._x_of_end())
+        self._drag = "start" if d_start < d_end or (
+            d_start == d_end and x < self.width() / 2) else "end"
+        self.mouseMoveEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if not self._drag:
+            return
+        x = e.position().x() - self._GRIP_W / 2
+        if self._drag == "start":
+            n = min(self._frames_at(x), self._room() - self._end)
+            self.set_range(n, self._end)
+        else:
+            n = min(self._total - self._frames_at(x), self._room() - self._start)
+            self.set_range(self._start, n)
+
+    def mouseReleaseEvent(self, e):
+        self._drag = None
+
+    def set_range(self, start, end):
+        start = max(0, min(int(start), self._room()))
+        end = max(0, min(int(end), self._room() - start))
+        if (start, end) == (self._start, self._end):
+            return
+        self._start, self._end = start, end
+        self.update()
+        self.changed.emit(start, end)
+
+    def paintEvent(self, _e):
+        from PySide6.QtCore import QRectF
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        pal = self.palette()
+        accent = QColor(BRAND_HEADING_BLUE)
+        h, gw = self.height(), self._GRIP_W
+        xs = self._x_of_start()
+        xe = self._x_of_end()
+        # whole sequence, then the part that is used
+        p.setPen(pal.color(QPalette.Mid))
+        p.setBrush(pal.color(QPalette.Base))
+        p.drawRoundedRect(QRectF(0.5, 0.5, self.width() - 1, h - 1), 6, 6)
+        tint = QColor(accent); tint.setAlpha(45)
+        p.setPen(Qt.NoPen)
+        p.setBrush(tint)
+        p.drawRoundedRect(QRectF(xs + gw / 2, 1, max(0.0, xe - xs), h - 2), 5, 5)
+        # the two grips, drawn BEFORE the pill, so a grip passing under the count never hides it
+        p.setPen(Qt.NoPen)
+        p.setBrush(accent)
+        for x in (xs, xe):
+            p.drawRoundedRect(QRectF(x, 0, gw, h), 5, 5)
+        # the count, in a small pill on top of everything else
+        txt = f"Using {self.used()} of {self._total} frames"
+        fm = p.fontMetrics()
+        tw = fm.horizontalAdvance(txt) + 20
+        pill = QRectF((self.width() - tw) / 2, 3, tw, h - 6)
+        p.setPen(pal.color(QPalette.Mid))
+        p.setBrush(pal.color(QPalette.Window))
+        p.drawRoundedRect(pill, 5, 5)
+        p.setPen(pal.color(QPalette.WindowText))
+        p.drawText(pill, Qt.AlignCenter, txt)
+        p.end()
+
+
 class StarTrailPanel(QWidget):
     """The Star Trail tab inside CreatorWindow, opened when a clean finishes.
 
@@ -8467,6 +8589,45 @@ class StarTrailPanel(QWidget):
             # remembers its own choices either (see _restore_choices there).
             # Both windows opening the same way every time is the point.
             _row("Source", self._src_cb)
+
+        # Frame Range: leave out frames at the start and/or the end of the
+        # sequence. Counts are what the person sees -- every shot found, the
+        # automatic first-3-and-last-3 skip deliberately not mentioned -- and the
+        # bar never lets fewer than MIN_FRAMES_SHOWN remain. A sequence that short
+        # has nothing worth trimming, so the whole row is left out. Not remembered
+        # between sessions, like every other choice on this tab.
+        self._frame_range = None
+        try:
+            import make_share_clip as _msc
+            _total = (len(_msc._list_frames(self._cleaned))
+                      + _msc.SKIP_FIRST + _msc.SKIP_LAST)
+            _min_keep = _msc.MIN_FRAMES_SHOWN
+        except Exception:
+            _total, _min_keep = 0, 0
+        if _total > _min_keep > 0:
+            self._frame_range = FrameRangeSlider(_total, _min_keep)
+            _num_css = f"color: {BRAND_HEADING_BLUE}; font-weight: bold;"
+            self._range_lo = QLabel("0")
+            self._range_hi = QLabel("0")
+            for _n in (self._range_lo, self._range_hi):
+                _n.setFixedWidth(44)
+                _n.setAlignment(Qt.AlignCenter)
+                _n.setStyleSheet(_num_css)
+
+            def _show_range(s, e):
+                self._range_lo.setText(f"-{s}" if s else "0")
+                self._range_hi.setText(f"-{e}" if e else "0")
+            self._frame_range.changed.connect(_show_range)
+            _rr = QHBoxLayout()
+            _rl = QLabel("Frame Range")
+            _rl.setFixedWidth(_LABEL_W)
+            _rl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            _rlf = _rl.font(); _rlf.setBold(True); _rl.setFont(_rlf)
+            _rr.addWidget(_rl)
+            _rr.addWidget(self._range_lo)
+            _rr.addWidget(self._frame_range, 1)
+            _rr.addWidget(self._range_hi)
+            lay.addLayout(_rr)
 
         from PySide6.QtWidgets import QRadioButton, QButtonGroup
         # Blending mode radios, stacked vertically: Normal on top, Comet Mode below.
@@ -8756,6 +8917,10 @@ class StarTrailPanel(QWidget):
             args += ["--match-cleaned", self._cleaned]
         if self._mode_comet.isChecked() and self._reverse_chk.isChecked():
             args.append("--reverse")     # flip comet-tail direction (comet only)
+        if self._frame_range is not None and (self._frame_range.start()
+                                              or self._frame_range.end()):
+            args += ["--trim-start", str(self._frame_range.start()),
+                     "--trim-end", str(self._frame_range.end())]
         if self._hotpix_chk.isChecked():
             args.append("--remove-hotpix")
         self._skip_msg = ""     # set if the foreground guard bails (HOTPIX_SKIPPED)
@@ -8802,8 +8967,9 @@ class StarTrailPanel(QWidget):
         self._tick_spinner()
         for w in (self._hotpix_chk, self._mode_normal, self._mode_comet, self._comet_len_cb,
                   self._reverse_chk, self._size_cb, self._src_cb, self._fmt_cb,
-                  self._open_img_btn, self._open_dir_btn):
-            w.setEnabled(False)
+                  self._open_img_btn, self._open_dir_btn, self._frame_range):
+            if w is not None:
+                w.setEnabled(False)
         self._proc = QProcess(self)
         self._proc.setProcessChannelMode(QProcess.MergedChannels)
         self._proc.readyReadStandardOutput.connect(self._on_proc_output)
@@ -8947,8 +9113,9 @@ class StarTrailPanel(QWidget):
         self._build_btn.setEnabled(True)
         for w in (self._hotpix_chk, self._mode_normal, self._mode_comet, self._comet_len_cb,
                   self._reverse_chk, self._size_cb, self._src_cb, self._fmt_cb,
-                  self._open_img_btn, self._open_dir_btn):
-            w.setEnabled(True)
+                  self._open_img_btn, self._open_dir_btn, self._frame_range):
+            if w is not None:
+                w.setEnabled(True)
         self._sync_comet_len()   # re-gray Length if Blending Mode is Normal
         if self._build_cancelled:
             self._bar.setVisible(False)
