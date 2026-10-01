@@ -29,6 +29,39 @@ the preference, so nothing is ever dropped to zero.
 import os
 import re
 
+# The Frame Range slider (Star Trail and Timelapse tabs) lets a person cut frames
+# off either end of the sequence, and never lets fewer than this many remain. The
+# slider and both programs that act on it use THIS number, so it cannot drift.
+MIN_FRAMES_SHOWN = 20
+
+
+def apply_trim(names, trim_start=0, trim_end=0, hidden=0):
+    """Cut `trim_start` frames off the front and `trim_end` off the back of an
+    ordered frame list, and return what is left.
+
+    The numbers are what the Frame Range slider shows, counted from the frames the
+    person sees. `hidden` is how many frames the caller already dropped that the
+    person is never told about (the star trail's automatic first-3-and-last-3
+    skip is 6; the timelapse has none, so 0). They are added back when checking
+    the floor, so the floor holds on the scale the person sees: what remains must
+    still be at least MIN_FRAMES_SHOWN. If it would not be, the trim is IGNORED and
+    said so out loud (no silent drops either way) -- a result built from a handful
+    of frames is the one nobody asked for."""
+    ts, te = max(0, int(trim_start or 0)), max(0, int(trim_end or 0))
+    if not ts and not te:
+        return names
+    shown_after = len(names) + hidden - ts - te
+    if shown_after < MIN_FRAMES_SHOWN:
+        print(f"  WARNING: cutting {ts} from the start and {te} from the end would "
+              f"leave only {max(shown_after, 0)} frames (the minimum is "
+              f"{MIN_FRAMES_SHOWN}) -- using every frame instead.", flush=True)
+        return names
+    kept = names[ts:len(names) - te] if te else names[ts:]
+    print(f"  frame range: cut {ts} from the start and {te} from the end "
+          f"({len(kept)} of {len(names)} frames used)", flush=True)
+    return kept
+
+
 # Number-aware ("natural") ordering of frame paths. A plain text sort puts
 # "10.jpg" right after "1.jpg" (and "2.jpg" all the way after "100.jpg"), which
 # scrambles the capture order for folders whose filenames are NOT zero-padded --

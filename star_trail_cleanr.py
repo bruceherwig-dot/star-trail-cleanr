@@ -7827,6 +7827,17 @@ class TimelapsePanel(QWidget):
             self._source_cb.setCurrentIndex(self._source_cb.findData("original"))
         _row("Source", self._source_cb)
 
+        # Frame Range: leave out frames at the start and/or the end. A timelapse has
+        # no automatic test-shot skip, so these numbers count from the very first and
+        # last frame. The row re-points at the new total whenever the Source changes
+        # (_reload_frames) and hides itself when there are too few frames to trim.
+        # Not remembered between sessions, like every other choice on this tab.
+        from modules.frame_list import MIN_FRAMES_SHOWN as _MIN_KEEP
+        self._frame_row = FrameRangeRow(90, 1, _MIN_KEEP)
+        self._frame_range = self._frame_row.slider
+        self._frame_range.changed.connect(lambda _s, _e: self._update_estimate())
+        lay.addWidget(self._frame_row)
+
         # Style: what the finished video SHOWS, not how it is encoded.
         # "Moving Stars" is the timelapse this window has always made -- one
         # photo per movie frame, the sky drifting. "Building Trails" keeps every
@@ -8082,6 +8093,7 @@ class TimelapsePanel(QWidget):
         from modules.io_safe import image_size
         self._frames = gather_frames(self._current_folder())
         self._n_frames = len(self._frames)
+        self._frame_row.set_total(self._n_frames)
         self._nw = self._nh = 0
         if self._frames:
             sz = image_size(self._frames[0])
@@ -8089,6 +8101,12 @@ class TimelapsePanel(QWidget):
                 self._nw, self._nh = sz
         self._update_estimate()
         self._set_poster()
+
+    def _frames_used(self):
+        """How many frames will really go into the video: every frame found, less
+        whatever the Frame Range slider leaves out."""
+        return max(0, self._n_frames - self._frame_range.start()
+                   - self._frame_range.end())
 
     def _calc(self):
         """Work out what the timelapse will be before rendering it: the finished
@@ -8106,7 +8124,7 @@ class TimelapsePanel(QWidget):
             tw, th = target_size(self._nw, self._nh, size_key)
         else:
             tw, th = 1920, 1080
-        est = estimate_output_bytes(self._n_frames, fps, tw, th)
+        est = estimate_output_bytes(self._frames_used(), fps, tw, th)
         import shutil
         try:
             free = shutil.disk_usage(self._cleaned).free
@@ -8118,7 +8136,7 @@ class TimelapsePanel(QWidget):
         self._save_choices()
         size_key, fps, tw, th, est, free = self._calc()
         self._estimate_lbl.setText(
-            f"{self._n_frames} frames → {tw} x {th} @ {fps}fps    |    "
+            f"{self._frames_used()} frames → {tw} x {th} @ {fps}fps    |    "
             f"estimated ~{est / 1e6:.0f} MB    |    free {free / 1e9:.1f} GB")
 
     def _toggle_render(self):
@@ -8132,7 +8150,7 @@ class TimelapsePanel(QWidget):
         """Grey out (or restore) every option control while a render runs, so the
         settings can't change mid-encode. The Stop button stays live to cancel."""
         for cb in (self._source_cb, self._size_cb, self._fps_cb,
-                   self._blend_cb, self._fmt_cb):
+                   self._blend_cb, self._fmt_cb, self._frame_range):
             cb.setEnabled(enabled)
 
     def _stop_render(self):
@@ -8196,6 +8214,9 @@ class TimelapsePanel(QWidget):
             args += ["--style", "blended", "--blend-window", str(blend)]
         else:
             args += ["--style", "plain"]
+        if self._frame_range.start() or self._frame_range.end():
+            args += ["--trim-start", str(self._frame_range.start()),
+                     "--trim-end", str(self._frame_range.end())]
         if getattr(sys, "frozen", False):
             pargs = ["--cleanr-worker", script] + args
         else:
@@ -8210,7 +8231,7 @@ class TimelapsePanel(QWidget):
             "fps": fps,
             "blend": blend,
             "format": ext,
-            "frames": self._n_frames,
+            "frames": self._frames_used(),
             "width": tw,
             "height": th,
         }
@@ -8406,6 +8427,16 @@ class FrameRangeSlider(QWidget):
     def mouseReleaseEvent(self, e):
         self._drag = None
 
+    def set_total(self, total, min_keep=None):
+        """Start over on a different sequence (the Source was switched): both
+        grips back to 0, the bar now standing for `total` frames. Does not emit
+        `changed` -- the caller is already refreshing everything that depends on it."""
+        self._total = max(1, int(total))
+        if min_keep is not None:
+            self._min_keep = int(min_keep)
+        self._start = self._end = 0
+        self.update()
+
     def set_range(self, start, end):
         start = max(0, min(int(start), self._room()))
         end = max(0, min(int(end), self._room() - start))
@@ -8450,6 +8481,46 @@ class FrameRangeSlider(QWidget):
         p.setPen(pal.color(QPalette.WindowText))
         p.drawText(pill, Qt.AlignCenter, txt)
         p.end()
+
+
+class FrameRangeRow(QWidget):
+    """The whole Frame Range line, identical on the Star Trail and Timelapse tabs:
+    the label, the number for the start grip, the bar, the number for the end grip.
+
+    `slider` is the FrameRangeSlider inside it; read `slider.start()` and
+    `slider.end()` when the job starts. `set_total` re-points the row at a different
+    sequence, and hides it outright when there are too few frames to trim."""
+
+    def __init__(self, label_w, total, min_keep, parent=None):
+        super().__init__(parent)
+        self._min_keep = int(min_keep)
+        self.slider = FrameRangeSlider(max(1, total), min_keep)
+        self._lo, self._hi = QLabel("0"), QLabel("0")
+        for n in (self._lo, self._hi):
+            n.setFixedWidth(44)
+            n.setAlignment(Qt.AlignCenter)
+            n.setStyleSheet(f"color: {BRAND_HEADING_BLUE}; font-weight: bold;")
+        lab = QLabel("Frame Range")
+        lab.setFixedWidth(label_w)
+        lab.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        f = lab.font(); f.setBold(True); lab.setFont(f)
+        r = QHBoxLayout(self)
+        r.setContentsMargins(0, 0, 0, 0)
+        r.addWidget(lab)
+        r.addWidget(self._lo)
+        r.addWidget(self.slider, 1)
+        r.addWidget(self._hi)
+        self.slider.changed.connect(self._show)
+        self.setVisible(total > min_keep)
+
+    def _show(self, start, end):
+        self._lo.setText(f"-{start}" if start else "0")
+        self._hi.setText(f"-{end}" if end else "0")
+
+    def set_total(self, total):
+        self.slider.set_total(total, self._min_keep)
+        self._show(0, 0)
+        self.setVisible(total > self._min_keep)
 
 
 class StarTrailPanel(QWidget):
@@ -8608,29 +8679,9 @@ class StarTrailPanel(QWidget):
         except Exception:
             _total, _min_keep = 0, 0
         if _total > _min_keep > 0:
-            self._frame_range = FrameRangeSlider(_total, _min_keep)
-            _num_css = f"color: {BRAND_HEADING_BLUE}; font-weight: bold;"
-            self._range_lo = QLabel("0")
-            self._range_hi = QLabel("0")
-            for _n in (self._range_lo, self._range_hi):
-                _n.setFixedWidth(44)
-                _n.setAlignment(Qt.AlignCenter)
-                _n.setStyleSheet(_num_css)
-
-            def _show_range(s, e):
-                self._range_lo.setText(f"-{s}" if s else "0")
-                self._range_hi.setText(f"-{e}" if e else "0")
-            self._frame_range.changed.connect(_show_range)
-            _rr = QHBoxLayout()
-            _rl = QLabel("Frame Range")
-            _rl.setFixedWidth(_LABEL_W)
-            _rl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            _rlf = _rl.font(); _rlf.setBold(True); _rl.setFont(_rlf)
-            _rr.addWidget(_rl)
-            _rr.addWidget(self._range_lo)
-            _rr.addWidget(self._frame_range, 1)
-            _rr.addWidget(self._range_hi)
-            lay.addLayout(_rr)
+            _fr_row = FrameRangeRow(_LABEL_W, _total, _min_keep)
+            self._frame_range = _fr_row.slider
+            lay.addWidget(_fr_row)
 
         from PySide6.QtWidgets import QRadioButton, QButtonGroup
         # Blending mode radios, stacked vertically: Normal on top, Comet Mode below.

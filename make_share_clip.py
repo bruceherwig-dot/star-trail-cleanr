@@ -71,18 +71,12 @@ from modules.io_safe import robust_imread, robust_imwrite  # noqa: E402
 # non-ASCII characters on Windows. A user with Scandinavian letters in his
 # folder name could not export a star trail at all (2026-08-23).
 from modules.frame_list import (natural_key, IMAGE_EXTS, dedupe_frames,  # noqa: E402
-                                is_image_name)
+                                is_image_name, apply_trim, MIN_FRAMES_SHOWN)
 
 TAGLINE = "Remove the Trails. Keep the Stars."
 URL = "www.StarTrailCleanR.com"
 SKIP_FIRST = 3        # drop the first N frames (test shots) from the sequence
 SKIP_LAST = 3         # drop the last N frames (test shots) from the sequence
-# The Star Trail tab's Frame Range slider lets a person cut more frames off either
-# end. The slider counts frames as the person sees them (every shot found, the
-# automatic 3-and-3 not mentioned), and never lets fewer than this many remain.
-# _apply_trim holds the same line on the program side, so a hand-typed command
-# cannot build a trail from a handful of frames either.
-MIN_FRAMES_SHOWN = 20
 FPS = 30
 BOX_FRAC = 0.13       # bottom BLACK text box height, as a fraction of canvas height
 
@@ -168,29 +162,10 @@ def _list_frames(folder, keep=None):
 
 
 def _apply_trim(names, trim_start=0, trim_end=0):
-    """Cut `trim_start` frames off the front and `trim_end` off the back of an
-    already-listed (3-and-3 skipped) shot list, and return what is left.
-
-    The numbers are what the Frame Range slider shows, counted from the frames the
-    person sees: every shot found, with the automatic test-shot skip not part of
-    the count. So the floor is checked on that same scale -- the shots listed here
-    plus the SKIP_FIRST + SKIP_LAST already dropped, minus the trims, must still be
-    at least MIN_FRAMES_SHOWN. If it would not be, the trim is IGNORED and said so
-    out loud (no silent drops either way): a star trail from a few frames is the
-    one result nobody asked for."""
-    ts, te = max(0, int(trim_start or 0)), max(0, int(trim_end or 0))
-    if not ts and not te:
-        return names
-    shown_after = len(names) + SKIP_FIRST + SKIP_LAST - ts - te
-    if shown_after < MIN_FRAMES_SHOWN:
-        print(f"  WARNING: cutting {ts} from the start and {te} from the end would "
-              f"leave only {max(shown_after, 0)} frames (the minimum is "
-              f"{MIN_FRAMES_SHOWN}) -- using every frame instead.", flush=True)
-        return names
-    kept = names[ts:len(names) - te] if te else names[ts:]
-    print(f"  frame range: cut {ts} from the start and {te} from the end "
-          f"({len(kept)} of {len(names)} frames used)", flush=True)
-    return kept
+    """Frame Range trim for an already-listed (3-and-3 skipped) shot list. The
+    shared rule lives in modules.frame_list.apply_trim; the automatic skip counts
+    as `hidden` there, because the person is never told about it."""
+    return apply_trim(names, trim_start, trim_end, hidden=SKIP_FIRST + SKIP_LAST)
 
 
 def _list_frames_matched(original_dir, cleaned_dir):

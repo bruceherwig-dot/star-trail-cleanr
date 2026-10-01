@@ -49,7 +49,7 @@ if not getattr(sys, "frozen", False):
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from modules.io_safe import robust_imread, image_size, capture_time
 from modules.frame_list import (IMAGE_EXTS, order_by_capture_time, natural_key,
-                                is_image_name)
+                                is_image_name, apply_trim)
 
 TIMELAPSE_VERSION = "1.2"   # 1.2: encoder fallback (missing bundled ffmpeg can no longer crash)
 
@@ -157,10 +157,16 @@ def _open_writer(out_path, fps, tw, th):
 
 
 def render(frames_dir, out_path, size_key="4k", fps=30, style="plain",
-           blend_window=3, limit=0):
+           blend_window=3, limit=0, trim_start=0, trim_end=0):
     """Encode the timelapse. Prints TIMELAPSE_PROGRESS lines the window reads to
-    drive its progress bar. Returns 0 on success."""
+    drive its progress bar. Returns 0 on success.
+
+    `trim_start` / `trim_end`: frames to leave out of the front / back of the
+    sequence (the Timelapse tab's Frame Range slider). Unlike the star trail, a
+    timelapse has no automatic test-shot skip, so these count from the very first
+    and last frame. Never fewer than MIN_FRAMES_SHOWN remain."""
     frames = ordered_frames(frames_dir)
+    frames = apply_trim(frames, trim_start, trim_end)
     if limit and limit > 0:
         frames = frames[:limit]
     if len(frames) < 2:
@@ -257,9 +263,15 @@ def main():
                     default="plain")
     ap.add_argument("--blend-window", type=int, default=3)
     ap.add_argument("--limit", type=int, default=0, help="Only render the first N frames (0 = all)")
+    ap.add_argument("--trim-start", type=int, default=0,
+                    help="Leave out this many frames from the start (never fewer "
+                         "than 20 frames remain)")
+    ap.add_argument("--trim-end", type=int, default=0,
+                    help="Leave out this many frames from the end")
     args = ap.parse_args()
     sys.exit(render(args.frames_dir, args.out, args.size, args.fps,
-                    args.style, args.blend_window, args.limit))
+                    args.style, args.blend_window, args.limit,
+                    args.trim_start, args.trim_end))
 
 
 if __name__ == "__main__":

@@ -3,9 +3,9 @@
 ---
 
 ## v2.97-beta
-- **New: Frame Range on the Star Trail tab.** One bar with two grips lets you leave out frames at the start, the end, or both. Drag the left grip inward to cut frames off the start, and the right grip inward to cut frames off the end. The number beside each grip shows how many you are cutting, and the middle of the bar shows how many frames the star trail will use. It is handy when the first or last shots are not the ones you want, such as a car passing at the start or clouds rolling in at the end. At least 20 frames always remain, and the bar will not let you go below that.
+- **New: Frame Range on the Star Trail and Timelapse tabs.** One bar with two grips lets you leave out frames at the start, the end, or both. Drag the left grip inward to cut frames off the start, and the right grip inward to cut frames off the end. The number beside each grip shows how many you are cutting, and the middle of the bar shows how many frames the star trail will use. It is handy when the first or last shots are not the ones you want, such as a car passing at the start or clouds rolling in at the end. At least 20 frames always remain, and the bar will not let you go below that. On the Timelapse tab the size and length estimate follows what you cut, and the bar starts over whenever you switch between Cleaned and Original.
 - **The Timelapse tab now opens on Original** whenever your original frames are available, because the originals carry the most movement. Choose Cleaned from the Source menu if you want the cleaned frames instead. The Star Trail tab still opens on Cleaned.
-- **Smoke tests:** 484 passing.
+- **Smoke tests:** 488 passing.
 
 ## v2.96-beta
 - **Fixed: "Remove hot pixels & colored specks" drew a bright yellow outline around the foreground.** On a photo with dark silhouettes against a bright sky, such as cacti against an aurora, the soft edge of every silhouette was mistaken for a ring of specks. The cleanup then painted that ring with one bright colour taken from somewhere else in the picture, even where the sky nearby was red or purple. Any flagged area too big to be a real speck is now left exactly as you shot it. Reported by Sean Parker.
