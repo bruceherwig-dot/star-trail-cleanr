@@ -6509,7 +6509,7 @@ class MainWindow(QMainWindow):
         if total_trails <= 0:
             self._stats_trail_line = (
                 f"Sky was clean. No airplane or satellite trails found<br>"
-                f"in your <b>{total_frames:,}</b> frames.<br><br>"
+                f"in your <b>{total_frames:,}</b> frames.<br>{_SUMMARY_GAP}"
                 + stack_cta
             )
             return
@@ -6540,15 +6540,15 @@ class MainWindow(QMainWindow):
             _code = getattr(getattr(self, "worker", None), "_gpu_status_code", None)
             _txt = _gpu_summary(_code or "")
             if _txt:
-                _gpu_line = f"<span style='font-size:15px;'>{_txt}</span><br><br>"
+                _gpu_line = f"<span style='font-size:15px;'>{_txt}</span><br>{_SUMMARY_GAP}"
         except Exception:
             pass
         self._stats_trail_line = (
             f"Swept <b>{total_trails:,}</b> airplane and satellite trails from your stars<br>"
             f"across <b>{total_frames:,}</b> twinkling frames.<br>"
-            f"<i>Based on manual cleanup at 30 seconds per trail.</i><br><br>"
+            f"<i>Based on manual cleanup at 30 seconds per trail.</i><br>{_SUMMARY_GAP}"
             f"<span style='font-size:20px; font-weight:bold;'>TIME SAVED: {time_saved}</span>"
-            f"<br><br>"
+            f"<br>{_SUMMARY_GAP}"
             + _gpu_line
             + stack_cta
         )
@@ -6566,7 +6566,7 @@ class MainWindow(QMainWindow):
         frames = getattr(self, '_run_total_frames', 0)
         pf = f"  ({actual_sec / frames:.1f}s/frame)" if frames > 0 else ""
         self._stats_timing_line = (
-            f"<br><br><span style='font-size:14px; color:{MUTED_TEXT};'>"
+            f"<br>{_SUMMARY_GAP}<span style='font-size:14px; color:{MUTED_TEXT};'>"
             f"Thought it'd take <b>{fmt_hms(initial_est_sec)}</b>. "
             f"Took <b>{fmt_hms(actual_sec)}</b>{pf}. {tail}"
             f"</span>"
@@ -9248,6 +9248,141 @@ class StarTrailPanel(QWidget):
             self._proc.waitForFinished(2000)
 
 
+def _video_poster(path, frac=0.4):
+    """One picture from a video, as a QImage, or None if it cannot be read.
+
+    Used as the Summary tab's thumbnail for the before-and-after clip. The clip is
+    a wipe from the original to the cleaned sky, so a frame about 40% of the way
+    through shows both halves -- more telling than frame 0, which is all "before".
+    OpenCV reads these H.264 files fine; anything it cannot open (a codec it lacks,
+    a half-written file) simply returns None and the caller draws a plain box."""
+    try:
+        import cv2
+        from PySide6.QtGui import QImage
+        cap = cv2.VideoCapture(path)
+        try:
+            if not cap.isOpened():
+                return None
+            n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+            if n > 1:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, int(n * frac))
+            ok, bgr = cap.read()
+        finally:
+            cap.release()
+        if not ok or bgr is None:
+            return None
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        h, w = rgb.shape[:2]
+        return QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888).copy()
+    except Exception:
+        return None
+
+
+class _VideoThumb(QWidget):
+    """The before-and-after clip as a picture with a play symbol on it. A click
+    anywhere on it emits `clicked` (the Summary tab opens the video in the system's
+    default player). `width_px` is the picture's width; the height follows the
+    clip's own shape, so a portrait clip is taller and narrower than a landscape one,
+    capped so a tall one cannot balloon the window."""
+
+    clicked = Signal()
+
+    def __init__(self, video_path, width_px=220, max_h=190, parent=None):
+        super().__init__(parent)
+        from PySide6.QtGui import QPixmap
+        img = _video_poster(video_path)
+        self._pm = None
+        w, h = width_px, int(width_px * 0.8)        # 5:4, the usual clip, if unreadable
+        if img is not None and not img.isNull():
+            pm = QPixmap.fromImage(img)
+            ratio = pm.height() / max(1, pm.width())
+            h = int(width_px * ratio)
+            if h > max_h:
+                h = max_h
+                w = int(max_h / max(ratio, 0.01))
+            self._pm = pm.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self.setFixedSize(w, h)
+        self._hover = False
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip("Play the before and after clip")
+
+    def enterEvent(self, e):
+        self._hover = True
+        self.update()
+
+    def leaveEvent(self, e):
+        self._hover = False
+        self.update()
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.LeftButton and self.rect().contains(e.position().toPoint()):
+            self.clicked.emit()
+
+    def paintEvent(self, _e):
+        from PySide6.QtCore import QRectF, QPointF
+        from PySide6.QtGui import QPainterPath, QPolygonF
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = QRectF(self.rect())
+        clip = QPainterPath()
+        clip.addRoundedRect(r, 8, 8)
+        p.setClipPath(clip)
+        if self._pm is not None:
+            p.drawPixmap(0, 0, self._pm)
+        else:
+            p.fillRect(r, QColor("#141414"))
+        # play symbol: a dark disc with a white triangle, brighter under the mouse
+        d = min(self.width(), self.height()) * 0.34
+        c = r.center()
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(0, 0, 0, 175 if self._hover else 135))
+        p.drawEllipse(c, d / 2, d / 2)
+        t = d * 0.30
+        p.setBrush(QColor("white"))
+        p.drawPolygon(QPolygonF([QPointF(c.x() - t * 0.6, c.y() - t),
+                                 QPointF(c.x() - t * 0.6, c.y() + t),
+                                 QPointF(c.x() + t * 1.1, c.y())]))
+        p.end()
+
+
+# A gap between blocks of the Summary text: a little under half a blank line. The
+# summary used to separate its blocks with a full blank line each (two <br>), which
+# spent about 40 px of window height on air; this keeps them visibly apart for less.
+_SUMMARY_GAP = "<div style='font-size:9px;'>&nbsp;</div>"
+
+def _tidy_summary_html(html):
+    """The summary text as the Summary tab shows it, whether it was just built or was
+    saved from an earlier run (the app keeps the last run's text so the tab still
+    has real numbers after a restart, and that saved copy predates any change made
+    to how the text is built).
+
+    Same words, two small changes of place:
+      * the gray "Thought it'd take X. Took Y." line moves from the very bottom to
+        just above "Ready for the fun part!", so the time figures read together
+        and the line is no longer stranded under everything else;
+      * blank-line gaps between blocks become the shorter _SUMMARY_GAP.
+    Text that does not have those pieces is returned unchanged, apart from the
+    gaps."""
+    import re
+    if not html:
+        return html
+    m = re.search(r"(?:<br>(?:<br>|<div style='font-size:9px;'>&nbsp;</div>))?"
+                  r"<span style='font-size:14px; color:[^']*;'>Thought it'd take.*?</span>\s*$",
+                  html, re.S)
+    ready = html.find("<b>Ready for the fun part!</b>")
+    if m and 0 <= ready < m.start():
+        timing = html[m.start():m.end()]
+        timing = re.sub(r"^(?:<br>(?:<br>|<div[^>]*>&nbsp;</div>))", "", timing)
+        html = (html[:ready] + timing.strip() + "<br>" + _SUMMARY_GAP
+                + html[ready:m.start()])
+    return html.replace("<br><br>", "<br>" + _SUMMARY_GAP)
+
+
+# How big the before-and-after picture is on the Summary tab. Every pixel of height
+# here is a pixel of window height (this tab sets it), so it is one place to change.
+_SUMMARY_THUMB_W, _SUMMARY_THUMB_MAX_H = 240, 192
+
+
 class SummaryPanel(QWidget):
     """Run Complete summary -- the first tab of CreatorWindow. Shows the run stats
     (trails removed, time saved), a share nudge, and an Open Cleaned Folder button.
@@ -9257,15 +9392,30 @@ class SummaryPanel(QWidget):
         super().__init__(parent)
         self._video_path = video_path or ""
         self._video_lbl = None
+        summary_html = _tidy_summary_html(summary_html)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(*_CREATOR_PANEL_MARGINS)
         lay.setSpacing(_CREATOR_PANEL_SPACING)
 
+        # The logo sits just left of the heading, the two centered together as one
+        # unit. (It is 44 px so the row is barely taller than the heading alone.)
         header = QLabel("Your skies are scrubbed!")
         hf = QFont(); hf.setPointSize(22); hf.setBold(True)
-        header.setFont(hf); header.setAlignment(Qt.AlignCenter)
+        header.setFont(hf)
         header.setStyleSheet(f"color: {BRAND_HEADING_BLUE};")
-        lay.addWidget(header)
+        _head_row = QHBoxLayout()
+        _head_row.setSpacing(12)
+        _head_row.addStretch(1)
+        _logo_path = os.path.join(_base, "assets", "StarTrailCleanR.png")
+        if os.path.isfile(_logo_path):
+            _lpm = QPixmap(_logo_path)
+            if not _lpm.isNull():
+                _logo = QLabel()
+                _logo.setPixmap(_lpm.scaled(44, 44, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                _head_row.addWidget(_logo)
+        _head_row.addWidget(header)
+        _head_row.addStretch(1)
+        lay.addLayout(_head_row)
 
         if summary_html and summary_html.strip():
             body = QLabel(summary_html)
@@ -9286,42 +9436,43 @@ class SummaryPanel(QWidget):
         _divider.setStyleSheet(f"color: {CARD_BORDER}; background: {CARD_BORDER}; border: none;")
         lay.addWidget(_divider)
 
-        # Brand block centered in the empty space: title, then the logo, then the
-        # share nudge underneath.
+        # The before-and-after clip, as a big picture with a play symbol, with a short
+        # block of words on each side so the picture says what it is and what to do:
+        # on the left what you are looking at (the sentence this tab has always used),
+        # on the right how to watch it and where it lives. The two sides share the
+        # leftover width equally, so the picture stays centered. A click on the
+        # picture plays the clip in the system's default player. Built automatically
+        # during the run and always on disk right after one (the completion is held
+        # until the in-run stacker finishes rendering it), so the whole block is
+        # simply left out when the clip is missing. Sits ABOVE the social-media nudge.
         lay.addStretch(1)
-        _brand = QLabel("Star Trail CleanR")
-        _brand.setAlignment(Qt.AlignCenter)
-        # Match the main window's headline size exactly (26px bold).
-        _brand.setStyleSheet(f"color: {CARD_TEXT}; font-size: 26px; font-weight: bold;")
-        lay.addWidget(_brand)
-
-        _logo_path = os.path.join(_base, "assets", "StarTrailCleanR.png")
-        if os.path.isfile(_logo_path):
-            _lpm = QPixmap(_logo_path)
-            if not _lpm.isNull():
-                _logo = QLabel()
-                _logo.setPixmap(_lpm.scaled(80, 80, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-                _logo.setAlignment(Qt.AlignCenter)
-                lay.addWidget(_logo)
-
-        # The 10-second before & after clip built automatically during the run. Two
-        # links: open it in the system's default player, or reveal its folder. Only
-        # shown when the clip actually exists on disk (it always does right after a run;
-        # the completion is held until the in-run stacker finishes rendering it). Sits
-        # ABOVE the social-media nudge.
         if self._video_path and os.path.isfile(self._video_path):
-            vid = QLabel(
-                "Check out this cool before and after clip<br>"
-                f"<a href='video' style='color:{BRAND_HEADING_BLUE};'>Open video</a>"
-                "&nbsp;&nbsp;&middot;&nbsp;&nbsp;"
-                f"<a href='folder' style='color:{BRAND_HEADING_BLUE};'>Open folder</a>")
-            vid.setTextFormat(Qt.RichText); vid.setWordWrap(True)
-            vid.setAlignment(Qt.AlignCenter)
-            vid.setStyleSheet(f"color: {CARD_TEXT}; font-size: 15px; padding: 0px 24px;")
+            _thumb = _VideoThumb(self._video_path, width_px=_SUMMARY_THUMB_W,
+                                 max_h=_SUMMARY_THUMB_MAX_H)
+            _thumb.clicked.connect(lambda: self._open_video_link("video"))
+
+            def _side(html, align):
+                lbl = QLabel(html)
+                lbl.setTextFormat(Qt.RichText)
+                lbl.setWordWrap(True)
+                lbl.setAlignment(align | Qt.AlignVCenter)
+                lbl.setStyleSheet(f"color: {CARD_TEXT}; font-size: 14px;")
+                lbl.setMinimumWidth(60)
+                return lbl
+            _what = _side("Check out this cool before and after clip", Qt.AlignRight)
+            vid = _side(
+                "Click thumbnail to watch<br><br>"
+                f"<a href='folder' style='color:{BRAND_HEADING_BLUE};'>"
+                "Click here to open folder</a>", Qt.AlignLeft)
             vid.setOpenExternalLinks(False)
             vid.linkActivated.connect(self._open_video_link)
             self._video_lbl = vid
-            lay.addWidget(vid)
+            _trow = QHBoxLayout()
+            _trow.setSpacing(14)
+            _trow.addWidget(_what, 1)
+            _trow.addWidget(_thumb, 0)
+            _trow.addWidget(vid, 1)
+            lay.addLayout(_trow)
 
         share = QLabel("Help spread the word! When you share on social media, "
                        "tag <b>@bruceherwig #StarTrailCleanR</b>")
@@ -9460,10 +9611,57 @@ class CreatorWindow(QDialog):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._position_close_x()
+        # Text wraps differently at a different width, so what the tabs need in height
+        # changes with it. Re-measure after the resize settles (not inside it).
+        if getattr(self, "_height_fitted", False) and event.oldSize().width() != event.size().width():
+            self._schedule_fit()
+
+    def _schedule_fit(self):
+        if getattr(self, "_fit_pending", False):
+            return
+        self._fit_pending = True
+        QTimer.singleShot(30, self._run_scheduled_fit)
+
+    def _run_scheduled_fit(self):
+        self._fit_pending = False
+        self._fit_height()
 
     def showEvent(self, event):
         super().showEvent(event)
         self._position_close_x()
+        if not getattr(self, "_height_fitted", False):
+            self._height_fitted = True
+            QTimer.singleShot(0, self._fit_height)
+            # Again once the first paint has settled fonts and stylesheets.
+            QTimer.singleShot(250, self._fit_height)
+
+    def _fit_height(self):
+        """Make the window at least as tall as its tallest tab needs.
+
+        A window's own minimum comes from its layout's MINIMUM size, and a label
+        that wraps text can always claim to be able to squash into fewer lines than
+        it wants. So the Summary tab, whose text wraps, could open in a window too
+        short for it, with its text clipped under the divider -- which is exactly
+        what happened once the before-and-after picture made that tab the tallest
+        (2026-09-30). This asks each tab what height it really needs at this width
+        and holds the window to the largest, never taller than 90% of the screen."""
+        try:
+            w = self._tabs.currentWidget().width()
+            need = 0
+            for panel in (self._summary_panel, self._star_panel, self._tl_panel):
+                lay = panel.layout()
+                need = max(need, panel.sizeHint().height(),
+                           lay.totalHeightForWidth(w) if lay is not None else 0)
+            chrome = self.height() - self._tabs.currentWidget().height()
+            target = need + chrome
+            screen = QApplication.primaryScreen()
+            if screen:
+                target = min(target, int(screen.availableGeometry().height() * 0.9))
+            self.setMinimumHeight(target)
+            if self.height() < target:
+                self.resize(self.width(), target)
+        except Exception:
+            pass
 
     def select_tab(self, which):
         """Front the Summary ('summary'), Star Trail ('star'), or Timelapse
