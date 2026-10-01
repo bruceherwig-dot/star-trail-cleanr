@@ -471,6 +471,37 @@ def _foreground_guard(allmap, fg_mask, H, W):
     return allmap
 
 
+# Largest connected flagged shape (px, after the 1px growth) still treated as a
+# speck. Measured on 2,589 shapes from Sean Parker's set: median 18, 90th
+# percentile 30; everything above ~500 was a cactus edge.
+MAX_SPECK_AREA = 300
+
+
+def _drop_oversize(allmap):
+    """Remove every flagged shape too big to be a speck; return the trimmed map.
+
+    SIZE CAP (2026-09-30, Sean Parker's aurora set). A real speck is a few pixels
+    wide; the median flagged shape is 18 px and 90% are under 30. But on a photo
+    with cacti against a bright sky, the soft dark edge of every cactus got
+    flagged as a ring, and the rings touched, forming ONE shape of 298,255 px
+    spanning the whole left side. The lift pass in _fill_specks measures one sky
+    colour near a shape's centre -- which for that shape was the yellow horizon
+    glow -- and raised every pixel of it to at least that colour, painting a
+    bright yellow outline around each cactus even where the sky is red. Anything
+    this large is scenery, not a defect, so it is left exactly as shot. Done on
+    the map itself so the fill and the self-check agree on what was painted."""
+    m8 = (allmap > 0).astype(np.uint8)
+    n, lab, st, _ = cv2.connectedComponentsWithStats(m8, 8)
+    big_ids = np.flatnonzero(st[:, cv2.CC_STAT_AREA] > MAX_SPECK_AREA)
+    big_ids = big_ids[big_ids > 0]
+    if len(big_ids):
+        allmap = allmap.copy()
+        allmap[np.isin(lab, big_ids)] = 0
+        print(f"  left alone {len(big_ids)} flagged shapes larger than "
+              f"{MAX_SPECK_AREA} px (scenery edges, not specks)", flush=True)
+    return allmap
+
+
 def _ring_colour(big, mask, cx, cy, lo=4, hi=9):
     """The colour of the sky immediately around a speck: the per-channel median of
     an annulus, skipping anything that is itself being removed. This is the FLOOR
@@ -625,6 +656,7 @@ def remove_specks(cleaned_dir, names, big, fg_mask, read_frame, comet_tail=0,
     # is deliberately small: every pixel added is a pixel of real picture thrown
     # away, and an over-grown patch is visible even when the fill is perfect.
     allmap = cv2.dilate(allmap, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
+    allmap = _drop_oversize(allmap)
     out, n_specks, n_lifted = _fill_specks(big, allmap)
     print(f"  removing {n_specks} specks ({n_lifted} needed lifting to sky level)",
           flush=True)
