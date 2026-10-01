@@ -5,6 +5,7 @@
 ## v2.97-beta
 - **New: Frame Range on the Star Trail and Timelapse tabs.** One bar with two grips lets you leave out frames at the start, the end, or both. Drag the left grip inward to cut frames off the start, and the right grip inward to cut frames off the end. The number beside each grip shows how many you are cutting, and the middle of the bar shows how many frames the star trail will use. It is handy when the first or last shots are not the ones you want, such as a car passing at the start or clouds rolling in at the end. At least 20 frames always remain, and the bar will not let you go below that. On the Timelapse tab the size and length estimate follows what you cut, and the bar starts over whenever you switch between Cleaned and Original.
 - **The Timelapse tab now opens on Original** whenever your original frames are available, because the originals carry the most movement. Choose Cleaned from the Source menu if you want the cleaned frames instead. The Star Trail tab still opens on Cleaned.
+- **The Star Trail and Timelapse window is about 65 pixels shorter.** The big heading at the top of each tab repeated the tab's own name, and a blank line for status messages sat empty above the main button. The heading is gone, and the message line now appears only when there is something to say. The red close button moved a few pixels toward the edge to stay clear of the preview.
 - **Smoke tests:** 488 passing.
 
 ## v2.96-beta

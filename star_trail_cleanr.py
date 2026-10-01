@@ -7751,13 +7751,8 @@ class TimelapsePanel(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(*_CREATOR_PANEL_MARGINS)
         lay.setSpacing(_CREATOR_PANEL_SPACING)
-        _title = QLabel("Create Timelapse")
-        _f = QFont()
-        _f.setPointSize(20)
-        _f.setBold(True)
-        _title.setFont(_f)
-        _title.setStyleSheet(f"color: {BRAND_HEADING_BLUE};")
-        lay.addWidget(_title)
+        # No heading here: the tab above already says "Timelapse", and the heading
+        # cost the window about 40 px of height (Bruce, 2026-09-30).
 
         # Poster: the star trail image if we have one, otherwise the first frame
         # of the selected source. Once a timelapse is rendered, a white play button
@@ -7914,7 +7909,7 @@ class TimelapsePanel(QWidget):
         self._bar.setValue(0)
         self._bar.setVisible(False)
         lay.addWidget(self._bar)
-        self._status_lbl = QLabel("")
+        self._status_lbl = _StatusLabel()
         lay.addWidget(self._status_lbl)
 
         # Absorb any leftover vertical space here so the controls above stay packed
@@ -8348,6 +8343,22 @@ class TimelapsePanel(QWidget):
             self._remove_partial()
 
 
+class _StatusLabel(QLabel):
+    """The one-line status under the options ("Done: file name", "Build
+    cancelled."). It used to sit there empty, holding a blank line open above the
+    big button on both maker tabs; now it takes no room until it has a message, and
+    gives it back when the message is cleared. The window therefore opens a line
+    shorter and grows by one line only while there is something to read."""
+
+    def __init__(self, parent=None):
+        super().__init__("", parent)
+        self.setVisible(False)
+
+    def setText(self, text):
+        super().setText(text)
+        self.setVisible(bool(text))
+
+
 class FrameRangeSlider(QWidget):
     """One bar with two grips: how many frames to leave out at each end.
 
@@ -8578,11 +8589,8 @@ class StarTrailPanel(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(*_CREATOR_PANEL_MARGINS)
         lay.setSpacing(_CREATOR_PANEL_SPACING)
-        _title = QLabel("Create Star Trail")
-        _f = QFont(); _f.setPointSize(20); _f.setBold(True)
-        _title.setFont(_f)
-        _title.setStyleSheet(f"color: {BRAND_HEADING_BLUE};")
-        lay.addWidget(_title)
+        # No heading here: the tab above already says "Star Trail", and the heading
+        # cost the window about 40 px of height (Bruce, 2026-09-30).
 
         # Preview: the newest star trail if one exists, else a placeholder telling
         # the user how to make one (mirrors the Timelapse tab so the area is never
@@ -8762,7 +8770,7 @@ class StarTrailPanel(QWidget):
         self._bar.setValue(0)
         self._bar.setVisible(False)
         lay.addWidget(self._bar)
-        self._status_lbl = QLabel("")
+        self._status_lbl = _StatusLabel()
         lay.addWidget(self._status_lbl)
 
         # Absorb any leftover vertical space here so the controls above stay packed
@@ -9437,9 +9445,15 @@ class CreatorWindow(QDialog):
 
     def _position_close_x(self):
         """Park the red X in the top-right of the content area, just below the tab
-        bar, with a small margin. Re-run on resize so it tracks the corner."""
-        m = 12
-        y = self._tabs.tabBar().height() + m
+        bar. Re-run on resize so it tracks the corner.
+
+        It hugs the right edge (4 px) on purpose. The maker tabs no longer open with
+        a heading to sit beside it, and the preview box ends 38 px from the window's
+        edge, so a 32 px button fits in that margin only when it is pushed this far
+        right; at the old 12 px it landed on the preview's corner. (In the tab bar
+        it covered the end of the word "Timelapse", so it stays below the bar.)"""
+        m = 4
+        y = self._tabs.tabBar().height() + 12
         self._close_x.move(self.width() - self._close_x.width() - m, y)
         self._close_x.raise_()
 
