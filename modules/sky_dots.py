@@ -476,9 +476,34 @@ def _foreground_guard(allmap, fg_mask, H, W):
 # percentile 30; everything above ~500 was a cactus edge.
 MAX_SPECK_AREA = 300
 
+# Largest connected shape (px, BEFORE the 1px growth) a stuck pixel can be. A Bayer
+# defect is a cluster about 5 px across after demosaic -- 25 px at most. Measured on
+# the saved maps of seven other sequences: 99% of the marked shapes are 28 px or
+# smaller, and the largest anywhere in a sky is 59. Anything bigger is not a sensor
+# defect, it is a real star: a bright star near the celestial pole barely moves
+# across a whole night, so it sits on the same pixels in every frame and passes
+# every "same place in every frame" test, and the step used to paint it out
+# (Sean Parker's aurora set, 2026-09-30: Polaris, a saturated blob about 99 px
+# across at half brightness, drifting 9 px in 566 frames, turned into a lavender
+# smudge). Position cannot tell the two apart there; size can.
+MAX_DEFECT_AREA = 40
 
-def _drop_oversize(allmap):
+
+def _drop_oversize(allmap, limit=None, why="scenery edges, not specks", grown=False):
     """Remove every flagged shape too big to be a speck; return the trimmed map.
+    `limit` is the largest area (px) kept; it defaults to MAX_SPECK_AREA.
+
+    Two ways to measure a shape. Raw (the default): each connected piece of the map
+    on its own, which is how MAX_DEFECT_AREA tells a star from a stuck pixel.
+    `grown=True`: after the 1px growth the fill is about to apply, so pieces that
+    will merge into one clump are measured as that clump, and a clump over the limit
+    is removed WHOLE, small pieces and all. The order matters: judged piece by
+    piece, a horizon full of tiny lights or a cactus edge flagged as a ring of
+    small bits would be painted bit by bit, which is worse than leaving it alone
+    (the clump rule alone did that job before the raw limit existed; with both,
+    the clump rule must run first or its small pieces slip through as specks --
+    measured on Sean Parker's set, 529 extra patches along the horizon).
+    `why` names what such shapes are, for the log.
 
     SIZE CAP (2026-09-30, Sean Parker's aurora set). A real speck is a few pixels
     wide; the median flagged shape is 18 px and 90% are under 30. But on a photo
@@ -491,14 +516,17 @@ def _drop_oversize(allmap):
     this large is scenery, not a defect, so it is left exactly as shot. Done on
     the map itself so the fill and the self-check agree on what was painted."""
     m8 = (allmap > 0).astype(np.uint8)
+    if grown:
+        m8 = cv2.dilate(m8, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
     n, lab, st, _ = cv2.connectedComponentsWithStats(m8, 8)
-    big_ids = np.flatnonzero(st[:, cv2.CC_STAT_AREA] > MAX_SPECK_AREA)
+    limit = MAX_SPECK_AREA if limit is None else limit
+    big_ids = np.flatnonzero(st[:, cv2.CC_STAT_AREA] > limit)
     big_ids = big_ids[big_ids > 0]
     if len(big_ids):
         allmap = allmap.copy()
         allmap[np.isin(lab, big_ids)] = 0
         print(f"  left alone {len(big_ids)} flagged shapes larger than "
-              f"{MAX_SPECK_AREA} px (scenery edges, not specks)", flush=True)
+              f"{limit} px ({why})", flush=True)
     return allmap
 
 
@@ -650,6 +678,15 @@ def remove_specks(cleaned_dir, names, big, fg_mask, read_frame, comet_tail=0,
     allmap = _detect_map(big, sample, run_map=run_map, cand=cand,
                          fleck_ids=fleck_ids)
     allmap = _foreground_guard(allmap, fg_mask, H, W)
+    # First, clumps: pieces that the 1px growth below will merge into one big shape
+    # are scenery, and are left alone WHOLE (see _drop_oversize, grown=True).
+    allmap = _drop_oversize(allmap, MAX_SPECK_AREA, "clumps of marks: scenery edges, "
+                            "not specks", grown=True)
+    # Then, piece by piece before the growth: too big to be a sensor defect means a
+    # real star (a pole star sits on the same pixels all night) or scenery. See
+    # MAX_DEFECT_AREA.
+    allmap = _drop_oversize(allmap, MAX_DEFECT_AREA,
+                            "too big for a stuck pixel: real stars and scenery")
 
     # Grow each speck by a pixel so its demosaic fringe goes with it, then paint
     # them all out on the finished stack. One route now, no re-reading. The growth
