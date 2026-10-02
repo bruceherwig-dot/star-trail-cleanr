@@ -110,3 +110,72 @@ def test_a_clump_of_small_pieces_that_will_merge_is_left_alone_whole():
     out = sky_dots._drop_oversize(allmap, sky_dots.MAX_SPECK_AREA, "test", grown=True)
     assert out[150:152, 40:400].sum() == 0, "the clump must be left alone whole"
     assert out[40:44, 500:504].all(), "a lone small defect must still be removed"
+
+
+# ── a speck on a silhouette's edge must not become a pale blotch ─────────────
+
+def _edge_scene():
+    """Dark scenery on the left (value 8, columns 0-32), sky on the right (value
+    100), a bright stuck-pixel cluster right on the boundary. The ring around the
+    cluster is mostly sky (so the sky floor reads 100) while the patch itself
+    straddles the edge, its two leftmost columns lying on the dark object -- the
+    case that painted pale blotches onto trees and cacti."""
+    big = np.full((60, 80, 3), 100, np.uint8)
+    big[:, :33] = 8
+    big[28:32, 32:37] = 255
+    mask = np.zeros((60, 80), np.uint8)
+    mask[27:33, 31:38] = 255                      # the cluster, grown by a pixel
+    return big, mask
+
+
+def test_a_speck_on_a_dark_edge_keeps_its_dark_side_dark_and_its_sky_side_at_sky():
+    big, mask = _edge_scene()
+    out, n, _ = sky_dots._fill_specks(big, mask)
+    patch = mask > 0
+    dark_side = patch & (np.arange(80)[None, :] < 33)
+    sky_side = patch & (np.arange(80)[None, :] >= 36)     # clear of the edge's ramp
+    assert out[dark_side].max() < 40, "the dark side of the patch was lifted to sky colour"
+    assert out[sky_side].min() >= 90, "the sky side of the patch fell below the sky"
+    # and the edge keeps a smooth ramp from dark to sky, not a jump
+    row = out[30, 31:37, 0].astype(int)
+    assert (np.diff(row) >= 0).all() and row[0] < 40 and row[-1] >= 90, row.tolist()
+
+
+def test_an_ordinary_open_sky_speck_is_still_lifted_to_the_sky():
+    """The scenery rule must not weaken the no-holes guarantee in open sky."""
+    big = np.full((60, 80, 3), 100, np.uint8)
+    big[30, 40] = 255
+    mask = np.zeros((60, 80), np.uint8)
+    mask[28:33, 38:43] = 255
+    out, n, _ = sky_dots._fill_specks(big, mask)
+    assert out[mask > 0].min() >= 95, "a patch in open sky came out darker than the sky"
+
+
+def test_the_edge_test_fails_when_the_scenery_rule_is_off():
+    """Prove the edge test above is a real test: with the rule off, the dark side IS
+    lifted to the sky colour."""
+    big, mask = _edge_scene()
+    old = sky_dots._FG_FRAC
+    sky_dots._FG_FRAC = 0.0
+    try:
+        out, _, _ = sky_dots._fill_specks(big, mask)
+    finally:
+        sky_dots._FG_FRAC = old
+    dark_side = (mask > 0) & (np.arange(80)[None, :] < 33)
+    assert out[dark_side].max() >= 40, "expected the old behaviour with the rule off"
+
+
+def test_a_spot_that_is_not_brighter_than_its_surroundings_is_left_alone():
+    """A flagged spot no brighter than the picture around it has nothing to remove.
+    Real example: dark tree-edge pixels flagged as specks, then filled with a paler
+    blend -- a gray blotch on a dark object. A genuinely bright speck is kept."""
+    big = np.full((80, 120, 3), 100, np.uint8)         # sky
+    big[30:34, 20:24] = 30                             # a dark scenery edge, flagged
+    big[30:34, 80:84] = 255                            # a real bright speck, flagged
+    mask = np.zeros((80, 120), np.uint8)
+    mask[29:35, 19:25] = 255
+    mask[29:35, 79:85] = 255
+    out = sky_dots._drop_not_brighter(big, mask)
+    assert out[31, 21] == 0, "the dark spot must be left alone"
+    assert out[31, 81] == 255, "the bright speck must still be removed"
+    assert mask[31, 21] == 255, "the caller's map must not be modified"

@@ -530,6 +530,58 @@ def _drop_oversize(allmap, limit=None, why="scenery edges, not specks", grown=Fa
     return allmap
 
 
+# A filled pixel darker than this share of the sky around it is dark scenery (a tree,
+# a ridge, a cactus), not sky, and is left as the inpainting made it. It is the same
+# 72% the trail repair uses to tell dark static foreground from sky
+# (repair._DARKEN_FG_FRAC), for the same reason: on a silhouette's edge the speck
+# step used to raise EVERY pixel of a patch to the sky colour, which painted pale
+# gray blotches onto dark objects (33 of 80 patches on Bruce's Borrego trail, and
+# the little gray marks on Sean Parker's tree and cactus edges).
+_FG_FRAC = 0.72
+
+
+def _drop_not_brighter(big, allmap):
+    """Leave alone every flagged spot that is not BRIGHTER than the picture around it.
+
+    A speck is a bright dot that does not belong. A spot no brighter than its
+    surroundings has nothing to remove, whatever flagged it. On Bruce's Borrego
+    trail, of the 75 patches the step painted, 39 were not brighter than their
+    surroundings at all -- the two he circled measured 24 levels DARKER than the sky
+    beside them. They were dark scenery on the edge of a tree, flagged because the
+    pixels were static and brighter than the black right next to them, then filled
+    with a blend of dark and sky that came out paler than the real thing (about
+    62 where the tree was 39): a gray blotch on a dark object. Only 5 of the 75 were
+    clearly bright specks.
+
+    Judged on the map about to be painted (after the 1px growth), each shape's mean
+    brightness against the median of the picture just around it, other flagged
+    spots excluded. Returns the map without the spots that are no brighter."""
+    g = big.max(2).astype(np.int16)
+    H, W = g.shape
+    m8 = (allmap > 0).astype(np.uint8)
+    n, lab, st, _ = cv2.connectedComponentsWithStats(m8, 8)
+    drop = []
+    for i in range(1, n):
+        x, y = int(st[i, cv2.CC_STAT_LEFT]), int(st[i, cv2.CC_STAT_TOP])
+        bw, bh = int(st[i, cv2.CC_STAT_WIDTH]), int(st[i, cv2.CC_STAT_HEIGHT])
+        y0, y1 = max(0, y - 9), min(H, y + bh + 9)
+        x0, x1 = max(0, x - 9), min(W, x + bw + 9)
+        sub = lab[y0:y1, x0:x1]
+        ring = g[y0:y1, x0:x1][sub == 0]
+        if ring.size < 8:
+            continue
+        inside = g[y0:y1, x0:x1][sub == i]
+        if float(inside.mean()) <= float(np.median(ring)):
+            drop.append(i)
+    if drop:
+        allmap = allmap.copy()
+        allmap[np.isin(lab, drop)] = 0
+        print(f"  left alone {len(drop)} flagged spots that are not brighter than "
+              f"their surroundings (dark scenery edges, nothing to remove)",
+              flush=True)
+    return allmap
+
+
 def _ring_colour(big, mask, cx, cy, lo=4, hi=9):
     """The colour of the sky immediately around a speck: the per-channel median of
     an annulus, skipping anything that is itself being removed. This is the FLOOR
@@ -593,7 +645,13 @@ def _fill_specks(big, mask):
         # below the sky and still pass: 4 of 833 patches on Bruce's Perseid trail
         # came out as small dark spots that way. Per pixel, the promise holds by
         # construction rather than nearly holding.
-        raised = np.maximum(patch, np.clip(sky, 0, 255).astype(np.uint8))
+        # ...EXCEPT pixels that are dark scenery rather than sky: a patch straddling
+        # a tree or ridge edge has a dark side, and raising that to the sky colour
+        # paints a pale blotch on the object. Those keep what the inpainting gave.
+        floor = np.clip(sky, 0, 255).astype(np.uint8)
+        is_scenery = patch.max(axis=1) < _FG_FRAC * float(sky.max())
+        raised = patch.copy()
+        raised[~is_scenery] = np.maximum(patch[~is_scenery], floor)
         if np.array_equal(raised, patch):
             continue
         out[y:y + bh, x:x + bw][sub] = raised
@@ -694,6 +752,7 @@ def remove_specks(cleaned_dir, names, big, fg_mask, read_frame, comet_tail=0,
     # away, and an over-grown patch is visible even when the fill is perfect.
     allmap = cv2.dilate(allmap, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
     allmap = _drop_oversize(allmap)
+    allmap = _drop_not_brighter(big, allmap)
     out, n_specks, n_lifted = _fill_specks(big, allmap)
     print(f"  removing {n_specks} specks ({n_lifted} needed lifting to sky level)",
           flush=True)
@@ -717,9 +776,13 @@ def remove_specks(cleaned_dir, names, big, fg_mask, read_frame, comet_tail=0,
         x, y = int(ss[i, cv2.CC_STAT_LEFT]), int(ss[i, cv2.CC_STAT_TOP])
         bw, bh = int(ss[i, cv2.CC_STAT_WIDTH]), int(ss[i, cv2.CC_STAT_HEIGHT])
         sub = ll[y:y + bh, x:x + bw] == i
-        dimmest = int(out[y:y + bh, x:x + bw][sub].max(axis=1).min())
         sky = _ring_colour(out, allmap, cx, cy)
-        if sky is not None and dimmest < int(sky.max()) - 8:
+        if sky is None:
+            continue
+        vals = out[y:y + bh, x:x + bw][sub].max(axis=1)
+        # dark scenery is not a hole (see _FG_FRAC): judge only the sky-side pixels
+        judged = vals[vals >= _FG_FRAC * float(sky.max())]
+        if judged.size and int(judged.min()) < int(sky.max()) - 8:
             holes += 1
     print(f"  speck removal done (spots left darker than their surroundings, "
           f"must be 0: {holes})", flush=True)
