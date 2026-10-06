@@ -21,6 +21,23 @@ def _clear_flags():
         os.environ.pop(k, None)
 
 
+class _on_platform:
+    """Pin sys.platform for the length of a with-block. The GPU pack exists only
+    on Windows, so every test about pack codes must say which computer it is
+    pretending to be: otherwise it passes or fails depending on whether it runs on
+    the Mac, the Linux build machine or the Windows one."""
+
+    def __init__(self, name):
+        self.name = name
+
+    def __enter__(self):
+        self._real = sys.platform
+        sys.platform = self.name
+
+    def __exit__(self, *exc):
+        sys.platform = self._real
+
+
 def test_gpu_status_exports():
     import modules.gpu_pack as g
     for name in ("gpu_status", "status_message", "run_note", "GPU_STATUS_CODES"):
@@ -58,25 +75,27 @@ def test_card_present_but_on_cpu_always_explains_itself():
     from modules.gpu_pack import gpu_status, status_message, run_note
     _clear_flags()
 
-    os.environ["STC_GPU_VERSION_MISMATCH"] = "1"
-    try:
-        assert gpu_status("cpu", "yes") == "cpu_pack_mismatch"
-    finally:
-        _clear_flags()
+    # The pack codes are Windows codes: pin the platform (see _on_platform).
+    with _on_platform("win32"):
+        os.environ["STC_GPU_VERSION_MISMATCH"] = "1"
+        try:
+            assert gpu_status("cpu", "yes") == "cpu_pack_mismatch"
+        finally:
+            _clear_flags()
 
-    os.environ["STC_CUDA_UNSUPPORTED"] = "1"
-    try:
-        assert gpu_status("cpu", "yes") == "cpu_card_unsupported"
-    finally:
-        _clear_flags()
+        os.environ["STC_CUDA_UNSUPPORTED"] = "1"
+        try:
+            assert gpu_status("cpu", "yes") == "cpu_card_unsupported"
+        finally:
+            _clear_flags()
 
-    # With no flags set the answer depends on whether a pack is on disk; both
-    # outcomes are valid, and both must explain themselves.
-    code = gpu_status("cpu", "yes")
-    assert code in ("cpu_pack_missing", "cpu_pack_unused")
+        # With no flags set the answer depends on whether a pack is on disk; both
+        # outcomes are valid, and both must explain themselves.
+        code = gpu_status("cpu", "yes")
+        assert code in ("cpu_pack_missing", "cpu_pack_unused")
 
     for c in ("cpu_pack_mismatch", "cpu_card_unsupported",
-              "cpu_pack_missing", "cpu_pack_unused"):
+              "cpu_pack_missing", "cpu_pack_unused", "cpu_os_unsupported"):
         assert status_message(c), f"{c} has no Settings line"
         assert run_note(c), f"{c} says nothing in the run log"
 
@@ -135,7 +154,8 @@ def test_no_card_is_stated_not_scolded():
     """With no graphics card there is nothing to fix, so the header states it
     plainly and the run summary says nothing at all."""
     from modules.gpu_pack import header_badge, summary_line
-    for code in ("cpu_no_card", "cpu_only", "cpu_card_unsupported"):
+    for code in ("cpu_no_card", "cpu_only", "cpu_card_unsupported",
+                 "cpu_os_unsupported"):
         text, tone = header_badge(code)
         assert tone == "neutral", f"{code} must not read as a warning"
         assert text, f"{code} should still state what is doing the work"
@@ -256,3 +276,66 @@ def test_the_header_badge_is_corrected_by_the_engine():
         "the correction must actually refresh the badge, not just record a value"
     assert "_compute_device" in body, \
         "the engine's answer must replace the startup guess"
+
+
+# ── Linux: an NVIDIA card, but no GPU pack exists for this operating system ──
+
+def test_linux_with_an_nvidia_card_is_told_the_truth_not_to_install_a_pack():
+    """Field case (2026-10-05, Rainer Herkenrath, RTX 5060, Tuxedo OS / Linux Mint):
+    the Linux build ships a CPU-only PyTorch and the GPU pack is Windows-only, yet
+    the app offered "Install GPU support" on Linux. He installed it; it downloaded
+    Windows files into a folder nothing reads; nothing changed. Everywhere the app
+    talks about the GPU, Linux must now say there is nothing to install."""
+    from modules.gpu_pack import (gpu_status, status_message, run_note, header_badge,
+                                  summary_line)
+    _clear_flags()
+    with _on_platform("linux"):
+        code = gpu_status("cpu", "yes")
+        # no flag and no stray pack on disk may change the answer on Linux
+        os.environ["STC_GPU_VERSION_MISMATCH"] = "1"
+        try:
+            assert gpu_status("cpu", "yes") == "cpu_os_unsupported"
+        finally:
+            _clear_flags()
+    assert code == "cpu_os_unsupported"
+    for text in (status_message(code), run_note(code)):
+        low = text.lower()
+        assert text, "it must still say something"
+        assert "settings" not in low and "reinstall" not in low, text
+        assert "install gpu" not in low and "install the gpu" not in low, text
+        assert "nothing to install" in low or "not available" in low, text
+    text, tone = header_badge(code)
+    assert tone == "neutral", "it must not read as a fixable warning in the header"
+    assert summary_line(code) == "", "it must not nag on the finished-run summary"
+
+
+def test_linux_and_mac_never_see_a_gpu_offer_but_windows_still_does():
+    """The three codes that make the app offer or point at a pack must be reachable
+    on Windows only. This is the guard on the banner: it appears only for them."""
+    from modules.gpu_pack import gpu_status
+    _clear_flags()
+    pack_codes = ("cpu_pack_missing", "cpu_pack_mismatch", "cpu_pack_unused")
+    for name in ("linux", "darwin", "linux2"):
+        with _on_platform(name):
+            assert gpu_status("cpu", "yes") not in pack_codes, name
+    with _on_platform("win32"):
+        assert gpu_status("cpu", "yes") in pack_codes, "Windows must be unchanged"
+    # and a working GPU, on any platform, is still reported as working
+    with _on_platform("linux"):
+        assert gpu_status("cuda", "yes") == "gpu_nvidia"
+
+
+def test_the_banner_only_ever_appears_for_the_pack_codes():
+    """The orange 'NVIDIA GPU detected. Install' banner is shown by
+    _maybe_show_nvidia_banner, which has no platform check of its own: it relies on
+    the status code. If a new code were ever added to its list the Linux fix would
+    silently break, so lock its list to exactly the three Windows pack codes."""
+    app = (REPO / "star_trail_cleanr.py").read_text(encoding="utf-8")
+    i = app.find("def _maybe_show_nvidia_banner")
+    assert i > 0, "the banner function is gone"
+    body = app[i:i + 2200]
+    assert 'code == "cpu_pack_missing"' in body
+    assert 'code in ("cpu_pack_mismatch", "cpu_pack_unused")' in body
+    assert "cpu_os_unsupported" not in body, \
+        "the banner must never be shown for the unsupported-OS code"
+

@@ -572,6 +572,7 @@ GPU_STATUS_CODES = (
     "cpu_pack_mismatch",     # card present, pack installed but built for another app version
     "cpu_card_unsupported",  # card present, pack installed, card too old for this CUDA build
     "cpu_pack_unused",       # card present, pack installed and matching, still on CPU
+    "cpu_os_unsupported",    # card present, but this OS has no GPU pack at all (Linux)
 )
 
 
@@ -599,7 +600,18 @@ def gpu_status(device: str, nvidia_outcome: Optional[str] = None) -> str:
     if nvidia_outcome != "yes":
         return "cpu_no_card" if sys.platform == "win32" else "cpu_only"
 
-    # A working card IS present, so something is stopping us from using it.
+    # A working card IS present. On anything but Windows the honest answer is
+    # that there is nothing to install: the GPU pack is built for Windows only (its
+    # download links are Windows files, it unpacks into a Windows-style folder, and
+    # only the Windows startup hook ever loads it), and every other build ships a
+    # CPU-only PyTorch. Linux users with an NVIDIA card used to be told to "install
+    # GPU support", did, and changed nothing (Rainer Herkenrath, RTX 5060, Tuxedo OS
+    # and Linux Mint, 2026-10-05). This must come before the pack checks below, which
+    # all assume a pack could exist.
+    if sys.platform != "win32":
+        return "cpu_os_unsupported"
+
+    # Something is stopping us from using the card.
     # Order matters: the two environment flags name a specific cause, and the
     # mismatch flag is only ever set when a pack is actually installed.
     if os.environ.get("STC_GPU_VERSION_MISMATCH"):
@@ -645,6 +657,8 @@ def status_message(code: str) -> str:
                                  "current GPU pack, running on CPU."),
         "cpu_pack_unused": ("CPU: GPU support is installed but isn't being used. "
                             "Reinstall it to switch back to your graphics card."),
+        "cpu_os_unsupported": ("CPU: NVIDIA GPU detected, but GPU acceleration is not "
+                               "available on this operating system yet."),
     }.get(code, "")
 
 
@@ -670,6 +684,7 @@ def header_badge(code: str) -> Tuple[str, str]:
         "cpu_pack_mismatch": ("GPU: off", "warn"),
         "cpu_pack_unused": ("GPU: off", "warn"),
         "cpu_card_unsupported": ("CPU only", "neutral"),
+        "cpu_os_unsupported": ("CPU only", "neutral"),
         "cpu_no_card": ("CPU only", "neutral"),
         "cpu_only": ("CPU only", "neutral"),
     }.get(code, ("", "neutral"))
@@ -735,4 +750,8 @@ def run_note(code: str) -> str:
         "cpu_card_unsupported": ("Running on the processor. This graphics card is not supported "
                                  "by the current GPU support download, so there is nothing to "
                                  "change: the run will simply take longer."),
+        "cpu_os_unsupported": ("Running on the processor. This computer has an NVIDIA graphics "
+                               "card, but GPU acceleration is not available on this operating "
+                               "system yet, so there is nothing to install: the run will "
+                               "simply take longer."),
     }.get(code, "")
