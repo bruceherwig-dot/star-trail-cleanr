@@ -625,6 +625,12 @@ _PHANTOM_OPEN_R = 6        # parts thinner than ~2*R px are "thin" (spurs / line
 _PHANTOM_MIN_INK = 12      # min phantom pixels in a bridged line
 _PHANTOM_MIN_EXTENT = 40   # min bounding extent of a bridged line
 _PHANTOM_KEEP_FRAC = 0.20  # drop a detection if < this fraction survives trimming
+# Holding one full-frame mask per detection is a speed shortcut that costs memory in proportion
+# to (detections x frame size): about 53 x 44 MP = 2.3 GB, which stays on the fast path. At 102 MP (a Fujifilm GFX100)
+# the same 50 detections are 5 GB on top of everything else, and a v2.98 user's laptop ran out
+# of memory right here (Sentry 2026-10-07). Past this many bytes the stage builds masks one at a
+# time instead of keeping them all; the answers are identical, only the speed differs.
+_PHANTOM_MASK_CACHE_BYTES = int(2.5 * 1024 ** 3)
 
 
 def _phantom_local_sky(gray: np.ndarray) -> np.ndarray:
@@ -674,13 +680,24 @@ def stage_prune_phantoms(state: PipelineState, cfg: StageConfig,
     h, w = state.image.shape[:2]
     gray = state.image.max(2).astype(np.uint8) if state.image.ndim == 3 else state.image.astype(np.uint8)
 
-    pred_masks = [_pred_to_mask(p, h, w) for p in preds]
+    lean = len(preds) * h * w > _PHANTOM_MASK_CACHE_BYTES
     union = np.zeros((h, w), np.uint8)
-    for m in pred_masks:
-        if m is not None:
-            union[m > 0] = 1
+    if lean:
+        # HUGE FRAME: never hold more than one detection's mask. The union is the same
+        # either way; the masks are rebuilt below, and by the next stage, when needed.
+        pred_masks = None
+        for p in preds:
+            m = _pred_to_mask(p, h, w)
+            if m is not None:
+                union[m > 0] = 1
+            m = None
+    else:
+        pred_masks = [_pred_to_mask(p, h, w) for p in preds]
+        for m in pred_masks:
+            if m is not None:
+                union[m > 0] = 1
     if union.sum() == 0:
-        state.pred_masks = pred_masks     # built already; the next stage needs them
+        state.pred_masks = pred_masks if pred_masks is not None else []   # next stage builds
         return state
 
     sky = _phantom_local_sky(gray)
@@ -698,7 +715,7 @@ def stage_prune_phantoms(state: PipelineState, cfg: StageConfig,
             fm = cv2.resize(fm, (w, h), interpolation=cv2.INTER_NEAREST)
         ph[fm > 0] = 0
     if ph.sum() == 0:
-        state.pred_masks = pred_masks     # built already; the next stage needs them
+        state.pred_masks = pred_masks if pred_masks is not None else []   # built already, or the next stage builds
         return state
 
     bridged = cv2.dilate(ph, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15)))
@@ -739,14 +756,15 @@ def stage_prune_phantoms(state: PipelineState, cfg: StageConfig,
                 "note": "thin FP over empty sky; nothing to see here (hard negative)",
             })
     if not kill.any():
-        state.pred_masks = pred_masks     # built already; the next stage needs them
+        state.pred_masks = pred_masks if pred_masks is not None else []   # built already, or the next stage builds
         return state
 
     new_preds = []
     new_masks = []
     n_dropped = n_trimmed = 0
     notkill = ~kill
-    for pred, m in zip(preds, pred_masks):
+    for _k, pred in enumerate(preds):
+        m = pred_masks[_k] if pred_masks is not None else _pred_to_mask(pred, h, w)
         if m is None:
             new_preds.append(pred)
             new_masks.append(None)
@@ -765,7 +783,7 @@ def stage_prune_phantoms(state: PipelineState, cfg: StageConfig,
         rows = np.any(m, axis=1)
         if not rows.any():
             new_preds.append(pred)
-            new_masks.append(m)
+            new_masks.append(None if lean else m)
             continue
         cols = np.any(m, axis=0)
         rr = np.where(rows)[0]
@@ -796,7 +814,7 @@ def stage_prune_phantoms(state: PipelineState, cfg: StageConfig,
             n_trimmed += 1
         else:
             new_preds.append(pred)
-            new_masks.append(m)
+            new_masks.append(None if lean else m)    # lean: let the next stage rebuild it
 
     state.raw_detections = new_preds
     state.pred_masks = new_masks

@@ -189,10 +189,23 @@ def _pred_to_mask(pred, h, w):
             if arr.shape != (h, w):
                 arr = cv2.resize(arr, (w, h), interpolation=cv2.INTER_NEAREST)
             return arr
+        except MemoryError:
+            # NEVER fall through to the library's path on this: it needs a float64
+            # array the size of the whole frame (8 bytes a pixel, 776 MiB at 102 MP),
+            # so running short of memory here would just fail again, bigger, and
+            # leave a traceback about an array nobody asked for (Sentry 2026-10-07).
+            raise MemoryError(
+                f"Not enough memory to process a frame this large ({w} x {h}). "
+                f"Close other programs and try again.")
         except Exception:
             pass      # anything unexpected: fall through to the library's own path
 
-    seg = _m.bool_mask
+    try:
+        seg = _m.bool_mask
+    except MemoryError:
+        raise MemoryError(
+            f"Not enough memory to process a frame this large ({w} x {h}). "
+            f"Close other programs and try again.")
     if seg is None:
         return None
     # A bool array is one byte per element, so a uint8 VIEW of it costs nothing
