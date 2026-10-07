@@ -2,6 +2,10 @@
 
 ---
 
+## v2.99-beta
+- **Fixed: when a cleaning run failed, the message could be a meaningless console hint instead of the real error.** Some Windows computers print "Press Ctrl-Break to quit" (Macs print "Press Ctrl-C to quit") when the cleaning engine stops. That line is not an error, but the app showed it as the whole message, which hid the engine's own explanation and, after a real crash, the actual cause such as a memory error. Those hints are now ignored, so you see what really went wrong, and so do the crash reports. Found through a crash report from a user cleaning 102-megapixel photos.
+- **Smoke tests:** 516 passing.
+
 ## v2.98-beta
 - **Fixed: on Linux, the app no longer tells you to install GPU support that cannot work.** The Linux version runs on the processor only, because the optional GPU download is built for Windows. Even so, a Linux computer with an NVIDIA card was shown an orange "Install GPU support" banner, an amber "GPU: off" badge, and "install GPU support" notes in Settings, in the run log and on the finished-run screen. Installing it downloaded about 3 to 4 GB of Windows files that nothing could ever use, and changed nothing. Linux now says plainly, in all of those places, that a graphics card was found but GPU acceleration is not available on this operating system yet, so there is nothing to install. Windows is unchanged. Reported by Rainer Herkenrath, who has an RTX 5060 and tried Tuxedo OS and Linux Mint.
 - **Fixed: a crash on Chinese (and some other non-English) Windows computers when making a star trail, red trail map or the before-and-after video.** The app reads what its helper programs print, and it was doing that with the computer's own text setting, which can't read some folder names and messages. The read failed in the background, and the helper's real error message was lost. It now reads that text in a way that can never fail, and passes the real message along. Reported through a crash report from a v2.97 user.

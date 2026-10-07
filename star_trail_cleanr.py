@@ -1158,8 +1158,22 @@ def worker_error_message(stderr_text, stdout_lines):
     exception). Otherwise the engine printed a handled error to stdout, and
     everything from the last "ERROR:" line onward is the message; the engine
     exits immediately after printing one, so nothing unrelated follows it.
+
+    ONE-LINE CONSOLE NOTICES ARE NOT CONTENT (2026-10-07). A compiled library
+    prints "Press Ctrl-Break to quit" (Windows) or "Press Ctrl-C to quit" (Mac) on
+    the error stream. It is not an error, but it was the last line, so it won the
+    "stderr wins" rule and became the whole message: a Windows user with 102 MP
+    frames got a crash report titled "Worker exited 1: Press Ctrl-Break to quit",
+    hiding both the engine's own ERROR block on stdout and, in a real crash, the
+    exception line just above it ("MemoryError: ..."). They are skipped here.
     """
-    err_lines = [l for l in (stderr_text or "").splitlines() if l.strip()]
+    # A line that is only a console hint, never an error. Built here, not at module
+    # level: tests/test_windows_version_detection.py cuts this stretch of the file
+    # out and runs it on its own, so nothing new may execute at import time here.
+    _console_notice = re.compile(
+        r"^\s*Press\s+Ctrl[-+ ]?(?:C|Break)\s+to\s+quit\.?\s*$", re.I)
+    err_lines = [l for l in (stderr_text or "").splitlines()
+                 if l.strip() and not _console_notice.match(l)]
     if err_lines:
         return err_lines[-1]
     lines = list(stdout_lines or [])
@@ -1169,7 +1183,8 @@ def worker_error_message(stderr_text, stdout_lines):
             start = i
     if start is not None:
         return "\n".join(l.rstrip() for l in lines[start:]).strip()
-    return lines[-1] if lines else "unknown error"
+    real = [l for l in lines if not _console_notice.match(l)]
+    return real[-1] if real else "unknown error"
 
 
 class CleanerWorker(QThread):

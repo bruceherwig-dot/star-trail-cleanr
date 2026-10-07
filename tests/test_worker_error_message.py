@@ -100,3 +100,47 @@ def test_the_sentry_title_stays_groupable():
     assert "{err_msg}" not in call, (
         "the whole multi-line block must not be the Sentry title: it carries the "
         "user's path and numbers, and would split one bug into many issues")
+
+
+# ── console notices are not errors (Sentry 2026-10-07, Windows 11, 102 MP frames) ──
+
+NOTICE_WIN = "Press Ctrl-Break to quit"
+NOTICE_MAC = "Press Ctrl-C to quit"
+
+
+def test_a_console_notice_alone_does_not_hide_the_engines_own_error():
+    """The report was titled "Worker exited 1: Press Ctrl-Break to quit". The engine
+    had printed its own ERROR block on stdout, but the error stream held the console
+    notice, which won the 'stderr wins' rule."""
+    engine = ["Batch 2/2", "ERROR: Not enough memory for this batch.",
+              "  Each frame is 11648 x 8736.", "  Close other programs and try again."]
+    for notice in (NOTICE_WIN, NOTICE_MAC, NOTICE_WIN + "\n"):
+        msg = worker_error_message(notice, engine)
+        assert msg.startswith("ERROR: Not enough memory for this batch."), (notice, msg)
+        assert "11648 x 8736" in msg and "Close other programs" in msg
+
+
+def test_a_console_notice_after_a_real_crash_does_not_hide_the_exception():
+    """A real Python crash ends its traceback with the exception, and the notice
+    can come after it. The exception is what the user and Sentry need."""
+    tb = ("Traceback (most recent call last):\n  File \"x.py\", line 1, in <module>\n"
+          "MemoryError: Unable to allocate 305 MiB for an array\n")
+    for notice in (NOTICE_WIN, NOTICE_MAC):
+        msg = worker_error_message(tb + notice + "\n", ["Detecting..."])
+        assert msg == "MemoryError: Unable to allocate 305 MiB for an array", msg
+    # and the notice may also come BEFORE the traceback
+    msg = worker_error_message(NOTICE_WIN + "\n" + tb, [])
+    assert msg == "MemoryError: Unable to allocate 305 MiB for an array", msg
+
+
+def test_only_a_console_notice_and_nothing_else_still_says_something_honest():
+    assert worker_error_message(NOTICE_WIN, []) == "unknown error"
+    assert worker_error_message(NOTICE_WIN, ["loading 1/20", "something odd"]) == "something odd"
+    # a console notice on stdout is not the "last thing said" either
+    assert worker_error_message("", ["something odd", NOTICE_MAC]) == "something odd"
+
+
+def test_a_real_line_that_merely_mentions_ctrl_c_is_kept():
+    """Only a line that is JUST the console hint is dropped."""
+    line = "RuntimeError: stopped: Press Ctrl-C to quit was ignored by the worker"
+    assert worker_error_message(line, ["ERROR: earlier"]) == line
