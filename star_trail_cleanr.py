@@ -2741,7 +2741,10 @@ class ShareRenderThread(QThread):
                 cmd = [sys.executable, "--cleanr-worker", SHARE_SCRIPT] + self._job_args
             else:
                 cmd = [sys.executable, "-u", SHARE_SCRIPT] + self._job_args
-            proc = subprocess.run(cmd, capture_output=True, text=True)
+            # Read the helper's output as UTF-8, never the computer's own encoding
+            # (gbk on a Chinese Windows crashed here: see io_safe.run_captured).
+            from modules.io_safe import run_captured
+            proc = run_captured(cmd)
             if proc.returncode != 0:
                 msg = (proc.stderr or proc.stdout or "render failed").strip()
                 self.failed.emit(self._kind, msg[-400:])

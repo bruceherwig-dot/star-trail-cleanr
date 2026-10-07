@@ -778,3 +778,29 @@ def robust_imwrite(path: Union[str, Path], image: np.ndarray,
             return False
     finally:
         _restore_cv2_logs(prev)
+
+
+def run_captured(cmd, **kwargs):
+    """Run a helper program, capture what it prints, and read that as UTF-8.
+
+    WHY THIS EXISTS (2026-10-07). `subprocess.run(..., text=True)` reads the
+    helper's output with the COMPUTER'S default text encoding. On a Chinese Windows
+    that is gbk, and a gbk read of anything it does not recognise (a folder name in
+    UTF-8, a character from a library's message) raises UnicodeDecodeError inside a
+    background reader thread: nothing catches it, the helper's real error message is
+    lost (the user sees only "render failed"), and the crash lands in Sentry as an
+    unhandled exception (a v2.97 user, "'gbk' codec can't decode byte 0x87 in
+    position 97"). The main cleaning process was already read as UTF-8 with
+    errors="replace"; the share-output and video helpers were missed.
+
+    So: decode as UTF-8 and REPLACE anything unreadable, which can never raise, and
+    ask a Python helper to print UTF-8 so non-ASCII folder names come through as
+    themselves. A caller-supplied PYTHONIOENCODING wins. Returns the
+    subprocess.CompletedProcess with str stdout/stderr, exactly as before.
+    """
+    import os
+    import subprocess
+    env = dict(kwargs.pop("env", None) or os.environ)
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", env=env, **kwargs)

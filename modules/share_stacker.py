@@ -28,12 +28,11 @@ bit-identical to the batch stackers (tests/test_incremental_stack.py).
 """
 import os
 import time
-import subprocess
 
 import cv2
 import numpy as np
 
-from modules.io_safe import robust_imread, robust_imwrite
+from modules.io_safe import robust_imread, robust_imwrite, run_captured
 # robust_imWRITE: cv2 cannot write non-ASCII paths on Windows.
 import make_share_clip as msc
 
@@ -291,7 +290,7 @@ class ShareStacker:
             cmd = list(self._video_cmd_prefix) + [
                 "--original", self.original_dir, "--out", video_out,
                 "--prebuilt-before", before_png, "--prebuilt-after", after_png]
-            r = subprocess.run(cmd, capture_output=True, text=True)
+            r = run_captured(cmd)       # UTF-8, never the computer's own encoding
             ok = r.returncode == 0 and os.path.exists(video_out)
             if not ok:
                 self._video_fail = (f"the video encoder exited with code {r.returncode}: "
