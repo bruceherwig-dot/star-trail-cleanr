@@ -41,10 +41,16 @@ def test_run_captured_does_not_depend_on_the_computers_default_encoding():
     code = ("import sys; sys.stdout.buffer.write(('x' * 60 + ' \\u674e\\u661f ' + 'y' * 10 + "
             "' \\u2026 done\\n').encode('utf-8'))")
     cmd = _child(code)
-    # the OLD call, with the gbk default made explicit, fails the way the user's did
-    crashed = False
+    # The helper's raw bytes must really be unreadable as gbk, or this proves nothing.
+    # (Checked on the bytes themselves, not by watching subprocess.run raise: on a Mac
+    # or Linux a wrong-encoding read raises in the caller, but on Windows it raises in
+    # a background reader thread, which is exactly how the user's crash looked and why
+    # an earlier version of this check passed on the Mac and failed on the Windows
+    # build machine.)
+    raw = subprocess.run(cmd, capture_output=True).stdout
     try:
-        subprocess.run(cmd, capture_output=True, text=True, encoding="gbk")
+        raw.decode("gbk")
+        crashed = False
     except UnicodeDecodeError:
         crashed = True
     assert crashed, "the test input must actually trip a gbk read, or it proves nothing"
