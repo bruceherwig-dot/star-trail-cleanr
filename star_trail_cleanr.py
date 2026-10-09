@@ -1154,18 +1154,29 @@ def worker_error_message(stderr_text, stdout_lines):
     truncating anything -- it is everything the app kept. Every multi-line
     message the engine has ever printed reached users the same way.
 
-    stderr wins when it has content (a real crash, where the last line is the
-    exception). Otherwise the engine printed a handled error to stdout, and
-    everything from the last "ERROR:" line onward is the message; the engine
-    exits immediately after printing one, so nothing unrelated follows it.
+    THE ORDER OF CHOICE (2026-10-09):
+      1. A real Python crash -- the error stream holds a "Traceback (most recent call
+         last)" block -- shows its last meaningful line (the exception).
+      2. Otherwise, if the engine wrote its own "ERROR:" block on stdout, that is the
+         message. Everything from the last "ERROR:" line onward; the engine exits
+         immediately after printing one, so nothing unrelated follows it. Every
+         "ERROR:" print in the engine is followed by an exit, so none can be stale.
+      3. Otherwise the last meaningful error-stream line, then the last stdout line.
+
+    WHY WARNINGS MUST NOT WIN. This used to be "stderr wins whenever it has any
+    content", on the idea that content there means a crash. But libraries write
+    harmless warnings and hints there constantly. On every Mac run the SAHI library
+    prints a deprecation warning whose last line is the SOURCE CODE of the offending
+    call, so a disk that disconnected mid-run (Errno 6, "Device not configured")
+    reached the user, and Sentry, as
+        Worker exited 2: elif mps and getattr(torch, "has_mps", False) and ...
+    while the engine's own explanation sat unread on stdout (v1.992, 2026-10-09).
 
     ONE-LINE CONSOLE NOTICES ARE NOT CONTENT (2026-10-07). A compiled library
     prints "Press Ctrl-Break to quit" (Windows) or "Press Ctrl-C to quit" (Mac) on
-    the error stream. It is not an error, but it was the last line, so it won the
-    "stderr wins" rule and became the whole message: a Windows user with 102 MP
-    frames got a crash report titled "Worker exited 1: Press Ctrl-Break to quit",
-    hiding both the engine's own ERROR block on stdout and, in a real crash, the
-    exception line just above it ("MemoryError: ..."). They are skipped here.
+    the error stream. A Windows user with 102 MP frames got a crash report titled
+    "Worker exited 1: Press Ctrl-Break to quit", hiding both the engine's own ERROR
+    block and, in a real crash, the exception line just above it. They are skipped.
     """
     # A line that is only a console hint, never an error. Built here, not at module
     # level: tests/test_windows_version_detection.py cuts this stretch of the file
@@ -1174,15 +1185,18 @@ def worker_error_message(stderr_text, stdout_lines):
         r"^\s*Press\s+Ctrl[-+ ]?(?:C|Break)\s+to\s+quit\.?\s*$", re.I)
     err_lines = [l for l in (stderr_text or "").splitlines()
                  if l.strip() and not _console_notice.match(l)]
-    if err_lines:
-        return err_lines[-1]
     lines = list(stdout_lines or [])
     start = None
     for i, line in enumerate(lines):
         if line.startswith("ERROR:"):
             start = i
+    crashed = any(l.startswith("Traceback (most recent call last)") for l in err_lines)
+    if crashed:
+        return err_lines[-1]
     if start is not None:
         return "\n".join(l.rstrip() for l in lines[start:]).strip()
+    if err_lines:
+        return err_lines[-1]
     real = [l for l in lines if not _console_notice.match(l)]
     return real[-1] if real else "unknown error"
 

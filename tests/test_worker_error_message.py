@@ -143,4 +143,52 @@ def test_only_a_console_notice_and_nothing_else_still_says_something_honest():
 def test_a_real_line_that_merely_mentions_ctrl_c_is_kept():
     """Only a line that is JUST the console hint is dropped."""
     line = "RuntimeError: stopped: Press Ctrl-C to quit was ignored by the worker"
-    assert worker_error_message(line, ["ERROR: earlier"]) == line
+    assert worker_error_message(line, ["loading 1/20: a.jpg"]) == line
+
+
+# ── harmless warnings must not hide the engine's own error (Sentry 2026-10-09) ──
+
+# The REAL event from v1.992 on a Mac (Jims-MacBook-Pro, batch 12 of 48): the library's
+# deprecation warning on the error stream, and the engine's own explanation of a drive that
+# disconnected mid-run on stdout. The user and Sentry were shown the warning's source line.
+REAL_MAC_WARNING = (
+    "sahi/utils/torch_utils.py:80: UserWarning: 'has_mps' is deprecated, please use "
+    "'torch.backends.mps.is_built()'\n"
+    "  elif mps and getattr(torch, \"has_mps\", False) and torch.backends.mps.is_available():"
+    "  # prefer MPS if available\n")
+REAL_MAC_STDOUT = [
+    "Step 1 complete - 20/20 frames have trails",
+    "Step 2 - repairing frames (skipping first/last 0)",
+    "ERROR: Cannot write cleaned frame to:",
+    "/Volumes/Laptop Dropbox/Hoosiers Nest Astrophotography 20261008/191_PANA JPG/cleaned",
+    "The output folder may be on a read-only drive, synced by OneDrive, or a file there may "
+    "be open in another app. Pick a different output folder and try again.",
+    "(Detail: OSError: [Errno 6] Device not configured: '/Volumes/Laptop Dropbox/Hoosiers "
+    "Nest Astrophotography 20261008/191_PANA JPG/cleaned/PETE0221.jpg')",
+]
+
+
+def test_the_real_mac_event_shows_the_engines_error_not_the_warning_line():
+    msg = worker_error_message(REAL_MAC_WARNING, REAL_MAC_STDOUT)
+    assert msg.startswith("ERROR: Cannot write cleaned frame to:"), msg
+    assert "Device not configured" in msg and "PETE0221.jpg" in msg, \
+        "the detail that names the cause must reach the user"
+    assert "has_mps" not in msg, "the library's warning line must not be the message"
+
+
+def test_a_warning_never_outranks_the_engines_error_but_a_traceback_does():
+    engine = ["ERROR: Not enough memory for this batch.", "  Close other programs."]
+    warn = "UserWarning: something is deprecated\n  some_source_line_of_the_library()\n"
+    assert worker_error_message(warn, engine).startswith("ERROR: Not enough memory")
+    # a warning, then a real crash: the crash is what happened
+    tb = warn + ("Traceback (most recent call last):\n  File \"x.py\", line 1, in <module>\n"
+                 "ValueError: bad frame\n")
+    assert worker_error_message(tb, engine) == "ValueError: bad frame"
+
+
+def test_without_an_engine_error_the_last_real_error_line_is_still_reported():
+    """A native crash prints its own text on the error stream and no ERROR block
+    on stdout: that text is all there is, and it must still come through."""
+    native = "UserWarning: x\n  src()\nforrtl: severe (157): Program Exception - access violation\n"
+    assert worker_error_message(native, ["loading 1/20: a.jpg"]).startswith("forrtl: severe (157)")
+
