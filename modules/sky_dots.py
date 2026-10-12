@@ -166,9 +166,32 @@ def _paint(cand_lab, ids, n_pts):
     return lut[cand_lab]
 
 
-def _flecks(pts, peak, evidence):
+def _strongly_coloured(big, cx, cy):
+    """True if the dot has a colour no trail piece or whitish speck has: the
+    strongest split between its red, green and blue values, in a small window
+    around it, reaches _FLECK_MIN_COLOUR. Obvious red and blue dots sit far above
+    it (a blue one measured 247); a faint orange piece of trail sits near 60."""
+    H, W = big.shape[:2]
+    w = big[max(0, cy - 2):min(H, cy + 3),
+            max(0, cx - 2):min(W, cx + 3)].reshape(-1, 3).astype(int)
+    return bool(w.size and int((w.max(1) - w.min(1)).max()) >= _FLECK_MIN_COLOUR)
+
+
+def _flecks(pts, peak, evidence, big=None):
     """Which candidates are one-off events -- cosmic rays, satellite glints, a
     single frame's noise -- rather than stars.
+
+    WHICH ONE-OFFS ARE PAINTED (2026-10-12). Only the strongly coloured ones, when
+    `big` (the finished stack) is given. On Bruce's 6D sequence this list alone
+    painted 1,107 of 1,706 patches, and 938 of those 1,706 showed at their pixel in
+    only 0 to 3 frames: beads of dotted trails and faint trail pieces, with no
+    speck in them. Switching the list off removed the obvious red and blue dots as
+    well, so it is kept for dots a trail cannot be: a colour split of 100 or more.
+    A cutoff of 60 let faint orange trail through (it measures 61); 100 painted
+    741 patches instead of 1,706, kept all 523 real stuck pixels, and dropped both
+    trail pieces Bruce circled. Whitish one-offs are left alone on purpose: on that
+    sequence about 363 were left, nearly all faint (median peak 96 of 255) and
+    nothing obvious. Measured on ONE camera and ONE sky.
 
     The sky turns, so the light of a real star is at a KNOWN place one frame
     earlier and another known place one frame later. Follow it there: a star is
@@ -188,7 +211,8 @@ def _flecks(pts, peak, evidence):
     scored 0 of 800 controls but caught 0 of the 12, because in a field this
     crowded some trail is nearly always passing within 10px."""
     return [k + 1 for k in range(len(pts))
-            if peak[k] > _FLECK_MIN_PEAK and evidence[k] < _FLECK_RATIO * peak[k]]
+            if peak[k] > _FLECK_MIN_PEAK and evidence[k] < _FLECK_RATIO * peak[k]
+            and (big is None or _strongly_coloured(big, *pts[k]))]
 
 
 def _detect_map(big, sample_frames, run_map=None, cand=None, fleck_ids=None):
@@ -225,8 +249,8 @@ def _detect_map(big, sample_frames, run_map=None, cand=None, fleck_ids=None):
     bead's neighbours are inside the very radius the test looks past. Colour,
     collinearity and structure-tensor direction were measured too and separate
     nothing (14% vs 13%, 85% vs 77%, 78% vs 75%). Do not re-add an isolation
-    test; the leftover one-off flecks are a separate problem and need evidence
-    the finished stack does not contain."""
+    test. One-off flecks come in only when strongly coloured (see _flecks); the
+    rest need evidence the finished stack does not contain."""
     H, W = big.shape[:2]
 
     ch = build_hot_pixel_map_chromatic(
@@ -263,6 +287,7 @@ def _detect_map(big, sample_frames, run_map=None, cand=None, fleck_ids=None):
 _BATCH = 20            # the clean judges 20 frames at a time; match it exactly
 _FLECK_MIN_PEAK = 40   # too dim to judge: leave it alone
 _FLECK_RATIO = 0.4     # the sky-predicted spot must beat this share of the dot's peak
+_FLECK_MIN_COLOUR = 100  # a one-off is painted only if its red/green/blue split is this big
 
 
 def _fit_sky_motion(a, b, hw):
@@ -730,9 +755,9 @@ def remove_specks(cleaned_dir, names, big, fg_mask, read_frame, comet_tail=0,
         print(f"  rebuilt hot-pixel map: {int((run_map > 0).sum())} px marked",
               flush=True)
 
-    fleck_ids = _flecks(pts, peak, evidence)
-    print(f"  {len(pts)} dots judged: {len(fleck_ids)} are one-off flecks "
-          f"(the sky's rotation does not account for them)", flush=True)
+    fleck_ids = _flecks(pts, peak, evidence, big)
+    print(f"  {len(pts)} dots judged: {len(fleck_ids)} are strongly coloured one-off "
+          f"flecks (the sky's rotation does not account for them)", flush=True)
     allmap = _detect_map(big, sample, run_map=run_map, cand=cand,
                          fleck_ids=fleck_ids)
     allmap = _foreground_guard(allmap, fg_mask, H, W)

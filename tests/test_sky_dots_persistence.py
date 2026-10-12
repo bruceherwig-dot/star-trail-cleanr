@@ -174,6 +174,27 @@ def test_a_one_off_fleck_is_removed_but_a_moving_star_is_not():
         "too dim to judge; guessing wrong here puts a mark on a real star"
 
 
+def test_only_strongly_coloured_one_offs_are_painted():
+    """Field case, 2026-10-12 (Bruce's 6D sequence): the fleck list painted 938 spots
+    that showed in only 0-3 frames -- trail beads and faint trail pieces -- next to
+    the real red and blue dots. A one-off is now painted only when its colour split
+    is 100 or more. A faint orange trail piece measured 61 and a whitish dot 80."""
+    from modules.sky_dots import _flecks
+
+    big = np.full((60, 60, 3), 20, np.uint8)
+    big[10, 10] = (255, 37, 102)         # BGR: an obvious blue dot, split 218
+    big[20, 20] = (33, 61, 94)           # faint orange trail piece, split 61
+    big[30, 30] = (109, 115, 84)         # whitish dot, split 31
+    pts = [(10, 10), (20, 20), (30, 30)]
+    peak = np.array([200, 200, 200])     # all bright enough to judge
+    evidence = np.array([5, 5, 5])       # all one-off (empty sky where a star would be)
+
+    assert _flecks(pts, peak, evidence, big) == [1], \
+        "only the strongly coloured one-off may be painted"
+    assert _flecks(pts, peak, evidence) == [1, 2, 3], \
+        "without the picture the old rule applies (no colour check)"
+
+
 def test_a_sequence_whose_motion_cannot_be_read_loses_no_stars():
     """If the sky's motion can't be measured, the fleck test is pointed at the
     wrong pixels and would condemn stars. Removing nothing beats that."""
