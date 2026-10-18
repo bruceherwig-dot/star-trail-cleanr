@@ -915,3 +915,80 @@ def repair_ground(stack, n_frames, read_frame, ground, trail_cut=25, threads=4):
     np.minimum.at(out, (yy, xx), wmax)
     stats["pixels_changed"] = int((out != stack).any(2).sum())
     return out, stats
+
+
+# ── what to tell the user and the usage report ────────────────────────────────
+MARKER_LINE = "FLASHFINDER:"
+MARKER_COUNTS = "FLASHFINDER_COUNTS:"
+
+
+def _n(count, one, many):
+    return "%d %s" % (count, one if count == 1 else many)
+
+
+def plain_summary(sky, repair_stats, ground, ground_stats):
+    """Plain-English lines for the Star Log, plus a small dict of counts for the usage
+    report. `sky` is the FlashResult (or None when that pass never ran), `repair_stats`
+    the dict repair_stack returned, `ground` the GroundResult, `ground_stats` the dict
+    repair_ground returned. Counts only: no names, paths or images ever go in here."""
+    lines = []
+    counts = {"flash_spots": 0, "defect_spots": 0, "ground_spots": 0, "pixels_changed": 0,
+              "lighting_event_frames": 0, "left_alone": 0, "sky_stopped": False, "ground_stopped": False}
+    repair_stats = repair_stats or {}
+    ground_stats = ground_stats or {}
+
+    if sky is None or sky.bail:
+        counts["sky_stopped"] = True
+        lines.append("Flash finder, sky: nothing was changed because %s." % (sky.bail if sky else "it did not run"))
+    else:
+        fl, df = repair_stats.get("flash_spots", 0), repair_stats.get("defect_spots", 0)
+        counts["flash_spots"], counts["defect_spots"] = fl, df
+        counts["lighting_event_frames"] = sky.burst_frames
+        counts["left_alone"] += repair_stats.get("hidden_not_repaired", 0)
+        counts["pixels_changed"] += repair_stats.get("pixels_changed", 0)
+        if fl or df:
+            lines.append("Flash finder, sky: removed %s and %s." % (
+                _n(fl, "one-frame flash", "one-frame flashes"),
+                _n(df, "blinking sensor defect", "blinking sensor defects")))
+        else:
+            lines.append("Flash finder, sky: no single-frame flashes or blinking defects found.")
+        if sky.burst_frames:
+            lines.append("Flash finder, sky: skipped %s where the whole picture changed at once (lighting events)."
+                         % _n(sky.burst_frames, "frame", "frames"))
+        if repair_stats.get("hidden_not_repaired", 0):
+            lines.append("Flash finder, sky: left alone %s that would have damaged a nearby trail or were not visible."
+                         % _n(repair_stats["hidden_not_repaired"], "spot", "spots"))
+
+    if ground is None or ground.bail:
+        counts["ground_stopped"] = True
+        lines.append("Flash finder, ground: left alone because %s." % (ground.bail if ground else "it did not run"))
+    else:
+        g = ground_stats.get("ground_spots", 0)
+        counts["ground_spots"] = g
+        counts["left_alone"] += ground_stats.get("on_a_trail", 0)
+        counts["pixels_changed"] += ground_stats.get("pixels_changed", 0)
+        text = "Flash finder, ground: removed %s" % _n(g, "speck", "specks")
+        if ground_stats.get("on_a_trail", 0):
+            text += " and left %d alone that sat on a trail" % ground_stats["on_a_trail"]
+        lines.append(text + ".")
+    return lines, counts
+
+
+def marker_lines(lines, counts):
+    """The lines the engine prints so the app can pick them up (same idea as HOTPIX_SKIPPED:)."""
+    import json
+    return [MARKER_LINE + " " + t for t in lines] + [MARKER_COUNTS + " " + json.dumps(counts, sort_keys=True)]
+
+
+def parse_marker(line):
+    """('line', text) or ('counts', dict) for a printed marker line; None for anything else."""
+    import json
+    s = line.strip()
+    if s.startswith(MARKER_COUNTS):
+        try:
+            return "counts", json.loads(s[len(MARKER_COUNTS):].strip())
+        except ValueError:
+            return None
+    if s.startswith(MARKER_LINE):
+        return "line", s[len(MARKER_LINE):].strip()
+    return None
