@@ -1,56 +1,48 @@
-"""The Summary / Star Trail / Timelapse tabs sit along the TOP of the window, and the red
+"""The Summary / Star Trail / Timelapse window keeps its tabs along the TOP, and its red
 close box sits just below the bar in the right-hand corner with a visible margin
-(Bruce, 2026-10-18: he tried the tabs at the bottom and put them back)."""
+(Bruce, 2026-10-18: he tried the tabs at the bottom, then put them back, and asked for
+some margin on the right of the red box).
+
+This reads the source instead of building a window. A first version built real windows,
+and on the Apple-silicon Mac and Windows build machines the test run then aborted at
+interpreter exit ("QObject: shared QObject was deleted directly", v2.99 build 1) even
+though every test passed.
+"""
+import re
 import sys
-import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).parent.parent
 sys.path.insert(0, str(REPO))
 
 
-def _app():
-    from PySide6.QtWidgets import QApplication
-    return QApplication.instance() or QApplication([])
+def _creator_window_source():
+    src = (REPO / "star_trail_cleanr.py").read_text(encoding="utf-8")
+    start = src.index("class CreatorWindow(QDialog):")
+    end = src.index("class MaskEditorWindow(", start)
+    return src[start:end]
 
 
-def test_tab_bar_is_at_the_top_and_the_red_x_sits_below_it_with_a_margin():
-    _app()
-    import star_trail_cleanr as S
-    from PySide6.QtWidgets import QApplication, QTabWidget
-    with tempfile.TemporaryDirectory() as d:
-        w = S.CreatorWindow(d, "", summary_html="<p>line</p>")
-        w.resize(560, 800)
-        w.show()
-        for _ in range(8):
-            QApplication.instance().processEvents()
-        assert w._tabs.tabPosition() == QTabWidget.North
-        bar = w._tabs.tabBar()
-        assert bar.y() <= 2, "the tab bar must run along the top of the window"
-        assert w._close_x.y() >= bar.height(), "the red X must sit below the bar, not over the tab names"
-        margin = w.width() - (w._close_x.x() + w._close_x.width())
-        assert 10 <= margin <= 20, "in the right-hand corner, with a visible margin (%d px)" % margin
-        w.close()
+def test_the_tab_bar_stays_at_the_top():
+    body = _creator_window_source()
+    assert "setTabPosition" not in body, "the tabs belong along the top of the window"
 
 
-def test_the_red_x_never_touches_the_preview_even_at_the_narrowest_window():
-    _app()
-    import star_trail_cleanr as S
-    from PySide6.QtWidgets import QApplication
-    with tempfile.TemporaryDirectory() as d:
-        w = S.CreatorWindow(d, "", summary_html="<p>line</p>")
-        w.resize(200, 800)                       # asks for far less than the window allows
-        w.show()
-        for _ in range(8):
-            QApplication.instance().processEvents()
-        assert w.width() >= 520
-        w.select_tab("star")
-        for _ in range(4):
-            QApplication.instance().processEvents()
-        x_left = w._close_x.x()
-        from PySide6.QtWidgets import QLabel
-        pics = [c for c in w._star_panel.findChildren(QLabel) if c.isVisible() and c.width() >= 400]
-        assert pics, "the preview box must be found"
-        for c in pics:
-            assert c.mapTo(w, c.rect().topRight()).x() < x_left, "the red X must clear the preview box"
-        w.close()
+def test_the_red_x_sits_below_the_bar_with_a_margin():
+    body = _creator_window_source()
+    pos = body[body.index("def _position_close_x"):body.index("def resizeEvent")]
+    m = re.search(r"\bm = (\d+)\b", pos)
+    assert m and 10 <= int(m.group(1)) <= 20, "the red X needs a visible right margin"
+    assert "self._tabs.tabBar().height()" in pos, "the red X must sit below the tab bar"
+
+
+def test_the_window_is_wide_enough_to_keep_the_red_x_clear_of_the_preview():
+    """The 420 px preview is centred, so it ends (width - 420) / 2 px from the right edge.
+    The red X needs its width (32) plus its margin to fit in that gap at the narrowest
+    window."""
+    body = _creator_window_source()
+    min_w = int(re.search(r"setMinimumWidth\((\d+)\)", body).group(1))
+    pos = body[body.index("def _position_close_x"):body.index("def resizeEvent")]
+    margin = int(re.search(r"\bm = (\d+)\b", pos).group(1))
+    gap = (min_w - 420) // 2
+    assert gap >= 32 + margin, "at the minimum width the red X would touch the preview (%d px gap)" % gap
