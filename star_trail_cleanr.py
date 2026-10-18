@@ -194,6 +194,17 @@ def _set_current_star_log(path):
     _CURRENT_STAR_LOG = path
 
 
+# Where the hot-pixel step's time goes (measured on Glenn, 321 frames: old step 107 s, sky pass 39 s,
+# ground search 30 s, sky repair 14 s, ground repair 12 s), in the order the engine runs them. Each (start, width) is a fraction of
+# the hot-pixel slice of the progress bar; the last 3% is left for finishing.
+_HOTPIX_SHARES = {"specks": (0.00, 0.35), "flashes": (0.35, 0.25), "repair": (0.60, 0.12),
+                  "ground": (0.72, 0.15), "repair_ground": (0.87, 0.10)}
+_HOTPIX_STAGES = {"finding flashes": ("flashes", "Finding flashes…"),
+                  "checking the ground": ("ground", "Checking the ground…"),
+                  "repairing flashes": ("repair", "Repairing flashes…"),
+                  "repairing the ground": ("repair_ground", "Repairing the ground…")}
+
+
 def _log_app_error(context, exc=None, detail=""):
     """Append a timestamped entry to ~/.star_trail_cleanr/app_errors.log so GUI-side
     failures leave a trace we can ask any user for. Frozen windowed builds (Windows
@@ -9036,7 +9047,7 @@ class StarTrailPanel(QWidget):
             saved_secs = {}
         plan = [("stack", float(saved_secs.get("stack", 7.0)))]
         if self._hotpix_chk.isChecked():
-            plan.append(("hotpix", float(saved_secs.get("hotpix", 60.0))))
+            plan.append(("hotpix", float(saved_secs.get("hotpix", 150.0))))
         if thick > 0:
             plan.append(("thicken", float(saved_secs.get("thicken", 1.5))))
         total_secs = sum(s for _, s in plan) or 1.0
@@ -9141,14 +9152,17 @@ class StarTrailPanel(QWidget):
                 # longer deserves 70% of the segment (it used to, and it was the
                 # only reason this option had to read the whole sequence twice).
                 self._phase_text = "Finding hot pixels…"
-                self._set_phase_frac("hotpix", 0.9 * frac)
-            elif "finding flashes" in low and frac is not None:
-                self._phase_text = "Finding flashes…"
-                self._set_phase_frac("hotpix", 0.95)
+                self._set_phase_frac("hotpix", _HOTPIX_SHARES["specks"][0] + _HOTPIX_SHARES["specks"][1] * 0.9 * frac)
+            elif frac is not None and any(k in low for k in _HOTPIX_STAGES):
+                # The flash finder's stages each own a share of the hot-pixel slice of the bar.
+                key = next(k for k in _HOTPIX_STAGES if k in low)
+                share = _HOTPIX_SHARES[_HOTPIX_STAGES[key][0]]
+                self._phase_text = _HOTPIX_STAGES[key][1]
+                self._set_phase_frac("hotpix", share[0] + share[1] * frac)
             elif low.startswith("removing ") or low.startswith("speck removal done"):
-                # Detection finished, painting now: the tail of the segment.
+                # Detection finished, painting now: the tail of the old step's share.
                 self._phase_text = "Removing hot pixels…"
-                self._set_phase_frac("hotpix", 0.95)
+                self._set_phase_frac("hotpix", _HOTPIX_SHARES["specks"][0] + _HOTPIX_SHARES["specks"][1])
             elif "finding hot pixels" in low:
                 self._phase_text = "Finding hot pixels…"
                 self._set_phase_frac("hotpix", 0.0)

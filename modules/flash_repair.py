@@ -476,7 +476,7 @@ def find_flashes(n_frames, read_frame, fg_mask=None, progress=None, threads=4):
             cache.pop(old, None)
             futs.pop(old, None)
         pg, cg, pd, cd = cg, ng, cd, nd
-        if progress is not None and k % 100 == 0:
+        if progress is not None and k % 10 == 0:
             progress(k, n_frames)
     pool.shutdown(wait=False)
     if res.bail:
@@ -611,7 +611,7 @@ def _stands_out(gray, yy, xx, rebuilt, original, chroma=None):
     return keep
 
 
-def repair_stack(stack, n_frames, read_frame, flags, defects, threads=4):
+def repair_stack(stack, n_frames, read_frame, flags, defects, threads=4, progress=None):
     """Return (new_stack, stats): `stack` with each single-frame flash and each blinking
     defect removed. The stack is whatever the caller built (plain or comet), so nothing
     is re-stacked; instead each flagged spot is REBUILT from the frames (the maximum of
@@ -684,6 +684,8 @@ def repair_stack(stack, n_frames, read_frame, flags, defects, threads=4):
         return img if img is not None and img.shape[:2] == (H, W) else None
 
     for k in range(n_frames):
+        if progress is not None and k % 10 == 0:
+            progress(k, n_frames)
         for j in range(k + 1, k + 4):
             prefetch(j)
         cur = frame(k)
@@ -770,7 +772,7 @@ class GroundResult:
         self.bail = None
 
 
-def find_ground_specks(n_frames, read_frame, fg_mask):
+def find_ground_specks(n_frames, read_frame, fg_mask, progress=None):
     """Find strongly coloured specks under the foreground mask.
 
     Guards, each from a real failure on a photographer's set:
@@ -809,6 +811,8 @@ def find_ground_specks(n_frames, read_frame, fg_mask):
     cand = []
     counts = collections.Counter()
     for k in range(n_frames):
+        if progress is not None and k % 10 == 0:
+            progress(k, n_frames)
         img = read_frame(k)
         if img is None or img.shape[:2] != (H, W):
             continue
@@ -839,7 +843,7 @@ def find_ground_specks(n_frames, read_frame, fg_mask):
     return res
 
 
-def repair_ground(stack, n_frames, read_frame, ground, trail_cut=25, threads=4):
+def repair_ground(stack, n_frames, read_frame, ground, trail_cut=25, threads=4, progress=None):
     """Return (new_stack, stats) with the ground's specks removed.
 
     Only each frame's OWN speck-coloured pixels (plus GROUND_REACH px of white core) go
@@ -883,6 +887,8 @@ def repair_ground(stack, n_frames, read_frame, ground, trail_cut=25, threads=4):
     pool = ThreadPoolExecutor(max_workers=threads)
     futs = {}
     for k in range(n_frames):
+        if progress is not None and k % 10 == 0:
+            progress(k, n_frames)
         for j in range(k, min(n_frames, k + 4)):
             if j not in futs:
                 futs[j] = pool.submit(read_frame, j)
@@ -1022,16 +1028,18 @@ def run_on_folder(cleaned_dir, names, stack, fg_mask, read_path, say=print, thre
         sky = find_flashes(n, rd, fg, progress=lambda k, t: say("  finding flashes: %d/%d" % (k, t)))
         if not sky.bail:
             defects = find_blinking_defects(sky.defect_candidates, n)
-            out, rstats = repair_stack(out, n, rd, sky.flags, defects, threads)
+            out, rstats = repair_stack(out, n, rd, sky.flags, defects, threads,
+                                       progress=lambda k, t: say("  repairing flashes: %d/%d" % (k, t)))
     except Exception as e:
         sky = FlashResult()
         sky.bail = "of an unexpected error (%s)" % type(e).__name__
         out = stack
 
     try:
-        ground = find_ground_specks(n, rd, fg)
+        ground = find_ground_specks(n, rd, fg, progress=lambda k, t: say("  checking the ground: %d/%d" % (k, t)))
         if not ground.bail:
-            out, gstats = repair_ground(out, n, rd, ground, threads=threads)
+            out, gstats = repair_ground(out, n, rd, ground, threads=threads,
+                                        progress=lambda k, t: say("  repairing the ground: %d/%d" % (k, t)))
     except Exception as e:
         ground = GroundResult()
         ground.bail = "of an unexpected error (%s)" % type(e).__name__

@@ -58,3 +58,36 @@ def test_a_reader_that_fails_leaves_the_stack_alone_and_says_so():
         out = fr.run_on_folder(d, names, stack, None, lambda p: None, say=said.append)
     assert (out == stack).all()
     assert any(fr.MARKER_COUNTS in s for s in said)
+
+
+def test_every_stage_reports_progress_in_order():
+    with tempfile.TemporaryDirectory() as d:
+        names, stack = _write_night(d)
+        fg = np.zeros((H, W), np.uint8)
+        fg[400:, :] = 255                                  # some ground, so the ground stages run
+        said = []
+        fr.run_on_folder(d, names, stack, fg, lambda p: cv2.imread(p), say=said.append)
+    labels = [s.strip().split(":")[0] for s in said if "/" in s and not s.startswith("FLASHFINDER")]
+    order = []
+    for t in labels:
+        if t not in order:
+            order.append(t)
+    true_order = ["finding flashes", "repairing flashes", "checking the ground", "repairing the ground"]
+    assert order == true_order[:len(order)], order        # the order the bar's shares assume
+    assert "finding flashes" in order and "repairing flashes" in order
+    for lab in order:                                       # each stage counts up, never back
+        nums = [int(s.split(":")[1].split("/")[0]) for s in said if s.strip().startswith(lab + ":")]
+        assert nums and nums == sorted(nums), (lab, nums)
+
+
+def test_the_bar_shares_for_the_stages_are_in_order_and_fit_the_slice():
+    src = (REPO / "star_trail_cleanr.py").read_text(encoding="utf-8")
+    import re
+    block = re.search(r"_HOTPIX_SHARES = \{(.*?)\}", src, re.S).group(1)
+    pairs = [(float(a), float(b)) for a, b in re.findall(r"\(([\d.]+), ([\d.]+)\)", block)]
+    assert len(pairs) == 5
+    end = 0.0
+    for start, width in pairs:
+        assert abs(start - end) < 1e-9, "stages must follow each other with no gap or overlap"
+        end = start + width
+    assert 0.95 <= end <= 1.0, end
