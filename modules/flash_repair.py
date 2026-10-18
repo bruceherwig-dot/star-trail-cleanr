@@ -53,6 +53,20 @@ STILL_THERE = 0.2       # share of the flash still visible next door (noise subt
 BOTH_SIDES_SIGMA = 3.0  # faint copy in BOTH neighbours, in noise-widths = a twinkling star
 BAIL_FLAGS_PER_FRAME = 10          # more kept flags per frame than this means we are not looking at specks
 MIN_FRAMES = 5
+# blinking sensor defects: a pixel that flashes a strong colour in short bursts spread across the
+# whole night (Glenn's blue dashes: 3-65 of 321 frames, often 2-6 in a row). A star's coloured
+# fringe sits on a pixel for ONE stretch while the star passes; a defect comes back.
+BASELINE_SAMPLES = 16       # frames sampled to learn each pixel's usual colour
+BASELINE_CHROMA_MAX = 30    # a pixel whose usual colour split is above this is coloured scenery, not a defect
+BLINK_MIN_BURSTS = 3        # separate bursts of flashes
+BLINK_SPAN = 0.4            # ... spread over at least this share of the sequence
+REPAIR_CHROMA = 80          # in a repaired frame only pixels this coloured (plus 2 px of white core) change
+REPAIR_ABOVE = 12           # ... and only if this far above the pixel's usual value
+DEFECT_HALF = 5             # px: the window rebuilt around a blinking defect
+VISIBLE_MIN = 20            # a spot is only worth repairing if, in the FINISHED picture, it stands out this
+                            # far above the brightest tenth of the pixels 3-7 px around it. A speck lost
+                            # inside a bright trail cannot be seen, and touching it nicked the trail (Glenn:
+                            # a solid trail came out broken into dashes).
 
 
 def chan_max(img):
@@ -63,6 +77,26 @@ def chan_max(img):
 
 
 # ── per-flag measurements ─────────────────────────────────────────────────────
+def _chroma(img):
+    """Per-pixel colour split (max channel minus min channel)."""
+    b, g, r = cv2.split(img)
+    return cv2.subtract(cv2.max(cv2.max(b, g), r), cv2.min(cv2.min(b, g), r))
+
+
+def usual_colour(n_frames, read_frame, size):
+    """Each pixel's usual colour split: the MINIMUM over a spread of frames. A defect is
+    on in a few percent of frames, so the minimum stays low where the pixel is neutral;
+    streaming the minimum keeps memory at one frame (a median would need them all)."""
+    base = None
+    for i in np.unique(np.linspace(0, n_frames - 1, min(BASELINE_SAMPLES, n_frames)).astype(int)):
+        img = read_frame(int(i))
+        if img is None or img.shape[:2] != size:
+            continue
+        c = _chroma(img)
+        base = c if base is None else cv2.min(base, c)
+    return base
+
+
 def _local_med_sigma(g, x, y):
     win = g[max(0, y - 14):y + 15, max(0, x - 14):x + 15].astype(np.float64)
     med = float(np.median(win))
@@ -203,11 +237,12 @@ class StarReference:
 
 
 class Flag:
-    __slots__ = ("frame", "x", "y", "contrast", "half", "colour")
+    __slots__ = ("frame", "x", "y", "contrast", "half", "colour", "pix")
 
-    def __init__(self, frame, x, y, contrast, half, colour):
+    def __init__(self, frame, x, y, contrast, half, colour, pix=None):
         self.frame, self.x, self.y = frame, x, y
         self.contrast, self.half, self.colour = contrast, half, colour
+        self.pix = pix          # (ys, xs) of the flash's own pixels: ONLY these are repaired, never a star beside it
 
     def __repr__(self):
         return "Flag(frame=%d, x=%d, y=%d, contrast=%d, colour=%s)" % (
@@ -230,6 +265,7 @@ class FlashResult:
         self.motion_pairs_measured = 0
         self.motion_pairs_failed = 0
         self.raw_per_frame = []        # raw candidate count per frame, for the Star Log and for testing
+        self.defect_candidates = []    # (frame, x, y): strongly coloured pixels where the usual colour is neutral
         self.star_reference = None
 
 
@@ -238,7 +274,8 @@ def find_flashes(n_frames, read_frame, fg_mask=None, progress=None, threads=4):
 
     read_frame(i) -> BGR uint8 image or None. fg_mask: HxW bool (True = foreground,
     skipped here) or None. Every frame is read exactly ONCE and kept in a rolling cache
-    (the previous version read each frame seven times and was five times slower).
+    (the previous version read each frame seven times and was five times slower). The
+    only repeats are the few frames sampled up front to learn each pixel's usual colour.
     """
     res = FlashResult()
     res.frames = n_frames
@@ -285,6 +322,7 @@ def find_flashes(n_frames, read_frame, fg_mask=None, progress=None, threads=4):
     star = StarReference(ref_frames, fg)
     res.star_reference = star
 
+    base_chroma = usual_colour(n_frames, read_frame, (H, W))
     k5 = np.ones((5, 5), np.uint8)
     raw_by = {}
     counts = []
@@ -307,7 +345,7 @@ def find_flashes(n_frames, read_frame, fg_mask=None, progress=None, threads=4):
             return
         cim, c = cur
         p, nx = prev[1], nxt[1]
-        for (kk, x, y, dd, w, h, mot, asp) in lst:
+        for (kk, x, y, dd, w, h, mot, asp, blob) in lst:
             reach = 40.0 + 4.0 * mot
             moved = False
             for q in (k - 2, k - 1, k + 1, k + 2):
@@ -335,7 +373,7 @@ def find_flashes(n_frames, read_frame, fg_mask=None, progress=None, threads=4):
             if not (colour or star.sharpness(feat) >= SHARP_MIN or dd >= RESCUE_CONTRAST):
                 res.removed["smooth (a star)"] += 1
                 continue
-            flag = Flag(k, px, py, dd, max(4, max(w, h) // 2 + 3), colour)
+            flag = Flag(k, px, py, dd, max(4, max(w, h) // 2 + 3), colour, blob)
             early_all.append(flag)
             if not colour:
                 if _still_there(c, p, nx, px, py) >= STILL_THERE:
@@ -372,6 +410,12 @@ def find_flashes(n_frames, read_frame, fg_mask=None, progress=None, threads=4):
                 break
         M = Mlast if Mlast is not None else np.array([[1, 0, 0], [0, 1, 0]], float)
         Minv = cv2.invertAffineTransform(M.astype(np.float32))
+        if base_chroma is not None and star.colour_usable:
+            cand = ((_chroma(get(k)[0]) >= COLOUR_MIN) & (base_chroma < BASELINE_CHROMA_MAX) & sky_mask).astype(np.uint8)
+            ncc, _l, stc, cenc = cv2.connectedComponentsWithStats(cand, 8)
+            for i in range(1, ncc):
+                if stc[i, cv2.CC_STAT_AREA] <= MAX_BLOB_AREA:
+                    res.defect_candidates.append((k, int(cenc[i][0]), int(cenc[i][1])))
         d = cg.astype(np.int16) - np.maximum(pd, nd).astype(np.int16)
         mask = ((d >= floor_detect) & (cg >= MIN_PEAK) & sky_mask).astype(np.uint8)
         nc, lab, st, cen = cv2.connectedComponentsWithStats(mask, 8)
@@ -403,7 +447,8 @@ def find_flashes(n_frames, read_frame, fg_mask=None, progress=None, threads=4):
             if len(xx) >= 3:
                 (_a, _b), (rw, rh), _t = cv2.minAreaRect(np.c_[xx, yy].astype(np.float32))
                 asp = max(rw, rh) / max(1.0, min(rw, rh))
-            lst.append((k, x, y, int(d[lab == i].max()), int(bw), int(bh), mot, round(asp, 2)))
+            lst.append((k, x, y, int(d[lab == i].max()), int(bw), int(bh), mot, round(asp, 2),
+                        (yy + y0, xx + x0)))
         raw_by[k] = lst
         counts.append(len(lst))
         if k >= 3:
@@ -445,3 +490,222 @@ def find_flashes(n_frames, read_frame, fg_mask=None, progress=None, threads=4):
         res.flags = []
     return res
 
+
+
+# ── blinking sensor defects ───────────────────────────────────────────────────
+def _bursts(frames, gap):
+    fr = sorted(frames)
+    runs = 1
+    for a, b in zip(fr, fr[1:]):
+        if b - a > gap:
+            runs += 1
+    return runs
+
+
+def find_blinking_defects(candidates, n_frames):
+    """Pixels that flash a strong colour in separate bursts spread across the night.
+
+    Measured on borrego_springs_1: 18,312 pixels flashed in 3+ frames, but only 529 did
+    so in 3+ separate bursts spread over 40% of the night; the other 85% were the
+    coloured fringes of stars crossing. A red speck that flashed in 11 of 1,559 frames
+    (bursts at frames 77, 391, 532, 799, 897, 1387, 1448) passes easily. It is NOT found
+    by asking whether a flash beats both neighbouring frames, because a defect often
+    lasts two or three frames in a row.
+    """
+    gap = max(4, n_frames // 100)
+    cell = collections.defaultdict(set)
+    for k, x, y in candidates:
+        cell[(x // 3, y // 3)].add(k)
+    found = []
+    for (cx, cy), frames in cell.items():
+        if len(frames) < BLINK_MIN_BURSTS:
+            continue
+        if max(frames) - min(frames) < BLINK_SPAN * n_frames:
+            continue
+        if _bursts(frames, gap) >= BLINK_MIN_BURSTS:
+            found.append((len(frames), cx * 3 + 1, cy * 3 + 1))
+    found.sort(reverse=True)
+    out = []
+    for _n, x, y in found:                       # one spot per place: drop a neighbour within 4 px
+        if all(abs(x - ox) > 4 or abs(y - oy) > 4 for ox, oy in out):
+            out.append((x, y))
+    return out
+
+
+# ── the repair ────────────────────────────────────────────────────────────────
+def _flash_mask(win, k, half):
+    """Boolean (2h+1, 2h+1) mask of the pixels that ARE the flash in frame k (its own blob
+    plus 1 px), or None when the blob pixels are unknown (then the whole window is used)."""
+    plist = win["pix"].get(k)
+    if not plist:
+        return None
+    n = 2 * half + 1
+    m = np.zeros((n, n), np.uint8)
+    for ys, xs in plist:
+        ly, lx = np.asarray(ys) - (win["y"] - half), np.asarray(xs) - (win["x"] - half)
+        ok = (ly >= 0) & (ly < n) & (lx >= 0) & (lx < n)
+        m[ly[ok], lx[ok]] = 1
+    return cv2.dilate(m, np.ones((3, 3), np.uint8)).astype(bool)
+
+
+def _window_index(xs, ys, half, h, w):
+    """Index arrays (n, 2*half+1, 2*half+1) for gathering square windows, clamped to the frame."""
+    d = np.arange(-half, half + 1)
+    yy = np.clip(np.asarray(ys)[:, None, None] + d[None, :, None], 0, h - 1)
+    xx = np.clip(np.asarray(xs)[:, None, None] + d[None, None, :], 0, w - 1)
+    return yy, xx
+
+
+def _stands_out(gray, yy, xx, rebuilt, original):
+    """Per window: does the speck being removed stand out in the finished picture?
+    Takes the brightest pixel the repair would lower and compares it with the brightest
+    tenth of the pixels 3-7 px around it."""
+    H, W = gray.shape
+    changed = (rebuilt < original).any(3)
+    keep = np.zeros(len(yy), bool)
+    for j in range(len(yy)):
+        if not changed[j].any():
+            continue
+        vals = np.where(changed[j], gray[yy[j], xx[j]], -1)
+        a, b = np.unravel_index(int(np.argmax(vals)), vals.shape)
+        wy = np.broadcast_to(yy[j], vals.shape)             # the index arrays are (w,1) and (1,w): broadcast to the window
+        wx = np.broadcast_to(xx[j], vals.shape)
+        py, px = int(wy[a, b]), int(wx[a, b])
+        y0, y1, x0, x1 = max(0, py - 7), min(H, py + 8), max(0, px - 7), min(W, px + 8)
+        win = gray[y0:y1, x0:x1]
+        gy, gx = np.ogrid[y0:y1, x0:x1]
+        d = np.maximum(np.abs(gy - py), np.abs(gx - px))
+        ring = win[(d >= 3) & (d <= 7)]
+        keep[j] = ring.size > 0 and int(gray[py, px]) - int(np.percentile(ring, 90)) >= VISIBLE_MIN
+    return keep
+
+
+def repair_stack(stack, n_frames, read_frame, flags, defects, threads=4):
+    """Return (new_stack, stats): `stack` with each single-frame flash and each blinking
+    defect removed. The stack is whatever the caller built (plain or comet), so nothing
+    is re-stacked; instead each flagged spot is REBUILT from the frames (the maximum of
+    its window over the sequence, with the flash taken out) and the result is the
+    DARKER of that and the stack, so a repair can only remove light, never add it.
+
+      single flash: in the flash frame the window becomes the lower of that frame and the
+        brighter of the frame before / after, so a star sitting in the window is kept;
+      blinking defect: in every frame only the pixels carrying the speck's colour (plus 2 px
+        of white core) go back to the pixel's own usual value (40th percentile over the
+        sequence). NEVER 'every bright pixel in the window': on an overexposed ground that
+        painted black squares into bright rock.
+    """
+    out = stack.copy()
+    H, W = out.shape[:2]
+    stats = {"flash_spots": 0, "defect_spots": 0, "pixels_changed": 0}
+    by_cell = collections.OrderedDict()
+    for fl in flags:
+        key = (fl.x // 6, fl.y // 6)
+        if key not in by_cell:
+            by_cell[key] = {"x": fl.x, "y": fl.y, "half": fl.half, "frames": set(), "pix": {}}
+        by_cell[key]["frames"].add(fl.frame)
+        if fl.pix is not None:
+            by_cell[key]["pix"].setdefault(fl.frame, []).append(fl.pix)
+        by_cell[key]["half"] = max(by_cell[key]["half"], fl.half)
+    groups = collections.defaultdict(list)                    # half -> list of windows
+    for w in by_cell.values():
+        groups[min(9, int(w["half"]))].append(w)
+    stats["flash_spots"] = len(by_cell)
+    dx = np.array([d[0] for d in defects], int)
+    dy = np.array([d[1] for d in defects], int)
+    stats["defect_spots"] = len(defects)
+    if not by_cell and not len(defects):
+        return out, stats
+
+    gidx = {}
+    for half, wins in groups.items():
+        xs = [w["x"] for w in wins]
+        ys = [w["y"] for w in wins]
+        yy, xx = _window_index(xs, ys, half, H, W)
+        gidx[half] = {"yy": yy, "xx": xx, "wins": wins,
+                      "max": np.zeros(yy.shape + (3,), np.uint8),
+                      "frames": [w["frames"] for w in wins], "half": half}
+    if len(defects):
+        dyy, dxx = _window_index(dx, dy, DEFECT_HALF, H, W)
+        # each defect pixel's usual value: 40th percentile over a spread of frames
+        samp = np.unique(np.linspace(0, n_frames - 1, min(60, n_frames)).astype(int))
+        crops = []
+        for i in samp:
+            img = read_frame(int(i))
+            if img is not None and img.shape[:2] == (H, W):
+                crops.append(img[dyy, dxx])
+        base = (np.percentile(np.stack(crops), 40, axis=0).astype(np.uint8)
+                if crops else None)
+        dmax = np.zeros(dyy.shape + (3,), np.uint8)
+    else:
+        base = None
+
+    pool = ThreadPoolExecutor(max_workers=threads)
+    futs = {}
+
+    def prefetch(i):
+        if 0 <= i < n_frames and i not in futs:
+            futs[i] = pool.submit(read_frame, i)
+
+    def frame(i):
+        i = min(max(i, 0), n_frames - 1)
+        prefetch(i)
+        img = futs[i].result()
+        return img if img is not None and img.shape[:2] == (H, W) else None
+
+    for k in range(n_frames):
+        for j in range(k + 1, k + 4):
+            prefetch(j)
+        cur = frame(k)
+        if cur is None:
+            continue
+        for half, g in gidx.items():
+            crops = cur[g["yy"], g["xx"]]
+            hit = [i for i, fs in enumerate(g["frames"]) if k in fs]
+            if hit:
+                prv, nxt = frame(k - 1), frame(k + 1)
+                if prv is not None and nxt is not None:
+                    nb = np.maximum(prv[g["yy"][hit], g["xx"][hit]], nxt[g["yy"][hit], g["xx"][hit]])
+                    crops = crops.copy()
+                    low = np.minimum(crops[hit], nb)
+                    for slot, i in enumerate(hit):
+                        m = _flash_mask(g["wins"][i], k, half)
+                        if m is None:
+                            continue
+                        sel = low[slot]
+                        sel[~m] = crops[i][~m]                  # a star beside the flash keeps its pixels
+                        low[slot] = sel
+                    crops[hit] = low
+            g["max"] = np.maximum(g["max"], crops)
+        if base is not None:
+            crops = cur[dyy, dxx]
+            ch = crops.max(3).astype(np.int16) - crops.min(3).astype(np.int16)
+            sp = np.zeros((len(dx), 2 * DEFECT_HALF + 3, 2 * DEFECT_HALF + 3), bool)
+            sp[:, 1:-1, 1:-1] = ch >= REPAIR_CHROMA
+            grown = sp.copy()
+            for a in range(-1, 2):                      # 1 px of reach: just the speck's own white core
+                for b in range(-1, 2):
+                    grown |= np.roll(np.roll(sp, a, 1), b, 2)
+            grown = grown[:, 1:-1, 1:-1]
+            above = crops.max(3).astype(np.int16) - base.max(3).astype(np.int16)
+            bad = grown & (above >= REPAIR_ABOVE)
+            crops = crops.copy()
+            crops[bad] = base[bad]
+            dmax = np.maximum(dmax, crops)
+        futs.pop(k - 2, None)
+    pool.shutdown(wait=False)
+
+    gray = chan_max(stack)
+    hidden = 0
+    for g in gidx.values():
+        orig = stack[g["yy"], g["xx"]]
+        ok = _stands_out(gray, g["yy"], g["xx"], g["max"], orig)
+        hidden += int((~ok).sum())
+        np.minimum.at(out, (g["yy"][ok], g["xx"][ok]), g["max"][ok])
+    if base is not None:
+        orig = stack[dyy, dxx]
+        ok = _stands_out(gray, dyy, dxx, dmax, orig)
+        hidden += int((~ok).sum())
+        np.minimum.at(out, (dyy[ok], dxx[ok]), dmax[ok])
+    stats["hidden_not_repaired"] = hidden
+    stats["pixels_changed"] = int((out != stack).any(2).sum())
+    return out, stats

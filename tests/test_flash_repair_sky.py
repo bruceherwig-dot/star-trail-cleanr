@@ -118,7 +118,9 @@ def test_too_few_frames_to_compare_does_nothing():
     assert res.bail and res.flags == []
 
 
-def test_every_frame_is_read_only_once():
+def test_every_frame_is_read_once_apart_from_the_colour_sample():
+    """The sky pass reads each frame once. The only repeats allowed are the handful of
+    frames sampled up front to learn each pixel's usual colour."""
     reads = []
     read0, _ = _night()
 
@@ -126,8 +128,9 @@ def test_every_frame_is_read_only_once():
         reads.append(i)
         return read0(i)
     fr.find_flashes(N, counting)
-    assert len(reads) == len(set(reads)), "frames were re-read: %r" % sorted(
-        [i for i in set(reads) if reads.count(i) > 1])
+    twice = [i for i in set(reads) if reads.count(i) > 1]
+    assert max(reads.count(i) for i in set(reads)) <= 2, "a frame was read more than twice"
+    assert len(twice) <= fr.BASELINE_SAMPLES, "more frames re-read than the colour sample: %r" % sorted(twice)
 
 
 def test_the_contrast_floor_is_chosen_from_the_sequence_not_fixed():
