@@ -156,3 +156,24 @@ def test_nothing_to_repair_returns_the_stack_unchanged():
     stack = _stack(frames)
     out, stats = fr.repair_stack(stack, N, lambda i: frames[i], [], [])
     assert (out == stack).all() and stats["pixels_changed"] == 0
+
+
+def test_dense_colour_fringed_trails_are_not_notched_by_a_defect_repair():
+    """borrego_springs_1, 2026-10-17: where trails are densest every pixel is coloured (red
+    and cyan fringes), a 'defect' there is really a trail's own fringe, and the repair cut
+    dark gaps into the trails. A real defect stands out in COLOUR from a quieter ground; in
+    a field of fringes it does not, so it is left alone."""
+    def mutate(frames):
+        field = np.zeros((H, W, 3), np.uint8)
+        for y in range(100, 220):                                     # diagonal red / cyan stripes
+            for x in range(100, 300):
+                field[y, x] = (40, 40, 250) if (x + y) % 4 < 2 else (250, 230, 40)
+        for k, f in enumerate(frames):
+            f[100:220, 100:300] = np.maximum(f[100:220, 100:300], field[100:220, 100:300])
+        for k in (3, 4, 15, 16, 28, 29, 37):
+            frames[k][160, 200] = (30, 30, 255)
+    frames = _night(mutate)
+    stack = _stack(frames)
+    out, stats = fr.repair_stack(stack, N, lambda i: frames[i], [], [(200, 160)])
+    assert (out[100:220, 100:300] == stack[100:220, 100:300]).all(), \
+        "a defect repair changed a field of coloured trail fringes"

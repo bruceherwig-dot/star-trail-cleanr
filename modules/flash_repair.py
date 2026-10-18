@@ -60,6 +60,14 @@ BASELINE_SAMPLES = 16       # frames sampled to learn each pixel's usual colour
 BASELINE_CHROMA_MAX = 30    # a pixel whose usual colour split is above this is coloured scenery, not a defect
 BLINK_MIN_BURSTS = 3        # separate bursts of flashes
 BLINK_SPAN = 0.4            # ... spread over at least this share of the sequence
+DEFECT_COLOUR_STRONG = 120
+DEFECT_RING_COLOURED_MAX = 0.15
+SPECK_TINT = 40
+SPECK_TINT_HALO = 12
+DEFECT_COLOUR_VISIBLE = 50  # a BLINKING DEFECT must also stand out in COLOUR from its surroundings in the
+                            # finished picture. Brightness alone did not protect borrego's dense rainbow-fringed
+                            # trails: every pixel there is coloured, the repair took the trails' own fringes for
+                            # the defect and notched them. A real defect is a coloured point on a quieter ground.
 REPAIR_CHROMA = 80          # in a repaired frame only pixels this coloured (plus 2 px of white core) change
 REPAIR_ABOVE = 12           # ... and only if this far above the pixel's usual value
 DEFECT_HALF = 5             # px: the window rebuilt around a blinking defect
@@ -567,7 +575,7 @@ def _window_index(xs, ys, half, h, w):
     return yy, xx
 
 
-def _stands_out(gray, yy, xx, rebuilt, original):
+def _stands_out(gray, yy, xx, rebuilt, original, chroma=None):
     """Per window: does the speck being removed stand out in the finished picture?
     Takes the brightest pixel the repair would lower and compares it with the brightest
     tenth of the pixels 3-7 px around it."""
@@ -577,7 +585,7 @@ def _stands_out(gray, yy, xx, rebuilt, original):
     for j in range(len(yy)):
         if not changed[j].any():
             continue
-        vals = np.where(changed[j], gray[yy[j], xx[j]], -1)
+        vals = np.where(changed[j], (gray if chroma is None else chroma)[yy[j], xx[j]], -1)   # a defect is judged by its most COLOURED pixel
         a, b = np.unravel_index(int(np.argmax(vals)), vals.shape)
         wy = np.broadcast_to(yy[j], vals.shape)             # the index arrays are (w,1) and (1,w): broadcast to the window
         wx = np.broadcast_to(xx[j], vals.shape)
@@ -587,7 +595,19 @@ def _stands_out(gray, yy, xx, rebuilt, original):
         gy, gx = np.ogrid[y0:y1, x0:x1]
         d = np.maximum(np.abs(gy - py), np.abs(gx - px))
         ring = win[(d >= 3) & (d <= 7)]
-        keep[j] = ring.size > 0 and int(gray[py, px]) - int(np.percentile(ring, 90)) >= VISIBLE_MIN
+        ok = ring.size > 0 and int(gray[py, px]) - int(np.percentile(ring, 90)) >= VISIBLE_MIN
+        if chroma is not None and ring.size > 0:
+            cring = chroma[y0:y1, x0:x1][(d >= 3) & (d <= 7)]
+            # against the TYPICAL (median) pixel around it, not the most coloured tenth: a bright trail
+            # beside a real dash would raise that bar out of reach (Glenn's dashes 3 and 4)
+            excess = int(chroma[py, px]) - int(np.median(cring))
+            # a blue dash is dark in grey, so a bright trail beside it fails the brightness test:
+            # a very strong colour excess stands in for it
+            ok = excess >= DEFECT_COLOUR_VISIBLE and (ok or excess >= DEFECT_COLOUR_STRONG)
+            # a real dash sits in quiet sky (measured: 1-4% of the ring strongly coloured); the rainbow fringe of a
+            # dense trail has 22-29% (borrego): that is a trail, not a speck, and is left alone
+            ok = ok and float((cring >= REPAIR_CHROMA).mean()) < DEFECT_RING_COLOURED_MAX
+        keep[j] = ok
     return keep
 
 
@@ -690,15 +710,30 @@ def repair_stack(stack, n_frames, read_frame, flags, defects, threads=4):
         if base is not None:
             crops = cur[dyy, dxx]
             ch = crops.max(3).astype(np.int16) - crops.min(3).astype(np.int16)
+            # the speck's own colour channel = the strongest channel of its most coloured centre pixel; a pixel
+            # belongs to the speck only if it leans toward that channel (a mint-green trail touching a blue dash
+            # does not, so it is not taken along with it)
+            c0, c1 = DEFECT_HALF - 1, DEFECT_HALF + 2
+            cc = ch[:, c0:c1, c0:c1].reshape(len(dx), -1)
+            top = cc.argmax(1)
+            cpx = crops[:, c0:c1, c0:c1].reshape(len(dx), -1, 3)[np.arange(len(dx)), top]
+            cidx = cpx.argmax(1)
+            sel = np.take_along_axis(crops.astype(np.int16), cidx[:, None, None, None].repeat(crops.shape[1], 1).repeat(crops.shape[2], 2), 3)[..., 0]
+            green = crops[..., 1].astype(np.int16)
+            other = np.where((cidx == 1)[:, None, None], np.maximum(crops[..., 0], crops[..., 2]).astype(np.int16), green)
+            tint = sel - other
             sp = np.zeros((len(dx), 2 * DEFECT_HALF + 3, 2 * DEFECT_HALF + 3), bool)
-            sp[:, 1:-1, 1:-1] = ch >= REPAIR_CHROMA
+            sp[:, 1:-1, 1:-1] = (ch >= REPAIR_CHROMA) & (tint >= SPECK_TINT)
             grown = sp.copy()
-            for a in range(-1, 2):                      # 1 px of reach: just the speck's own white core
+            for a in range(-1, 2):                      # 1 px of reach: the speck's own halo / white core
                 for b in range(-1, 2):
                     grown |= np.roll(np.roll(sp, a, 1), b, 2)
-            grown = grown[:, 1:-1, 1:-1]
+            grown = grown[:, 1:-1, 1:-1] & (tint >= SPECK_TINT_HALO)
             above = crops.max(3).astype(np.int16) - base.max(3).astype(np.int16)
             bad = grown & (above >= REPAIR_ABOVE)
+            # repair only in frames where the defect ITSELF shows its colour: a trail crossing it in other frames is left alone
+            on = (sp[:, 1:-1, 1:-1][:, c0:c1, c0:c1] & (above[:, c0:c1, c0:c1] >= REPAIR_ABOVE)).any((1, 2))
+            bad &= on[:, None, None]
             crops = crops.copy()
             crops[bad] = base[bad]
             dmax = np.maximum(dmax, crops)
@@ -706,6 +741,7 @@ def repair_stack(stack, n_frames, read_frame, flags, defects, threads=4):
     pool.shutdown(wait=False)
 
     gray = chan_max(stack)
+    stack_chroma = _chroma(stack)
     hidden = 0
     for g in gidx.values():
         orig = stack[g["yy"], g["xx"]]
@@ -714,7 +750,7 @@ def repair_stack(stack, n_frames, read_frame, flags, defects, threads=4):
         np.minimum.at(out, (g["yy"][ok], g["xx"][ok]), g["max"][ok])
     if base is not None:
         orig = stack[dyy, dxx]
-        ok = _stands_out(gray, dyy, dxx, dmax, orig)
+        ok = _stands_out(gray, dyy, dxx, dmax, orig, stack_chroma)
         hidden += int((~ok).sum())
         np.minimum.at(out, (dyy[ok], dxx[ok]), dmax[ok])
     stats["hidden_not_repaired"] = hidden
