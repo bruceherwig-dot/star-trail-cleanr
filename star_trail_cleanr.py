@@ -9613,7 +9613,9 @@ class CreatorWindow(QDialog):
                  summary_html="", on_open_folder=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Star Trail CleanR  Star Trail & Timelapse")
-        self.setMinimumWidth(480)
+        # 520, not 480: the 420 px preview is centred, so at 480 it ends only 30 px from the
+        # right edge, which leaves no room for the 32 px red X plus a 12 px margin (44 px).
+        self.setMinimumWidth(520)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
@@ -9662,14 +9664,13 @@ class CreatorWindow(QDialog):
 
     def _position_close_x(self):
         """Park the red X in the top-right of the content area, just below the tab
-        bar. Re-run on resize so it tracks the corner.
+        bar, 12 px in from the right edge. Re-run on resize so it tracks the corner.
 
-        It hugs the right edge (4 px) on purpose. The maker tabs no longer open with
-        a heading to sit beside it, and the preview box ends 38 px from the window's
-        edge, so a 32 px button fits in that margin only when it is pushed this far
-        right; at the old 12 px it landed on the preview's corner. (In the tab bar
-        it covered the end of the word "Timelapse", so it stays below the bar.)"""
-        m = 4
+        The 420 px preview is centred, so the window's minimum width (520) is what keeps
+        the 44 px the button needs (32 wide plus the 12 px margin) clear of the picture's
+        right edge. (In the tab bar it covered the end of the word "Timelapse", so it
+        stays below the bar.)"""
+        m = 12
         y = self._tabs.tabBar().height() + 12
         self._close_x.move(self.width() - self._close_x.width() - m, y)
         self._close_x.raise_()
