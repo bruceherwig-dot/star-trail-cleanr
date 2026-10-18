@@ -466,7 +466,7 @@ def find_flashes(n_frames, read_frame, fg_mask=None, progress=None, threads=4):
             if len(xx) >= 3:
                 (_a, _b), (rw, rh), _t = cv2.minAreaRect(np.c_[xx, yy].astype(np.float32))
                 asp = max(rw, rh) / max(1.0, min(rw, rh))
-            lst.append((k, x, y, int(d[lab == i].max()), int(bw), int(bh), mot, round(asp, 2),
+            lst.append((k, x, y, int(d[y0:y0 + bh, x0:x0 + bw][sub].max()), int(bw), int(bh), mot, round(asp, 2),
                         (yy + y0, xx + x0)))
         raw_by[k] = lst
         counts.append(len(lst))
