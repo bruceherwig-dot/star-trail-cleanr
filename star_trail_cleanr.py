@@ -9018,6 +9018,7 @@ class StarTrailPanel(QWidget):
         if self._hotpix_chk.isChecked():
             args.append("--remove-hotpix")
         self._skip_msg = ""     # set if the foreground guard bails (HOTPIX_SKIPPED)
+        self._ff_lines, self._ff_counts = [], None      # the flash finder's summary (FLASHFINDER: lines)
         if getattr(sys, "frozen", False):
             pargs = ["--cleanr-worker", script] + args
         else:
@@ -9112,6 +9113,14 @@ class StarTrailPanel(QWidget):
             if s.startswith("HOTPIX_SKIPPED:"):
                 self._skip_msg = s.split(":", 1)[1].strip()
                 continue
+            if s.startswith("FLASHFINDER"):
+                from modules.flash_repair import parse_marker
+                got = parse_marker(s)
+                if got and got[0] == "line":
+                    self._ff_lines = getattr(self, "_ff_lines", []) + [got[1]]
+                elif got:
+                    self._ff_counts = got[1]
+                continue
             low = s.lower()
             m = re.match(r"(stack|hot-pixel|thicken) phase: (\d+)s$", low)
             if m:
@@ -9133,6 +9142,9 @@ class StarTrailPanel(QWidget):
                 # only reason this option had to read the whole sequence twice).
                 self._phase_text = "Finding hot pixels…"
                 self._set_phase_frac("hotpix", 0.9 * frac)
+            elif "finding flashes" in low and frac is not None:
+                self._phase_text = "Finding flashes…"
+                self._set_phase_frac("hotpix", 0.95)
             elif low.startswith("removing ") or low.startswith("speck removal done"):
                 # Detection finished, painting now: the tail of the segment.
                 self._phase_text = "Removing hot pixels…"
@@ -9237,6 +9249,13 @@ class StarTrailPanel(QWidget):
                 self._status_lbl.setWordWrap(True)
             else:
                 self._status_lbl.setText("")   # no "done" text; the trail just updates
+            # The flash finder's plain-English summary goes into the Star Log (best effort).
+            try:
+                if getattr(self, "_ff_lines", None) and _CURRENT_STAR_LOG and os.path.isfile(_CURRENT_STAR_LOG):
+                    with open(_CURRENT_STAR_LOG, "a", encoding="utf-8") as _f:
+                        _f.write("\n" + "\n".join(self._ff_lines) + "\n")
+            except Exception:
+                pass
             # Anonymous usage report for a DELIBERATE star trail render (this tab's
             # Build button), mirroring the timelapse render report. The automatic
             # trail built during every run is NOT counted -- that would just
@@ -9255,6 +9274,7 @@ class StarTrailPanel(QWidget):
                         "reversed": bool(_comet and self._reverse_chk.isChecked()),
                         "thicken_px": self._size_cb.currentData(),
                         "speck_cleanup": self._hotpix_chk.isChecked(),
+                        "flash_finder": getattr(self, "_ff_counts", None),
                         "source": self._src_cb.currentData(),
                     })
             except Exception:

@@ -992,3 +992,51 @@ def parse_marker(line):
     if s.startswith(MARKER_LINE):
         return "line", s[len(MARKER_LINE):].strip()
     return None
+
+
+def run_on_folder(cleaned_dir, names, stack, fg_mask, read_path, say=print, threads=4):
+    """The whole flash finder as the star trail step uses it: find single-frame flashes
+    and blinking defects in the sky, find coloured specks on the ground, repair the
+    finished `stack`, print the plain-English summary behind marker lines, and return
+    the new stack. `names` are the frame filenames in the order the trail was built;
+    `fg_mask` is the foreground mask as saved (uint8, 255 = ground) or None;
+    `read_path(path)` reads one frame as BGR uint8. Never raises: a pass that hits an
+    error leaves the stack as it was and says so in the summary."""
+    import os
+    paths = [os.path.join(cleaned_dir, n) for n in names]
+    n = len(paths)
+
+    def rd(i):
+        try:
+            return read_path(paths[i])
+        except Exception:
+            return None
+
+    fg = None
+    if fg_mask is not None and fg_mask.shape[:2] == stack.shape[:2]:
+        fg = fg_mask > 127
+    out = stack
+    sky, rstats, ground, gstats = None, None, None, None
+
+    try:
+        sky = find_flashes(n, rd, fg, progress=lambda k, t: say("  finding flashes: %d/%d" % (k, t)))
+        if not sky.bail:
+            defects = find_blinking_defects(sky.defect_candidates, n)
+            out, rstats = repair_stack(out, n, rd, sky.flags, defects, threads)
+    except Exception as e:
+        sky = FlashResult()
+        sky.bail = "of an unexpected error (%s)" % type(e).__name__
+        out = stack
+
+    try:
+        ground = find_ground_specks(n, rd, fg)
+        if not ground.bail:
+            out, gstats = repair_ground(out, n, rd, ground, threads=threads)
+    except Exception as e:
+        ground = GroundResult()
+        ground.bail = "of an unexpected error (%s)" % type(e).__name__
+
+    lines, counts = plain_summary(sky, rstats, ground, gstats)
+    for m in marker_lines(lines, counts):
+        say(m)
+    return out

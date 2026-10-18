@@ -1059,6 +1059,18 @@ def make_star_trail(cleaned_dir, out_path=None, stack=None, comet_tail=0,
                                       lambda p: robust_imread(p, cv2.IMREAD_COLOR),
                                       comet_tail=comet_tail, run_map=run_map)
                 print(f"  hot-pixel phase: {time.time() - _t_hp:.0f}s", flush=True)
+                # The flash finder (modules/flash_repair.py): single-frame flashes and blinking
+                # sensor defects in the sky, coloured specks on the ground. It never raises and
+                # prints its own plain-English summary for the Star Log.
+                try:
+                    from modules.flash_repair import run_on_folder
+                    _t_ff = time.time()
+                    stack = run_on_folder(cleaned_dir, names, stack, fg,
+                                          lambda p: robust_imread(p, cv2.IMREAD_COLOR))
+                    print(f"  flash finder: {time.time() - _t_ff:.0f}s", flush=True)
+                    print(f"  hot-pixel phase: {time.time() - _t_hp:.0f}s", flush=True)
+                except Exception as e:
+                    print(f"  flash finder skipped ({type(e).__name__})", flush=True)
             except SkyDotsBail as b:
                 print(f"HOTPIX_SKIPPED: {b}", flush=True)
         except Exception as e:
