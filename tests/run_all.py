@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Run every test_*.py in this folder, report pass/fail, exit non-zero on any failure."""
 import importlib.util
+import os
 import sys
 import time
 import traceback
@@ -78,4 +79,13 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    code = main()
+    # Leave without the normal interpreter teardown. A few tests build real Qt windows, and
+    # on the CI machines Python's shutdown sometimes destroys those windows in the wrong
+    # order and the process dies ("QObject: shared QObject was deleted directly", exit 134
+    # on Mac, 139 on Linux, 1 on Windows) AFTER every test has passed and been printed,
+    # which failed the v2.99 build twice (a different machine each time). The exit code
+    # below is the tests' real result.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)
