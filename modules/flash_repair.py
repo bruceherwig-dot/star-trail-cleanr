@@ -63,6 +63,17 @@ BLINK_SPAN = 0.4            # ... spread over at least this share of the sequenc
 REPAIR_CHROMA = 80          # in a repaired frame only pixels this coloured (plus 2 px of white core) change
 REPAIR_ABOVE = 12           # ... and only if this far above the pixel's usual value
 DEFECT_HALF = 5             # px: the window rebuilt around a blinking defect
+# the GROUND (everything under the foreground mask) does not move, so no sky motion is needed:
+# a pixel whose usual colour is neutral that shows a strong colour is a speck, for one frame
+# or ten. Found by comparing with the pixel's OWN long-run colour, not with neighbour frames
+# (a two-frame flash cannot beat both its neighbours).
+GROUND_COLOUR_MIN = 80      # colour split that marks a speck on the ground
+GROUND_BASE_MAX = 30        # ... where the pixel's usual colour split is below this
+GROUND_HALF = 16            # px: a ground speck can be 15 px tall (a red/white streak)
+GROUND_REACH = 8            # px a speck may grow from its strongly coloured pixels through connected bright ones
+GROUND_BRIGHT_ABOVE = 45    # a connected pixel this far above its usual value belongs to the speck, coloured or white
+GROUND_WEAK_COLOUR = 25     # ... or this weakly coloured and 12 above
+GROUND_BASELINE_SAMPLES = 16
 VISIBLE_MIN = 20            # a spot is only worth repairing if, in the FINISHED picture, it stands out this
                             # far above the brightest tenth of the pixels 3-7 px around it. A speck lost
                             # inside a bright trail cannot be seen, and touching it nicked the trail (Glenn:
@@ -707,5 +718,164 @@ def repair_stack(stack, n_frames, read_frame, flags, defects, threads=4):
         hidden += int((~ok).sum())
         np.minimum.at(out, (dyy[ok], dxx[ok]), dmax[ok])
     stats["hidden_not_repaired"] = hidden
+    stats["pixels_changed"] = int((out != stack).any(2).sum())
+    return out, stats
+
+
+# ── the ground ────────────────────────────────────────────────────────────────
+class GroundResult:
+    """Specks on the (static) ground. `bail` is None, or why nothing was done there."""
+
+    def __init__(self):
+        self.spots = []              # (x, y)
+        self.burst_frames = set()    # frames where the whole ground changed (lighting events)
+        self.candidates = 0
+        self.flags_per_frame = 0.0
+        self.bail = None
+
+
+def find_ground_specks(n_frames, read_frame, fg_mask):
+    """Find strongly coloured specks under the foreground mask.
+
+    Guards, each from a real failure on a photographer's set:
+      - LIGHTING-EVENT frames (Cheryl Hanscom Wilcox, overexposed pink rock: frame 7 alone
+        gave 580 false flags while a normal frame had none) are skipped entirely;
+      - if the ground STILL gives more than BAIL_FLAGS_PER_FRAME flags per frame, it is not
+        speckled but coloured scenery (Juniper's warm lit trees gave ~100 per frame), so
+        nothing is done there.
+    """
+    res = GroundResult()
+    if fg_mask is None or not np.asarray(fg_mask).any():
+        res.bail = "no foreground mask: there is no ground to look at"
+        return res
+    fg = np.asarray(fg_mask).astype(bool)
+    first = read_frame(0)
+    if first is None:
+        res.bail = "the first frame could not be read"
+        return res
+    H, W = first.shape[:2]
+    if fg.shape != (H, W):
+        fg = cv2.resize(fg.astype(np.uint8), (W, H), interpolation=cv2.INTER_NEAREST).astype(bool)
+    y0 = max(0, int(np.where(fg.any(1))[0].min()) - 8)
+    fgd = cv2.dilate(fg[y0:].astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool)
+
+    samples = []
+    for i in np.unique(np.linspace(0, n_frames - 1, min(GROUND_BASELINE_SAMPLES, n_frames)).astype(int)):
+        img = read_frame(int(i))
+        if img is not None and img.shape[:2] == (H, W):
+            samples.append(_chroma(img[y0:]))
+    if len(samples) < 3:
+        res.bail = "too few readable frames to learn the ground's usual colour"
+        return res
+    base = np.median(np.stack(samples), axis=0).astype(np.uint8)
+    del samples
+
+    cand = []
+    counts = collections.Counter()
+    for k in range(n_frames):
+        img = read_frame(k)
+        if img is None or img.shape[:2] != (H, W):
+            continue
+        c = _chroma(img[y0:])
+        m = ((c >= GROUND_COLOUR_MIN) & (base < GROUND_BASE_MAX) & fgd).astype(np.uint8)
+        n, _lab, st, cen = cv2.connectedComponentsWithStats(m, 8)
+        for i in range(1, n):
+            if st[i, cv2.CC_STAT_AREA] <= MAX_BLOB_AREA:
+                cand.append((k, int(cen[i][0]), int(cen[i][1]) + y0))
+                counts[k] += 1
+    res.candidates = len(cand)
+    typical = float(np.median([counts.get(k, 0) for k in range(n_frames)]))
+    res.burst_frames = {k for k, v in counts.items() if v > max(BURST_MIN, BURST_FACTOR * typical)}
+    cand = [c for c in cand if c[0] not in res.burst_frames]
+    res.flags_per_frame = len(cand) / max(1, n_frames)
+    if res.flags_per_frame > BAIL_FLAGS_PER_FRAME:
+        res.bail = ("the ground gives %.1f coloured flags per frame: it is coloured scenery, "
+                    "not specks, so nothing was repaired there" % res.flags_per_frame)
+        return res
+    cell = collections.defaultdict(list)
+    for k, x, y in cand:
+        cell[(x // 6, y // 6)].append((x, y))
+    for pts in cell.values():
+        x = int(np.median([p[0] for p in pts]))
+        y = int(np.median([p[1] for p in pts]))
+        if GROUND_HALF <= x < W - GROUND_HALF and GROUND_HALF <= y < H - GROUND_HALF:
+            res.spots.append((x, y))
+    return res
+
+
+def repair_ground(stack, n_frames, read_frame, ground, trail_cut=25, threads=4):
+    """Return (new_stack, stats) with the ground's specks removed.
+
+    Only each frame's OWN speck-coloured pixels (plus GROUND_REACH px of white core) go
+    back to the pixel's usual value. Rewriting the whole window painted black squares into
+    an overexposed ground (the 'usual value' is the DARK quiet-frame ground, but a few lit
+    frames make the stack bright), and replacing 'any bright pixel' made it worse.
+    A spot sitting on a long bright line in the finished stack is a star trail crossing the
+    ground's edge, not a speck: left alone (a yellow trail tip was cut once).
+    """
+    out = stack.copy()
+    H, W = out.shape[:2]
+    stats = {"ground_spots": 0, "on_a_trail": 0, "pixels_changed": 0}
+    if ground is None or ground.bail or not ground.spots:
+        return out, stats
+    gray = chan_max(stack)
+    spots = []
+    for x, y in ground.spots:
+        if _object_length(gray, x, y) > trail_cut:
+            stats["on_a_trail"] += 1
+        else:
+            spots.append((x, y))
+    stats["ground_spots"] = len(spots)
+    if not spots:
+        return out, stats
+    sx = np.array([s_[0] for s_ in spots], int)
+    sy = np.array([s_[1] for s_ in spots], int)
+    yy, xx = _window_index(sx, sy, GROUND_HALF, H, W)
+    skip = ground.burst_frames
+    samp = [int(i) for i in np.unique(np.linspace(0, n_frames - 1, min(60, n_frames)).astype(int))
+            if int(i) not in skip]
+    crops = []
+    for i in samp:
+        img = read_frame(i)
+        if img is not None and img.shape[:2] == (H, W):
+            crops.append(img[yy, xx])
+    if not crops:
+        return out, stats
+    base = np.percentile(np.stack(crops), 40, axis=0).astype(np.uint8)
+    del crops
+    wmax = np.zeros(yy.shape + (3,), np.uint8)
+    pool = ThreadPoolExecutor(max_workers=threads)
+    futs = {}
+    for k in range(n_frames):
+        for j in range(k, min(n_frames, k + 4)):
+            if j not in futs:
+                futs[j] = pool.submit(read_frame, j)
+        img = futs[k].result()
+        futs.pop(k - 1, None)
+        if img is None or img.shape[:2] != (H, W):
+            continue
+        crop = img[yy, xx]
+        if k in skip:
+            wmax = np.maximum(wmax, crop)             # a lighting event: left exactly as it is
+            continue
+        ch = crop.max(3).astype(np.int16) - crop.min(3).astype(np.int16)
+        above = crop.max(3).astype(np.int16) - base.max(3).astype(np.int16)
+        seed = ch >= GROUND_COLOUR_MIN
+        # the speck = the strongly coloured pixels plus the bright / weakly coloured pixels
+        # CONNECTED to them (a 15 px red-and-white streak has pale ends). Growth stops at
+        # GROUND_REACH px: it can never spread across a lit scene.
+        member = ((above >= GROUND_BRIGHT_ABOVE) | ((ch >= GROUND_WEAK_COLOUR) & (above >= REPAIR_ABOVE)))
+        bad = seed & (above >= REPAIR_ABOVE)
+        for _ in range(GROUND_REACH):
+            grown = bad.copy()
+            for a in (-1, 0, 1):
+                for b in (-1, 0, 1):
+                    grown |= np.roll(np.roll(bad, a, 1), b, 2)
+            bad = (grown & member) | bad
+        crop = crop.copy()
+        crop[bad] = base[bad]
+        wmax = np.maximum(wmax, crop)
+    pool.shutdown(wait=False)
+    np.minimum.at(out, (yy, xx), wmax)
     stats["pixels_changed"] = int((out != stack).any(2).sum())
     return out, stats
