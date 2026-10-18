@@ -88,4 +88,13 @@ if __name__ == "__main__":
     # below is the tests' real result.
     sys.stdout.flush()
     sys.stderr.flush()
+    if sys.platform == "win32":
+        # On Windows even os._exit runs the DLL shutdown, and Qt's libraries can fail
+        # there (the Windows build still exited 1 after all 563 tests passed, with
+        # the runner already exiting 0). Ending the process directly skips that step.
+        try:
+            import ctypes
+            ctypes.windll.kernel32.TerminateProcess(ctypes.windll.kernel32.GetCurrentProcess(), code)
+        except Exception:
+            pass
     os._exit(code)
