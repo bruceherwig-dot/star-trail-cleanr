@@ -196,6 +196,39 @@ def build_hot_pixel_map(frames: List[np.ndarray], threshold: float = 2.0,
     return (ratio_hot & excess_hot).astype(np.uint8) * 255
 
 
+# The ground is the same pixels in every frame, so every speck of its texture
+# and colour noise looks "stuck" to the temporal test. A real sensor defect is
+# spread evenly over the whole frame, so the ground should hold about the same
+# number of flags per area as the sky. When it holds far more, the flags are
+# scenery. Found 2026-10-19 on King of Wings (ISO 10000): 16,707 ground flags,
+# about 13x the sky's density, each painted over with a smooth blob in every
+# frame, which the lighten-max stack turned into dark dots.
+GROUND_MIN_FLAGS = 500        # a handful of real ground defects never trips it
+GROUND_DENSITY_RATIO = 4.0    # ground flags per area vs sky flags per area
+SKY_DENSITY_FLOOR = 50.0      # flags per megapixel; stops a spotless sky making any ground look noisy
+
+
+def ground_looks_like_scenery(hot_map: np.ndarray, fg_mask: np.ndarray):
+    """Decide whether the ground's stuck-pixel flags are really just scenery.
+
+    ``hot_map`` is the stuck-pixel map (255 = flagged); ``fg_mask`` is the
+    foreground mask (255 = ground, 0 = sky). Returns
+    ``(is_scenery, ground_flags, ground_per_mpx, sky_per_mpx)``.
+    """
+    flagged = hot_map > 0
+    ground = fg_mask > 0
+    ground_px = int(ground.sum())
+    sky_px = int(ground.size - ground_px)
+    ground_flags = int((flagged & ground).sum())
+    sky_flags = int((flagged & ~ground).sum())
+    if ground_px == 0 or ground_flags < GROUND_MIN_FLAGS:
+        return False, ground_flags, 0.0, 0.0
+    ground_density = ground_flags / (ground_px / 1e6)
+    sky_density = sky_flags / (sky_px / 1e6) if sky_px else 0.0
+    limit = GROUND_DENSITY_RATIO * max(sky_density, SKY_DENSITY_FLOOR)
+    return ground_density > limit, ground_flags, ground_density, sky_density
+
+
 def fix_hot_pixels(frames: List[np.ndarray], threshold: float = 2.0,
                    min_fraction: float = 0.8) -> List[np.ndarray]:
     """Detect and repair hot pixels across a batch of frames.

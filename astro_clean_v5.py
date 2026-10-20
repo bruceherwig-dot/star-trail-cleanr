@@ -1747,12 +1747,28 @@ def main():
         # star-trail stack (make_star_trail), and only when the user asked for a
         # star trail. The map saved above is the running union so that end step
         # has the complete set of stuck-pixel locations.
+        dilated = None
         if hot_map.max() > 0:
-            dilated = cv2.dilate(hot_map,
-                cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (13, 13)))
-            dilated = cv2.bitwise_and(dilated, fg_mask)
+            from modules.hot_pixels import ground_looks_like_scenery
+            _scenery, _gflags, _gdens, _sdens = ground_looks_like_scenery(
+                hot_map, fg_mask)
+            if _scenery:
+                # The ground never moves, so its texture and colour noise look
+                # "stuck" in every frame. Painting over those spots leaves smooth
+                # blobs that the lighten-max stack turns into dark dots.
+                if args.start == 0:
+                    print(f"  Stuck pixels, ground: left alone because {_gflags:,} "
+                          "spots on the ground looked like stuck pixels. That many "
+                          "means the ground is textured scenery, not sensor "
+                          "defects, and painting over them would leave smooth "
+                          "dark dots in your star trail. The sky is handled "
+                          "separately.", flush=True)
+            else:
+                dilated = cv2.dilate(hot_map,
+                    cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (13, 13)))
+                dilated = cv2.bitwise_and(dilated, fg_mask)
 
-        if hot_map.max() > 0 and dilated.max() > 0:
+        if dilated is not None and dilated.max() > 0:
             if is_16bit:
                 for i in range(len(frames)):
                     orig = robust_imread(frame_files[i], cv2.IMREAD_UNCHANGED)
