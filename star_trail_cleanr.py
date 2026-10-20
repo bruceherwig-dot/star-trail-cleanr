@@ -164,7 +164,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QComboBox, QProgressBar,
     QTextEdit, QFileDialog, QStackedWidget, QCheckBox, QFrame,
-    QSpinBox, QTabWidget, QTextBrowser, QScrollArea, QMessageBox, QDialog,
+    QSpinBox, QTabWidget, QTextBrowser, QScrollArea, QMessageBox, QDialog, QSlider,
 )
 import queue
 from PySide6.QtCore import Qt, QThread, Signal, QSettings, QTimer, QProcess
@@ -8784,6 +8784,24 @@ class StarTrailPanel(QWidget):
             self._size_cb.addItem(label, v)
         _row("Trail Thickness", self._size_cb)
 
+        # Brightness of the finished trail: a midtone curve that keeps black and white
+        # where they are (see make_share_clip.apply_brightness). The slider counts
+        # tenths, -2.0 to +2.0; the middle is "as stacked" and changes nothing. Like every choice on this tab
+        # it is not remembered between sessions.
+        self._bright_sl = QSlider(Qt.Horizontal)
+        self._bright_sl.setRange(-20, 20)
+        self._bright_sl.setValue(0)
+        self._bright_sl.setTickPosition(QSlider.NoTicks)
+        self._bright_val = QLabel("As shot")
+        self._bright_val.setFixedWidth(64)
+        self._bright_val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self._bright_sl.valueChanged.connect(self._on_bright_changed)
+        _bw = QWidget()
+        _bh = QHBoxLayout(_bw); _bh.setContentsMargins(0, 0, 0, 0)
+        _bh.addWidget(self._bright_sl, 1)
+        _bh.addWidget(self._bright_val)
+        _row("Brightness", _bw)
+
         # Output format. You may always go DOWN in quality from what the frames
         # hold -- an 8-bit file from 16-bit frames is a perfectly reasonable ask.
         # You may never go up: _sync_format_choices greys out any depth the
@@ -8884,6 +8902,10 @@ class StarTrailPanel(QWidget):
         if folder and os.path.isdir(folder):
             QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
 
+    def _on_bright_changed(self, v):
+        """Show the slider's setting: 'As shot' in the middle, else the signed number."""
+        self._bright_val.setText("As shot" if v == 0 else f"{v / 10:+.1f}")
+
     def _toggle_build(self):
         """Build doubles as Stop while a rebuild is running."""
         if self._proc is not None and self._proc.state() != QProcess.NotRunning:
@@ -8919,6 +8941,9 @@ class StarTrailPanel(QWidget):
         thick = int(self._size_cb.currentData() or 0)
         if thick > 0:
             tokens.append(f"thick{thick}")
+        _bright = self._bright_sl.value()
+        if _bright != 0:
+            tokens.append(f"bright{_bright / 10:+.1f}")
         if self._hotpix_chk.isChecked():
             tokens.append("despeck")
         # The caption under the preview shows this filename as the record of the
@@ -9026,6 +9051,8 @@ class StarTrailPanel(QWidget):
                                               or self._frame_range.end()):
             args += ["--trim-start", str(self._frame_range.start()),
                      "--trim-end", str(self._frame_range.end())]
+        if self._bright_sl.value() != 0:
+            args += ["--brightness", str(self._bright_sl.value() / 10)]
         if self._hotpix_chk.isChecked():
             args.append("--remove-hotpix")
         self._skip_msg = ""     # set if the foreground guard bails (HOTPIX_SKIPPED)
@@ -9072,7 +9099,7 @@ class StarTrailPanel(QWidget):
         self._spin_timer.start(200)
         self._tick_spinner()
         for w in (self._hotpix_chk, self._mode_normal, self._mode_comet, self._comet_len_cb,
-                  self._reverse_chk, self._size_cb, self._src_cb, self._fmt_cb,
+                  self._reverse_chk, self._size_cb, self._bright_sl, self._src_cb, self._fmt_cb,
                   self._open_img_btn, self._open_dir_btn, self._frame_range):
             if w is not None:
                 w.setEnabled(False)
@@ -9202,12 +9229,19 @@ class StarTrailPanel(QWidget):
         self._thumb.setPixmap(pm.scaled(_PREVIEW_W, _PREVIEW_H,
                                         Qt.KeepAspectRatio, Qt.SmoothTransformation))
         self._thumb.show()
-        self._name_lbl.setText(
-            os.path.basename(self._star_path)
-            + (f" · {self._build_idx + 1} of {len(self._builds)}" if many else ""))
-        self._name_lbl.show()
-        self._hint_open.setText("Click the image to open")
-        self._hint_open.show()
+        # One line under the picture, not two (matches the Timelapse tab's height):
+        # the filename and position when there are several builds to page through,
+        # otherwise the click hint. The hover tip does not reliably show.
+        if many:
+            self._name_lbl.setText(
+                os.path.basename(self._star_path)
+                + f" · {self._build_idx + 1} of {len(self._builds)}")
+            self._name_lbl.show()
+            self._hint_open.hide()
+        else:
+            self._name_lbl.hide()
+            self._hint_open.setText("Click the image to open")
+            self._hint_open.show()
         self._prev_btn.setEnabled(self._build_idx < len(self._builds) - 1)
         self._next_btn.setEnabled(self._build_idx > 0)
 
@@ -9232,7 +9266,7 @@ class StarTrailPanel(QWidget):
         self._build_btn.setText("Create Star Trail")
         self._build_btn.setEnabled(True)
         for w in (self._hotpix_chk, self._mode_normal, self._mode_comet, self._comet_len_cb,
-                  self._reverse_chk, self._size_cb, self._src_cb, self._fmt_cb,
+                  self._reverse_chk, self._size_cb, self._bright_sl, self._src_cb, self._fmt_cb,
                   self._open_img_btn, self._open_dir_btn, self._frame_range):
             if w is not None:
                 w.setEnabled(True)
@@ -9454,7 +9488,8 @@ class SummaryPanel(QWidget):
     (trails removed, time saved), a share nudge, and an Open Cleaned Folder button.
     Replaces the old standalone Run Complete popup."""
 
-    def __init__(self, summary_html, on_open_folder, video_path="", parent=None):
+    def __init__(self, summary_html, on_open_folder, video_path="", parent=None,
+                 on_pick_tab=None):
         super().__init__(parent)
         self._video_path = video_path or ""
         self._video_lbl = None
@@ -9566,9 +9601,25 @@ class SummaryPanel(QWidget):
         lay.addWidget(self._feature_lbl)
         lay.addStretch(1)
 
+        # Two doorways to the other tabs. Bruce, 2026-10-19: this tab shows the video
+        # and people forget the window can also make a star trail or a timelapse.
+        # Each button only jumps to its tab; it never starts a build.
+        if on_pick_tab is not None:
+            _pick_row = QHBoxLayout()
+            _pick_row.setSpacing(12)
+            for _txt, _which in (("Create a Star Trail", "star"),
+                                 ("Create a Timelapse", "timelapse")):
+                _b = QPushButton(_txt)
+                _b.setFixedHeight(48)
+                _b.setStyleSheet(_hero_btn_css())
+                _b.clicked.connect(lambda *_, w=_which: on_pick_tab(w))
+                _pick_row.addWidget(_b, 1)
+            lay.addLayout(_pick_row)
+
         self._open_btn = QPushButton("Open Cleaned Folder")
         self._open_btn.setFixedHeight(48)
-        self._open_btn.setStyleSheet(_hero_btn_css())
+        self._open_btn.setStyleSheet(_secondary_btn_css() if on_pick_tab is not None
+                                     else _hero_btn_css())
         if on_open_folder is not None:
             # clicked emits a `checked` bool; swallow it so on_open_folder runs with NO
             # args and uses its real folder-path default (passing the bool as the path
@@ -9640,7 +9691,8 @@ class CreatorWindow(QDialog):
                 _video_path = workspace_path(cleaned_folder, "STC_share_video.mp4")
         except Exception:
             _video_path = ""
-        self._summary_panel = SummaryPanel(summary_html, on_open_folder, _video_path, self)
+        self._summary_panel = SummaryPanel(summary_html, on_open_folder, _video_path, self,
+                                           on_pick_tab=self.select_tab)
         self._star_panel = StarTrailPanel(cleaned_folder, star_path,
                                           original_folder=original_folder, parent=self)
         self._tl_panel = TimelapsePanel(cleaned_folder, original_folder, star_path, self)

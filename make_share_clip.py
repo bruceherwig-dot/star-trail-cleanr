@@ -950,16 +950,35 @@ def _thicken(img, px, fg_mask=None):
     return out
 
 
+def apply_brightness(img, amount):
+    """Midtone brightness curve, the Levels midtone slider: black stays black and white
+    stays white, and everything between moves. amount > 0 lifts the middle tones,
+    amount < 0 pulls them down (the sky goes darker while the brightest trails stay
+    bright). The curve is v' = v ** (2 ** -amount) on values scaled 0..1. A plain
+    multiply was tried first and looked flat: it turned a bright sky into grey and
+    gave the trails no extra contrast. A lookup table keeps it exact for 16-bit
+    and avoids a float copy of a picture that can be 100+ MB."""
+    top = 65535 if img.dtype == np.uint16 else 255
+    expo = 2.0 ** (-float(amount))
+    lut = np.round(top * (np.arange(top + 1, dtype=np.float64) / top) ** expo)
+    return lut.astype(img.dtype)[img]
+
+
 def make_star_trail(cleaned_dir, out_path=None, stack=None, comet_tail=0,
                     thicken_px=0, remove_hotpix=False, reverse=False,
                     match_cleaned=None, out_format="jpg",
-                    trim_start=0, trim_end=0):
+                    trim_start=0, trim_end=0, brightness_stops=0.0):
     """OUTPUT 1 — the quick-and-dirty full-resolution STAR TRAIL (`--star-trail`).
 
     `trim_start` / `trim_end`: extra frames to leave out of the front / back of the
     sequence, on top of the automatic first-3-and-last-3 skip (the Star Trail tab's
     Frame Range slider). 0 = use every frame. Only applies when this function does
     the stacking itself; a `stack` handed in by the in-run stacker is saved as is.
+
+    `brightness_stops`: midtone curve for the finished trail, -2 (darker sky, bright
+    trails stay bright) to +2 (lifted midtones); black and white stay put. 0 = as
+    stacked. Applied last, after thickening and before the depth is chosen, so 16-bit
+    files keep their full precision. The Star Trail tab's Brightness slider.
 
     `stack`: optional pre-built full-resolution lighten-max stack from the in-run
     incremental stacker. When given, the cleaned folder is NOT re-read -- the stack
@@ -1107,6 +1126,10 @@ def make_star_trail(cleaned_dir, out_path=None, stack=None, comet_tail=0,
               flush=True)
         print(f"  thicken phase: {time.time() - _t_th:.0f}s", flush=True)
 
+    if brightness_stops and float(brightness_stops) != 0.0:
+        stack = apply_brightness(stack, brightness_stops)
+        print(f"brightness curve {float(brightness_stops):+.1f}", flush=True)
+
     if out_path is None:
         out_path = os.path.join(cleaned_dir, "STC_cleaned_star_trail" + star_trail_ext(out_format))
     # ASKING FOR LESS IS ALLOWED. The depth used to be whatever the frames
@@ -1152,6 +1175,9 @@ if __name__ == "__main__":
                          "(e.g. 0.5/0.75/1.0; 0 = plain trail)")
     ap.add_argument("--thicken", type=int, default=0,
                     help="star trail: widen the trails by this many pixels (0 = leave as shot)")
+    ap.add_argument("--brightness", type=float, default=0.0,
+                    help="star trail: midtone brightness curve, -2 (darker) to +2 (lighter); "
+                         "black and white stay put (0 = as stacked)")
     ap.add_argument("--remove-hotpix", action="store_true",
                     help="star trail: remove sky hot pixels / colored specks (re-reads every frame)")
     ap.add_argument("--out-format", default="jpg", choices=["jpg", "tif8", "tif16"],
@@ -1190,7 +1216,8 @@ if __name__ == "__main__":
                         match_cleaned=args.match_cleaned,
                         thicken_px=args.thicken, remove_hotpix=args.remove_hotpix,
                         reverse=args.reverse,
-                        trim_start=args.trim_start, trim_end=args.trim_end)
+                        trim_start=args.trim_start, trim_end=args.trim_end,
+                        brightness_stops=args.brightness)
     elif args.red_map:
         if not args.original:
             ap.error("--red-map needs --original")
