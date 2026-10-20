@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How to Photograph Star Trails: A Beginner's Step-by-Step Guide · Star Trail CleanR</title>
+<meta name="description" content="How to photograph and create star trails: the camera settings (ISO 800, f/4, the Rule of 500), how to frame the shot, how to stack your photos for free, and how to remove airplane trails.">
+<style>
+  :root{
+    --navy:#0a1e3f; --navy2:#0c2c5c; --blue:#1a6fc4; --blue-h:#1580e0;
+    --sub:#a8c0e0; --star:#f3d08a;
+    --bg:#ffffff; --bg2:#f4f7fb; --text:#16263f; --muted:#5b6b82; --line:#e3e9f2;
+    --maxw:1080px; --readw:760px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;line-height:1.6;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:var(--maxw);margin:0 auto;padding:0 24px}
+  a{color:inherit;text-decoration:none}
+  header{position:sticky;top:0;z-index:50;background:var(--navy);border-bottom:1px solid rgba(255,255,255,.08)}
+  nav{max-width:var(--maxw);margin:0 auto;padding:0 24px;height:66px;display:flex;align-items:center;justify-content:space-between}
+  .brand{display:flex;align-items:center;gap:11px;font-weight:600;font-size:18px;color:#fff;letter-spacing:.2px}
+  .brand .logotile{width:40px;height:40px;border-radius:10px;background:#fff;display:flex;align-items:center;justify-content:center;flex:none}
+  .brand .logotile img{width:34px;height:34px;border-radius:7px;display:block}
+  .navlinks{display:flex;gap:26px;align-items:center;font-size:15px}
+  .navlinks a{color:var(--sub);white-space:nowrap}
+  .navlinks a:hover,.navlinks a.on{color:#fff}
+  .btn{display:inline-block;background:var(--blue);color:#fff;font-weight:600;padding:11px 20px;border-radius:8px;font-size:15px}
+  .btn:hover{background:var(--blue-h)}
+  .pagehead{background:var(--bg2);border-bottom:1px solid var(--line);padding:54px 0 44px}
+  .kicker{color:var(--blue);font-weight:600;font-size:14px;letter-spacing:1px;text-transform:uppercase}
+  .pagehead h1{font-size:40px;letter-spacing:-1px;color:var(--navy);margin:10px 0 12px;line-height:1.15}
+  .pagehead p{color:var(--muted);font-size:17px;max-width:680px}
+  .article{max-width:var(--readw);margin:0 auto;padding:44px 24px 20px}
+  .article h2{font-size:26px;letter-spacing:-.5px;color:var(--navy);margin:42px 0 12px;line-height:1.25}
+  .article h2 .num{color:var(--blue)}
+  .article p{font-size:17px;margin-bottom:16px}
+  .article ul{margin:0 0 16px 22px;font-size:17px}
+  .article li{margin-bottom:8px}
+  .article a.inline{color:var(--blue);text-decoration:underline}
+  .article a.inline:hover{color:var(--blue-h)}
+  .tip{background:var(--bg2);border-left:4px solid var(--star);border-radius:0 10px 10px 0;padding:14px 18px;margin:18px 0;font-size:16px;color:var(--text)}
+  table.settings{width:100%;border-collapse:collapse;margin:18px 0 24px;font-size:16px}
+  table.settings th,table.settings td{text-align:left;padding:11px 14px;border-bottom:1px solid var(--line);vertical-align:top}
+  table.settings th{background:var(--bg2);color:var(--navy);font-size:13px;letter-spacing:.8px;text-transform:uppercase}
+  table.settings td:first-child{font-weight:600;color:var(--navy);white-space:nowrap}
+  figure.hero{margin:0 0 28px}
+  figure.hero img{display:block;width:100%;height:auto;border-radius:12px;border:1px solid var(--line)}
+  figure.hero figcaption{color:var(--muted);font-size:14px;margin-top:8px}
+  .recipe{background:var(--navy);color:#fff;border-radius:12px;padding:20px 24px;margin:0 0 28px}
+  .recipe h2{color:var(--star);font-size:13px;letter-spacing:1px;text-transform:uppercase;margin:0 0 10px}
+  .recipe ul{margin:0 0 0 20px;font-size:16px}
+  .recipe li{margin-bottom:5px}
+  .cta{background:var(--navy);color:#fff;border-radius:14px;padding:30px 30px 32px;margin:44px 0 40px}
+  .cta h2{color:#fff;margin:0 0 10px;font-size:24px}
+  .cta p{color:var(--sub);margin-bottom:20px}
+  footer{background:var(--navy);color:var(--sub);padding:38px 0;font-size:14px}
+  footer .wrap{display:flex;justify-content:space-between;flex-wrap:wrap;gap:14px}
+  footer .brandf{color:#fff;font-weight:600}
+  footer a{color:#fff;text-decoration:underline}
+  @media(max-width:760px){
+    .navlinks{display:none}
+    .pagehead h1{font-size:30px}
+    .article h2{font-size:22px}
+    .article p,.article ul{font-size:16px}
+    table.settings td:first-child{white-space:normal}
+  }
+
+  /* --- mobile hamburger menu --- */
+  .navtoggle{display:none;background:none;border:0;color:#fff;font-size:26px;line-height:1;cursor:pointer;padding:4px 8px}
+  @media(max-width:720px){
+    nav{flex-wrap:wrap;height:auto;min-height:66px}
+    .navtoggle{display:block;order:2}
+    .brand{order:1}
+    nav .btn{display:none}
+    .navlinks{order:3}
+    header.open .navlinks{display:flex;flex-direction:column;flex-basis:100%;width:100%;padding:4px 0 14px;gap:0}
+    header.open .navlinks a{padding:11px 2px;font-size:17px}
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <nav>
+    <a class="brand" href="index.html"><span class="logotile"><img src="logo.png" alt="Star Trail CleanR logo"></span> Star Trail CleanR</a>
+    <div class="navlinks">
+      <a href="index.html#how">How it works</a>
+      <a href="index.html#gallery">Gallery</a>
+      <a href="index.html#download">Download</a>
+      <a href="research.html">Research</a>
+      <a class="on" href="how-to-photograph-star-trails.html">Star Trail Basics</a>
+      <a href="index.html#thanks">Thanks</a>
+      <a href="index.html#about">About</a>
+    </div>
+    <a class="btn" href="index.html#download">Download free</a>
+    <button class="navtoggle" aria-label="Menu" aria-expanded="false">&#9776;</button>
+</nav>
+</header>
+
+<section class="pagehead">
+  <div class="wrap">
+    <div class="kicker">Star Trail Basics</div>
+    <h1>How to Photograph Star Trails: A Beginner's Step-by-Step Guide</h1>
+    <p>How to create star trails in seven steps: what to bring, the camera settings to start with, how to point the camera, and how to turn a night of photos into one finished image.</p>
+  </div>
+</section>
+
+<div class="article">
+
+  <figure class="hero">
+    <img src="star-trails-joshua-tree.jpg" alt="Star trails streaking across a blue night sky above a silhouetted Joshua tree" width="1100" height="733">
+    <figcaption>A finished star trail image: hundreds of short photos blended into one.</figcaption>
+  </figure>
+
+  <div class="recipe">
+    <h2>The quick recipe</h2>
+    <ul>
+      <li>ISO 800, f/4, manual mode, manual focus at infinity</li>
+      <li>Shutter speed: 20 seconds. Adjust up or down for your focal length with the <a href="#rule-of-500" style="color:var(--star);text-decoration:underline">Rule of 500</a>.</li>
+      <li>Intervalometer on, 1 to 2 seconds between shots</li>
+      <li>Aim at Polaris for circles, or anywhere for arcs</li>
+      <li>Shoot for 45 minutes at least. Three hours is the sweet spot.</li>
+    </ul>
+  </div>
+
+  <p>A star trail image shows the stars as long, curved streaks across the sky. Earth turns, the stars appear to move, and a camera that keeps taking pictures records the whole path. You do not shoot one long exposure. You shoot hundreds of short ones and blend them together afterward on your computer. That is easier on the camera and gives you much cleaner results. Star Trail CleanR, the free app on this site, does the blending for you.</p>
+
+  <h2><span class="num">1.</span> What you need</h2>
+  <ul>
+    <li><b>A camera with manual controls.</b> A DSLR or mirrorless camera is ideal.</li>
+    <li><b>A wide-angle lens.</b> The wider the lens, the more sky you fit in the frame.</li>
+    <li><b>A sturdy tripod.</b> The camera cannot move for the whole shoot.</li>
+    <li><b>An intervalometer.</b> This is a remote that fires the camera again and again on its own. Many cameras have one built in. Check your menu for "interval timer" or "time-lapse."</li>
+    <li><b>A fully charged battery, plus a spare.</b> Cold nights drain batteries quickly.</li>
+    <li><b>A flashlight with a red mode, and a chair.</b> You will be standing out there a while.</li>
+  </ul>
+
+  <h2><span class="num">2.</span> Find a dark sky</h2>
+  <p>Dark skies make the best star trails. City lights wash out the fainter stars, and a bright moon does the same. Pick a night near the new moon, and drive away from town if you can.</p>
+  <p>If you are new to this, join a local astronomy club at one of their star parties. There is safety in numbers, and plenty of people there will gladly teach you what you are looking at.</p>
+
+  <h2><span class="num">3.</span> Start with these camera settings</h2>
+  <p>Put the camera in manual mode and begin here. You can adjust from these once you see your first test shot.</p>
+
+  <table class="settings">
+    <thead><tr><th>Setting</th><th>Start with</th></tr></thead>
+    <tbody>
+      <tr><td>ISO</td><td>800. This keeps the star colors and holds the noise down.</td></tr>
+      <tr><td>Aperture</td><td>f/4. One nice thing about star trails is that you don't need the fastest lens.</td></tr>
+      <tr><td>Shutter speed</td><td>20 seconds is a good starting point. Adjust up or down based on the <a class="inline" href="#rule-of-500">Rule of 500</a> (see below).</td></tr>
+      <tr><td>Gap between shots</td><td>1 to 2 seconds, just long enough for the camera to save each photo.</td></tr>
+      <tr><td>File type</td><td>RAW for the most editing room. JPEG also works well.</td></tr>
+      <tr><td>Focus</td><td>Switch your lens to manual focus (MF). Set it to infinity, or aim at the brightest star and focus on it with live view zoomed in.</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="rule-of-500">The Rule of 500: picking your shutter speed</h2>
+  <p>Divide 500 by your lens's focal length in millimeters. The answer is the longest exposure, in seconds, before the stars start to streak <em>within a single frame</em>.</p>
+  <p><b>Example:</b> you have a 24 mm lens. 500 &divide; 24 = about 20, so set the shutter to 20 seconds. Here are the numbers for popular lenses:</p>
+  <table class="settings">
+    <thead><tr><th>Your lens</th><th>Shutter speed</th></tr></thead>
+    <tbody>
+      <tr><td>14 mm</td><td>35 seconds</td></tr>
+      <tr><td>16 mm</td><td>30 seconds</td></tr>
+      <tr><td>20 mm</td><td>25 seconds</td></tr>
+      <tr><td>24 mm</td><td>20 seconds</td></tr>
+      <tr><td>35 mm</td><td>14 seconds</td></tr>
+    </tbody>
+  </table>
+  <p>On a crop-sensor camera, multiply the lens by 1.5 first (1.6 for Canon). A 10 mm lens on a Canon crop camera acts like a 16 mm lens, so use 30 seconds.</p>
+  <div class="tip">The rule is not exact, and for star trails it does not need to be. We are not chasing perfectly sharp pinpoint stars. If they tail a little in each frame, the final stack looks the same.</div>
+
+  <h2><span class="num">4.</span> Frame the shot</h2>
+  <p>The most interesting star trails have something in front of the stars: a tree, a building, a rock formation, a telescope. Use a phone app such as Sky Map to find Polaris, the North Star, and aim at it if you want the stars to sweep in circles. In the Northern Hemisphere they turn counterclockwise around it. Aim somewhere else and the trails become long, gentle arcs.</p>
+  <p>Take a test shot first. Check that the exposure looks right and the framing is what you want. Then make sure your tripod is steady and tightened down.</p>
+
+  <h2><span class="num">5.</span> Shoot</h2>
+  <p>Set the intervalometer to keep shooting until you stop it, and start it. Then leave the camera alone.</p>
+  <ul>
+    <li>Do not bump the tripod. Even a small nudge shifts every frame after it.</li>
+    <li>Keep flashlights and car headlights out of the frame.</li>
+    <li>Turn the rear screen brightness down and switch off image preview to save battery.</li>
+    <li>Turn off long exposure noise reduction. It makes the camera spend as long again after each shot, which leaves a gap in your trails.</li>
+  </ul>
+
+  <h2><span class="num">6.</span> Remove the airplane and satellite trails</h2>
+  <p>Sooner or later a plane or satellite crosses your sky, and because the stack keeps the brightest pixels, it becomes a bright line across your finished image. For some pictures that is a fun effect. Most of the time you want it gone.</p>
+  <p>The old way is to open every frame the plane appears in and paint over the line by hand. Then you stack again, and then you hunt for the ones you missed. It works, but it is slow.</p>
+  <p>Star Trail CleanR does this step for you. Clean your frames first, then create the star trail, so the airplane lines never reach the final image.</p>
+
+  <h2><span class="num">7.</span> Create the star trail</h2>
+  <p>Back home, a stacking step blends all your frames into a single picture, keeping the brightest pixels from each one. That is how the dots become trails.</p>
+  <p><b>You can do this right in Star Trail CleanR.</b> When cleaning finishes, the Star Trail &amp; Timelapse window opens. Choose your options, click <b>Create Star Trail</b>, and your finished image appears in the window. The same frames can also make a timelapse video.</p>
+  <p>Prefer another tool? The cleaned frames are ordinary image files, so any stacker works, such as <a class="inline" href="https://markus-enzweiler.de/software/starstax/" target="_blank" rel="noopener">StarStaX</a>, a free stacker for Mac and Windows. In Photoshop, load the frames as layers and set the blend mode to Lighten.</p>
+
+  <div class="cta">
+    <h2>Clean your frames and create your star trail in one program</h2>
+    <p>Star Trail CleanR finds the airplane and satellite trails in your frames and repairs them using the neighboring photos, so the stars stay and the trails go. Then it creates your star trail image, and a timelapse if you want one. It is free.</p>
+    <a class="btn" href="index.html#download">Download Star Trail CleanR free</a>
+  </div>
+
+  <p>Curious how the cleaning works? Read the plain-English <a class="inline" href="research.html">technical write-ups</a>.</p>
+
+</div>
+
+<footer>
+  <div class="wrap">
+    <div><span class="brandf">Star Trail CleanR</span> &middot; Remove the Trails. Keep the Stars.</div>
+    <div>Free beta &middot; <a href="stats.html">Stats</a> &middot; <a href="https://www.instagram.com/bruceherwig" target="_blank" rel="noopener">@bruceherwig</a></div>
+  </div>
+</footer>
+
+<script>(function(){var h=document.querySelector("header"),t=h&&h.querySelector(".navtoggle");if(t){t.addEventListener("click",function(){var o=h.classList.toggle("open");t.setAttribute("aria-expanded",o?"true":"false");});}})();</script>
+</body>
+</html>
