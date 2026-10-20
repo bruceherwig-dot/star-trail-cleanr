@@ -533,6 +533,10 @@ def _match_bitdepth(img, target_dtype):
     """
     if img.dtype == target_dtype:
         return img
+    if img.dtype.kind == "f":
+        # 32-bit float TIFFs hold 0.0-1.0; scale to the target's full range.
+        top = 65535.0 if target_dtype == np.uint16 else 255.0
+        return np.clip(np.rint(img * top), 0, top).astype(target_dtype)
     if target_dtype == np.uint16:
         return img.astype(np.uint16) * 257
     return (img >> 8).astype(np.uint8)

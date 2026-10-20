@@ -171,3 +171,15 @@ def test_gui_passes_expected_bitdepth():
         "The GUI no longer passes --expected-bitdepth to the worker, so batches "
         "would each guess their own target and could disagree across a run."
     )
+
+
+def test_float_frame_scales_to_full_range():
+    """A 32-bit float TIFF (0.0-1.0) crashed 8-bit targets (Sentry PYTHON-16)
+    and went near-black at 16-bit targets. White must stay white, mid stays mid."""
+    w = _load_worker()
+    f = np.full((4, 4, 3), 0.5, dtype=np.float32)
+    f[0, 0] = 1.0
+    f8 = w._match_bitdepth(f, np.uint8)
+    f16 = w._match_bitdepth(f, np.uint16)
+    assert f8.dtype == np.uint8 and f8[0, 0, 0] == 255 and f8[1, 1, 0] in (127, 128)
+    assert f16.dtype == np.uint16 and f16[0, 0, 0] == 65535 and 32767 <= f16[1, 1, 0] <= 32768
