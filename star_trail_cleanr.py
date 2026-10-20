@@ -9575,6 +9575,21 @@ class SummaryPanel(QWidget):
             _trow.addWidget(vid, 1)
             lay.addLayout(_trow)
 
+        # Two doorways to the other tabs. Bruce, 2026-10-19: this tab shows the video
+        # and people forget the window can also make a star trail or a timelapse.
+        # Each button only jumps to its tab; it never starts a build.
+        if on_pick_tab is not None:
+            _pick_row = QHBoxLayout()
+            _pick_row.setSpacing(12)
+            for _txt, _which in (("Create a Star Trail", "star"),
+                                 ("Create a Timelapse", "timelapse")):
+                _b = QPushButton(_txt)
+                _b.setFixedHeight(48)
+                _b.setStyleSheet(_hero_btn_css())
+                _b.clicked.connect(lambda *_, w=_which: on_pick_tab(w))
+                _pick_row.addWidget(_b, 1)
+            lay.addLayout(_pick_row)
+
         share = QLabel("Help spread the word! When you share on social media, "
                        "tag <b>@bruceherwig #StarTrailCleanR</b>")
         share.setTextFormat(Qt.RichText); share.setWordWrap(True)
@@ -9600,21 +9615,6 @@ class SummaryPanel(QWidget):
         self._feature_lbl.setStyleSheet(f"color: {CARD_TEXT}; font-size: 15px; padding: 4px 24px;")
         lay.addWidget(self._feature_lbl)
         lay.addStretch(1)
-
-        # Two doorways to the other tabs. Bruce, 2026-10-19: this tab shows the video
-        # and people forget the window can also make a star trail or a timelapse.
-        # Each button only jumps to its tab; it never starts a build.
-        if on_pick_tab is not None:
-            _pick_row = QHBoxLayout()
-            _pick_row.setSpacing(12)
-            for _txt, _which in (("Create a Star Trail", "star"),
-                                 ("Create a Timelapse", "timelapse")):
-                _b = QPushButton(_txt)
-                _b.setFixedHeight(48)
-                _b.setStyleSheet(_hero_btn_css())
-                _b.clicked.connect(lambda *_, w=_which: on_pick_tab(w))
-                _pick_row.addWidget(_b, 1)
-            lay.addLayout(_pick_row)
 
         self._open_btn = QPushButton("Open Cleaned Folder")
         self._open_btn.setFixedHeight(48)
