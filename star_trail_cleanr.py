@@ -9448,7 +9448,7 @@ class _VideoThumb(QWidget):
 # A gap between blocks of the Summary text: a little under half a blank line. The
 # summary used to separate its blocks with a full blank line each (two <br>), which
 # spent about 40 px of window height on air; this keeps them visibly apart for less.
-_SUMMARY_GAP = "<div style='font-size:9px;'>&nbsp;</div>"
+_SUMMARY_GAP = "<div style='font-size:4px;'>&nbsp;</div>"
 
 def _tidy_summary_html(html):
     """The summary text as the Summary tab shows it, whether it was just built or was
@@ -9466,7 +9466,7 @@ def _tidy_summary_html(html):
     import re
     if not html:
         return html
-    m = re.search(r"(?:<br>(?:<br>|<div style='font-size:9px;'>&nbsp;</div>))?"
+    m = re.search(r"(?:<br>(?:<br>|<div style='font-size:\d+px;'>&nbsp;</div>))?"
                   r"<span style='font-size:14px; color:[^']*;'>Thought it'd take.*?</span>\s*$",
                   html, re.S)
     ready = html.find("<b>Ready for the fun part!</b>")
@@ -9475,6 +9475,8 @@ def _tidy_summary_html(html):
         timing = re.sub(r"^(?:<br>(?:<br>|<div[^>]*>&nbsp;</div>))", "", timing)
         html = (html[:ready] + timing.strip() + "<br>" + _SUMMARY_GAP
                 + html[ready:m.start()])
+    # A copy saved by an older version carries the old, taller gaps; shrink them too.
+    html = re.sub(r"<div style='font-size:\d+px;'>&nbsp;</div>", _SUMMARY_GAP, html)
     return html.replace("<br><br>", "<br>" + _SUMMARY_GAP)
 
 
@@ -9495,8 +9497,11 @@ class SummaryPanel(QWidget):
         self._video_lbl = None
         summary_html = _tidy_summary_html(summary_html)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(*_CREATOR_PANEL_MARGINS)
-        lay.setSpacing(_CREATOR_PANEL_SPACING)
+        # Tighter than the two maker tabs (top 8, spacing 6): this tab holds the most,
+        # and every point here is window height.
+        lay.setContentsMargins(_CREATOR_PANEL_MARGINS[0], 8, _CREATOR_PANEL_MARGINS[2],
+                               _CREATOR_PANEL_MARGINS[3])
+        lay.setSpacing(6)
 
         # The logo sits just left of the heading, the two centered together as one
         # unit. (It is 44 px so the row is barely taller than the heading alone.)
@@ -9594,7 +9599,7 @@ class SummaryPanel(QWidget):
                        "tag <b>@bruceherwig #StarTrailCleanR</b>")
         share.setTextFormat(Qt.RichText); share.setWordWrap(True)
         share.setAlignment(Qt.AlignCenter)
-        share.setStyleSheet(f"color: {CARD_TEXT}; font-size: 15px; padding: 12px 24px;")
+        share.setStyleSheet(f"color: {CARD_TEXT}; font-size: 15px; padding: 2px 24px;")
         lay.addWidget(share)
 
         # Invitation to be featured on the website. First sentence blue + bold, then a
