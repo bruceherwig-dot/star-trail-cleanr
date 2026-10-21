@@ -8750,9 +8750,10 @@ class StarTrailPanel(QWidget):
 
         # Trail Length (Comet's sub-option), indented to the right to read as a child
         # of Comet Mode. Grayed (control AND label) unless Comet Mode is selected.
-        # Fraction of the sequence (50/75/100%), so the tail scales to the frame count.
+        # Fraction of the sequence (50/75/100/150/200%), so the tail scales to the frame count.
         self._comet_len_cb = QComboBox()
-        for label, frac in (("Short (50%)", 0.5), ("Medium (75%)", 0.75), ("Long (100%)", 1.0)):
+        for label, frac in (("Short (50%)", 0.5), ("Medium (75%)", 0.75), ("Long (100%)", 1.0),
+                            ("Extra Long (150%)", 1.5), ("Max (200%)", 2.0)):
             self._comet_len_cb.addItem(label, frac)
         self._comet_len_cb.setCurrentIndex(self._comet_len_cb.findData(1.0))   # default Long (100%)
         _lenrow = QHBoxLayout()
@@ -8931,7 +8932,8 @@ class StarTrailPanel(QWidget):
         ws = os.path.dirname(self._star_path) if self._star_path else self._cleaned
         tokens = []
         if self._mode_comet.isChecked():
-            length = {0.5: "short", 0.75: "medium", 1.0: "long"}.get(
+            length = {0.5: "short", 0.75: "medium", 1.0: "long",
+                      1.5: "xlong", 2.0: "max"}.get(
                 float(self._comet_len_cb.currentData() or 1.0), "long")
             tokens.append(f"comet-{length}")
             if self._reverse_chk.isChecked():
