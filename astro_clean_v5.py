@@ -414,11 +414,33 @@ def _filter_by_resolution(files: List[Path],
         from collections import Counter
         target = Counter(sizes).most_common(1)[0][0]
 
-    filtered = [fp for fp in files if _hdr_size(fp) == target]
-    skipped = len(files) - len(filtered)
-    if skipped:
-        word = "frame" if skipped == 1 else "frames"
-        print(f"  Skipped {skipped} {word} with different resolution")
+    # A failed size read (None) is NOT a size mismatch. Retry it once after a
+    # short pause -- a file that is briefly unavailable (cloud-synced or busy
+    # folder, drive hiccup) must not be thrown away as "different size".
+    # Sentry 7819644016: all 20 frames of one batch were dropped this way though
+    # the app's own pre-run scan had read every one of them fine.
+    filtered = []
+    wrong_sizes = []
+    unreadable = 0
+    for fp in files:
+        sz = _hdr_size(fp)
+        if sz is None:
+            time.sleep(0.5)
+            sz = _hdr_size(fp)
+        if sz == target:
+            filtered.append(fp)
+        elif sz is None:
+            unreadable += 1
+        else:
+            wrong_sizes.append(sz)
+    _filter_by_resolution.last_unreadable = unreadable
+    _filter_by_resolution.last_wrong_sizes = wrong_sizes
+    if wrong_sizes:
+        word = "frame" if len(wrong_sizes) == 1 else "frames"
+        print(f"  Skipped {len(wrong_sizes)} {word} with different resolution")
+    if unreadable:
+        word = "frame" if unreadable == 1 else "frames"
+        print(f"  Skipped {unreadable} {word} whose size could not be read")
     return filtered
 
 
@@ -1254,10 +1276,18 @@ def main():
         # sentence a person can act on.
         dropped = getattr(load_with_neighbors, "last_dropped", 0)
         if dropped:
-            print(f"ERROR: none of the frames in this batch are "
-                  f"{args.expected_width}x{args.expected_height} -- "
-                  f"{dropped} were a different size and were skipped, leaving "
-                  f"{n}. This batch cannot be cleaned.")
+            _unr = getattr(_filter_by_resolution, "last_unreadable", 0)
+            _wrong = getattr(_filter_by_resolution, "last_wrong_sizes", [])
+            _seen = ", ".join(sorted({f"{w}x{h}" for w, h in _wrong})[:5])
+            _parts = []
+            if _wrong:
+                _parts.append(f"{len(_wrong)} were a different size ({_seen})")
+            if _unr:
+                _parts.append(f"{_unr} could not be read")
+            print(f"ERROR: none of the frames in this batch could be used "
+                  f"(expected {args.expected_width}x{args.expected_height}) -- "
+                  f"{'; '.join(_parts) or str(dropped) + ' were skipped'}, "
+                  f"leaving {n}. This batch cannot be cleaned.")
         else:
             print(f"ERROR: this batch has only {n} frame(s); cleaning needs at "
                   f"least 3 (each frame is repaired using its neighbours).")
