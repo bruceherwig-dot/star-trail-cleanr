@@ -192,3 +192,21 @@ def test_without_an_engine_error_the_last_real_error_line_is_still_reported():
     native = "UserWarning: x\n  src()\nforrtl: severe (157): Program Exception - access violation\n"
     assert worker_error_message(native, ["loading 1/20: a.jpg"]).startswith("forrtl: severe (157)")
 
+
+
+def test_a_native_crash_code_gets_plain_english_not_a_bare_number():
+    """Sentry 7825670217 (2026-11-02): a Windows user's engine died with exit code
+    3221225477 (0xC0000005) and no Python error. The user saw only the number."""
+    faulthandler_stderr = ("Windows fatal exception: access violation\n\n"
+                           "Current thread 0x00001a2c (most recent call first):\n"
+                           "  File \"ultralytics\\engine\\model.py\", line 1, in predict\n")
+    msg = worker_error_message(faulthandler_stderr, ["Loading AI trail detector..."], 3221225477)
+    assert "crashed" in msg and "antivirus" in msg and "access violation" in msg, msg
+    assert "ultralytics" not in msg, "the raw stack goes to the crash report, not the user"
+
+
+def test_ordinary_exit_codes_and_engine_errors_are_unchanged_by_the_native_crash_rule():
+    assert worker_error_message("", REAL_FULL_DISK_RUN, 2).startswith("ERROR: Cannot write")
+    assert worker_error_message("boom line\n", ["x"], 1) == "boom line"
+    tb = "Traceback (most recent call last):\n  File \"x.py\", line 1, in <module>\nValueError: bad\n"
+    assert worker_error_message(tb, ["x"], 3221225477) == "ValueError: bad"

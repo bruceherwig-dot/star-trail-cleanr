@@ -78,6 +78,16 @@ if sys.platform == 'win32' and getattr(sys, 'frozen', False):
 if len(sys.argv) > 1 and sys.argv[1] == '--cleanr-worker':
     script = sys.argv[2]
     sys.argv = [script] + sys.argv[3:]
+    # A native crash (access violation inside a compiled library) kills the process
+    # with no Python error at all, so the crash report arrives blank (Sentry
+    # 7825670217, 2026-11-02). faulthandler writes the Python call stack to stderr
+    # at the moment of death, which lands in the report and names the step.
+    try:
+        import faulthandler
+        if sys.stderr is not None:
+            faulthandler.enable(file=sys.stderr, all_threads=True)
+    except Exception:
+        pass
     import runpy
     runpy.run_path(script, run_name='__main__')
     sys.exit(0)
@@ -1151,7 +1161,32 @@ def _leader_gear_exif(frames):
     return out
 
 
-def worker_error_message(stderr_text, stdout_lines):
+_NATIVE_CRASH_CODES = {
+    3221225477: "memory access violation",       # 0xC0000005
+    3221225725: "stack overflow",                # 0xC00000FD
+    3221225501: "illegal processor instruction",  # 0xC000001D
+    3221226505: "heap corruption",               # 0xC0000374
+    -11: "memory access violation",              # SIGSEGV (Mac/Linux)
+    -4: "illegal processor instruction",         # SIGILL
+}
+
+
+def native_crash_message(returncode):
+    """Plain-English text for an engine that died inside a compiled library, or
+    None for any other exit code. These deaths leave no Python error, so without
+    this the user sees only a bare number."""
+    kind = _NATIVE_CRASH_CODES.get(returncode)
+    if kind is None:
+        return None
+    return (f"The cleaning engine crashed inside the computer's own math libraries "
+            f"({kind}).\n"
+            "Things to try: restart Star Trail CleanR and run again; update Windows "
+            "and your graphics drivers; add Star Trail CleanR to your antivirus "
+            "exclusions. If it keeps happening, the crash report we receive "
+            "will help us fix it.")
+
+
+def worker_error_message(stderr_text, stdout_lines, returncode=None):
     """The message to show the user when an engine batch exits non-zero.
 
     KEEPS THE WHOLE ERROR BLOCK, not just its first line. The engine writes a
@@ -1206,6 +1241,9 @@ def worker_error_message(stderr_text, stdout_lines):
         return err_lines[-1]
     if start is not None:
         return "\n".join(l.rstrip() for l in lines[start:]).strip()
+    native = native_crash_message(returncode)
+    if native:
+        return native
     if err_lines:
         return err_lines[-1]
     real = [l for l in lines if not _console_notice.match(l)]
@@ -2154,7 +2192,8 @@ class CleanerWorker(QThread):
                     return
                 if self._proc.returncode != 0:
                     stderr_text = self._proc.stderr.read().strip()
-                    err_msg = worker_error_message(stderr_text, proc_stdout_lines)
+                    err_msg = worker_error_message(stderr_text, proc_stdout_lines,
+                                                   self._proc.returncode)
 
                     def _head_tail(lines, n=50):
                         """Return first n + last n lines joined, with a marker
@@ -2203,6 +2242,16 @@ class CleanerWorker(QThread):
                                 scope.set_tag("skipped_size", str(len(mismatched)))
                                 scope.set_tag("skipped_unreadable",
                                               str(len(unreadable_sorted)))
+                                scope.set_tag("exit_code_hex", hex(self._proc.returncode & 0xFFFFFFFF))
+                                try:
+                                    scope.set_tag("cpu", _plat.processor() or "unknown")
+                                    if sysname == "Windows":
+                                        import ctypes
+                                        # 40 = PF_AVX2_INSTRUCTIONS_AVAILABLE
+                                        scope.set_tag("cpu_avx2", str(bool(
+                                            ctypes.windll.kernel32.IsProcessorFeaturePresent(40))))
+                                except Exception:
+                                    pass
                                 scope.set_extra("stderr_preview", stderr_preview or "")
                                 scope.set_extra("stdout_preview", stdout_preview or "")
                                 scope.set_extra("stderr_full", stderr_text or "")
