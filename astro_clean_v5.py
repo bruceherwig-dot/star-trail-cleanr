@@ -1904,6 +1904,10 @@ def main():
         fit_polygons=True, fallback_polys=False, link_gaps=False,
         seam_second_pass=True, suppress_fp=False,
         prune_phantoms=True,
+        # Drop polygons that outline the ground (a tree line or roof edge just
+        # outside the rough foreground mask) instead of a trail; each drop is
+        # logged with its position and scores.
+        ground_filter=True,
         # Hard-negative phantom logging is dev-only (Bruce's source runs), never
         # in the shipped frozen bundle. sys.frozen is True only in the bundle.
         log_phantom_negatives=not getattr(sys, "frozen", False),

@@ -55,7 +55,7 @@ from .io_safe import robust_imread
 from .crossing_splitter import split_crossing, has_crossing_evidence
 from .trail_grouper import (
     group_detections, fit_polygon, fit_curved_group, _group_angle_spread,
-    _try_split_parallel, _pred_to_mask, thin_fat_detections, bands_for_blob,
+    _try_split_parallel, _pred_to_mask, thin_fat_detections, bands_for_blob, ground_mark,
     _CURVED_MIN_XSPAN, _CURVED_MIN_ANGLE_SPREAD, MIN_AREA, _REF_FRAME_PX,
 )
 
@@ -83,6 +83,12 @@ class StageConfig:
     # noise to their logs that never reaches us); the STC worker turns it on
     # only when running from source (Bruce's machine), not in the frozen bundle.
     log_phantom_negatives: bool = False
+    # Final stage: drop polygons that outline the GROUND (a tree line or roof edge
+    # just outside the rough foreground mask) rather than a trail: ground on one
+    # side along the whole polygon and no bright line inside it. OFF by default so
+    # test suites see legacy behaviour; the STC worker turns it on. Every drop is
+    # written to the run log with its position and both scores.
+    ground_filter: bool = False
 
     # Core tunables (carried over from the old pipeline; revisit per stage).
     tile_size: int = 640
@@ -1612,6 +1618,54 @@ def stage_suppress_fp(state: PipelineState, cfg: StageConfig,
 # Orchestrator
 # --------------------------------------------------------------------------- #
 
+def stage_ground_filter(state: PipelineState, cfg: StageConfig,
+                        log: StageLog) -> PipelineState:
+    """Final stage: remove polygons that are outlines of the ground, not trails.
+
+    A tree line or roof edge just outside the (deliberately rough) foreground mask
+    gets read as a trail. It has dark ground on one side along its whole length and
+    no bright thin line inside it. A real trail has sky on both sides, or a bright
+    line in it (a real low trail on a horizon keeps the line). See ground_mark().
+    The polygon, its repair segment and its pixels in the final mask all go; pixels
+    shared with a polygon that stays are kept. Each drop is logged.
+    """
+    polys, segs = state.polygons, state.polygon_segs
+    if not polys or state.final_mask is None or state.image is None:
+        return state
+    if len(segs) != len(polys):
+        log.event("ground_filter_skipped", reason="polygon and segment lists differ",
+                  polygons=len(polys), segments=len(segs))
+        return state
+    img = state.image
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY) if img.ndim == 3 else img
+    drop = []
+    for i, p in enumerate(polys):
+        mark, info = ground_mark(gray, p)
+        if mark:
+            drop.append(i)
+            pts = np.asarray(p, dtype=np.int32).reshape(-1, 2)
+            log.event("ground_mark_dropped",
+                      bbox=[int(pts[:, 0].min()), int(pts[:, 1].min()),
+                            int(pts[:, 0].max()), int(pts[:, 1].max())],
+                      side_ratio=info["side_ratio"], ridge=info["ridge"])
+    log.count("polygons_checked", len(polys))
+    log.count("ground_marks_dropped", len(drop))
+    if not drop:
+        return state
+    keep = [i for i in range(len(polys)) if i not in set(drop)]
+    kept_union = np.zeros(state.final_mask.shape[:2], dtype=bool)
+    for i in keep:
+        kept_union |= segs[i] > 0
+    dropped_only = np.zeros_like(kept_union)
+    for i in drop:
+        dropped_only |= segs[i] > 0
+    dropped_only &= ~kept_union
+    state.final_mask[dropped_only] = 0
+    state.polygons = [polys[i] for i in keep]
+    state.polygon_segs = [segs[i] for i in keep]
+    return state
+
+
 def detect_frame(model: Any,
                  image: np.ndarray,
                  foreground_mask: Optional[np.ndarray] = None,
@@ -1648,6 +1702,9 @@ def detect_frame(model: Any,
     if cfg.suppress_fp:
         with flog.stage("suppress_fp") as s:
             state = stage_suppress_fp(state, cfg, s, neighbour_frames)
+    if cfg.ground_filter:
+        with flog.stage("ground_filter") as s:
+            state = stage_ground_filter(state, cfg, s)
 
     # Expose per-stage timing so callers (e.g. astro_clean_v5) can report where
     # detection time goes without re-parsing the JSONL.

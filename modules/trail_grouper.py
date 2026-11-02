@@ -1493,3 +1493,112 @@ def thin_fat_detections(det_list, h, w, others=None):
         stats["thinned"] += 1
         out.extend(made if made else [d])
     return out, stats
+
+
+# ── Ground-edge marks (a tree line or roof outline read as a trail) ───────────
+# The foreground mask is a rough estimate (it is meant to be), so the model sometimes
+# marks the fringe of trees or a roof edge just outside it. Such a mark has dark
+# ground on ONE side along its whole length and no bright thin line inside it. A
+# real trail in open sky has sky on both sides, and a real trail low on a horizon
+# has a bright line in it. Only a polygon that fails BOTH tests is dropped.
+#   side test : brightness of the strip beside each side of the polygon (min/max
+#               ratio), judged in chunks along its length; every judged chunk
+#               must be dark on the SAME side.
+#   line test : height of the centre of the cross-trail profile above its two
+#               sides, in noise units (median along the length, so stars drop out).
+# The cutoffs were set from about 14 examples: see project_large_square_problem.md.
+GROUND_NEAR_PX      = 14     # side strips start this far from the polygon ...
+GROUND_FAR_PX       = 70     # ... and end this far
+GROUND_CHUNKS       = 4      # judged in this many chunks along the polygon
+GROUND_CHUNK_RATIO  = 0.65   # a chunk counts as "ground on one side" below this min/max brightness
+GROUND_MIN_JUDGED   = 3      # at least this many chunks must be judgeable
+GROUND_MIN_SIDE_PX  = 150    # a side strip needs at least this many pixels to be judged
+GROUND_RIDGE_MIN    = 5.0    # a bright line this far above its sides (noise units) means a real trail
+
+
+def _ground_crop(gray, corners):
+    """Crop around a polygon with room for the side strips. Returns (crop, local corners)."""
+    h, w = gray.shape[:2]
+    pts = np.asarray(corners, dtype=np.int32).reshape(-1, 2)
+    m = GROUND_FAR_PX + 2
+    x0 = max(0, int(pts[:, 0].min()) - m); x1 = min(w, int(pts[:, 0].max()) + m + 1)
+    y0 = max(0, int(pts[:, 1].min()) - m); y1 = min(h, int(pts[:, 1].max()) + m + 1)
+    return gray[y0:y1, x0:x1], pts - np.array([x0, y0], dtype=np.int32)
+
+
+def _ground_chunks(crop, local):
+    """Per-chunk (min/max side brightness, which side is darker +1/-1) along a polygon; None = not judgeable."""
+    ch, cw = crop.shape[:2]
+    P = np.zeros((ch, cw), np.uint8)
+    cv2.fillPoly(P, [local.reshape(-1, 1, 2)], 1)
+    ys, xs = np.nonzero(P)
+    if len(ys) < 50:
+        return []
+    cx, cy = xs.mean(), ys.mean()
+    u = np.linalg.svd(np.column_stack([xs - cx, ys - cy]).astype(np.float32), full_matrices=False)[2][0]
+    nrm = np.array([-u[1], u[0]])
+    near = np.ones((2 * GROUND_NEAR_PX + 1,) * 2, np.uint8)
+    far = np.ones((2 * GROUND_FAR_PX + 1,) * 2, np.uint8)
+    ring = cv2.dilate(P, far) - cv2.dilate(P, near)
+    ry, rx = np.nonzero(ring)
+    along = (rx - cx) * u[0] + (ry - cy) * u[1]
+    across = (rx - cx) * nrm[0] + (ry - cy) * nrm[1]
+    pa = (xs - cx) * u[0] + (ys - cy) * u[1]
+    edges = np.linspace(pa.min(), pa.max(), GROUND_CHUNKS + 1)
+    g = crop[ry, rx].astype(np.float32)
+    out = []
+    for i in range(GROUND_CHUNKS):
+        sel = (along >= edges[i]) & (along <= edges[i + 1])
+        a, b = g[sel & (across > 0)], g[sel & (across <= 0)]
+        if len(a) < GROUND_MIN_SIDE_PX or len(b) < GROUND_MIN_SIDE_PX:
+            out.append(None)
+            continue
+        ma, mb = float(np.median(a)), float(np.median(b))
+        out.append((min(ma, mb) / max(ma, mb, 1e-6), 1 if ma < mb else -1))
+    return out
+
+
+def _ground_ridge(crop, local, pad=20):
+    """How far the centre of the cross-trail profile stands above its two sides, in noise units (None if too short)."""
+    pts = local.astype(np.float32).reshape(-1, 1, 2)
+    (cx, cy), (rw, rh), ang = cv2.minAreaRect(pts)
+    if rw < rh:
+        ang += 90
+        rw, rh = rh, rw
+    M = cv2.getRotationMatrix2D((cx, cy), ang, 1.0)
+    H, L = int(rh + 2 * pad), int(rw)
+    M[0, 2] += L / 2 - cx
+    M[1, 2] += H / 2 - cy
+    strip = cv2.warpAffine(crop.astype(np.float32), M, (L, H), flags=cv2.INTER_LINEAR,
+                           borderMode=cv2.BORDER_REFLECT)
+    if strip.shape[1] < 40:
+        return None
+    prof = np.median(strip, axis=1).astype(np.float64)
+    n = len(prof)
+    c = n // 2
+    noise = 1.4826 * np.median(np.abs(np.diff(prof))) / 1.414 + 1e-6
+    half = max(6, int(rh / 2))
+    core = prof[max(0, c - half):c + half + 1]
+    left = np.median(prof[max(0, c - 3 * half):max(1, c - half)]) if c - half > 1 else np.median(prof[:3])
+    right = np.median(prof[c + half:c + 3 * half]) if c + half < n - 1 else np.median(prof[-3:])
+    return float((core.max() - max(left, right)) / noise)
+
+
+def ground_mark(gray, corners):
+    """Is this polygon an outline of the ground rather than a trail? Returns (is_mark, info).
+
+    info holds "side_ratio" (worst-judged chunk's min/max brightness, None if not
+    judged) and "ridge" (bright-line height in noise units) for the run log.
+    """
+    crop, local = _ground_crop(gray, corners)
+    info = {"side_ratio": None, "ridge": None}
+    chunks = [c for c in _ground_chunks(crop, local) if c is not None]
+    if len(chunks) < GROUND_MIN_JUDGED:
+        return False, info
+    info["side_ratio"] = round(max(c[0] for c in chunks), 2)
+    same_side = len({c[1] for c in chunks}) == 1
+    if not (same_side and all(c[0] < GROUND_CHUNK_RATIO for c in chunks)):
+        return False, info
+    ridge = _ground_ridge(crop, local)
+    info["ridge"] = None if ridge is None else round(ridge, 1)
+    return (ridge is None or ridge < GROUND_RIDGE_MIN), info
