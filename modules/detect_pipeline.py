@@ -55,7 +55,7 @@ from .io_safe import robust_imread
 from .crossing_splitter import split_crossing, has_crossing_evidence
 from .trail_grouper import (
     group_detections, fit_polygon, fit_curved_group, _group_angle_spread,
-    _try_split_parallel, _pred_to_mask,
+    _try_split_parallel, _pred_to_mask, thin_fat_detections, bands_for_blob,
     _CURVED_MIN_XSPAN, _CURVED_MIN_ANGLE_SPREAD, MIN_AREA, _REF_FRAME_PX,
 )
 
@@ -967,6 +967,14 @@ def stage_fit_polygons(state: PipelineState, cfg: StageConfig,
         state.final_mask = final
         return state
 
+    # Fat junction pieces (an X or V of thin lines read as one wide blob) would
+    # become one big box ("large square") or a stray box between the real trails.
+    # Cut them to thin bands, or drop them when thin neighbours already cover them.
+    det_list, _thin = thin_fat_detections(det_list, h, w)
+    for _k, _n in _thin.items():
+        if _n:
+            log.count("fat_" + _k, _n)
+
     # Group collinear, touching fragments into trails.
     _t = time.perf_counter()
     groups = group_detections(det_list) if det_list else []
@@ -984,7 +992,19 @@ def stage_fit_polygons(state: PipelineState, cfg: StageConfig,
     # polygon so repair and the viewers treat it like any other region. This
     # keeps every arm the model masked (the fitted-quad path trimmed the 8819
     # vertical stub) without the quad's fat over-coverage.
+    # When the tangle has two or more clear line directions it is painted as one
+    # thin band per line (and a rectangle per band) instead of one fat blob.
     for _mb, _rb, _cb in rescued_blobs:
+        _bands = bands_for_blob(_mb)
+        if _bands:
+            for _pb in _bands:
+                final[_rb:_rb + _pb.shape[0], _cb:_cb + _pb.shape[1]][_pb > 0] = 255
+                _ys, _xs = np.nonzero(_pb)
+                _box = cv2.boxPoints(cv2.minAreaRect(
+                    np.column_stack([_xs, _ys]).astype(np.float32)))
+                polygons.append(
+                    (_box + np.array([_cb, _rb])).round().astype(int).tolist())
+            continue
         final[_rb:_rb + _mb.shape[0], _cb:_cb + _mb.shape[1]][_mb > 0] = 255
         _cnts, _ = cv2.findContours(_mb, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         for _cn in _cnts:
@@ -1342,6 +1362,13 @@ def stage_seam_second_pass(state: PipelineState, cfg: StageConfig,
         new_dets.extend(_targeted_tile_dets(model, img_rgb, tx, ty,
                                             cfg.tile_size, h, w, cfg, log, rot90=True))
     log.count("tiles_run", len(seen_tiles))
+    # The re-run detections are kept whole (no crossing or parallel split), so a
+    # junction comes back as a fat blob: thin it before it is grouped and boxed,
+    # judged against what the frame already had.
+    new_dets, _thin = thin_fat_detections(new_dets, h, w, det_list)
+    for _k, _n in _thin.items():
+        if _n:
+            log.count("fat_" + _k, _n)
     log.count("new_dets", len(new_dets))
 
     # Re-inference enrichment: when the model DID fire in a gap (e.g. B10), fold

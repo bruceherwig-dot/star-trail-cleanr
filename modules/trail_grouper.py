@@ -99,6 +99,7 @@ import math
 import time
 from skimage.measure import label as sklabel, regionprops as skregionprops
 from modules.crossing_splitter import split_crossing
+from modules import crossing_splitter as _cs   # line-direction helpers for the fat-blob thinning below
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 # Thresholds used across filter, splitter, grouper, and polygon fitter.
@@ -1110,6 +1111,100 @@ def fit_polygon(group_indices, det_list):
     return corners_xy, width, u_avg
 
 
+def refine_rectangle_to_trail(gray, corners_xy, width_scale=1.0,
+                              max_angle_deg=6.0, max_shift_frac=0.35):
+    """
+    Re-aim and re-center a fitted trail rectangle on the real streak pixels.
+
+    fit_polygon takes its angle and center from the detector's mask blobs, so a
+    lopsided mask gives a rectangle that is tilted or shifted off the actual
+    trail. This looks at the image itself: inside the rectangle it subtracts the
+    local background and keeps small bright specks (dropping big blobs). It then
+    searches a narrow window of angles (max_angle_deg either side of the current
+    axis) and sideways shifts (max_shift_frac x width) for the strongest
+    brightness-weighted streak. The rectangle is rebuilt along that line with the
+    same length and width (width multiplied by width_scale).
+
+    gray: 2-D float image (full frame). corners_xy: four (x, y) corners.
+    Returns (new_corners_xy, info). Returns the input corners unchanged, with
+    info["refined"] False, when there is too little streak signal. Not called
+    by the app pipeline; used when building training pre-annotations.
+    """
+    p = np.array(corners_xy, dtype=np.float64).reshape(-1, 2)
+    c0 = p.mean(axis=0)
+    q = p - c0
+    _, _, vt = np.linalg.svd(q, full_matrices=False)
+    ax = vt[0]
+    length = float(np.ptp(q @ ax))
+    width = float(np.ptp(q @ np.array([-ax[1], ax[0]])))
+    info = {"refined": False, "angle_change_deg": 0.0, "shift_px": 0.0}
+    keep = [tuple(int(v) for v in pt) for pt in p]
+
+    h, w = gray.shape[:2]
+    x0, y0 = np.maximum(p.min(axis=0).astype(int) - 5, 0)
+    x1, y1 = np.minimum(p.max(axis=0).astype(int) + 5, [w, h])
+    crop = gray[y0:y1, x0:x1].astype(np.float32)
+    if crop.size == 0:
+        return keep, info
+    resid = crop - cv2.GaussianBlur(crop, (0, 0), 12)
+    inside = np.zeros(crop.shape, np.uint8)
+    cv2.fillPoly(inside, [(p - [x0, y0]).astype(np.int32)], 1)
+    vals = resid[inside > 0]
+    med = float(np.median(vals))
+    mad = float(np.median(np.abs(vals - med))) * 1.48 + 1e-6
+    cand = ((resid > med + 2.5 * mad) & (inside > 0)).astype(np.uint8)
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(cand, 8)
+    big = np.nonzero(stats[:, cv2.CC_STAT_AREA] > 40)[0]
+    cand[np.isin(lab, big)] = 0
+    ys, xs = np.nonzero(cand)
+    if len(ys) < 25:
+        return keep, info
+    pts = np.stack([xs + x0, ys + y0], axis=1).astype(np.float64)
+    wts = np.clip(resid[ys, xs] - med, 0.0, None).astype(np.float64)
+    wts = np.minimum(wts, np.percentile(wts, 95)) + 1e-6   # bright specks count more
+
+    # Constrained search: only angles within max_angle_deg of the rectangle's own
+    # axis, and only lines whose sideways offset is within max_shift_frac x width.
+    # For each angle, bin the specks by sideways position (brightness-weighted),
+    # smooth over a 5 px strip, and take the strongest strip.
+    max_shift = max(3.0, max_shift_frac * width)
+    best = None
+    for da in np.arange(-max_angle_deg, max_angle_deg + 0.01, 0.5):
+        r = math.radians(da)
+        d = np.array([ax[0] * math.cos(r) - ax[1] * math.sin(r),
+                      ax[0] * math.sin(r) + ax[1] * math.cos(r)])
+        nv = np.array([-d[1], d[0]])
+        off = (pts - c0) @ nv
+        lo = int(np.floor(-max_shift - 3))
+        bins = np.arange(lo, int(np.ceil(max_shift + 3)) + 2)
+        hist, _ = np.histogram(off, bins=bins, weights=wts)
+        strip = np.convolve(hist, np.ones(5), mode="same")
+        centers = bins[:-1] + 0.5
+        ok = np.abs(centers) <= max_shift
+        if not ok.any():
+            continue
+        k = int(np.argmax(np.where(ok, strip, -1.0)))
+        if best is None or strip[k] > best[0]:
+            best = (float(strip[k]), d, nv, float(centers[k]))
+    if best is None:
+        return keep, info
+    _, d, nv, off0 = best
+    inl = np.abs((pts - c0) @ nv - off0) < 2.5
+    span = float(np.ptp(pts[inl] @ d)) if inl.sum() > 1 else 0.0
+    if inl.sum() < 20 or span < 0.3 * length:
+        return keep, info            # too little streak signal: leave it alone
+    m = np.average(pts[inl], axis=0, weights=wts[inl])
+    dang = math.degrees(math.acos(min(1.0, abs(float(d @ ax)))))
+    n_vec = nv
+    center = m + float((c0 - m) @ d) * d    # keep the along-trail position
+    half_l, half_w = length / 2.0, (width * width_scale) / 2.0
+    new = [center + s1 * half_l * d + s2 * half_w * n_vec
+           for s1, s2 in ((-1, 1), (-1, -1), (1, -1), (1, 1))]
+    info.update(refined=True, angle_change_deg=dang,
+                shift_px=float(np.hypot(*(center - c0))))
+    return [(int(round(v[0])), int(round(v[1]))) for v in new], info
+
+
 def _group_angle_spread(group_indices, det_list):
     """Return angle spread (degrees) across detections in a group.
     Handles the 0/180 wrap: angles are unwrapped relative to the median."""
@@ -1199,3 +1294,202 @@ def fit_curved_group(group_indices, det_list):
         if corners is not None:
             result.append(corners)
     return result
+
+
+# ── Fat junction blobs ("large square") ───────────────────────────────────────
+# Where two trails cross, the model's tile masks around the junction are an X or
+# V of THIN lines, but the blob as a whole is wide. Fitting one rectangle to it
+# draws a big box with a trail in it ("large square"), or a small box pointing
+# between the two real trails. The seam second pass keeps its re-run detections
+# whole (no crossing or parallel split), which is where most of these come from.
+#
+# thin_fat_detections() is the one place that cleans them up. For each detection:
+#   - A short, wide piece that points a clearly different way from detections
+#     that already cover it is junction fill, not a trail: dropped.
+#   - A fat piece (short side over FAT_MINOR_PX at 24 MP, scaled to the frame)
+#     that thin neighbours already cover is dropped.
+#   - Any other fat piece is cut down to a thin band along each line direction
+#     inside it (two bands for a crossing, one band for a single line).
+# Long thin detections are never dropped: a real bright trail crossing another
+# looks "covered" too, and the first version of this rule deleted one.
+FAT_MINOR_PX     = 100.0   # short side (px at 24 MP) above which a detection is "fat"
+BAND_WIDTH_MULT  = 1.3     # band half-width = this x measured trail half-width ...
+BAND_PAD_PX      = 2.0     # ... plus this
+COVER_FRAC       = 0.6     # share of a piece that must already be covered to drop it
+COVER_GRID_PX    = 8       # coverage is measured on a grid this coarse (speed)
+ANGLE_APART_DEG  = 8.0     # "points a different way" means at least this many degrees apart
+STUBBY_MINOR_MULT = 1.5    # redundant-piece test only for pieces this much wider than a typical trail
+STUBBY_MAX_ASPECT = 4.0    # ... and no longer than this many times their width
+
+
+def _det_angle(d):
+    """Direction of a detection in degrees, 0-180 (u is a (row, col) vector)."""
+    return float(np.degrees(np.arctan2(d["u"][0], d["u"][1])) % 180)
+
+
+def _angle_apart(a, b):
+    """Smallest difference between two 0-180 degree directions."""
+    x = abs(a - b) % 180
+    return min(x, 180 - x)
+
+
+def _coverage_grid(dets, h, w):
+    """Coarse 0/1 grid marking where the given detections have pixels, grown a little."""
+    k = COVER_GRID_PX
+    cov = np.zeros((h // k + 2, w // k + 2), np.uint8)
+    for o in dets:
+        cov[o["coords"][:, 0] // k, o["coords"][:, 1] // k] = 1
+    return cv2.dilate(cov, np.ones((5, 5), np.uint8))
+
+
+def _covered_fraction(d, cov):
+    """Share of detection d's pixels that fall on the coverage grid."""
+    k = COVER_GRID_PX
+    co = d["coords"]
+    return float(cov[co[:, 0] // k, co[:, 1] // k].mean())
+
+
+def _bands_from_blob(blob):
+    """Thin bands along each line direction found inside a blob (uint8 0/1 crop).
+
+    Hough lines are grouped by direction; every direction with real weight (the
+    same test the crossing splitter uses) becomes one band: the blob pixels
+    within BAND_WIDTH_MULT x the trail's measured half-width of that line.
+    Returns a list of band masks, or None when the blob has fewer than two
+    weighty directions (the caller then falls back to a single band).
+    """
+    area = int(blob.sum())
+    thr = 10 if area < 20000 else _cs._HOUGH_THRESHOLD
+    lines = cv2.HoughLinesP(blob * 255, 1, np.pi / 180, threshold=thr,
+                            minLineLength=_cs._HOUGH_MIN_LINE, maxLineGap=_cs._HOUGH_MAX_GAP)
+    if lines is None or len(lines) < 2:
+        return None
+    angles = [_cs._line_angle_deg(L[0]) for L in lines]
+    labels, _ = _cs._dbscan_angles(angles, _cs._DBSCAN_EPS, _cs._DBSCAN_MIN_SAMPLES)
+    ids = sorted(set(l for l in labels if l >= 0))
+    if len(ids) < 2:
+        return None
+    lens = {c: sum(_cs._line_length(lines[i][0]) for i, l in enumerate(labels) if l == c) for c in ids}
+    means = {c: _cs._circular_mean_angle([angles[i] for i, l in enumerate(labels) if l == c]) for c in ids}
+    total = sum(lens.values())
+    dom = max(ids, key=lambda c: lens[c])
+    keep = [dom] + [c for c in ids if c != dom
+                    and lens[c] >= _cs._MIN_SECOND_DIR_FRAC * total
+                    and _cs._angle_dist(means[c], means[dom]) >= _cs._MIN_SPLIT_ANGLE]
+    if len(keep) < 2:
+        return None
+    dt = cv2.distanceTransform(blob, cv2.DIST_L2, 5)
+    yy, xx = np.mgrid[0:blob.shape[0], 0:blob.shape[1]]
+    bands = []
+    for c in keep:
+        pts = np.array([[lines[i][0][0], lines[i][0][1]] for i, l in enumerate(labels) if l == c] +
+                       [[lines[i][0][2], lines[i][0][3]] for i, l in enumerate(labels) if l == c],
+                       np.float32)
+        band = _band_along_fitted_line(blob, dt, yy, xx, pts)
+        if band is not None:
+            bands.append(band)
+    return bands if len(bands) >= 2 else None
+
+
+def _band_along_fitted_line(blob, dt, yy, xx, pts, default_half=None):
+    """The blob's largest connected piece within a trail-width band of the line fitted to pts.
+
+    default_half: trail half-width to use when too few blob pixels sit on the
+    line to measure it; None means give up (return None) instead.
+    """
+    vx, vy, x0, y0 = [float(v) for v in cv2.fitLine(pts, cv2.DIST_L2, 0, 0.01, 0.01).ravel()]
+    perp = np.abs((xx - x0) * (-vy) + (yy - y0) * vx)
+    on = (blob > 0) & (perp < 3)
+    if on.sum() >= 20:
+        half = float(np.percentile(dt[on], 30))
+    elif default_half is not None:
+        half = default_half
+    else:
+        return None
+    band = ((blob > 0) & (perp <= BAND_WIDTH_MULT * half + BAND_PAD_PX)).astype(np.uint8)
+    n, lab, st, _ = cv2.connectedComponentsWithStats(band, 8)
+    if n > 1:
+        band = (lab == 1 + int(np.argmax(st[1:, cv2.CC_STAT_AREA]))).astype(np.uint8)
+    return band
+
+
+def _single_band(blob):
+    """One thin band along the blob's own principal line (used when it has only one direction)."""
+    ys, xs = np.nonzero(blob)
+    pts = np.column_stack([xs, ys]).astype(np.float32)
+    dt = cv2.distanceTransform(blob, cv2.DIST_L2, 5)
+    yy, xx = np.mgrid[0:blob.shape[0], 0:blob.shape[1]]
+    band = _band_along_fitted_line(blob, dt, yy, xx, pts, default_half=20.0)
+    return [band] if band is not None else [blob]
+
+
+def bands_for_blob(blob):
+    """Thin bands for a crossing blob (uint8 0/1 crop), or None to keep the blob as it is."""
+    return _bands_from_blob(blob)
+
+
+def _drop_redundant(dets, ref, h, w):
+    """Drop stubby wide pieces that detections pointing a different way already cover.
+
+    Biggest first; a piece already dropped stops counting as cover. Returns
+    (kept list, number dropped).
+    """
+    if not dets or not ref:
+        return dets, 0
+    med_minor = float(np.median([o["minor"] for o in ref]))
+    alive = set(id(x) for x in ref)
+    dropped = set()
+    for d in sorted(dets, key=lambda x: -x["minor"]):
+        if d["minor"] < STUBBY_MINOR_MULT * med_minor or d["major"] / max(d["minor"], 1) > STUBBY_MAX_ASPECT:
+            continue                      # a long thin detection is a real trail: never touched
+        a = _det_angle(d)
+        others = [o for o in ref if o is not d and id(o) in alive
+                  and _angle_apart(_det_angle(o), a) >= ANGLE_APART_DEG]
+        if others and _covered_fraction(d, _coverage_grid(others, h, w)) >= COVER_FRAC:
+            dropped.add(id(d))
+            alive.discard(id(d))
+    return [d for d in dets if id(d) not in dropped], len(dropped)
+
+
+def thin_fat_detections(det_list, h, w, others=None):
+    """Clean fat junction detections out of a detection list. Returns (new list, stats).
+
+    others: the detections to measure "already covered" against. Defaults to
+    det_list itself; the seam second pass passes the frame's existing detections
+    so its new ones are judged against what was already found.
+    stats counts "dropped_redundant", "dropped_covered" and "thinned" for the run log.
+    """
+    stats = {"dropped_redundant": 0, "dropped_covered": 0, "thinned": 0}
+    if not det_list:
+        return det_list, stats
+    ref = others if others is not None else det_list
+    det_list, stats["dropped_redundant"] = _drop_redundant(det_list, ref, h, w)
+    fat_px = FAT_MINOR_PX * math.sqrt(h * w / _REF_FRAME_PX)
+    fat = [d for d in det_list if d["minor"] > fat_px]
+    if not fat:
+        return det_list, stats
+    cov = _coverage_grid([o for o in ref if o["minor"] <= fat_px], h, w)
+    out = []
+    for d in det_list:
+        if d["minor"] <= fat_px:
+            out.append(d)
+            continue
+        if _covered_fraction(d, cov) >= COVER_FRAC:
+            stats["dropped_covered"] += 1
+            continue
+        co = d["coords"]
+        r0, c0 = co[:, 0].min(), co[:, 1].min()
+        crop = np.zeros((co[:, 0].max() - r0 + 1, co[:, 1].max() - c0 + 1), np.uint8)
+        crop[co[:, 0] - r0, co[:, 1] - c0] = 1
+        made = []
+        for band in (_bands_from_blob(crop) or _single_band(crop)):
+            p = detection_props(band * 255, min_aspect=0.0, min_area=0)
+            if p is None:
+                continue
+            p["coords"] = p["coords"] + np.array([r0, c0])
+            p["centroid"] = p["centroid"] + np.array([r0, c0])
+            p["conf"] = d.get("conf", 0.0)
+            made.append(p)
+        stats["thinned"] += 1
+        out.extend(made if made else [d])
+    return out, stats
