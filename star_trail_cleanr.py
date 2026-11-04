@@ -746,7 +746,7 @@ _SHARE_KIND_LABELS = {
 _bundled_model = os.path.join(_base, "best.pt")
 _DEV_FALLBACK_MODEL = os.path.join(
     os.path.expanduser("~"),
-    "Documents/yolo_runs/trail_detector_v5/weights/best.pt")
+    "Documents/yolo_runs/trail_detector_v7a_scratch/weights/best.pt")
 
 # THE dev-only gate. Shown ONLY when running from SOURCE; a frozen build hides
 # everything behind it, so the built .app shows exactly what the public sees.
