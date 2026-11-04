@@ -56,15 +56,43 @@ MIN_LONG_AXIS = 60   # drop polygons shorter than this (unless red)
 # v5 retrain DATASETS (full frames). Folder is under "star trail images" unless it's an
 # absolute path (out-of-root sets: Bombay, Jeff Fishman). Count = all reviewed frames.
 TASK_CONFIG = {
-    36: ("Warren Hatch - Stroudt's Preserve",                       114),
+    77: ("Warren Hatch - Stroudt's Preserve",                        57),   # JPG-only task; replaces doubled task 36
+    78: ("Warren Hatch - Barnegat Light - Camera 2",                149),   # JPG-only task; replaces doubled task 35
     39: ("borrego_springs_1",                                         5),
     40: ("Bruce Herwig Joshua Tree 6.26 80 sec exposure Star Trail", 89),
     41: ("Thomas Jackson Star Trails Borrego",                      301),
     54: ("Thomas Jackson GoPro_G0088569",                           900),
-    55: ("Thomas Jackson GoPro_G0037688",                           997),
+    55: ("Thomas Jackson GoPro_G0037688",                           308),   # frames 1-8 missing on disk; 9-308 = 300 real frames
     56: ("Katrina Brown - Full Size Star Trails",                   709),
     59: ("/Volumes/T7 Shield/Photos/Astrophotography/_2026/26.6 Bombay Beach - Soly/Star Trail Canon 6D/ST Export Originals", 118),
     60: ("/Volumes/T7 Shield/AI Projects/Star Trail CleanR/star trail images/Jeff Fishman/cleaned", 6),
+    # ── v6 roster (added 2026-10-31). Limits: Bruce's 2026 sets use the FIRST 300 frames
+    # (task 64 Spain: first 250); older sets keep their v4/v5 limits. ──
+    1:  ("Bruce Herwig - Joshua Tree - Juniper and Monolith",        400),
+    2:  ("Bruce Herwig - first star trail data",                     135),
+    5:  ("Silvana Della Camera - Tree and Trails",                   251),
+    8:  ("Bruce Herwig - Borrego - Gomphothere",                     154),
+    9:  ("Silvana Della Camera - Lighthouse",                        608),
+    15: ("Greg Meyer Arizona Brightened",                            400),
+    19: ("Pioneertown 6mm Fisheye Training",                         112),
+    21: ("Cheryl Hanscom Wilcox - Milky Way 101",                    101),
+    22: ("Silvana Della Camera - Boardwalk",                          64),
+    26: ("Silvana Della Camera - River Reflection",                   98),
+    29: ("Sean Parker - Arizona Star Trails",                        206),
+    31: ("Cheryl Hanscom Wilcox - Alabama Hills",                    192),
+    32: ("borrego_springs_1",                                        400),
+    33: ("Shiu Wan - 2013_11_30 Green Park Star Trail",               99),
+    34: ("Shiu Wan - 2023-03-14 Sompting Church",                     52),
+    62: ("Ajay Talwar - India -fisheye",                             300),
+    63: ("Antonio Pena - All Sky 072326",                            300),
+    64: ("Glenn Tetley - Spain Sky",                                 250),
+    65: ("Kajan Gnanasakthy - star trail",                           300),
+    66: ("Jon Bertsch - Lake Mead - Gold Butte NM",                  158),
+    67: ("Shiu Wan - 2016_12_04 St Brides Church Star Trail",        300),
+    68: ("/Volumes/T7 Shield/Photos/Astrophotography/_2026/26.8 Star Trail UofR Memorial Chapel/EOS R Left Side/Before",                                 300),
+    69: ("/Volumes/T7 Shield/Photos/Astrophotography/_2026/26.8 Star Trail UofR Memorial Chapel/Canon 6D Right Side/Before",                             300),
+    70: ("/Volumes/T7 Shield/Photos/Astrophotography/_2026/26.4 Astro Adventure Joshua Tree Borrego Death Valley/Joshua Tree/Star Trails/JPGS", 300),
+    76: ("Sean Parker - AZ Aurora",                                  300),
 }
 
 # ── CVAT auth ─────────────────────────────────────────────────────────────────
@@ -354,6 +382,10 @@ def main():
         except Exception as e:
             print(f"  ERROR: {e}")
 
+    skipped = sorted(set(TASK_CONFIG) - {x["task"] for x in summaries})
+    if skipped:
+        print(f"\nFAIL: {len(skipped)} task(s) produced NOTHING (image folder missing or error): {skipped}")
+
     # ── count-check reconcile (catches the TJ-14-class silent shortfall) ──
     print("\n" + "=" * 60)
     print("RECONCILE (count-check):")
@@ -373,6 +405,8 @@ def main():
     else:
         print("OK: every reviewed frame matched a source image. No silent drops.")
     print("\nDone.")
+    if skipped or problems:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

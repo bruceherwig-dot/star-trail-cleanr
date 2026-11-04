@@ -46,6 +46,17 @@ def natkey(p):
 def list_frames(src, only=None):
     fs = [f for f in os.listdir(src) if os.path.splitext(f)[1].lower() in EXTS]
     fs = sorted(fs, key=natkey)
+    # Refuse the same photo twice (e.g. _DSC8002.jpg AND _DSC8002.tif). Uploading both
+    # doubled whole sets and contaminated v4 training.
+    seen = {}
+    for f in fs:
+        seen.setdefault(os.path.splitext(f)[0].lower(), []).append(f)
+    doubled = {k: v for k, v in seen.items() if len(v) > 1}
+    if doubled:
+        raise SystemExit(
+            f"REFUSING TO UPLOAD: {len(doubled)} photos are in this folder twice "
+            f"(for example {next(iter(doubled.values()))}). Keep one copy of each photo "
+            f"(the JPG) and try again.")
     if only:
         keep = set(only)
         fs = [f for f in fs if os.path.splitext(f)[0] in keep]

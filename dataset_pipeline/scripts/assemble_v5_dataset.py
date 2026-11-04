@@ -63,7 +63,7 @@ ROTATIONS = {
     270: (cv2.ROTATE_90_CLOCKWISE,        lambda x, y: (1.0 - y, x      )),
 }
 
-DATASET_NAMES = {36: "Stroudt's", 39: "borrego", 40: "Joshua Tree 80s", 41: "TJ Borrego",
+DATASET_NAMES = {77: "Stroudt's", 78: "Barnegat Light", 39: "borrego", 40: "Joshua Tree 80s", 41: "TJ Borrego",
                  54: "GoPro 88569", 55: "GoPro 37688", 56: "Katrina", 59: "Bombay",
                  60: "Jeff Fishman"}
 

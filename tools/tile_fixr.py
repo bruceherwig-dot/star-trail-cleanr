@@ -814,10 +814,20 @@ def fetch_cvat_tasks(auth):
             print(f"fetch_cvat_tasks error: {e}")
             break
         for t in r.get("results", []):
+            size = t.get("size", 0)
+            active = size
+            if size > 0:
+                try:
+                    meta = requests.get(f"{CVAT_URL}/api/tasks/{t['id']}/data/meta",
+                                        auth=auth).json()
+                    active = size - len(meta.get("deleted_frames", []))
+                except Exception:
+                    pass
             out.append({
                 "id": t["id"],
                 "name": t["name"],
-                "size": t.get("size", 0),
+                "size": size,
+                "active": active,
             })
         url = r.get("next")
     out.sort(key=lambda t: t["name"].lower())
@@ -886,7 +896,7 @@ class TaskPickerDialog(QDialog):
         row1.addWidget(QLabel("CVAT task:"))
         self.task_combo = QComboBox()
         for t in tasks:
-            label = f"{t['id']:>3}  —  {t['name']}  ({t['size']} frames)"
+            label = f"{t['name']}  ({t['active']} frames)  (CVAT project #{t['id']})"
             self.task_combo.addItem(label, t["id"])
         for i in range(self.task_combo.count()):
             if self.task_combo.itemData(i) == last_task_id:
@@ -962,20 +972,8 @@ class TaskPickerDialog(QDialog):
         task = self.tasks[idx] if 0 <= idx < len(self.tasks) else None
         if task is None:
             return
-        # Fetch deleted_frames to get accurate count, then update the combo label.
-        effective_size = task["size"]
-        if self.auth and task["size"] > 0:
-            try:
-                meta = requests.get(
-                    f"{CVAT_URL}/api/tasks/{task['id']}/data/meta",
-                    auth=self.auth).json()
-                deleted = meta.get("deleted_frames", [])
-                effective_size = task["size"] - len(deleted)
-                new_label = (f"{task['id']:>3}  —  {task['name']}  "
-                             f"({effective_size} frames)")
-                self.task_combo.setItemText(idx, new_label)
-            except Exception:
-                pass
+        # The active (non-deleted) frame count is computed when the task list loads.
+        effective_size = task["active"]
         # Reset to 1/max when switching to a different task; restore saved values
         # when reopening on the same task.
         if effective_size > 0:
@@ -1284,6 +1282,7 @@ class TileFixR(QMainWindow):
         self.add_mode = False
         self.add_pts_local = []   # in tile-local coords of current tile
         self.add_hover_xy = None  # current cursor pos for rubber-band preview
+        self.TWO_END_WIDTH = 14   # width (px) of a 2-ends polygon
         self.next_temp_id = -1
         # Undo stack — list of (op_type, payload) tuples, max 50
         self.undo_stack = []
@@ -1369,6 +1368,7 @@ class TileFixR(QMainWindow):
 
         if self.view_only:
             self.add_btn.setEnabled(False)
+            self.width_spin.setEnabled(False)
             self.send_btn.setEnabled(False)
             self.pull_btn.setEnabled(False)
             self.setWindowTitle("TileFixR  —  View Only")
@@ -1552,6 +1552,24 @@ class TileFixR(QMainWindow):
         self.flagged_pill.clicked.connect(self._on_view_flagged_toggled)
         row1.addWidget(self.flagged_pill)
         row1.addStretch()
+
+        width_lbl = QLabel("Width:")
+        width_lbl.setStyleSheet(f"color: {MUTED_TEXT}; font-size: 12px; font-weight: bold;")
+        row1.addWidget(width_lbl)
+        self.width_spin = QSpinBox()
+        self.width_spin.setRange(4, 100)
+        self.width_spin.setSingleStep(2)
+        self.width_spin.setSuffix(" px")
+        self.width_spin.setFocusPolicy(Qt.ClickFocus)
+        self.width_spin.setToolTip(
+            "Width of the polygon drawn when you click the start and end of a "
+            "trail. Up/down arrows change it by 2. Remembered between launches. "
+            "Polygons already drawn keep their width.")
+        self.width_spin.setValue(self._load_two_end_width())
+        self.TWO_END_WIDTH = self.width_spin.value()
+        self.width_spin.valueChanged.connect(self._on_two_end_width_changed)
+        row1.addWidget(self.width_spin)
+        row1.addSpacing(16)
 
         tile_lbl = QLabel("Tile:")
         tile_lbl.setStyleSheet(f"color: {MUTED_TEXT}; font-size: 12px; font-weight: bold;")
@@ -2509,6 +2527,15 @@ class TileFixR(QMainWindow):
                     cv2.fillPoly(crop, [inner], fill)
         # Add-mode in-progress polygon — thin lime line + dots.
         # The FIRST vertex is drawn larger as a snap-close target.
+        if (self.add_mode and self._two_end_mode()
+                and len(self.add_pts_local) == 1
+                and self.image_view._rb_line is not None):
+            line = self.image_view._rb_line.line()
+            box = self._two_end_corners(
+                self.add_pts_local[0], (line.x2(), line.y2()))
+            if box is not None:
+                cv2.polylines(crop, [np.array(box, dtype=np.int32)], True,
+                              (50, 255, 50), s(2), cv2.LINE_AA)
         if self.add_mode and self.add_pts_local:
             pts = np.array(self.add_pts_local, dtype=np.int32)
             line_color = (50, 255, 50)
@@ -2674,6 +2701,17 @@ class TileFixR(QMainWindow):
         # If the click is within snap-radius of the FIRST vertex (and we have
         # at least 3 vertices placed), treat it as "close the polygon."
         if self.add_mode:
+            if self._two_end_mode():
+                if not self.add_pts_local:
+                    self.add_pts_local.append((ix, iy))
+                    self.refresh_view()
+                    return
+                corners = self._two_end_corners(self.add_pts_local[0], (ix, iy))
+                if corners is None:
+                    return  # second click on top of the first: ignore
+                self.add_pts_local = corners
+                self._close_add_polygon()
+                return
             SNAP_R = 14
             if len(self.add_pts_local) >= 4:
                 fx, fy = self.add_pts_local[0]
@@ -3078,7 +3116,7 @@ class TileFixR(QMainWindow):
 
     def _on_image_double_clicked(self, ix, iy):
         """In add mode, a double-click closes the in-progress polygon."""
-        if self.add_mode:
+        if self.add_mode and not self._two_end_mode():
             self._close_add_polygon()
 
     def _on_image_right_clicked(self, ix, iy):
@@ -3151,6 +3189,46 @@ class TileFixR(QMainWindow):
 
     # ── Add mode ────────────────────────────────────────────────────────────
 
+    def _two_end_mode(self):
+        """Always True: the 2-ends method is the only way to draw."""
+        return True
+
+    def _two_end_width_path(self):
+        return Path.home() / ".star_trail_cleanr" / "tile_fixr_width.json"
+
+    def _load_two_end_width(self):
+        """Last width the user set (4-100, even), or 14 if none saved."""
+        try:
+            w = int(json.loads(self._two_end_width_path().read_text())["width"])
+            return max(4, min(100, w))
+        except Exception:
+            return 14
+
+    def _on_two_end_width_changed(self, value):
+        """New polygons use this width; save it as the default for next launch.
+        A half-drawn polygon is kept (its preview just redraws at the new width)."""
+        self.TWO_END_WIDTH = int(value)
+        try:
+            p = self._two_end_width_path()
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps({"width": int(value)}))
+        except Exception:
+            pass
+        self.refresh_view()
+
+    def _two_end_corners(self, p0, p1):
+        """Corners of the TWO_END_WIDTH-pixel-wide rectangle running from p0 to
+        p1 (tile-local), or None if the two points are under 2 px apart."""
+        dx = float(p1[0] - p0[0])
+        dy = float(p1[1] - p0[1])
+        length = (dx * dx + dy * dy) ** 0.5
+        if length < 2.0:
+            return None
+        hw = self.TWO_END_WIDTH / 2.0
+        nx, ny = -dy / length * hw, dx / length * hw
+        return [(p0[0] + nx, p0[1] + ny), (p1[0] + nx, p1[1] + ny),
+                (p1[0] - nx, p1[1] - ny), (p0[0] - nx, p0[1] - ny)]
+
     def _toggle_add_mode(self):
         """Turn the draw-a-new-polygon mode on or off. Entering it switches to a
         cross cursor, allows clicks beyond the tile edge, and clears the
@@ -3182,6 +3260,8 @@ class TileFixR(QMainWindow):
         if not self.add_mode or not self.entries:
             return
         if len(self.add_pts_local) < 3:
+            if self._two_end_mode():
+                return  # Enter / double-click mid 2-ends draw: ignore
             QMessageBox.information(self, "Need 3+ vertices",
                 "A polygon needs at least 3 vertices. Click more, "
                 "or press ESC to cancel.")

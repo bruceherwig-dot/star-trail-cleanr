@@ -136,7 +136,9 @@ INFO_TEXT = "#000"
 SELECTED_COLOR = (255, 255, 255)   # white outline on selected polygon
 DELETE_COLOR = (60, 60, 220)       # red overlay for marked-for-delete
 EDITED_COLOR = (0, 255, 255)       # yellow outline for edited polygons
+MAX_SIZE_GROWTH_PX = 400         # send is refused if an edited polygon grew longer than this (stray-corner guard)
 ADDED_COLOR = (50, 255, 50)        # lime outline for newly added polygons
+FLAGGED_COLOR = (0, 215, 255)      # amber-yellow outline for flagged polygons
 CURRENT_COLOR = (0, 255, 0)        # default green for current (entry) polygon
 
 
@@ -210,7 +212,21 @@ def fetch_cvat_tasks(auth):
             print(f"fetch_cvat_tasks error: {e}")
             break
         for t in r.get("results", []):
-            out.append({"id": t["id"], "name": t["name"], "size": t.get("size", 0)})
+            size = t.get("size", 0)
+            active, max_frame = size, size
+            if size > 0:
+                try:
+                    meta = requests.get(f"{CVAT_URL}/api/tasks/{t['id']}/data/meta",
+                                        auth=auth).json()
+                    deleted = set(meta.get("deleted_frames", []))
+                    if deleted:
+                        live = [i for i in range(size) if i not in deleted]
+                        active = len(live)
+                        max_frame = (live[-1] + 1) if live else 0
+                except Exception:
+                    pass
+            out.append({"id": t["id"], "name": t["name"], "size": size,
+                        "active": active, "max_frame": max_frame})
         url = r.get("next")
     out.sort(key=lambda t: t["name"].lower())
     return out
@@ -506,6 +522,17 @@ def load_and_analyze(progress_cb=None):
                 elif e["cvat_seq"] in claude_flagged:
                     e["flagged"] = True
                     e["flag_reason"] = claude_flagged[e["cvat_seq"]]
+            # Flags Bruce already cleared (edited the polygon, or pressed U)
+            cleared_path = CLAUDE_FLAGS_PATH.with_name("flags_cleared.json")
+            if cleared_path.exists():
+                try:
+                    cleared = set(json.loads(cleared_path.read_text()).get("cleared_server_ids", []))
+                except Exception:
+                    cleared = set()
+                for e in entries:
+                    if e["flagged"] and e["server_id"] in cleared:
+                        e["flagged"] = False
+                        e["flag_reason"] = ""
             flagged_count = sum(1 for e in entries if e["flagged"])
             print(f"\n  Loaded {flagged_count} Claude flags")
 
@@ -671,6 +698,11 @@ class ZoomableImageView(QGraphicsView):
                     if abs(dx) < 10 and abs(dy) < 10:
                         self.clicked_at_image_xy.emit(float(xy[0]), float(xy[1]))
                 self.released_at_image_xy.emit(int(xy[0]), int(xy[1]))
+            else:
+                # Released over the dark margin / off the picture: still tell the parent,
+                # otherwise it believes the drag is still going and a later mouse move drags
+                # a corner of the old polygon to the cursor (the stray-line bug). Never a click.
+                self.released_at_image_xy.emit(0, 0)
             self._press_pos = None
             self._press_button = None
             self._is_dragging = False
@@ -760,9 +792,11 @@ PILL_STYLE = """
 """
 
 
-def make_pill(text, color_key="blue"):
-    """Create a checkable pill-style toggle button."""
+def pill_colors(color_key="blue"):
+    """Return the colour set for one pill style."""
     colors = {
+        "orange_hot": {"bg": "#ff9800", "fg": "#2b1700", "border": "#e65100",
+                    "checked_bg": "#e65100", "checked_border": "#bf360c", "hover_bg": "#ffb74d"},
         "blue":   {"bg": "#e8f0fe", "fg": "#1a5276", "border": "#b0c4de",
                     "checked_bg": "#1a6fc4", "checked_border": "#145da0", "hover_bg": "#d0e0f0"},
         "orange": {"bg": "#fef3e8", "fg": "#7e5109", "border": "#e0c8a0",
@@ -772,11 +806,27 @@ def make_pill(text, color_key="blue"):
         "green":  {"bg": "#e8fee8", "fg": "#1e7a1e", "border": "#b0deb0",
                     "checked_bg": "#2a7a2a", "checked_border": "#1e5f1e", "hover_bg": "#d0f0d0"},
     }
-    c = colors.get(color_key, colors["blue"])
+    return colors.get(color_key, colors["blue"])
+
+
+def make_pill(text, color_key="blue"):
+    """Create a checkable pill-style toggle button."""
     btn = QPushButton(text)
     btn.setCheckable(True)
-    btn.setStyleSheet(PILL_STYLE.format(**c))
+    btn.setStyleSheet(PILL_STYLE.format(**pill_colors(color_key)))
     return btn
+
+
+def _send_log(msg):
+    """Append one timestamped line to the send log (diagnostic only; never raises)."""
+    try:
+        import datetime
+        path = STATE_DIR / "send_log.txt"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a") as f:
+            f.write(f"{datetime.datetime.now():%Y-%m-%d %H:%M:%S} {msg}\n")
+    except Exception:
+        pass
 
 
 # --- Main GUI ---
@@ -838,10 +888,12 @@ class TrailFixR(QMainWindow):
         self._extend_axis = None
         self._extend_last_full = None
         self._extend_opposite_indices = None
+        self._handle_lock = None
         # Add-polygon-mode state
         self.add_mode = False
         self.add_pts_local = []     # crop-local coords of in-progress polygon
         self.add_hover_xy = None
+        self.TWO_END_WIDTH = 14   # width (px) of a 2-ends polygon
         self.next_temp_id = -1
         # Hover affordance state
         self.hovered_handle = None
@@ -907,6 +959,7 @@ class TrailFixR(QMainWindow):
             (QKeySequence(Qt.Key_C),          self._copy_reference),
             (QKeySequence(Qt.Key_A),          self._toggle_add_mode),
             (QKeySequence(Qt.Key_T),          self._auto_tighten),
+            (QKeySequence(Qt.Key_U),          self._unflag_selected),
             (QKeySequence(Qt.Key_Escape),     self._on_escape),
             (QKeySequence(Qt.Key_Return),     self._close_add_polygon),
             (QKeySequence(Qt.Key_Enter),      self._close_add_polygon),
@@ -1074,6 +1127,7 @@ class TrailFixR(QMainWindow):
             pill.clicked.connect(lambda checked, m=mode: self.set_filter(m))
             row1.addWidget(pill)
 
+        self._restyle_flag_pill()
         row1.addStretch()
 
         # Edit-mode controls (right side of row 1)
@@ -1091,11 +1145,28 @@ class TrailFixR(QMainWindow):
         self.add_btn.setCheckable(True)
         self.add_btn.setStyleSheet(edit_btn_style)
         self.add_btn.setToolTip(
-            "Toggle Add Polygon mode (A). Click 4 corners to make a polygon, "
-            "or click the first vertex / press Enter to close earlier."
+            "Toggle Add Polygon mode (A). Click the start and end of the trail; "
+            "the polygon is drawn for you at the Width shown."
         )
         self.add_btn.clicked.connect(self._toggle_add_mode)
         row1.addWidget(self.add_btn)
+
+        width_lbl = QLabel("Width:")
+        width_lbl.setStyleSheet("color: #666; font-size: 12px; font-weight: bold;")
+        row1.addWidget(width_lbl)
+        self.width_spin = QSpinBox()
+        self.width_spin.setRange(4, 100)
+        self.width_spin.setSingleStep(2)
+        self.width_spin.setSuffix(" px")
+        self.width_spin.setFocusPolicy(Qt.ClickFocus)
+        self.width_spin.setToolTip(
+            "Width of the polygon drawn when you click the start and end of a "
+            "trail. Up/down arrows change it by 2. Remembered between launches. "
+            "Polygons already drawn keep their width.")
+        self.width_spin.setValue(self._load_two_end_width())
+        self.TWO_END_WIDTH = self.width_spin.value()
+        self.width_spin.valueChanged.connect(self._on_two_end_width_changed)
+        row1.addWidget(self.width_spin)
 
         self.tighten_btn = QPushButton("Auto-Tighten (T)")
         self.tighten_btn.setStyleSheet(edit_btn_style)
@@ -1328,7 +1399,7 @@ class TrailFixR(QMainWindow):
         # Shortcut hint (center)
         hint_left = QLabel(
             "← / → = prev/next   |   Tab / Shift-Tab = next/prev in same frame   |   "
-            "Space, D, Del = delete   |   A = add   |   T = tighten   |"
+            "Space, D, Del = delete   |   A = add   |   T = tighten   |   U = unflag   |"
             "Cmd+Z = undo")
         hint_left.setStyleSheet(f"color: {HINT_TEXT}; font-size: 11px; background: transparent;")
         hint_left.setAlignment(Qt.AlignCenter)
@@ -1584,13 +1655,46 @@ class TrailFixR(QMainWindow):
             scale = 1.0
         return max(6.0, base / scale)
 
-    def _compute_extend_handles(self, ff_pts):
+    def _lock_handles(self, sid):
+        """Freeze which sides are green/blue (and which vertices each handle
+        moves) for polygon sid until _unlock_handles(). Called when a drag
+        starts so a near-square polygon can't swap its handles mid-drag."""
+        poly = self.polygons_by_id.get(sid)
+        self._handle_lock = None
+        if poly is None:
+            return
+        fresh = self._compute_extend_handles(poly["points"])
+        self._handle_lock = (sid, [(h["kind"], list(h["vertex_indices"]),
+                                    h["axis"].copy()) for h in fresh])
+
+    def _unlock_handles(self):
+        """Release the handle freeze so the next press decides afresh."""
+        self._handle_lock = None
+
+    def _compute_extend_handles(self, ff_pts, sid=None):
         """PCA-based handle compute. Returns list of dicts with kind
         ('length' on short sides, 'width' on long sides), center_full,
-        vertex_indices to move together, and unit-axis vector."""
+        vertex_indices to move together, and unit-axis vector. A near-square
+        polygon treats left-right as its long direction (green on the left
+        and right ends). If sid matches the locked polygon, the locked
+        grouping is reused with centers taken from the current points."""
         if ff_pts is None or len(ff_pts) < 3:
             return []
         pts = ff_pts.astype(np.float32)
+        lock = getattr(self, "_handle_lock", None)
+        if lock is not None and sid is not None and lock[0] == sid:
+            out = []
+            for kind, indices, axis in lock[1]:
+                if max(indices) >= len(pts):
+                    continue
+                center = pts[indices].mean(axis=0)
+                out.append({
+                    "kind": kind,
+                    "center_full": (float(center[0]), float(center[1])),
+                    "vertex_indices": list(indices),
+                    "axis": axis.copy(),
+                })
+            return out
         mu = pts.mean(axis=0)
         centered = pts - mu
         cov = centered.T @ centered / max(len(centered) - 1, 1)
@@ -1608,6 +1712,9 @@ class TrailFixR(QMainWindow):
             return []
         principal = principal / n1
         secondary = secondary / n2
+        if evals[order[0]] <= 1.69 * max(float(evals[order[1]]), 1e-9):
+            principal = np.array([1.0, 0.0], dtype=np.float32)
+            secondary = np.array([0.0, 1.0], dtype=np.float32)
 
         def _make(axis_vec, kind):
             proj = centered @ axis_vec
@@ -1670,7 +1777,7 @@ class TrailFixR(QMainWindow):
         entry = self.entries[self.current_idx]
         best = None
         best_dist2 = float("inf")
-        for h in self._compute_extend_handles(poly["points"]):
+        for h in self._compute_extend_handles(poly["points"], self.selected_id):
             cx_full, cy_full = h["center_full"]
             cx = cx_full - entry["crop_x"]
             cy = cy_full - entry["crop_y"]
@@ -1731,6 +1838,7 @@ class TrailFixR(QMainWindow):
         single-vertex drag. If neither is in range, it leaves the view in pan
         mode. A vertex grab also auto-selects that polygon. A snapshot of the
         polygon is stashed for undo."""
+        self._end_stale_drag()
         if self.add_mode:
             self.image_view.setDragMode(QGraphicsView.NoDrag)
             return
@@ -1746,6 +1854,7 @@ class TrailFixR(QMainWindow):
         if prefer_extend:
             poly = self.polygons_by_id.get(ext_sid)
             if poly is not None:
+                self._lock_handles(ext_sid)
                 self.image_view.setDragMode(QGraphicsView.NoDrag)
                 self.image_view.viewport().setCursor(Qt.ClosedHandCursor)
                 entry = self.entries[self.current_idx]
@@ -1761,7 +1870,7 @@ class TrailFixR(QMainWindow):
                 grabbed = set(ext_h["vertex_indices"])
                 self._extend_opposite_indices = None
                 if ext_h["kind"] == "width":
-                    for h in self._compute_extend_handles(poly["points"]):
+                    for h in self._compute_extend_handles(poly["points"], ext_sid):
                         if h["kind"] == "width" and set(h["vertex_indices"]) != grabbed:
                             self._extend_opposite_indices = h["vertex_indices"]
                             break
@@ -1779,6 +1888,7 @@ class TrailFixR(QMainWindow):
             self.selected_id = n_sid
         self.image_view.setDragMode(QGraphicsView.NoDrag)
         self.image_view.viewport().setCursor(Qt.ClosedHandCursor)
+        self._lock_handles(n_sid)
         self._drag_polygon_id = n_sid
         self._drag_vertex_idx = n_vi
         self._drag_active = True
@@ -1789,6 +1899,12 @@ class TrailFixR(QMainWindow):
         else:
             self._drag_undo_snapshot = None
         self.refresh_view()
+
+    def _end_stale_drag(self):
+        """If a vertex or extend-handle drag is still marked active (its mouse release never
+        arrived), finish it now so it cannot keep following the cursor. Safe to call any time."""
+        if self._drag_active or self._extend_active:
+            self._on_image_released(0, 0)
 
     def _on_image_moved(self, ix, iy):
         """Live-update the polygon as the cursor moves during a drag. For an
@@ -1856,9 +1972,11 @@ class TrailFixR(QMainWindow):
             self._extend_axis = None
             self._extend_last_full = None
             self._extend_opposite_indices = None
+            self._unlock_handles()
             if not self.add_mode:
                 self.image_view.setDragMode(QGraphicsView.ScrollHandDrag)
                 self.image_view.viewport().unsetCursor()
+            self._grow_for_edited(sid)
             self._save_edits()
             self._refresh_send_button()
             self.refresh_view()
@@ -1871,10 +1989,12 @@ class TrailFixR(QMainWindow):
             self._push_undo(("vertex", sid_for_undo, pts_before, status_before))
         self._drag_undo_snapshot = None
         if self._drag_active:
+            self._grow_for_edited(self._drag_polygon_id)
             self._drag_active = False
             self._drag_polygon_id = None
             self._drag_vertex_idx = None
             self._drag_full_idx = None
+            self._unlock_handles()
             self._save_edits()
             self._refresh_send_button()
             self.refresh_view()
@@ -1922,7 +2042,7 @@ class TrailFixR(QMainWindow):
         new_hover = None
         if prefer_extend:
             handles = self._compute_extend_handles(
-                self.polygons_by_id[ext_sid]["points"])
+                self.polygons_by_id[ext_sid]["points"], ext_sid)
             try:
                 end_idx = handles.index(ext_h)
             except ValueError:
@@ -1948,6 +2068,46 @@ class TrailFixR(QMainWindow):
         super().leaveEvent(event)
 
     # ── Add-polygon mode ───────────────────────────────────────────────────
+
+    def _two_end_mode(self):
+        """Always True: the 2-ends method is the only way to draw."""
+        return True
+
+    def _two_end_width_path(self):
+        return Path.home() / ".star_trail_cleanr" / "trail_fixr_width.json"
+
+    def _load_two_end_width(self):
+        """Last width the user set (4-100, even), or 14 if none saved."""
+        try:
+            w = int(json.loads(self._two_end_width_path().read_text())["width"])
+            return max(4, min(100, w))
+        except Exception:
+            return 14
+
+    def _on_two_end_width_changed(self, value):
+        """New polygons use this width; save it as the default for next launch.
+        A half-drawn polygon is kept (its preview just redraws at the new width)."""
+        self.TWO_END_WIDTH = int(value)
+        try:
+            p = self._two_end_width_path()
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps({"width": int(value)}))
+        except Exception:
+            pass
+        self.refresh_view()
+
+    def _two_end_corners(self, p0, p1):
+        """Corners of the TWO_END_WIDTH-pixel-wide rectangle running from p0 to
+        p1 (crop-local), or None if the two points are under 2 px apart."""
+        dx = float(p1[0] - p0[0])
+        dy = float(p1[1] - p0[1])
+        length = (dx * dx + dy * dy) ** 0.5
+        if length < 2.0:
+            return None
+        hw = self.TWO_END_WIDTH / 2.0
+        nx, ny = -dy / length * hw, dx / length * hw
+        return [(p0[0] + nx, p0[1] + ny), (p1[0] + nx, p1[1] + ny),
+                (p1[0] - nx, p1[1] - ny), (p0[0] - nx, p0[1] - ny)]
 
     def _toggle_add_mode(self):
         """Turn add-polygon mode on or off (the A key / Add button). Entering
@@ -1976,6 +2136,8 @@ class TrailFixR(QMainWindow):
         if not self.add_mode or not self.entries:
             return
         if len(self.add_pts_local) < 3:
+            if self._two_end_mode():
+                return  # Enter / double-click mid 2-ends draw: ignore
             QMessageBox.information(self, "Need 3+ vertices",
                 "A polygon needs at least 3 vertices. Click more, "
                 "or press Esc to cancel.")
@@ -1997,9 +2159,54 @@ class TrailFixR(QMainWindow):
         self._push_undo(("add", temp_id))
         self.add_pts_local = []
         self.selected_id = temp_id
+        self._grow_crop_to_include(entry, ff_pts)
         self._toggle_add_mode()  # turn off and refresh
         self._save_edits()
         self._refresh_send_button()
+
+    def _grow_crop_to_include(self, entry, new_pts):
+        """After a polygon is drawn, widen the on-screen crop so it covers the
+        entry's own polygon plus the new one with the usual 20% margin (the
+        view never shrinks). Re-cuts the crop from the full-size image; every
+        polygon keeps its full-frame position."""
+        try:
+            main = self.polygons_by_id.get(entry["server_id"])
+            if main is None or not entry.get("img_path"):
+                return
+            allpts = np.vstack([main["points"], new_pts])
+            bw = allpts[:, 0].max() - allpts[:, 0].min()
+            bh = allpts[:, 1].max() - allpts[:, 1].min()
+            pad = max(MIN_CROP_PAD, int(CROP_PAD_RATIO * max(bw, bh)))
+            old_w = entry["crop_raw"].shape[1]
+            old_h = entry["crop_raw"].shape[0]
+            x_min = max(0, min(entry["crop_x"], int(allpts[:, 0].min()) - pad))
+            y_min = max(0, min(entry["crop_y"], int(allpts[:, 1].min()) - pad))
+            x_max = min(entry["img_w"], max(entry["crop_x"] + old_w, int(allpts[:, 0].max()) + pad))
+            y_max = min(entry["img_h"], max(entry["crop_y"] + old_h, int(allpts[:, 1].max()) + pad))
+            if (x_min == entry["crop_x"] and y_min == entry["crop_y"]
+                    and x_max - x_min == old_w and y_max - y_min == old_h):
+                return  # already roomy enough
+            img = cv2.imread(entry["img_path"])
+            if img is None:
+                return
+            entry["crop_raw"] = img[y_min:y_max, x_min:x_max].copy()
+            entry["crop_x"] = x_min
+            entry["crop_y"] = y_min
+            shifted = main["points"].copy()
+            shifted[:, 0] -= x_min
+            shifted[:, 1] -= y_min
+            entry["poly_pts"] = shifted.astype(np.int32)
+            self._last_displayed_idx = None  # re-fit the view to the bigger crop
+        except Exception as exc:
+            _send_log(f"grow crop failed: {exc!r}")
+
+    def _grow_for_edited(self, sid):
+        """After a drag or extend finishes, widen the on-screen crop so the
+        edited polygon has its 20% margin right away (never shrinks)."""
+        poly = self.polygons_by_id.get(sid)
+        if poly is None or not self.entries:
+            return
+        self._grow_crop_to_include(self.entries[self.current_idx], poly["points"])
 
     def _on_escape(self):
         """Handle the Escape key: first press clears a half-drawn add-mode
@@ -2054,6 +2261,9 @@ class TrailFixR(QMainWindow):
                 poly["points"] = pts_before
                 poly["status"] = status_before
                 dest_stack.append(("vertex", sid, pts_now, status_now))
+                auto = getattr(self, "_auto_unflagged", set())
+                if sid in auto:
+                    self._set_flag(sid, status_before != "original")
         elif kind == "add":
             temp_id = op[1]
             poly = self.polygons_by_id.pop(temp_id, None)
@@ -2080,6 +2290,12 @@ class TrailFixR(QMainWindow):
             self.marked_ids.add(sid)
             self._sync_entry_delete_flag(sid, True)
             dest_stack.append(("mark", sid))
+        elif kind == "unflag":
+            self._set_flag(op[1], True)
+            dest_stack.append(("reflag", op[1]))
+        elif kind == "reflag":
+            self._set_flag(op[1], False)
+            dest_stack.append(("unflag", op[1]))
 
     def _undo(self):
         """Pop the last operation off the undo stack, apply its inverse (which
@@ -2165,6 +2381,8 @@ class TrailFixR(QMainWindow):
         main_sid = entry["server_id"]
         visible = self._visible_polys_for_entry(entry)
 
+        flagged_sids = {e["server_id"] for e in self.entries if e["flagged"]}
+
         # Pass 1: every polygon in its base color
         for sid, local_pts in visible:
             poly = self.polygons_by_id.get(sid)
@@ -2173,6 +2391,9 @@ class TrailFixR(QMainWindow):
             if is_marked:
                 color = DELETE_COLOR
                 thick = s(2)
+            elif sid in flagged_sids:
+                color = FLAGGED_COLOR
+                thick = s(3)
             elif is_main:
                 color = CURRENT_COLOR
                 thick = s(2)
@@ -2227,7 +2448,8 @@ class TrailFixR(QMainWindow):
                                 if self.hovered_handle and
                                    self.hovered_handle[0] == "extend"
                                 else None)
-                handles_list = self._compute_extend_handles(poly_meta["points"])
+                handles_list = self._compute_extend_handles(poly_meta["points"],
+                                                           self.selected_id)
                 for end_idx, h in enumerate(handles_list):
                     cx = int(round(h["center_full"][0] - cx0))
                     cy = int(round(h["center_full"][1] - cy0))
@@ -2256,6 +2478,14 @@ class TrailFixR(QMainWindow):
                     cv2.fillPoly(crop, [inner], fill)
 
         # Pass 6: add-mode in-progress polygon (lime + dots)
+        if (self.add_mode and self._two_end_mode()
+                and len(self.add_pts_local) == 1
+                and self.add_hover_xy is not None):
+            box = self._two_end_corners(self.add_pts_local[0],
+                                        self.add_hover_xy)
+            if box is not None:
+                cv2.polylines(crop, [np.array(box, dtype=np.int32)], True,
+                              (50, 255, 50), s(2), cv2.LINE_AA)
         if self.add_mode and self.add_pts_local:
             pts = np.array(self.add_pts_local, dtype=np.int32)
             line_color = (50, 255, 50)
@@ -2339,14 +2569,19 @@ class TrailFixR(QMainWindow):
         )
         webbrowser.open_new_tab(url)
 
-    def _pull_from_cvat(self):
-        """Re-fetch ALL polygons on the current frame from CVAT by frame index.
-        Updates existing, adds new, removes deleted. Used after send or manual pull."""
+    def _pull_from_cvat(self, *_):
+        """Re-fetch ALL polygons on the frame on screen from CVAT (the Pull
+        button). The button passes a 'checked' flag, ignored here."""
         if not self.entries:
             return
+        self._pull_frame_from_cvat(self.entries[self.current_idx]["frame_idx"])
 
-        entry = self.entries[self.current_idx]
-        frame_idx = entry["frame_idx"]
+    def _pull_frame_from_cvat(self, frame_idx):
+        """Re-fetch ALL polygons on one frame from CVAT by frame index.
+        Updates existing, adds new, removes deleted. Used after send (once per
+        frame that received a new polygon) and by the manual pull."""
+        if not self.entries:
+            return
 
         # Warn once if any locally-tracked polygon on this frame has unsaved edits
         local_frame_sids = [
@@ -2364,6 +2599,7 @@ class TrailFixR(QMainWindow):
                 "with the CVAT versions.\n\nContinue?",
                 QMessageBox.Yes | QMessageBox.Cancel)
             if reply != QMessageBox.Yes:
+                _send_log("PULL cancelled by the local-edits warning")
                 return
 
         self.pull_btn.setEnabled(False)
@@ -2376,6 +2612,7 @@ class TrailFixR(QMainWindow):
                 f"{CVAT_URL}/api/jobs/{self.job_id}/annotations",
                 auth=(CVAT_USER, password)).json()
         except Exception as exc:
+            _send_log(f"PULL failed: {exc!r}")
             self.pull_btn.setEnabled(True)
             self.pull_btn.setText("Pull from CVAT")
             QMessageBox.critical(self, "CVAT error",
@@ -2522,6 +2759,9 @@ class TrailFixR(QMainWindow):
 
         _save_cache(cache_index)
 
+        _send_log(f"PULL frame={frame_idx} cvat_ids_on_frame={sorted(cvat_frame_ids)} "
+                  f"local_ids_on_frame={sorted(self._frame_to_sids.get(frame_idx, set()))} "
+                  f"image_loaded={img is not None} entries={len(self.entries)}")
         self._last_displayed_idx = None
         self.pull_btn.setEnabled(True)
         self.pull_btn.setText("Pull from CVAT")
@@ -2566,6 +2806,7 @@ class TrailFixR(QMainWindow):
         if not indices:
             return
         idx = max(0, min(value - 1, len(indices) - 1))
+        self._end_stale_drag()
         self.current_idx = indices[idx]
         self.refresh_view()
 
@@ -2585,6 +2826,7 @@ class TrailFixR(QMainWindow):
             return
         # Treat as position in current filter (1-based)
         pos = max(1, min(target, len(indices)))
+        self._end_stale_drag()
         self.current_idx = indices[pos - 1]
         self.jump_input.clearFocus()
         self.refresh_view()
@@ -2689,7 +2931,79 @@ class TrailFixR(QMainWindow):
         self.filter_buttons["not_flagged"].setText(f"Not Flagged ({n_not_flagged})")
         self.filter_buttons["delete"].setText(f"Marked ({n_del})")
         self.filter_buttons["not_marked"].setText(f"Not Marked ({n_keep})")
+        self._restyle_flag_pill()
 
+    def _restyle_flag_pill(self):
+        """Flagged button is bright orange whenever anything is flagged,
+        pale orange when nothing is."""
+        btn = self.filter_buttons.get("flagged")
+        if btn is None:
+            return
+        n = sum(1 for e in self.entries if e["flagged"])
+        btn.setStyleSheet(PILL_STYLE.format(**pill_colors("orange_hot" if n else "orange")))
+
+    # -- Flags: clearing and restoring ---------------------------------------
+
+    @property
+    def _flags_cleared_path(self):
+        return CLAUDE_FLAGS_PATH.with_name("flags_cleared.json")
+
+    def _set_flag(self, sid, value):
+        """Turn the Claude flag on or off for every entry whose main polygon
+        is sid. Clearing remembers the flag text so it can be restored; the
+        set of cleared ids is saved so it sticks after a relaunch."""
+        if not hasattr(self, "_flag_reasons"):
+            self._flag_reasons = {}
+        changed = False
+        for e in self.entries:
+            if e["server_id"] != sid:
+                continue
+            if value and not e["flagged"]:
+                e["flagged"] = True
+                e["flag_reason"] = self._flag_reasons.get(sid, e["flag_reason"])
+                changed = True
+            elif not value and e["flagged"]:
+                self._flag_reasons[sid] = e["flag_reason"]
+                e["flagged"] = False
+                e["flag_reason"] = ""
+                changed = True
+        if not changed:
+            return False
+        try:
+            cleared = set()
+            if self._flags_cleared_path.exists():
+                cleared = set(json.loads(self._flags_cleared_path.read_text()).get("cleared_server_ids", []))
+            if value:
+                cleared.discard(sid)
+            else:
+                cleared.add(sid)
+            self._flags_cleared_path.parent.mkdir(parents=True, exist_ok=True)
+            self._flags_cleared_path.write_text(json.dumps({"cleared_server_ids": sorted(cleared)}))
+        except Exception:
+            pass
+        self.update_filter_counts()
+        return True
+
+    def _auto_unflag(self, sid):
+        """A flagged polygon that was moved, reshaped or tightened counts as
+        dealt with: clear its flag. Remembered so Undo can bring it back."""
+        if not hasattr(self, "_auto_unflagged"):
+            self._auto_unflagged = set()
+        if self._set_flag(sid, False):
+            self._auto_unflagged.add(sid)
+
+    def _unflag_selected(self):
+        """U: take the flag off the selected polygon (or the current entry's
+        polygon) without editing it. Undoable."""
+        if not self.entries:
+            return
+        sid = self.selected_id
+        if sid is None:
+            sid = self.entries[self.current_idx]["server_id"]
+        if self._set_flag(sid, False):
+            self._push_undo(("unflag", sid))
+            self._save_edits()
+            self.refresh_view()
     # ── Navigation ──────────────────────────────────────────────────────────
 
     def go_prev(self):
@@ -2698,8 +3012,13 @@ class TrailFixR(QMainWindow):
         indices = self.filtered_indices()
         if not indices:
             return
-        pos = indices.index(self.current_idx) if self.current_idx in indices else 0
+        if self.current_idx in indices:
+            pos = indices.index(self.current_idx)
+        else:
+            earlier = [i for i in indices if i < self.current_idx]
+            pos = indices.index(earlier[-1]) + 1 if earlier else 0
         if pos > 0:
+            self._end_stale_drag()
             self.current_idx = indices[pos - 1]
             self.selected_id = self.entries[self.current_idx]["server_id"]
             self.refresh_view()
@@ -2712,8 +3031,13 @@ class TrailFixR(QMainWindow):
         indices = self.filtered_indices()
         if not indices:
             return
-        pos = indices.index(self.current_idx) if self.current_idx in indices else 0
+        if self.current_idx in indices:
+            pos = indices.index(self.current_idx)
+        else:
+            later = [i for i in indices if i > self.current_idx]
+            pos = indices.index(later[0]) - 1 if later else len(indices) - 1
         if pos < len(indices) - 1:
+            self._end_stale_drag()
             self.current_idx = indices[pos + 1]
             self.selected_id = self.entries[self.current_idx]["server_id"]
             self.refresh_view()
@@ -2775,7 +3099,21 @@ class TrailFixR(QMainWindow):
         if self.add_mode:
             # Add-mode click is handled separately — append a vertex (or close
             # the polygon if near the first vertex). Mirrors TileFixR.
-            SNAP_R = 14
+            # Close-early radius is ~10 SCREEN pixels (converted to image
+            # pixels via the zoom), so a thin box on a zoomed-in view can
+            # still take its 4th corner near the 1st.
+            if self._two_end_mode():
+                if not self.add_pts_local:
+                    self.add_pts_local.append((int(ix), int(iy)))
+                    self.refresh_view()
+                    return
+                corners = self._two_end_corners(self.add_pts_local[0], (ix, iy))
+                if corners is None:
+                    return  # second click on top of the first: ignore
+                self.add_pts_local = corners
+                self._close_add_polygon()
+                return
+            SNAP_R = 10.0 / max(0.05, self.image_view.current_scale())
             if len(self.add_pts_local) >= 3:
                 fx, fy = self.add_pts_local[0]
                 if (fx - ix) ** 2 + (fy - iy) ** 2 <= SNAP_R ** 2:
@@ -3112,11 +3450,37 @@ class TrailFixR(QMainWindow):
         CvatSendWorker thread (so the UI stays responsive), and runs the
         "Sending..." button animation until the worker reports back to
         _on_send_finished. Does nothing if there are no pending changes."""
+        worker = getattr(self, "_send_worker", None)
+        if worker is not None and worker.isRunning():
+            _send_log("SEND ignored: a send is already running")
+            return
         n_del = len(self.marked_ids)
         adds = [p for p in self.polygons_by_id.values() if p["status"] == "added"]
         edits = [p for p in self.polygons_by_id.values() if p["status"] == "edited"]
         if n_del + len(adds) + len(edits) == 0:
             return
+        add_frames = sorted({int(p["frame_idx"]) for p in adds})
+
+        # Safety check: a polygon whose size jumped by hundreds of pixels is almost certainly a
+        # corner dragged somewhere by mistake. Refuse to send it (Pull from CVAT resets it).
+        stretched = []
+        for p in edits:
+            orig = p.get("original_points")
+            if orig is None:
+                continue
+            new_ext = float(np.hypot(*(p["points"].max(0) - p["points"].min(0))))
+            old_ext = float(np.hypot(*(np.asarray(orig).max(0) - np.asarray(orig).min(0))))
+            if new_ext - old_ext > MAX_SIZE_GROWTH_PX:
+                stretched.append((p["server_id"], p["frame_idx"], new_ext, old_ext))
+        if stretched:
+            lines = "\n".join("polygon %d on frame %d: %.0f px long, was %.0f px" % t for t in stretched)
+            reply = QMessageBox.question(self, "A polygon grew a lot",
+                "These polygons grew far more than a normal edit. That is fine if you "
+                "extended a trail, but it can also mean a corner got pulled across the "
+                "picture:\n\n%s\n\nSend anyway?" % lines,
+                QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel)
+            if reply != QMessageBox.Yes:
+                return
 
         # Snapshot data for the worker — safe to pass across threads
         adds_data = [{"points": p["points"].copy(), "frame_idx": p["frame_idx"]}
@@ -3124,6 +3488,9 @@ class TrailFixR(QMainWindow):
         edits_data = [{"server_id": p["server_id"], "points": p["points"].copy()}
                       for p in edits]
         marked_snapshot = set(self.marked_ids)
+        _send_log(f"SEND start task={CVAT_TASK_ID} adds={[(p['frame_idx'], [[round(float(x)), round(float(y))] for x, y in p['points']]) for p in adds]} "
+                  f"edits={[p['server_id'] for p in edits]} deletes={sorted(marked_snapshot)} "
+                  f"current_frame={self.entries[self.current_idx]['frame_idx'] if self.entries else None}")
 
         password = read_cvat_password()
         self._send_worker = CvatSendWorker(
@@ -3132,8 +3499,10 @@ class TrailFixR(QMainWindow):
             adds_data, edits_data, marked_snapshot,
         )
         self._send_worker.finished.connect(
-            lambda ok, err: self._on_send_finished(ok, err, marked_snapshot))
+            lambda ok, err: self._on_send_finished(ok, err, marked_snapshot, add_frames))
         self.send_btn.setEnabled(False)
+        if hasattr(self, "save_btn"):
+            self.save_btn.setEnabled(False)
         self.send_btn.setText("Sending")
         self._send_anim_frame = 0
         self._send_anim_timer = QTimer(self)
@@ -3148,7 +3517,7 @@ class TrailFixR(QMainWindow):
         self._send_anim_frame = (self._send_anim_frame + 1) % len(dots)
         self.send_btn.setText(dots[self._send_anim_frame])
 
-    def _on_send_finished(self, success, error_msg, deleted_sids):
+    def _on_send_finished(self, success, error_msg, deleted_sids, add_frames=()):
         """Handle the background send result. On failure, show the CVAT error
         and leave the pending state intact to retry. On success, CVAT is now
         caught up: clear all marks, drop the deleted polygons (and their cached
@@ -3158,6 +3527,8 @@ class TrailFixR(QMainWindow):
         if hasattr(self, "_send_anim_timer"):
             self._send_anim_timer.stop()
         self.send_btn.setEnabled(True)
+        _send_log(f"SEND finished success={success} error={error_msg!r} "
+                  f"temp_polys_before_cleanup={[s for s in self.polygons_by_id if s < 0]}")
         if not success:
             self._refresh_send_button()
             QMessageBox.critical(self, "CVAT error",
@@ -3178,6 +3549,15 @@ class TrailFixR(QMainWindow):
                 _cache_crop_path(sid).unlink(missing_ok=True)
             except Exception:
                 pass
+        # Drawn polygons were stored under a negative temp id. CVAT has now made the
+        # real ones and the re-pull below brings them back with their real ids, so
+        # drop the temp copies here or each one is drawn twice, stacked.
+        for temp_sid in [s for s in self.polygons_by_id if s < 0]:
+            self.polygons_by_id.pop(temp_sid, None)
+            for frame_sids in self._frame_to_sids.values():
+                frame_sids.discard(temp_sid)
+            if self.selected_id == temp_sid:
+                self.selected_id = None
         for poly in list(self.polygons_by_id.values()):
             if poly["status"] in ("added", "edited"):
                 poly["status"] = "original"
@@ -3190,6 +3570,12 @@ class TrailFixR(QMainWindow):
         self._refresh_send_button()
         self.update_filter_counts()
         self.refresh_view()
+        # Reload every frame that received a new polygon (not only the frame on
+        # screen), or the real polygons never come back after the temp copies go.
+        cur_frame = self.entries[self.current_idx]["frame_idx"] if self.entries else None
+        for f in add_frames:
+            if f != cur_frame:
+                self._pull_frame_from_cvat(f)
         self._pull_from_cvat()
 
 
@@ -3221,7 +3607,7 @@ class TaskPickerDialog(QDialog):
         row1.addWidget(QLabel("CVAT task:"))
         self.task_combo = QComboBox()
         for t in tasks:
-            label = f"{t['id']:>3}  —  {t['name']}  ({t['size']} frames)"
+            label = f"{t['name']}  ({t['active']} frames)  (CVAT project #{t['id']})"
             self.task_combo.addItem(label, t["id"])
         for i in range(self.task_combo.count()):
             if self.task_combo.itemData(i) == last_task_id:
@@ -3276,8 +3662,8 @@ class TaskPickerDialog(QDialog):
         task = self.tasks[idx] if 0 <= idx < len(self.tasks) else None
         if task is None:
             return
-        if task["size"] > 0:
-            max_frames = task["size"]
+        if task["max_frame"] > 0:
+            max_frames = task["max_frame"]
             self.first_spin.setMaximum(max_frames)
             self.last_spin.setMaximum(max_frames)
             if self.first_spin.value() > max_frames:

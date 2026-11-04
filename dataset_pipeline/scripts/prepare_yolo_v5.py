@@ -64,7 +64,8 @@ SEED         = 42
 
 # Task ID -> (image folder name OR absolute path, max frames). The 9 v5 datasets.
 TASK_CONFIG = {
-    36: ("Warren Hatch - Stroudt's Preserve",                       114),
+    77: ("Warren Hatch - Stroudt's Preserve",                        57),   # JPG-only task; replaces doubled task 36
+    78: ("Warren Hatch - Barnegat Light - Camera 2",                149),   # JPG-only task; replaces doubled task 35
     39: ("borrego_springs_1",                                         5),
     40: ("Bruce Herwig Joshua Tree 6.26 80 sec exposure Star Trail", 89),
     41: ("Thomas Jackson Star Trails Borrego",                      301),

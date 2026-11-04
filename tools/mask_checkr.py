@@ -813,7 +813,7 @@ class StackWorker(QThread):
         write the plain and tile-grid stacks into
         <img_dir>/cleanr_workspace/masks/mask_checkr_output/; emit finished with
         counts (frames stacked, frames annotated, polygons filled). Emits error
-        on any failure or if the expected masks folder is missing.
+        on any failure.
         """
         try:
             self.progress.emit("Fetching CVAT annotations...", 0, 0)
@@ -896,15 +896,12 @@ class StackWorker(QThread):
                 self.error.emit("No frames could be loaded.")
                 return
 
-            masks_dir = resolve_workspace(self.img_dir) / "masks"
-            if not masks_dir.is_dir():
-                self.error.emit(
-                    f"Masks folder not found.\n"
-                    f"Expected 'STC Extras/masks/' (or legacy 'cleanr_workspace/masks/') "
-                    f"for:\n{self.img_dir}"
-                )
-                return
-            out_dir  = masks_dir.parent / "mask_checkr_output"   # STC Extras root, not masks/
+            # The polygons come from CVAT, so no local masks folder is needed.
+            # Write into the dataset's STC Extras folder, creating it if the set has none yet.
+            workspace = resolve_workspace(self.img_dir)
+            if not workspace.is_dir():
+                workspace = self.img_dir / WORKSPACE_NAME
+            out_dir  = workspace / "mask_checkr_output"
             out_dir.mkdir(parents=True, exist_ok=True)
             out_path = str(out_dir / f"{self.img_dir.name}_maskcheckr.jpg")
             stack_img = acc.astype(np.uint8)
