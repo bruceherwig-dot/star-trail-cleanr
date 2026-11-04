@@ -6,6 +6,14 @@
         <description>Auto-update feed for Star Trail CleanR on Mac (Intel).</description>
         <language>en</language>
         <item>
+            <title>Version 3.0-beta</title>
+            <pubDate>Wed, 04 Nov 2026 22:36:36 +0000</pubDate>
+            <sparkle:version>3.0</sparkle:version>
+            <sparkle:shortVersionString>3.0-beta</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>10.13</sparkle:minimumSystemVersion>
+            <enclosure url="https://github.com/bruceherwig-dot/star-trail-cleanr/releases/download/v3.0-beta/StarTrailCleanR-Mac-Intel.dmg" length="758597252" type="application/octet-stream" sparkle:edSignature="/jbE0/Cg32Il4CLMKnA+CQ7OnAOgqiyfYLsmQ2q8pCPTj92O2BG8aL+53B/UIn2qhhh5u/9RmdIJY3hSs60TDA=="/>
+        </item>
+        <item>
             <title>Version 2.99-beta</title>
             <pubDate>Mon, 19 Oct 2026 02:44:37 +0000</pubDate>
             <sparkle:version>2.99</sparkle:version>
