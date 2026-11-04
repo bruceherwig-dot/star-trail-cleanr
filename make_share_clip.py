@@ -118,6 +118,38 @@ def _fill_canvas(img, cw, ch):
     return r[y0:y0 + ch, x0:x0 + cw]
 
 
+_NEWER_BY_S = 2.0   # a twin must be at least this many seconds newer to override the TIFF-wins rule
+
+
+def _drop_older_twins(folder, names):
+    """When one shot exists as two non-RAW files (a TIFF and a JPEG), keep only the NEWER one.
+
+    A cleaned folder can hold last month's TIFFs next to today's JPEGs of the same shots. The
+    TIFF-wins rule below would stack the old, uncleaned-by-today's-rules TIFFs and the Star Trail
+    window would show trails the latest clean already removed (Joshua Tree 80 sec, 2026-11-04).
+    The newest copy is the one the latest clean wrote. Copies written within a couple of seconds
+    of each other (one run writing both formats) are left for the normal rule. Nothing is deleted
+    or modified; the older file is only left out of the stack."""
+    from modules.frame_list import RAW_EXTS
+    by_stem = {}
+    for n in names:
+        stem, ext = os.path.splitext(n)
+        if ext.lower() not in RAW_EXTS:
+            by_stem.setdefault(stem, []).append(n)
+    drop = set()
+    for stem, group in by_stem.items():
+        if len(group) < 2:
+            continue
+        try:
+            mt = {n: os.path.getmtime(os.path.join(folder, n)) for n in group}
+        except OSError:
+            continue
+        newest = max(mt.values())
+        keepers = [n for n in group if newest - mt[n] < _NEWER_BY_S]
+        drop.update(n for n in group if n not in keepers)
+    return [n for n in names if n not in drop]
+
+
 def _list_frames(folder, keep=None):
     """Sorted image frames in `folder`, ONE PER SHOT, dropping the first/last few
     test shots (SKIP_FIRST / SKIP_LAST), in true capture order via natural_key.
@@ -152,9 +184,10 @@ def _list_frames(folder, keep=None):
     only when it is the sole copy of a shot. Between a TIFF and a JPEG the TIFF
     wins -- same picture, more of it kept."""
     fs = dedupe_frames(
-        [f for f in os.listdir(folder)
-         if is_image_name(f) and os.path.isfile(os.path.join(folder, f))
-         and (keep is None or keep(os.path.join(folder, f)))],
+        _drop_older_twins(folder,
+                          [f for f in os.listdir(folder)
+                           if is_image_name(f) and os.path.isfile(os.path.join(folder, f))
+                           and (keep is None or keep(os.path.join(folder, f)))]),
         prefer_raw=False,
     )
     end = len(fs) - SKIP_LAST                       # drop the trailing test shots
