@@ -513,7 +513,9 @@ jobs:
     # v1.995-beta while the app shipped v2.56, and the in-app "version history on
     # GitHub" link (About tab -> blob/main/CHANGELOG.md) showed a stale history.
     # This copies the tagged CHANGELOG.md onto main automatically so that link is
-    # always current. Doc-only: it touches CHANGELOG.md on main and nothing else.
+    # always current. It also copies version.txt so main's version file agrees with
+    # the shipped tag (it sat at 1.995 on main while releases were 2.9x). It touches
+    # CHANGELOG.md and version.txt on main and nothing else.
     # It runs in PARALLEL with publish-appcast (both only need `release`), so a
     # failure here can never block the release or the auto-update publish that
     # actually reaches users.
@@ -532,17 +534,18 @@ jobs:
         with:
           ref: main
           path: main-co
-      - name: Copy the tagged CHANGELOG.md onto main and push if changed
+      - name: Copy the tagged CHANGELOG.md and version.txt onto main and push if changed
         run: |
           cp tagged/CHANGELOG.md main-co/CHANGELOG.md
+          cp tagged/version.txt main-co/version.txt
           cd main-co
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add CHANGELOG.md
+          git add CHANGELOG.md version.txt
           if git diff --cached --quiet; then
-            echo "CHANGELOG.md on main already current — nothing to sync."
+            echo "CHANGELOG.md and version.txt on main already current — nothing to sync."
           else
-            git commit -m "Sync CHANGELOG.md to main for ${GITHUB_REF_NAME}"
+            git commit -m "Sync CHANGELOG.md and version.txt to main for ${GITHUB_REF_NAME}"
             git push origin main
           fi
 
