@@ -1132,7 +1132,7 @@ def main():
         if args.output_format == "jpg":
             out = img if img.dtype == np.uint8 else (img >> 8).astype(np.uint8)
             rgb = cv2.cvtColor(out, cv2.COLOR_BGR2RGB)
-            pil = Image.fromarray(rgb, mode="RGB")
+            pil = Image.fromarray(rgb)   # no mode=: Pillow 13 removed it; RGB is inferred
             save_kwargs = {"quality": int(args.jpeg_quality), "subsampling": 0}
             if icc_profile:
                 save_kwargs["icc_profile"] = icc_profile
@@ -1147,8 +1147,8 @@ def main():
             out = img if img.dtype == np.uint8 else (img >> 8).astype(np.uint8)
             rgb = cv2.cvtColor(out, cv2.COLOR_BGR2RGB)
             _grey = _grey_plane(rgb)
-            pil = (Image.fromarray(_grey, mode="L") if _grey is not None
-                   else Image.fromarray(rgb, mode="RGB"))
+            pil = (Image.fromarray(_grey) if _grey is not None
+                   else Image.fromarray(rgb))
             save_kwargs = {}
             if icc_profile:
                 save_kwargs["icc_profile"] = icc_profile

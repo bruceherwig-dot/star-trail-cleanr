@@ -118,5 +118,7 @@ def test_the_engine_still_has_both_greyscale_write_branches():
     assert "minisblack" in engine, (
         "the 16-bit TIFF writer no longer has a greyscale photometric; a mono "
         "source would be written as RGB")
-    assert 'mode="L"' in engine, (
+    # No mode= argument any more (Pillow 13 removed it); the greyscale plane is passed as-is and
+    # Pillow reads it as mode L.
+    assert "Image.fromarray(_grey)" in engine, (
         "the 8-bit TIFF writer no longer has a greyscale branch")

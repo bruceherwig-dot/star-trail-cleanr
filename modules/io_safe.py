@@ -747,11 +747,12 @@ def robust_imwrite(path: Union[str, Path], image: np.ndarray,
             from PIL import Image
             arr = image
             if arr.ndim == 2:
-                # Grayscale (uint8 or uint16)
+                # Grayscale (uint8 or uint16). No mode= argument: Pillow 13 removed it, and it infers
+                # the same mode (L for uint8, I;16 for uint16) from the array.
                 if arr.dtype == np.uint16:
-                    im = Image.fromarray(arr, mode="I;16")
+                    im = Image.fromarray(arr)
                 else:
-                    im = Image.fromarray(arr, mode="L")
+                    im = Image.fromarray(arr)
             elif arr.ndim == 3:
                 if arr.shape[2] == 3:
                     rgb = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
