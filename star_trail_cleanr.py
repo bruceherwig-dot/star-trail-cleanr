@@ -771,6 +771,8 @@ def _get_dev_model_choices():
         ("v3", "trail_detector_v12s_tiled"),   # Trail DetectoR v3 (prior shipped)
         ("v4", "trail_detector_v13s_tiled"),   # Trail DetectoR v4 (currently shipped)
         ("v5", "trail_detector_v5"),           # Trail DetectoR v5 (new fine-tune)
+        ("v6", "trail_detector_v6_scratch"),   # Trail DetectoR v6 (from-scratch candidate, testing)
+        ("v7 A", "trail_detector_v7a_scratch"),  # Trail DetectoR v7 A (from-scratch, corrected labels, testing)
     ]
     choices = []
     for label, folder in mapping:
@@ -778,6 +780,21 @@ def _get_dev_model_choices():
         if pt.is_file():
             choices.append((label, str(pt)))
     return choices
+
+
+def _dev_override_label():
+    """Return the picker label (e.g. "v6") of the active dev model override, or
+    None when the switcher is off or no override is set. Lets the header,
+    diagnostics and run log name the model that actually runs, not the shipped one."""
+    if not _DEV_SWITCHER_ENABLED:
+        return None
+    override = SETTINGS.value("dev_model_override", "", type=str)
+    if not (override and os.path.isfile(override)):
+        return None
+    for label, pt in _get_dev_model_choices():
+        if pt == override:
+            return label
+    return None
 
 
 def get_model_path():
@@ -1711,6 +1728,9 @@ class CleanerWorker(QThread):
                 _mv = _gmv()
                 _mm = re.match(r"model-v(\d+(?:\.\d+)?)", _mv or "")
                 _model_str = f"Trail DetectoR v{_mm.group(1)}" if _mm else (_mv or "bundled model")
+                _dev_lbl = _dev_override_label()
+                if _dev_lbl:
+                    _model_str = f"Trail DetectoR {_dev_lbl}"
             except Exception:
                 _model_str = "unknown model"
             _scrub_str = ("Second ScrubbeR on"
@@ -3396,9 +3416,12 @@ class MainWindow(QMainWindow):
             if _choices:
                 self._dev_model_combo.setCurrentIndex(_saved_idx)
                 SETTINGS.setValue("dev_model_override", _choices[_saved_idx][1])
-            self._dev_model_combo.currentIndexChanged.connect(
-                lambda idx: SETTINGS.setValue(
-                    "dev_model_override", self._dev_model_combo.itemData(idx)))
+            def _on_dev_model_changed(idx):
+                SETTINGS.setValue("dev_model_override", self._dev_model_combo.itemData(idx))
+                _hs = getattr(self, "_header_subline", None)
+                if _hs is not None:
+                    _hs.setText(f"Beta v{VERSION}\n{self._current_model_display_name()}")
+            self._dev_model_combo.currentIndexChanged.connect(_on_dev_model_changed)
             model_row.addWidget(self._dev_model_combo)
             model_row.addStretch()
             layout.addSpacing(4)
@@ -4114,6 +4137,9 @@ class MainWindow(QMainWindow):
     def _current_model_display_name(self):
         """Return 'Trail DetectoR N' for the currently-active model. Empty string on failure."""
         try:
+            _dev_lbl = _dev_override_label()
+            if _dev_lbl:
+                return f"Trail DetectoR {_dev_lbl}"
             from modules.model_update import local_model_version
             return self._model_display_name(local_model_version())
         except Exception:
@@ -8842,14 +8868,17 @@ class StarTrailPanel(QWidget):
         self._bright_sl.setRange(-20, 20)
         self._bright_sl.setValue(0)
         self._bright_sl.setTickPosition(QSlider.NoTicks)
-        self._bright_val = QLabel("As shot")
-        self._bright_val.setFixedWidth(64)
-        self._bright_val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self._bright_val = QLabel("No change")
+        self._bright_val.setAlignment(Qt.AlignHCenter | Qt.AlignVCenter)
         self._bright_sl.valueChanged.connect(self._on_bright_changed)
         _bw = QWidget()
-        _bh = QHBoxLayout(_bw); _bh.setContentsMargins(0, 0, 0, 0)
+        _bv = QVBoxLayout(_bw); _bv.setContentsMargins(0, 0, 0, 0); _bv.setSpacing(0)
+        _bh = QHBoxLayout(); _bh.setContentsMargins(0, 0, 0, 0)
+        _bh.addWidget(QLabel("Darker"))
         _bh.addWidget(self._bright_sl, 1)
-        _bh.addWidget(self._bright_val)
+        _bh.addWidget(QLabel("Lighter"))
+        _bv.addLayout(_bh)
+        _bv.addWidget(self._bright_val)
         _row("Brightness", _bw)
 
         # Output format. You may always go DOWN in quality from what the frames
@@ -8953,8 +8982,8 @@ class StarTrailPanel(QWidget):
             QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
 
     def _on_bright_changed(self, v):
-        """Show the slider's setting: 'As shot' in the middle, else the signed number."""
-        self._bright_val.setText("As shot" if v == 0 else f"{v / 10:+.1f}")
+        """Show the slider's setting: 'No change' in the middle, else the signed number."""
+        self._bright_val.setText("No change" if v == 0 else f"{v / 10:+.1f}")
 
     def _toggle_build(self):
         """Build doubles as Stop while a rebuild is running."""
