@@ -103,6 +103,11 @@ class StageConfig:
     # OFF by default (trust SAHI). When off, detections it WOULD have dropped are
     # still logged so we can see its effect.
     fat_blob_gate: bool = False
+    # Star-size rule (replaces the fixed pixel-area floor when both are set). Measured per set by
+    # modules/star_size.measure_star_size: a detection is dropped only when it is NOT red, NOT longer than the
+    # longest star and NOT fatter than a star. None = not measured (too few stars) -> the old area floor applies.
+    star_len_px: Optional[float] = None
+    star_width_px: Optional[float] = None
 
 
 # --------------------------------------------------------------------------- #
@@ -406,8 +411,17 @@ def stage_tiled_inference(state: PipelineState, cfg: StageConfig,
     return state
 
 
+def _piece_is_red(mask: np.ndarray, img, img_is_rgb: bool) -> bool:
+    """True if the detection reads warm/red (an aircraft light). img must be the same size as mask."""
+    if img is None or img.shape[:2] != mask.shape[:2]:
+        return False
+    from modules.star_streak import _is_red
+    return _is_red(mask, img[..., ::-1] if img_is_rgb else img)
+
+
 def _props_with_log(mask: np.ndarray, cfg: StageConfig, log: StageLog,
-                    skip_aspect: bool = False, frame_px=None):
+                    skip_aspect: bool = False, frame_px=None,
+                    img=None, img_is_rgb: bool = False):
     """Region properties for one detection mask, or None if it fails a gate.
     Same gates as the shipped elongation filter, except the fat-blob gate is
     toggleable and every drop (and every fat-blob the gate would have killed)
@@ -417,7 +431,8 @@ def _props_with_log(mask: np.ndarray, cfg: StageConfig, log: StageLog,
     crossing-splitter output where the splitter already validated the pieces as
     real trail arms -- re-filtering by shape would kill short stubby tips.
     frame_px: total pixels of the FULL frame for area normalisation; pass when
-    `mask` is a crop so thresholds match full-frame. Defaults to mask size."""
+    `mask` is a crop so thresholds match full-frame. Defaults to mask size.
+    img / img_is_rgb: the frame pixels under `mask` (same size), used only for the red test of the star-size rule."""
     area_scale = (frame_px if frame_px else (mask.shape[0] * mask.shape[1])) / _REF_FRAME_PX
     min_area = MIN_AREA * area_scale
     ys, xs = np.where(mask > 0)
@@ -431,12 +446,29 @@ def _props_with_log(mask: np.ndarray, cfg: StageConfig, log: StageLog,
         return None
     p = max(props, key=lambda x: x.area)
     minor = p.axis_minor_length
-    if minor < 1 or p.area < min_area:
+    use_star_rule = bool(cfg.star_len_px and cfg.star_width_px)
+    if minor < 1:
         log.count("dropped_area")
         log.event("drop", gate="area", area=float(round(p.area, 1)),
                   min_area=round(min_area, 1))
         return None
-    if not skip_aspect and p.axis_major_length / minor < cfg.min_aspect:
+    if use_star_rule:
+        # Keep a detection if it is red, longer than the longest star, or fatter than a star.
+        # Only a small, thin, non-red piece (star-sized) is dropped.
+        major = p.axis_major_length
+        if major <= cfg.star_len_px and minor <= cfg.star_width_px and not _piece_is_red(mask, img, img_is_rgb):
+            log.count("dropped_star_size")
+            log.event("drop", gate="star_size", major=float(round(major, 1)), minor=float(round(minor, 1)),
+                      star_len=round(cfg.star_len_px, 1), star_width=round(cfg.star_width_px, 1))
+            return None
+    elif p.area < min_area:
+        log.count("dropped_area")
+        log.event("drop", gate="area", area=float(round(p.area, 1)),
+                  min_area=round(min_area, 1))
+        return None
+    # With the star-size rule on, "fatter than a star" or "longer than a star" is the shape test; the old
+    # roundness test would throw out short round plane lights the star rule just kept.
+    if not skip_aspect and not use_star_rule and p.axis_major_length / minor < cfg.min_aspect:
         log.count("dropped_aspect")
         log.event("drop", gate="aspect",
                   aspect=round(p.axis_major_length / minor, 2))
@@ -953,7 +985,9 @@ def stage_fit_polygons(state: PipelineState, cfg: StageConfig,
                 _t = time.perf_counter()
                 props = _props_with_log(em, cfg, log,
                                         skip_aspect=is_confirmed_crossing,
-                                        frame_px=frame_px)
+                                        frame_px=frame_px,
+                                        img=state.image[r0:r1 + 1, c0:c1 + 1],
+                                        img_is_rgb=True)   # state.image is the RGB copy made at tiled inference
                 t_props += time.perf_counter() - _t
                 if props is not None:
                     props["coords"] = props["coords"] + off
@@ -1321,7 +1355,7 @@ def _targeted_tile_dets(model, img_rgb, tile_x, tile_y, tile_size, h, w,
                 local = np.ascontiguousarray(np.rot90(local[:pad_h, :pad_w], 3))
             global_mask = np.zeros((h, w), dtype=np.uint8)
             global_mask[ty1:ty2, tx1:tx2] = local[:crop_h, :crop_w]
-            props = _props_with_log(global_mask, cfg, log)
+            props = _props_with_log(global_mask, cfg, log, img=img_rgb, img_is_rgb=True)
             if props is not None:
                 props["conf"] = seg_conf
                 new_dets.append(props)

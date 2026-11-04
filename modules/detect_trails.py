@@ -1299,13 +1299,19 @@ def apply_sky_mask(mask: np.ndarray, sky_mask: np.ndarray) -> np.ndarray:
 
 def filter_small_components(mask: np.ndarray, img: np.ndarray,
                             min_area: int = 1000,
-                            debug_out=None) -> np.ndarray:
+                            debug_out=None,
+                            star_len=None, star_width=None) -> np.ndarray:
     """Remove connected components smaller than min_area, unless red (nav light).
 
     img is BGR (as loaded by cv2). Channel 2 = R.
     debug_out (dict, optional): filled with removed count, kept_as_nav_light count,
     and removed_areas list (one int per removed component).
+
+    star_len / star_width (px, both given): use the star-size rule instead of the fixed area. A component
+    is removed only when it is NOT red, NOT longer than the longest star and NOT fatter than a star
+    (measured per set by modules/star_size.measure_star_size). min_area is then ignored.
     """
+    use_star_rule = bool(star_len and star_width)
     if img.shape[:2] != mask.shape[:2]:
         img = cv2.resize(img, (mask.shape[1], mask.shape[0]),
                          interpolation=cv2.INTER_LINEAR)
@@ -1315,8 +1321,21 @@ def filter_small_components(mask: np.ndarray, img: np.ndarray,
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask)
     for i in range(1, num_labels):
         area = stats[i, cv2.CC_STAT_AREA]
-        if area >= min_area:
+        if not use_star_rule and area >= min_area:
             continue
+        if use_star_rule:
+            bx, by = stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_TOP]
+            bw, bh = stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT]
+            ys, xs = np.nonzero(labels[by:by + bh, bx:bx + bw] == i)   # bbox crop: no full-frame compare
+            if len(ys) >= 2:
+                pts = np.column_stack([xs, ys]).astype(np.float64)
+                cov = np.cov(pts.T, bias=True)        # same definition as skimage's axis lengths in the detector gate
+                ev = np.linalg.eigvalsh(cov)
+                major, minor = 4.0 * np.sqrt(ev[1]), 4.0 * np.sqrt(max(ev[0], 0.0))
+            else:
+                major = minor = 1.0
+            if major > star_len or minor > star_width:
+                continue                      # longer than the longest star, or fatter than a star: a trail
         component_mask = (labels == i)
         pixels = img[component_mask]
         r_vals = pixels[:, 2].astype(float)

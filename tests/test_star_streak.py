@@ -35,10 +35,30 @@ def test_short_white_dropped_long_kept():
 def test_short_red_kept_as_nav_light():
     h, w = 220, 420
     short = _line_mask(h, w, (50, 100), (78, 100))     # ~28px, below ceiling
-    frame = np.zeros((h, w, 3), np.uint8)
-    frame[:, :, 2] = 200                               # red channel high (BGR) -> warm
+    frame = np.full((h, w, 3), 30, np.uint8)           # neutral dark sky
+    frame[short > 0] = (40, 40, 230)                   # the light itself is red (BGR)
     kept, kept_c, dropped, n_red = filter_segs([short], [None], frame, ceiling=50)
     assert len(kept) == 1 and n_red == 1 and len(dropped) == 0
+
+
+def test_small_red_light_inside_a_bigger_outline_is_red():
+    # The detection outline is mostly dark sky around a thin red core (the real Sean case, R-B 64 core vs R-B 10 outline).
+    from modules.star_streak import _is_red
+    h, w = 220, 420
+    frame = np.full((h, w, 3), 20, np.uint8)
+    outline = np.zeros((h, w), np.uint8)
+    cv2.ellipse(outline, (200, 100), (12, 7), 0, 0, 360, 255, -1)       # ~24 x 14 outline
+    frame[98:102, 192:208] = (38, 90, 102)                              # thin warm core
+    assert _is_red(outline, frame)
+
+
+def test_a_uniformly_orange_sky_does_not_make_everything_red():
+    from modules.star_streak import _is_red
+    h, w = 220, 420
+    frame = np.full((h, w, 3), (90, 120, 170), np.uint8)               # twilight orange everywhere (BGR)
+    outline = np.zeros((h, w), np.uint8)
+    cv2.line(outline, (50, 100), (78, 100), 255, 3)
+    assert not _is_red(outline, frame)
 
 
 def test_measure_ceiling_none_when_too_few_stars():

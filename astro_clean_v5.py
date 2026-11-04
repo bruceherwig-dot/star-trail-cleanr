@@ -597,6 +597,9 @@ def _is_bright_trail(comp_pixels, img_bgr):
     return ratio >= _BRIGHT_TRAIL_RATIO, ratio
 
 
+STATIC_FP_MIN_MATCHES = 3   # neighbouring frames a detection must match before it counts as a fixed object
+
+
 def _suppress_static_fps(masks_all, core_start, core_end,
                          iou_threshold=0.70, min_matches=1,
                          raw_masks_all=None, frames_all=None, debug_out=None,
@@ -934,6 +937,10 @@ def main():
                              "(default auto picks cuda > mps > cpu)")
     parser.add_argument("--min-area", type=int, default=1000,
                         help="Min trail component area in pixels (default 1000)")
+    parser.add_argument("--legacy-size-gate", action="store_true",
+                        help="Use the old fixed pixel-area floor (--min-area) instead of the star-size rule "
+                             "(keep a detection if red, longer than the longest star, or fatter than a star; "
+                             "star size measured per set). For A/B comparisons.")
     parser.add_argument("--foreground-mask", type=str, default=None,
                         help="Path to foreground mask (white=foreground to exclude)")
     parser.add_argument("--skip-boundary", type=int, default=0,
@@ -1828,6 +1835,29 @@ def main():
     sc_area = (w * h) / REF_PIXELS
     min_area_scaled = max(args.min_area, int(args.min_area * sc_area))
 
+    # Star-size rule (replaces the fixed area floor above when the stars can be measured): a detection is
+    # kept if red, longer than the longest star, or fatter than a star. Measured from this batch's own frames.
+    star_size = None
+    _star_size_s = 0.0
+    if not args.legacy_size_gate:
+        try:
+            from modules.star_size import measure_star_size
+            _tss = time.perf_counter()
+            star_size = measure_star_size(frames_8bit_all, fg_mask)
+            _star_size_s = time.perf_counter() - _tss
+        except Exception as _e:   # never block a run on the measurement; fall back to the old rule
+            print(f"  Star size could not be measured ({_e}); using the fixed size floor.", flush=True)
+            star_size = None
+    if star_size:
+        print(f"  Star size measured: longest {star_size['length']:.1f}px, fattest {star_size['width']:.1f}px "
+              f"({star_size['stars']} stars) -> keeping red, longer-than-star or fatter-than-star detections",
+              flush=True)
+    else:
+        print(f"  Star size rule off ({'legacy gate requested' if args.legacy_size_gate else 'too few stars to measure'}); "
+              f"using the fixed size floor ({min_area_scaled}px area).", flush=True)
+    _star_len = star_size["length"] if star_size else None
+    _star_wid = star_size["width"] if star_size else None
+
     t_total = time.time()
 
     # ── Step 1: Detect trails (YOLO) ────────────────────────────────────
@@ -1895,6 +1925,7 @@ def main():
     _tacc("frame_read_s", _read_s)
     _tacc("hot_pixel_s", _hotpix_s)
     _tacc("model_load_s", _model_load_s)
+    _tacc("star_size_s", _star_size_s)
 
     # New modular pipeline is THE detector -- no fallback. Stages 3/4
     # (fallback_polys, link_gaps) are not built yet -> off. The static FP
@@ -1904,6 +1935,7 @@ def main():
         fit_polygons=True, fallback_polys=False, link_gaps=False,
         seam_second_pass=True, suppress_fp=False,
         prune_phantoms=True,
+        star_len_px=_star_len, star_width_px=_star_wid,
         # Drop polygons that outline the ground (a tree line or roof edge just
         # outside the rough foreground mask) instead of a trail; each drop is
         # logged with its position and scores.
@@ -2003,7 +2035,8 @@ def main():
         if min_area_scaled > 0 and mask.max() > 0:
             _t0 = time.perf_counter()
             mask = filter_small_components(mask, frames_8bit_all[i], min_area_scaled,
-                                           debug_out=small_dbg)
+                                           debug_out=small_dbg,
+                                           star_len=_star_len, star_width=_star_wid)
             _tacc("filter_small_s", time.perf_counter() - _t0)
 
         masks_all.append(mask)
@@ -2051,7 +2084,8 @@ def main():
                 if sky_mask is not None:
                     mask2 = apply_sky_mask(mask2, sky_mask)
                 if min_area_scaled > 0 and mask2.max() > 0:
-                    mask2 = filter_small_components(mask2, frames_8bit_all[i], min_area_scaled)
+                    mask2 = filter_small_components(mask2, frames_8bit_all[i], min_area_scaled,
+                                                    star_len=_star_len, star_width=_star_wid)
                 masks_all[i] = np.maximum(masks_all[i], mask2)
                 is_neighbor = i < core_start or i >= core_end
                 if not is_neighbor:
@@ -2076,7 +2110,11 @@ def main():
     _sfp_timing = {}
     _sfp_removed = {}
     _t0 = time.perf_counter()
+    # A fixed object (roofline, fence post) sits at the same pixel in nearly every neighbouring frame, so it
+    # needs to match at least 3 of them. One match is also what a satellite train on a single track or a plane
+    # crossing the same spot looks like, and those are real trails.
     n_static = _suppress_static_fps(masks_all, core_start, core_end,
+                                    min_matches=STATIC_FP_MIN_MATCHES,
                                     raw_masks_all=raw_masks_all,
                                     frames_all=frames_all,
                                     debug_out=static_fp_dbg,
@@ -2483,6 +2521,8 @@ def main():
             "dilate":               args.dilate,
             "min_area":             args.min_area,
             "min_area_scaled":      min_area_scaled,
+            "star_size":            star_size,
+            "size_gate":            "star-size rule" if star_size else "fixed area floor",
             "second_scrub":         args.second_scrub,
             # Per-step timing for the whole batch so the log shows where time went
             # (detection vs repair vs image write vs suppressor vs filters).

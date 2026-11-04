@@ -85,7 +85,12 @@ def _mask_long_axis(mask):
 
 
 def _is_red(mask, frame_bgr):
-    """True if the seg's pixels read warm/red (aircraft nav light), per repair's warm test."""
+    """True if the seg's CORE reads warmer than the sky around it (aircraft nav light).
+
+    A detection's outline is much bigger than the light inside it, so the middle value of every pixel in
+    the outline is mostly dark sky and a small red light never passed. This judges the brightest fifth of
+    the outline's pixels instead, and compares them with a ring of sky just outside the outline, so a
+    uniformly orange twilight sky does not make every detection look red."""
     if frame_bgr is None or frame_bgr.ndim < 3:
         return False
     m = (mask > 0).astype(np.uint8)
@@ -93,11 +98,24 @@ def _is_red(mask, frame_bgr):
     if w == 0 or h == 0:
         return False
     sub_m = m[y:y + h, x:x + w] > 0
-    px = frame_bgr[y:y + h, x:x + w][sub_m]
+    px = frame_bgr[y:y + h, x:x + w][sub_m].astype(np.float32)
     if len(px) == 0:
         return False
-    b = float(np.median(px[:, 0])); r = float(np.median(px[:, 2]))
-    return (r - b) > TRAIL_WARM_MARGIN and r > 60
+    bright = px.sum(axis=1)
+    core = px[bright >= np.percentile(bright, 80)]
+    b = float(np.median(core[:, 0])); r = float(np.median(core[:, 2]))
+    # Local sky: a ring around the outline, inside a window padded by 20 px (clipped to the array).
+    pad = 20
+    H, W = m.shape[:2]
+    y0, y1, x0, x1 = max(0, y - pad), min(H, y + h + pad), max(0, x - pad), min(W, x + w + pad)
+    win = m[y0:y1, x0:x1]
+    ring = cv2.dilate(win, np.ones((31, 31), np.uint8)) > 0
+    ring &= ~(cv2.dilate(win, np.ones((7, 7), np.uint8)) > 0)
+    sky_rb = 0.0
+    if int(ring.sum()) >= 30:
+        sp = frame_bgr[y0:y1, x0:x1][ring].astype(np.float32)
+        sky_rb = float(np.median(sp[:, 2]) - np.median(sp[:, 0]))
+    return ((r - b) - sky_rb) > TRAIL_WARM_MARGIN and r > 60
 
 
 def filter_segs(segs, corners, frame_bgr, ceiling):

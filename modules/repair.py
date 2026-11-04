@@ -92,6 +92,7 @@ import numpy as np
 
 PAD            = 120   # pixels around each trail bbox for feature search
 MIN_AREA       = 500   # skip tiny mask components (noise)
+POLYGON_MIN_AREA = 10  # a detector polygon is repaired unless it is a degenerate sliver (px)
 MAX_SEG_LENGTH = 500   # reference segment length at full-frame resolution; scaled
                        # per-frame in _split_component (see _REF_FRAME_PX) so the
                        # chop point is a fixed fraction of the frame, not a hard px count
@@ -638,7 +639,11 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
         # sharp edges list in ARCHITECTURE.md.
         _ts = time.perf_counter()
         area0 = int(np.count_nonzero(trail))
-        if area0 >= MIN_AREA:
+        # A polygon handed over by the detector is already a decided trail: the detector's own star-size
+        # rule has thrown out star-sized noise. The 500 px floor below is for the connected-components path,
+        # which has no such filter. Applied here it skipped every short plane dash (a 37 x 7 px dash is
+        # about 260 px), so 35% of detected trails were never cleaned (Sean run, 2026-11-04).
+        if area0 >= POLYGON_MIN_AREA:
             _rows = np.any(trail, axis=1)
             _cols = np.any(trail, axis=0)
             _rr = np.flatnonzero(_rows)

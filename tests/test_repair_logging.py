@@ -88,3 +88,30 @@ def test_legend_documents_repair_fields():
         assert field in rk, f"the log legend must explain the repair field '{field}' in plain English"
     # The method explanation must name the crayon and black fills so a reader knows them.
     assert "crayon" in rk["method"].lower() and "black" in rk["method"].lower()
+
+
+def test_a_short_dash_polygon_under_500px_is_repaired():
+    """The detector's polygons are repaired whatever their size. A 37 x 7 px plane dash (about 260 px) used to
+    be skipped by the 500 px floor, so detected trails were left in the picture (Sean run, 2026-11-04)."""
+    from modules.repair import repair_frame
+    frames, _ = _synthetic_frames()
+    dash = np.zeros((200, 200), np.uint8)
+    dash[97:104, 60:97] = 255
+    assert 0 < int(dash.sum() // 255) < 500
+    f1 = frames[1].copy()
+    f1[97:104, 60:97] = (240, 240, 240)             # the dash itself
+    dbg = {}
+    out = repair_frame(f1, dash, 1, [frames[0], f1, frames[2]], neighbor_masks=[None, None, None],
+                       polygon_segs=[dash], debug_out=dbg)
+    assert dbg["components"], "a short dash polygon must produce a repaired component"
+    assert out[97:104, 60:97].max() < 200, "the dash must be gone after repair"
+
+
+def test_the_connected_components_path_still_skips_tiny_noise():
+    from modules.repair import repair_frame
+    frames, _ = _synthetic_frames()
+    speck = np.zeros((200, 200), np.uint8)
+    speck[100:104, 100:110] = 255                    # 40 px, no polygon list given
+    dbg = {}
+    repair_frame(frames[1], speck, 1, frames, neighbor_masks=[None, None, None], debug_out=dbg)
+    assert not dbg.get("components"), "tiny specks on the old path stay skipped"
