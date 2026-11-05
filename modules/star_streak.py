@@ -18,6 +18,9 @@ import cv2
 
 from modules.repair import TRAIL_WARM_MARGIN
 
+RED_CLUMP_MARGIN = 30     # a pixel is clearly warm when its red-minus-blue beats the local sky's by this much
+RED_CLUMP_MIN_PX = 10     # ... and a piece is red when at least this many of its pixels are
+
 _MIN_STREAKS = 40      # need at least this many star streaks before a measurement is trusted
 _PCTL = 99             # ceiling = this percentile of star-streak lengths ...
 _MARGIN = 1.25         # ... times this margin, to clear the longest (edge-bloated) stars
@@ -115,7 +118,15 @@ def _is_red(mask, frame_bgr):
     if int(ring.sum()) >= 30:
         sp = frame_bgr[y0:y1, x0:x1][ring].astype(np.float32)
         sky_rb = float(np.median(sp[:, 2]) - np.median(sp[:, 0]))
-    return ((r - b) - sky_rb) > TRAIL_WARM_MARGIN and r > 60
+    if ((r - b) - sky_rb) > TRAIL_WARM_MARGIN and r > 60:
+        return True
+    # Second way to be red: a CLUMP of clearly warm pixels. A small red light sits inside a model outline
+    # that is mostly dark sky, so even the brightest fifth of the outline is mostly NOT red and its middle
+    # value reads neutral (Silvana Tree and Trails 1553-1567: 18 red pixels in a 328 pixel outline, middle
+    # value R-B 12, so the whole plane's red light was dropped as a star). Count the warm pixels directly.
+    # The first test above is kept as it was, so nothing that was red stops being red.
+    warm = ((px[:, 2] - px[:, 0]) - sky_rb > RED_CLUMP_MARGIN) & (px[:, 2] > 60)
+    return int(warm.sum()) >= RED_CLUMP_MIN_PX
 
 
 def filter_segs(segs, corners, frame_bgr, ceiling):

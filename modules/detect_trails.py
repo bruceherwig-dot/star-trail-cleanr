@@ -1345,6 +1345,11 @@ def filter_small_components(mask: np.ndarray, img: np.ndarray,
         top_b = float(pixels[top_mask, 0].mean())
         is_red = top_r > 80 and top_r > top_g * 1.4 and top_r > top_b * 1.4
         if not is_red:
+            # The same shared red test the star-size rule uses (a clump of clearly warm pixels), so a small red
+            # light kept by the detector is not removed here by a stricter colour-ratio test (Silvana 1553-1567).
+            from modules.star_streak import _is_red as _shared_is_red
+            is_red = _shared_is_red(component_mask.astype(np.uint8), img)
+        if not is_red:
             out[component_mask] = 0
             if debug_out is not None:
                 debug_out["removed"] += 1
