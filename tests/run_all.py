@@ -2,6 +2,7 @@
 """Run every test_*.py in this folder, report pass/fail, exit non-zero on any failure."""
 import importlib.util
 import os
+import re
 import sys
 import time
 import traceback
@@ -78,7 +79,42 @@ def main():
     return 1
 
 
+_ALL_PASSED = re.compile(r"All (\d+) tests passed")
+_SOME_FAILED = re.compile(r"(\d+) failed, (\d+) passed")
+
+
+def verdict_from_output(text: str, child_code: int) -> int:
+    """The suite's real result from what it printed. A printed failure count always fails; the
+    'All N tests passed' line passes even when the process then died on the way out; with neither
+    line (the suite itself crashed) the child's own exit code stands."""
+    plain = re.sub(r"\033\[[0-9;]*m", "", text)
+    if _SOME_FAILED.search(plain):
+        return 1
+    if _ALL_PASSED.search(plain):
+        return 0
+    return child_code or 1
+
+
+def run_in_child_on_windows():
+    """On Windows the process that builds the Qt windows can exit 1 during its own shutdown, after
+    every test passed (the v3.01 Windows build did this on 10 of 10 runs). Run the suite in a child
+    process and judge it by what it printed; this parent never loads Qt, so it exits cleanly."""
+    import subprocess
+    proc = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--child"],
+                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    text = proc.stdout.decode("utf-8", errors="replace")
+    sys.stdout.write(text)
+    sys.stdout.flush()
+    code = verdict_from_output(text, proc.returncode)
+    if proc.returncode != code:
+        print(f"(child exited {proc.returncode}; its printed result says {code}, so exiting {code})")
+        sys.stdout.flush()
+    return code
+
+
 if __name__ == "__main__":
+    if sys.platform == "win32" and "--child" not in sys.argv:
+        os._exit(run_in_child_on_windows())
     code = main()
     # Leave without the normal interpreter teardown. A few tests build real Qt windows, and
     # on the CI machines Python's shutdown sometimes destroys those windows in the wrong
