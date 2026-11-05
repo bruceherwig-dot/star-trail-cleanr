@@ -1318,6 +1318,9 @@ BAND_PAD_PX      = 2.0     # ... plus this
 COVER_FRAC       = 0.6     # share of a piece that must already be covered to drop it
 COVER_GRID_PX    = 8       # coverage is measured on a grid this coarse (speed)
 ANGLE_APART_DEG  = 8.0     # "points a different way" means at least this many degrees apart
+COVER_CROSS_DEG  = 30.0    # a thin piece only counts as covering a FAT one if it crosses it at least this steeply.
+                           # One plane line is often split into several detections whose directions differ by 8-20
+                           # degrees; those are the line's own pieces, not a crossing (Joshua Tree 2963).
 STUBBY_MINOR_MULT = 1.5    # redundant-piece test only for pieces this much wider than a typical trail
 STUBBY_MAX_ASPECT = 4.0    # ... and no longer than this many times their width
 
@@ -1468,13 +1471,18 @@ def thin_fat_detections(det_list, h, w, others=None):
     fat = [d for d in det_list if d["minor"] > fat_px]
     if not fat:
         return det_list, stats
-    cov = _coverage_grid([o for o in ref if o["minor"] <= fat_px], h, w)
+    thin_ref = [o for o in ref if o["minor"] <= fat_px]
     out = []
     for d in det_list:
         if d["minor"] <= fat_px:
             out.append(d)
             continue
-        if _covered_fraction(d, cov) >= COVER_FRAC:
+        # Only thin pieces CROSSING it (COVER_CROSS_DEG apart) count as covering a fat one (the arms of a crossing).
+        # A long plane line's own pieces point the same way as the line, and used to "cover" it, so the
+        # whole glowing line was dropped and its middle was left in the picture (Joshua Tree 2963).
+        a = _det_angle(d)
+        cross = [o for o in thin_ref if o is not d and _angle_apart(_det_angle(o), a) >= COVER_CROSS_DEG]
+        if cross and _covered_fraction(d, _coverage_grid(cross, h, w)) >= COVER_FRAC:
             stats["dropped_covered"] += 1
             continue
         co = d["coords"]
