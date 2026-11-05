@@ -1081,10 +1081,26 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                 next_c = (neighbor_masks[next_idx][y0:y1, x0:x1] > 0
                           if has_next and neighbor_masks[next_idx] is not None
                           else np.zeros(comp_mask.shape, dtype=bool))
+                # EDGE FRAME (the first or last of the set: exactly one neighbour). The two-neighbour test
+                # below needs both neighbours dirty, so on an edge frame it could never fire, and the one
+                # neighbour's own trail was pasted straight in (Joshua Tree 3033 copied 3032's plane trail).
+                # Treat the missing neighbour as dirty everywhere, so wherever the one neighbour's mask lands
+                # on this trail the same reach-outward-then-sky-fill route below runs.
+                _edge = (use_prev != use_next)
+                _mstep = 1.0 if _edge else 0.5      # star motion per frame: a full shift for the edge case, half the prev->next shift otherwise
                 if use_prev and use_next and _ok:
                     # Same slide as the borrowed pixels (see _shift_mask).
                     prev_c = prev_c | _shift_mask(prev_c, _dx / 2.0, _dy / 2.0)
                     next_c = next_c | _shift_mask(next_c, -_dx / 2.0, -_dy / 2.0)
+                if _edge:
+                    if use_prev:
+                        if _ok:
+                            prev_c = prev_c | _shift_mask(prev_c, _dx, _dy)
+                        next_c = np.ones(comp_mask.shape, dtype=bool)
+                    else:
+                        if _ok:
+                            next_c = next_c | _shift_mask(next_c, -_dx, -_dy)
+                        prev_c = np.ones(comp_mask.shape, dtype=bool)
                 union_both = comp_mask & prev_c & next_c
                 _union_zeroed_px = int(union_both.sum())
                 if union_both.any():
@@ -1098,7 +1114,7 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                         for _d in range(2, _CROSS_REACH + 1):
                             if not _remaining.any():
                                 break
-                            for _sgn in (1, -1):
+                            for _sgn in ((-1,) if (_edge and use_prev) else (1,) if _edge else (1, -1)):
                                 _k = frame_idx + _sgn * _d
                                 if not (0 <= _k < N):
                                     continue
@@ -1107,7 +1123,7 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                                        else np.zeros(comp_mask.shape, dtype=bool))
                                 if _ok:
                                     # frame _k's pixels are slid onto frame N below, so flag where its mask lands too (and where it sits)
-                                    _km = _km | _shift_mask(_km, -_sgn * _d * (_dx / 2.0), -_sgn * _d * (_dy / 2.0))
+                                    _km = _km | _shift_mask(_km, -_sgn * _d * (_dx * _mstep), -_sgn * _d * (_dy * _mstep))
                                 _clean = _remaining & ~_km          # frame _k is clean at these px
                                 if not _clean.any():
                                     continue
@@ -1119,8 +1135,8 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                                     if _kc.shape[0] >= 20:
                                         _offk = _cur_med - np.median(_kc, axis=0).astype(np.float32)
                                 # shift _k's stars onto frame N (per-frame motion = the shift / 2)
-                                _wk = (_shift_image(_pk, -_sgn * _d * (_dx / 2.0),
-                                                         -_sgn * _d * (_dy / 2.0))
+                                _wk = (_shift_image(_pk, -_sgn * _d * (_dx * _mstep),
+                                                         -_sgn * _d * (_dy * _mstep))
                                        if _ok else _pk)
                                 _wk = _level(_wk, _offk)
                                 result[y0:y1, x0:x1][_clean] = _wk[_clean]
@@ -1129,7 +1145,10 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                     # Whatever no clean frame was found for falls back to the colour-closest paste
                     # (or crayon sky-fill) -- a genuinely persistent crossing.
                     if _remaining.any():
-                        if raw_clean is not None:
+                        if _edge:
+                            # The one neighbour is dirty here too, so pasting it back would restore the trail.
+                            _sky_fill(result[y0:y1, x0:x1], _remaining, comp_mask)
+                        elif raw_clean is not None:
                             result[y0:y1, x0:x1][_remaining] = raw_clean[_remaining]
                         else:
                             _sky_fill(result[y0:y1, x0:x1], _remaining, comp_mask)
