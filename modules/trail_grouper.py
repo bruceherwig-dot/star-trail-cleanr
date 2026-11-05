@@ -1426,9 +1426,56 @@ def _single_band(blob):
     return [band] if band is not None else [blob]
 
 
+LEFTOVER_MIN_LEN_PX  = 2 * _cs._HOUGH_MIN_LINE   # an uncovered piece must be at least this long to be a streak
+LEFTOVER_OPEN_PX     = 9                         # thinner fringe than this is outline slack, not a streak
+LEFTOVER_MAX_ROUNDS  = 4
+
+
+def _cover_leftover_streaks(blob, bands):
+    """Add a band for every long, thin piece of the blob that no band covers yet.
+
+    WHAT: the blob is the model's outline of a crossing. _bands_from_blob makes ONE band per line
+    DIRECTION, so two parallel arms (an "F": one stem, two arms the same way) share one band and one
+    arm is left out, and a band keeps only its largest connected piece, so a stem can stop short.
+    This takes what the bands left uncovered, drops outline slack (fringe thinner than
+    LEFTOVER_OPEN_PX), and gives each remaining long thin piece its own band, a few rounds at most.
+    Each leftover piece is added as the model's own outline pixels there, not a fitted line.
+    WHY: whatever the model outlined was a trail to it; thinning is only meant to trim the box
+    around the trails, never to leave a bright streak inside it unmasked (Joshua Tree 3033).
+    WHEN NOT: it adds nothing when the bands already cover the blob, and never touches a blob that
+    has no bands. No number comes from one frame: lengths are multiples of the splitter's own
+    minimum line length.
+    """
+    bands = list(bands)
+    for _ in range(LEFTOVER_MAX_ROUNDS):
+        cov = np.zeros_like(blob)
+        for b in bands:
+            cov |= b
+        left = ((blob > 0) & (cv2.dilate(cov, np.ones((9, 9), np.uint8)) == 0)).astype(np.uint8)
+        left = cv2.morphologyEx(left, cv2.MORPH_OPEN, np.ones((LEFTOVER_OPEN_PX,) * 2, np.uint8))
+        n, lab, st, _stats = cv2.connectedComponentsWithStats(left, 8)
+        added = False
+        for i in range(1, n):
+            piece = (lab == i).astype(np.uint8)
+            ys, xs = np.nonzero(piece)
+            (_, _), (rw, rh), _ = cv2.minAreaRect(np.column_stack([xs, ys]).astype(np.float32))
+            major = max(rw, rh)
+            if major < LEFTOVER_MIN_LEN_PX:
+                continue
+            # The piece itself (the model's own outline there) becomes the band, thin or fat. Cutting a fat
+            # piece into fitted bands left gaps along the streaks inside it (Joshua Tree 3033), and the model
+            # already called these pixels trail.
+            bands.append(piece)
+            added = True
+        if not added:
+            break
+    return bands
+
+
 def bands_for_blob(blob):
     """Thin bands for a crossing blob (uint8 0/1 crop), or None to keep the blob as it is."""
-    return _bands_from_blob(blob)
+    bands = _bands_from_blob(blob)
+    return None if bands is None else _cover_leftover_streaks(blob, bands)
 
 
 def _drop_redundant(dets, ref, h, w):
