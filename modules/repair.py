@@ -204,6 +204,24 @@ def _shift_image(img: np.ndarray, dx: float, dy: float) -> np.ndarray:
                           borderMode=cv2.BORDER_REFLECT)
 
 
+def _shift_mask(mask: np.ndarray, dx: float, dy: float) -> np.ndarray:
+    """Move a yes/no trail mask by the same amount _shift_image moves the pixels, so the mask still
+    sits on the trail pixels that were borrowed. Outside the window counts as "no trail" (unknown).
+
+    Without this the neighbour's trail was looked for where it sat in the neighbour frame, not where its
+    pixels land after the star-motion slide, so a trail moving with the stars was missed and pasted back
+    (Sean Aurora frames 7702/7704: the neighbour's mask covered 31 of 474 dash pixels unshifted, 445 shifted).
+
+    Callers OR the shifted mask with the UNSHIFTED one, never replace it. A detection sitting on something
+    that does not move (a bush or trunk the model wrongly outlined) is flagged in the neighbour at the same
+    position; moving that flag away with the stars made the repair borrow slid sky over the bush instead of
+    pasting the real bush back, which left patches (Joshua Tree 3014 and 3026)."""
+    M = np.float32([[1, 0, dx], [0, 1, dy]])
+    moved = cv2.warpAffine(mask.astype(np.uint8), M, (mask.shape[1], mask.shape[0]),
+                           flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+    return moved > 0
+
+
 # ── Sky-color fallback fill (replaces the old black fill) ──────────────────────
 # Star Bridge still borrows real sky and stars from neighbor frames wherever a clean
 # neighbor exists -- that path is unchanged. These helpers only handle the give-up
@@ -879,6 +897,10 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                         next_c = (neighbor_masks[next_idx][y0:y1, x0:x1] > 0
                                   if has_next and neighbor_masks[next_idx] is not None
                                   else np.zeros(comp_mask.shape, dtype=bool))
+                        # The borrowed pixels were slid by half the star motion (warped_prev/next above),
+                        # so slide each neighbour's trail mask the same way before comparing.
+                        prev_c = prev_c | _shift_mask(prev_c, dx / 2.0, dy / 2.0)
+                        next_c = next_c | _shift_mask(next_c, -dx / 2.0, -dy / 2.0)
                         # Base fill where both neighbors are clean: averaged blend
                         # (default) or the colour-closest neighbor alone
                         # (single_shift). Then override the pixels where exactly one
@@ -1059,6 +1081,10 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                 next_c = (neighbor_masks[next_idx][y0:y1, x0:x1] > 0
                           if has_next and neighbor_masks[next_idx] is not None
                           else np.zeros(comp_mask.shape, dtype=bool))
+                if use_prev and use_next and _ok:
+                    # Same slide as the borrowed pixels (see _shift_mask).
+                    prev_c = prev_c | _shift_mask(prev_c, _dx / 2.0, _dy / 2.0)
+                    next_c = next_c | _shift_mask(next_c, -_dx / 2.0, -_dy / 2.0)
                 union_both = comp_mask & prev_c & next_c
                 _union_zeroed_px = int(union_both.sum())
                 if union_both.any():
@@ -1079,6 +1105,9 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                                 _km = ((neighbor_masks[_k][y0:y1, x0:x1] > 0)
                                        if neighbor_masks[_k] is not None
                                        else np.zeros(comp_mask.shape, dtype=bool))
+                                if _ok:
+                                    # frame _k's pixels are slid onto frame N below, so flag where its mask lands too (and where it sits)
+                                    _km = _km | _shift_mask(_km, -_sgn * _d * (_dx / 2.0), -_sgn * _d * (_dy / 2.0))
                                 _clean = _remaining & ~_km          # frame _k is clean at these px
                                 if not _clean.any():
                                     continue

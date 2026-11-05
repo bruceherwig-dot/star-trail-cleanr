@@ -115,3 +115,84 @@ def test_the_connected_components_path_still_skips_tiny_noise():
     dbg = {}
     repair_frame(frames[1], speck, 1, frames, neighbor_masks=[None, None, None], debug_out=dbg)
     assert not dbg.get("components"), "tiny specks on the old path stay skipped"
+
+
+def _plane_moves_with_the_stars():
+    """Three frames. The stars drift (-12, +20) px per frame, and a short plane dash drifts with them, so after
+    the repair's slide each neighbour's dash lands exactly on this frame's dash. The dash is far smaller than
+    the drift, so at the SAME position the neighbours show no dash there."""
+    H = W = 260
+    sx, sy = -12, 20
+    stars = [(40, 150), (200, 60), (90, 40), (180, 200), (60, 90), (220, 150), (130, 120), (30, 40), (160, 30)]
+
+    def frame(k):                                      # k = -1, 0, +1 relative to the middle frame
+        f = np.full((H, W, 3), 40, np.uint8)
+        for (y, x) in stars:
+            yy, xx = y + k * sy, x + k * sx
+            if 2 <= yy < H - 4 and 2 <= xx < W - 4:
+                f[yy:yy + 3, xx:xx + 3] = 230
+        # the plane dash: 12 x 6 px, centred at (110, 110) in the middle frame, moving with the stars
+        cy, cx = 110 + k * sy, 110 + k * sx
+        f[cy - 3:cy + 3, cx - 6:cx + 6] = (240, 240, 240)
+        return f
+
+    frames = [frame(-1), frame(0), frame(1)]
+    masks = []
+    for k in (-1, 0, 1):
+        m = np.zeros((H, W), np.uint8)
+        cy, cx = 110 + k * sy, 110 + k * sx
+        m[cy - 5:cy + 5, cx - 8:cx + 8] = 255          # each frame's own detection, a little bigger than the dash
+        masks.append(m)
+    return frames, masks
+
+
+def _dash_left_after_repair():
+    from modules.repair import repair_frame
+    frames, masks = _plane_moves_with_the_stars()
+    dbg = {}
+    out = repair_frame(frames[1], masks[1], 1, frames, neighbor_masks=masks,
+                       polygon_segs=[masks[1]], debug_out=dbg)
+    assert dbg["components"] and dbg["components"][0]["segments"][0].get("tracking_ok"), \
+        "the test needs the star tracking to succeed"
+    return int(out[105:115, 104:116].max())
+
+
+def test_a_trail_that_moves_with_the_stars_is_not_pasted_back():
+    assert _dash_left_after_repair() < 150
+
+
+def test_without_sliding_the_neighbour_masks_the_dash_comes_back():
+    """Documents the old behaviour so the test above is known to be sensitive to the fix."""
+    import modules.repair as repair
+    real = repair._shift_mask
+    repair._shift_mask = lambda m, dx, dy: m > 0
+    try:
+        assert _dash_left_after_repair() >= 150
+    finally:
+        repair._shift_mask = real
+
+
+def test_a_wrongly_outlined_static_object_is_still_pasted_back_unshifted():
+    """A bush the model outlined sits at the SAME place in every frame. The old unshifted flag caught it and the
+    repair pasted the real bush back. Sliding the flag away with the stars lost that; the shifted flag is added
+    to the unshifted one, so the bush stays flagged and comes back intact."""
+    from modules.repair import repair_frame
+    H = W = 260
+    sx, sy = -12, 20
+    stars = [(40, 150), (200, 60), (90, 40), (180, 200), (60, 90), (220, 150), (130, 120), (30, 40), (160, 30)]
+
+    def frame(k):
+        f = np.full((H, W, 3), 40, np.uint8)
+        for (y, x) in stars:
+            yy, xx = y + k * sy, x + k * sx
+            if 2 <= yy < H - 4 and 2 <= xx < W - 4:
+                f[yy:yy + 3, xx:xx + 3] = 230
+        f[100:120, 100:130] = (20, 60, 20)             # a dark bush: it does NOT move between frames
+        return f
+
+    frames = [frame(-1), frame(0), frame(1)]
+    m = np.zeros((H, W), np.uint8)
+    m[100:120, 100:130] = 255                           # the same wrong outline in every frame
+    out = repair_frame(frames[1], m, 1, frames, neighbor_masks=[m, m, m], polygon_segs=[m], debug_out={})
+    # the bush must come back as the bush (dark green), not as slid sky (40)
+    assert abs(int(out[110, 115, 1]) - 60) <= 12, "the static bush was replaced by slid sky"
