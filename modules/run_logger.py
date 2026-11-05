@@ -50,6 +50,12 @@ LOG_LEGEND = {
         "final_trail_components": "How many separate trail blobs remained after all filtering.",
         "sky_mask_pixels_removed": "Detection pixels erased by the sky/foreground mask this frame.",
     },
+    "decision_event_fields": "Every keep-or-toss decision in a detect record's stages carries the same "
+        "four parts, so you can read what happened without opening any code: 'reason' (the rule's name), "
+        "'action' (dropped, kept, thinned, added), 'bbox' ([x0, y0, x1, y1] in full-frame pixels: WHERE), "
+        "'why' (plain words with the measured number and the cutoff it was judged against) and 'result' "
+        "(what became of the piece). Older events (the static false-positive and phantom ones) carry a "
+        "'detail' or 'note' in place of 'why'. A guard test fails if a new event leaves out the position.",
     "detect_stage_event_reasons": {
         "phantom_removed": "A THIN/FAINT hit pruned near sky. Usually a TRAIL-TIP TRIM hanging "
             "off a real trail, NOT a clean false positive. Do NOT use as a hard-negative without "
@@ -58,6 +64,39 @@ LOG_LEGEND = {
             "hard-POSITIVE training candidate (label the trail at this spot).",
         "phantoms_pruned": "Count bookkeeping for the phantom-prune stage.",
         "kept_would_fail_fat_blob": "Informational only; the fat-blob gate is off.",
+        "load_failed": "A frame's image could not be loaded for this stage.",
+        "drop": "A detection removed in the first fitting step by a size or shape gate; the 'gate' field "
+            "names it (area, star_size, aspect, fat_blob). The 'why' gives the measured size and the cutoff. "
+            "star_size is the star-size rule: small, thin and not red means a star, not a trail.",
+        "crossing_kept_whole": "The model outlined a crossing or tangle that the splitter could not cut "
+            "into simple pieces, so it was kept as one outline. The crossing_bands event says what it "
+            "became.",
+        "crossing_bands": "What a kept-whole crossing became: cut into thin bands (one per line direction, "
+            "plus one for any long outline piece no band covered) or painted as the model's exact outline. "
+            "The F problem fix lives here.",
+        "fat_thinned": "The large-square fix cut a fat piece (a junction blob) into thin bands along its "
+            "line directions. 'result' says how many bands.",
+        "fat_dropped_covered": "The large-square fix dropped a fat piece because thin pieces crossing it "
+            "at 30 degrees or more already cover most of it.",
+        "fat_dropped_redundant": "The large-square fix dropped a short wide piece that detections pointing a "
+            "different way (8 degrees or more apart) already cover.",
+        "group_fitted": "One group of touching, same-direction detections was fitted with polygon(s). "
+            "'result' gives the polygon count and whether the fit was straight or curved. A detection "
+            "that never appears in a group_fitted box was lost before fitting.",
+        "leftover_polygon_added": "A long piece of a group's own pixels lay outside its fitted polygon "
+            "(the Side lobe problem), so it got a box of its own.",
+        "ground_mark_dropped": "The ground filter removed a polygon that looked like the outline of "
+            "ground (trees, a roof) rather than a trail: dark ground along one side and no bright line "
+            "inside. A mark the bright-line test cannot judge is kept, not dropped.",
+        "fp_suppressed": "The static false-positive suppressor removed a detection whose pixels are nearly "
+            "identical in neighbouring frames (a fixed object, not a moving trail).",
+        "fp_veto_frame_edge": "A detection that looked static was KEPT because it touches the frame edge "
+            "(trails exit the frame, static objects don't).",
+        "fp_veto_bright_trail": "A detection that looked static was KEPT because it is much brighter than "
+            "its surroundings (a real trail).",
+        "regroup": "Seam second pass: detections re-grouped after new ones were folded in.",
+        "ground_filter_skipped": "The ground filter did not run on this frame; 'reason' says why.",
+        "skip": "A stage did not run; 'note' says why.",
     },
     "key_repair_fields": {
         "_structure": "A 'repair' record has a 'components' list, one entry per trail blob repaired "

@@ -1518,11 +1518,18 @@ def bands_for_blob(blob):
     return None if bands is None else _cover_leftover_streaks(blob, bands)
 
 
-def _drop_redundant(dets, ref, h, w):
+def _det_box(d):
+    """[x0, y0, x1, y1] of a detection's pixels in full-frame coordinates (for the run log)."""
+    co = d["coords"]
+    return [int(co[:, 1].min()), int(co[:, 0].min()), int(co[:, 1].max()), int(co[:, 0].max())]
+
+
+def _drop_redundant(dets, ref, h, w, events=None):
     """Drop stubby wide pieces that detections pointing a different way already cover.
 
     Biggest first; a piece already dropped stops counting as cover. Returns
-    (kept list, number dropped).
+    (kept list, number dropped). With an events list given, each drop is appended to it as a dict
+    (rule, action, bbox, why, result) for the run log.
     """
     if not dets or not ref:
         return dets, 0
@@ -1535,25 +1542,36 @@ def _drop_redundant(dets, ref, h, w):
         a = _det_angle(d)
         others = [o for o in ref if o is not d and id(o) in alive
                   and _angle_apart(_det_angle(o), a) >= ANGLE_APART_DEG]
-        if others and _covered_fraction(d, _coverage_grid(others, h, w)) >= COVER_FRAC:
-            dropped.add(id(d))
-            alive.discard(id(d))
+        if others:
+            frac = _covered_fraction(d, _coverage_grid(others, h, w))
+            if frac >= COVER_FRAC:
+                dropped.add(id(d))
+                alive.discard(id(d))
+                if events is not None:
+                    events.append({
+                        "rule": "fat_dropped_redundant", "action": "dropped", "bbox": _det_box(d),
+                        "why": "short and wide (%.0f px long, %.0f px wide) and %.0f%% of it is already covered by "
+                               "detections pointing a different way (at least %.0f degrees apart; cutoff %.0f%%)"
+                               % (d["major"], d["minor"], 100 * frac, ANGLE_APART_DEG, 100 * COVER_FRAC),
+                        "result": "piece gone; the detections covering it stay"})
     return [d for d in dets if id(d) not in dropped], len(dropped)
 
 
-def thin_fat_detections(det_list, h, w, others=None):
+def thin_fat_detections(det_list, h, w, others=None, events=None):
     """Clean fat junction detections out of a detection list. Returns (new list, stats).
 
     others: the detections to measure "already covered" against. Defaults to
     det_list itself; the seam second pass passes the frame's existing detections
     so its new ones are judged against what was already found.
     stats counts "dropped_redundant", "dropped_covered" and "thinned" for the run log.
+    events: an optional list; one dict (rule, action, bbox, why, result) is appended for every piece
+    dropped or thinned, so the run log says which piece and where, not only how many.
     """
     stats = {"dropped_redundant": 0, "dropped_covered": 0, "thinned": 0}
     if not det_list:
         return det_list, stats
     ref = others if others is not None else det_list
-    det_list, stats["dropped_redundant"] = _drop_redundant(det_list, ref, h, w)
+    det_list, stats["dropped_redundant"] = _drop_redundant(det_list, ref, h, w, events)
     fat_px = FAT_MINOR_PX * math.sqrt(h * w / _REF_FRAME_PX)
     fat = [d for d in det_list if d["minor"] > fat_px]
     if not fat:
@@ -1569,8 +1587,16 @@ def thin_fat_detections(det_list, h, w, others=None):
         # whole glowing line was dropped and its middle was left in the picture (Joshua Tree 2963).
         a = _det_angle(d)
         cross = [o for o in thin_ref if o is not d and _angle_apart(_det_angle(o), a) >= COVER_CROSS_DEG]
-        if cross and _covered_fraction(d, _coverage_grid(cross, h, w)) >= COVER_FRAC:
+        frac = _covered_fraction(d, _coverage_grid(cross, h, w)) if cross else 0.0
+        if cross and frac >= COVER_FRAC:
             stats["dropped_covered"] += 1
+            if events is not None:
+                events.append({
+                    "rule": "fat_dropped_covered", "action": "dropped", "bbox": _det_box(d),
+                    "why": "a fat piece (%.0f px wide; fat means over %.0f) and %.0f%% of it is covered by thin "
+                           "pieces crossing it at %.0f degrees or more (cutoff %.0f%%)"
+                           % (d["minor"], fat_px, 100 * frac, COVER_CROSS_DEG, 100 * COVER_FRAC),
+                    "result": "piece gone; the thin pieces crossing it stay"})
             continue
         co = d["coords"]
         r0, c0 = co[:, 0].min(), co[:, 1].min()
@@ -1586,6 +1612,13 @@ def thin_fat_detections(det_list, h, w, others=None):
             p["conf"] = d.get("conf", 0.0)
             made.append(p)
         stats["thinned"] += 1
+        if events is not None:
+            events.append({
+                "rule": "fat_thinned", "action": "thinned", "bbox": _det_box(d),
+                "why": "a fat piece (%.0f px wide; fat means over %.0f) that thin neighbours do not already cover"
+                       % (d["minor"], fat_px),
+                "result": ("cut into %d thin band(s) along its line direction(s)" % len(made)) if made
+                          else "could not be cut into bands, kept whole"})
         out.extend(made if made else [d])
     return out, stats
 

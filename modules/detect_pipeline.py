@@ -56,7 +56,8 @@ from .crossing_splitter import split_crossing, has_crossing_evidence
 from .trail_grouper import (
     group_detections, fit_polygon, fit_curved_group, _group_angle_spread,
     _try_split_parallel, _pred_to_mask, thin_fat_detections, bands_for_blob, ground_mark,
-    uncovered_pieces,
+    uncovered_pieces, MAX_ANGLE_DEG, LEFTOVER_MIN_LEN_PX, LEFTOVER_OPEN_PX,
+    GROUND_CHUNK_RATIO, GROUND_RIDGE_MIN,
     _CURVED_MIN_XSPAN, _CURVED_MIN_ANGLE_SPREAD, MIN_AREA, _REF_FRAME_PX,
 )
 
@@ -154,6 +155,19 @@ class StageLog:
         """Record a single gate/decision event, e.g. a detection that passed or
         was dropped and why."""
         self.events.append({"reason": reason, **detail})
+
+    def decision(self, rule: str, action: str, bbox, why: str, result: str, **detail: Any) -> None:
+        """Record one keep-or-toss decision in the standard four-part form, so a reader of the run log
+        can tell WHAT happened, WHERE, WHY and WITH WHAT RESULT without opening any code:
+          rule   = the name of the rule that decided (also stored under "reason")
+          action = what it did: dropped, kept, thinned, added ...
+          bbox   = [x0, y0, x1, y1] in full-frame pixels (None only when there is no single place)
+          why    = plain words with the measured number and the cutoff it was judged against
+          result = what became of the piece (gone, kept whole, N boxes ...)
+        A guard test (tests/test_log_standard.py) fails if a decision event leaves one of these out."""
+        self.event(rule, action=action,
+                   bbox=None if bbox is None else [int(v) for v in bbox],
+                   why=why, result=result, **detail)
 
     def count(self, key: str, n: int = 1) -> None:
         """Increment a named counter for this stage (e.g. 'passed', 'dropped')."""
@@ -422,7 +436,7 @@ def _piece_is_red(mask: np.ndarray, img, img_is_rgb: bool) -> bool:
 
 def _props_with_log(mask: np.ndarray, cfg: StageConfig, log: StageLog,
                     skip_aspect: bool = False, frame_px=None,
-                    img=None, img_is_rgb: bool = False):
+                    img=None, img_is_rgb: bool = False, offset=(0, 0)):
     """Region properties for one detection mask, or None if it fails a gate.
     Same gates as the shipped elongation filter, except the fat-blob gate is
     toggleable and every drop (and every fat-blob the gate would have killed)
@@ -433,7 +447,9 @@ def _props_with_log(mask: np.ndarray, cfg: StageConfig, log: StageLog,
     real trail arms -- re-filtering by shape would kill short stubby tips.
     frame_px: total pixels of the FULL frame for area normalisation; pass when
     `mask` is a crop so thresholds match full-frame. Defaults to mask size.
-    img / img_is_rgb: the frame pixels under `mask` (same size), used only for the red test of the star-size rule."""
+    img / img_is_rgb: the frame pixels under `mask` (same size), used only for the red test of the star-size rule.
+    offset: (row, col) of `mask`'s top-left corner in the full frame, so a logged drop carries a full-frame
+    position even when `mask` is a crop."""
     area_scale = (frame_px if frame_px else (mask.shape[0] * mask.shape[1])) / _REF_FRAME_PX
     min_area = MIN_AREA * area_scale
     ys, xs = np.where(mask > 0)
@@ -448,10 +464,14 @@ def _props_with_log(mask: np.ndarray, cfg: StageConfig, log: StageLog,
     p = max(props, key=lambda x: x.area)
     minor = p.axis_minor_length
     use_star_rule = bool(cfg.star_len_px and cfg.star_width_px)
+    # Where this piece sits in the full frame (x0, y0, x1, y1), for every drop logged below.
+    _box = [col_lo + int(offset[1]), row_lo + int(offset[0]), col_hi + int(offset[1]), row_hi + int(offset[0])]
     if minor < 1:
         log.count("dropped_area")
-        log.event("drop", gate="area", area=float(round(p.area, 1)),
-                  min_area=round(min_area, 1))
+        log.decision("drop", "dropped", _box,
+                     "the piece is under 1 px wide, so it has no shape to judge",
+                     "piece gone from this frame's detections",
+                     gate="area", area=float(round(p.area, 1)), min_area=round(min_area, 1))
         return None
     if use_star_rule:
         # Keep a detection if it is red, longer than the longest star, or fatter than a star.
@@ -459,20 +479,29 @@ def _props_with_log(mask: np.ndarray, cfg: StageConfig, log: StageLog,
         major = p.axis_major_length
         if major <= cfg.star_len_px and minor <= cfg.star_width_px and not _piece_is_red(mask, img, img_is_rgb):
             log.count("dropped_star_size")
-            log.event("drop", gate="star_size", major=float(round(major, 1)), minor=float(round(minor, 1)),
-                      star_len=round(cfg.star_len_px, 1), star_width=round(cfg.star_width_px, 1))
+            log.decision("drop", "dropped", _box,
+                         "star-sized and not red: length %.0f px (cutoff %.0f) and width %.0f px (cutoff %.0f)"
+                         % (major, cfg.star_len_px, minor, cfg.star_width_px),
+                         "piece gone from this frame's detections",
+                         gate="star_size", major=float(round(major, 1)), minor=float(round(minor, 1)),
+                         star_len=round(cfg.star_len_px, 1), star_width=round(cfg.star_width_px, 1))
             return None
     elif p.area < min_area:
         log.count("dropped_area")
-        log.event("drop", gate="area", area=float(round(p.area, 1)),
-                  min_area=round(min_area, 1))
+        log.decision("drop", "dropped", _box,
+                     "area %.0f px is under the minimum %.0f px" % (p.area, min_area),
+                     "piece gone from this frame's detections",
+                     gate="area", area=float(round(p.area, 1)), min_area=round(min_area, 1))
         return None
     # With the star-size rule on, "fatter than a star" or "longer than a star" is the shape test; the old
     # roundness test would throw out short round plane lights the star rule just kept.
     if not skip_aspect and not use_star_rule and p.axis_major_length / minor < cfg.min_aspect:
         log.count("dropped_aspect")
-        log.event("drop", gate="aspect",
-                  aspect=round(p.axis_major_length / minor, 2))
+        log.decision("drop", "dropped", _box,
+                     "length over width is %.2f, under the minimum %.2f, so it is too round to be a trail"
+                     % (p.axis_major_length / minor, cfg.min_aspect),
+                     "piece gone from this frame's detections",
+                     gate="aspect", aspect=round(p.axis_major_length / minor, 2))
         return None
     # "Fat blob" test: a detection is suspiciously fat when it is BOTH wide in
     # absolute terms (minor axis > ~50px, scaled to the frame size) AND wider
@@ -485,12 +514,17 @@ def _props_with_log(mask: np.ndarray, cfg: StageConfig, log: StageLog,
     if is_fat:
         if cfg.fat_blob_gate:
             log.count("dropped_fat_blob")
-            log.event("drop", gate="fat_blob", minor=round(minor, 1),
-                      fill_frac=round(fill_frac, 3))
+            log.decision("drop", "dropped", _box,
+                         "too fat and too solid to be a streak: width %.0f px (cutoff %.0f) and %.1fx its pixel density"
+                         % (minor, 50 * math.sqrt(area_scale), minor / max(pixel_density, 1e-6)),
+                         "piece gone from this frame's detections",
+                         gate="fat_blob", minor=round(minor, 1), fill_frac=round(fill_frac, 3))
             return None
         log.count("kept_would_fail_fat_blob")
-        log.event("kept_would_fail_fat_blob", minor=round(minor, 1),
-                  fill_frac=round(fill_frac, 3))
+        log.decision("kept_would_fail_fat_blob", "kept", _box,
+                     "the fat-blob gate is off; this piece would have failed it (width %.0f px)" % minor,
+                     "kept and passed on to polygon fitting",
+                     minor=round(minor, 1), fill_frac=round(fill_frac, 3))
     _, vecs = np.linalg.eigh(p.inertia_tensor)
     return {
         "centroid": np.array([p.centroid[0] + row_lo, p.centroid[1] + col_lo]),
@@ -626,6 +660,12 @@ def _polys_and_segs_deduped(polygons: list, h: int, w: int):
     return kept_polygons, kept_segs
 
 
+def _log_thin_events(log, events):
+    """Write the large-square fix's per-piece decisions (from thin_fat_detections) to the run log."""
+    for e in events:
+        log.decision(e["rule"], e["action"], e["bbox"], e["why"], e["result"])
+
+
 def _fit_groups(det_list: list, groups: list, h: int, w: int, log=None):
     """Fit one polygon per group and rasterise them into a mask. Returns
     (final_mask, polygons). Curved fit is used when a group is long and bends;
@@ -641,12 +681,20 @@ def _fit_groups(det_list: list, groups: list, h: int, w: int, log=None):
     for grp in groups:
         all_coords = np.vstack([det_list[i]["coords"] for i in grp])
         x_span = int(all_coords[:, 1].max() - all_coords[:, 1].min())
-        if (x_span >= _CURVED_MIN_XSPAN
-                and _group_angle_spread(grp, det_list) >= _CURVED_MIN_ANGLE_SPREAD):
+        _curved = (x_span >= _CURVED_MIN_XSPAN
+                   and _group_angle_spread(grp, det_list) >= _CURVED_MIN_ANGLE_SPREAD)
+        if _curved:
             corner_sets = fit_curved_group(grp, det_list)
         else:
             corners, _, _ = fit_polygon(grp, det_list)
             corner_sets = [corners]
+        if log is not None:
+            log.decision("group_fitted", "kept",
+                         [int(all_coords[:, 1].min()), int(all_coords[:, 0].min()),
+                          int(all_coords[:, 1].max()), int(all_coords[:, 0].max())],
+                         "%d touching detection(s) pointing the same way (within %.0f degrees) were fitted together"
+                         % (len(grp), MAX_ANGLE_DEG),
+                         "%d polygon(s), %s fit" % (len(corner_sets), "curved" if _curved else "straight"))
         for corners in corner_sets:
             pts = np.array(corners, dtype=np.int32).reshape(-1, 1, 2)
             cv2.fillPoly(final, [pts], 255)
@@ -658,7 +706,11 @@ def _fit_groups(det_list: list, groups: list, h: int, w: int, log=None):
             if log is not None:
                 log.count("leftover_polygons_added")
                 xs_, ys_ = [p[0] for p in corners], [p[1] for p in corners]
-                log.event("leftover_polygon_added", bbox=[min(xs_), min(ys_), max(xs_), max(ys_)])
+                (_, _), (_rw, _rh), _ = cv2.minAreaRect(np.array(corners, np.float32).reshape(-1, 1, 2))
+                log.decision("leftover_polygon_added", "added", [min(xs_), min(ys_), max(xs_), max(ys_)],
+                             "a piece of the group's own pixels %.0f px long (at least %d) and thicker than %d px "
+                             "lay outside every fitted polygon" % (max(_rw, _rh), LEFTOVER_MIN_LEN_PX, LEFTOVER_OPEN_PX),
+                             "got a box of its own, so the streak inside it is masked")
     return final, polygons
 
 
@@ -984,9 +1036,11 @@ def stage_fit_polygons(state: PipelineState, cfg: StageConfig,
             if has_crossing_evidence(mc, frame_px=frame_px):
                 n_kept_whole += 1
                 log.count("crossings_kept_whole")
-                log.event("crossing_kept_whole",
-                          area=int((mc > 0).sum()),
-                          bbox=[int(c0), int(r0), int(c1), int(r1)])
+                log.decision("crossing_kept_whole", "kept", [c0, r0, c1, r1],
+                             "the model's outline shows two or more line directions at a real angle (a crossing "
+                             "or tangle), which the splitter cannot cut into simple pieces",
+                             "kept as one outline for now; see the crossing_bands event for what it was cut into",
+                             area=int((mc > 0).sum()))
                 rescued_blobs.append(((mc > 0).astype(np.uint8), r0, c0))
                 t_split += time.perf_counter() - _t
                 continue
@@ -1001,7 +1055,8 @@ def stage_fit_polygons(state: PipelineState, cfg: StageConfig,
                                         skip_aspect=is_confirmed_crossing,
                                         frame_px=frame_px,
                                         img=state.image[r0:r1 + 1, c0:c1 + 1],
-                                        img_is_rgb=True)   # state.image is the RGB copy made at tiled inference
+                                        img_is_rgb=True,   # state.image is the RGB copy made at tiled inference
+                                        offset=(r0, c0))
                 t_props += time.perf_counter() - _t
                 if props is not None:
                     props["coords"] = props["coords"] + off
@@ -1024,10 +1079,12 @@ def stage_fit_polygons(state: PipelineState, cfg: StageConfig,
     # Fat junction pieces (an X or V of thin lines read as one wide blob) would
     # become one big box ("large square") or a stray box between the real trails.
     # Cut them to thin bands, or drop them when thin neighbours already cover them.
-    det_list, _thin = thin_fat_detections(det_list, h, w)
+    _thin_events = []
+    det_list, _thin = thin_fat_detections(det_list, h, w, events=_thin_events)
     for _k, _n in _thin.items():
         if _n:
             log.count("fat_" + _k, _n)
+    _log_thin_events(log, _thin_events)
 
     # Group collinear, touching fragments into trails.
     _t = time.perf_counter()
@@ -1050,7 +1107,12 @@ def stage_fit_polygons(state: PipelineState, cfg: StageConfig,
     # thin band per line (and a rectangle per band) instead of one fat blob.
     for _mb, _rb, _cb in rescued_blobs:
         _bands = bands_for_blob(_mb)
+        _bbox = [_cb, _rb, _cb + _mb.shape[1] - 1, _rb + _mb.shape[0] - 1]
         if _bands:
+            log.decision("crossing_bands", "thinned", _bbox,
+                         "the kept-whole crossing has two or more line directions; one band per direction, "
+                         "plus a band for any long outline piece no band covers",
+                         "cut into %d thin band(s), each painted into the cleaning mask" % len(_bands))
             for _pb in _bands:
                 final[_rb:_rb + _pb.shape[0], _cb:_cb + _pb.shape[1]][_pb > 0] = 255
                 _ys, _xs = np.nonzero(_pb)
@@ -1059,6 +1121,9 @@ def stage_fit_polygons(state: PipelineState, cfg: StageConfig,
                 polygons.append(
                     (_box + np.array([_cb, _rb])).round().astype(int).tolist())
             continue
+        log.decision("crossing_bands", "kept", _bbox,
+                     "the kept-whole crossing did not split into two usable line directions",
+                     "painted into the cleaning mask as the model's exact outline")
         final[_rb:_rb + _mb.shape[0], _cb:_cb + _mb.shape[1]][_mb > 0] = 255
         _cnts, _ = cv2.findContours(_mb, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         for _cn in _cnts:
@@ -1419,10 +1484,12 @@ def stage_seam_second_pass(state: PipelineState, cfg: StageConfig,
     # The re-run detections are kept whole (no crossing or parallel split), so a
     # junction comes back as a fat blob: thin it before it is grouped and boxed,
     # judged against what the frame already had.
-    new_dets, _thin = thin_fat_detections(new_dets, h, w, det_list)
+    _thin_events = []
+    new_dets, _thin = thin_fat_detections(new_dets, h, w, det_list, events=_thin_events)
     for _k, _n in _thin.items():
         if _n:
             log.count("fat_" + _k, _n)
+    _log_thin_events(log, _thin_events)
     log.count("new_dets", len(new_dets))
 
     # Re-inference enrichment: when the model DID fire in a gap (e.g. B10), fold
@@ -1692,10 +1759,15 @@ def stage_ground_filter(state: PipelineState, cfg: StageConfig,
         if mark:
             drop.append(i)
             pts = np.asarray(p, dtype=np.int32).reshape(-1, 2)
-            log.event("ground_mark_dropped",
-                      bbox=[int(pts[:, 0].min()), int(pts[:, 1].min()),
-                            int(pts[:, 0].max()), int(pts[:, 1].max())],
-                      side_ratio=info["side_ratio"], ridge=info["ridge"])
+            log.decision("ground_mark_dropped", "dropped",
+                         [int(pts[:, 0].min()), int(pts[:, 1].min()),
+                          int(pts[:, 0].max()), int(pts[:, 1].max())],
+                         "dark ground along one side (the dimmer side is only %.0f%% as bright as the other, "
+                         "cutoff %.0f%%) and no bright line inside it (height %s, cutoff %.1f)"
+                         % (100 * (info["side_ratio"] or 0), 100 * GROUND_CHUNK_RATIO,
+                            "%.1f" % info["ridge"] if info["ridge"] is not None else "n/a", GROUND_RIDGE_MIN),
+                         "polygon and its pixels removed from the cleaning mask",
+                         side_ratio=info["side_ratio"], ridge=info["ridge"])
     log.count("polygons_checked", len(polys))
     log.count("ground_marks_dropped", len(drop))
     if not drop:
