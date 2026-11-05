@@ -1609,4 +1609,9 @@ def ground_mark(gray, corners):
         return False, info
     ridge = _ground_ridge(crop, local)
     info["ridge"] = None if ridge is None else round(ridge, 1)
-    return (ridge is None or ridge < GROUND_RIDGE_MIN), info
+    # No ridge reading (polygon under 40 px long) means the bright-line test could not run, so the mark
+    # cannot be proven to be ground. Keep it: short plane dashes along a horizon look exactly like this
+    # (v3.0 dropped 1,979 of them on the Sean run before this was changed).
+    if ridge is None:
+        return False, info
+    return ridge < GROUND_RIDGE_MIN, info

@@ -63,6 +63,14 @@ def test_trails_in_open_sky_or_open_ground_are_never_touched():
     assert not ground_mark(plain, IN_GROUND)[0], "dark on BOTH sides is not a ground edge"
 
 
+def test_a_short_dash_at_the_horizon_is_kept_because_the_line_test_cannot_run():
+    """A dash under 40 px long cannot be tested for a bright line, so it must not be dropped as ground
+    (v3.0 dropped 1,979 such plane dashes on the Sean run)."""
+    short = _rect(500, HORIZON - 6, 530, HORIZON + 6)
+    mark, info = ground_mark(_scene(), short)
+    assert not mark, "an untestable short mark was dropped: %s" % info
+
+
 def test_a_polygon_too_close_to_the_frame_edge_to_judge_is_kept():
     mark, _ = ground_mark(_scene(), _rect(300, 0, 1000, 30))
     assert not mark
