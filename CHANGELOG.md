@@ -2,7 +2,7 @@
 
 ---
 
-## v3.01-beta
+## v3.02-beta
 This release is about plane and satellite trails that survived cleaning. Every item below was found on a real sequence, fixed, and checked by looking at the cleaned pictures. Tested on four sequences (an aurora sequence, an 80-second desert sequence, a winter preserve sequence and a lakeside tree sequence), not on a fresh camera.
 - **Fixed: short plane dashes along the horizon were being thrown away as "ground".** The filter that drops marks outlining trees or a roof edge also dropped any short mark near dark ground that it could not test, and a short plane dash looks exactly like that. On a 572-frame aurora sequence this removed 1,979 pieces in the horizon band before the repair ever saw them. A mark the filter cannot judge is now kept. This problem shipped in v3.0-beta.
 - **Fixed: a plane's moving white dashes were dropped as "stars".** A plane's strobe dash is about the size of a star streak, so the star-size rule threw it away and it left a dotted line in the finished star trail. The cleaner now checks the neighboring frames: a star shows up again about a pixel away, and a plane's dash has moved many pixels. A small, non-red piece with no partner nearby in the neighbors is kept and cleaned. On a lakeside sequence this removed a dotted line of 13 dashes. Limits: a dash that moves only a few pixels from frame to frame still looks like a star and is left alone, and where a cleaned dash crosses a bright star streak the streak can show a small gap.
@@ -13,6 +13,7 @@ This release is about plane and satellite trails that survived cleaning. Every i
 - **Fixed: the first and last frame of a sequence could copy the neighbor's own plane trail back in.** The repair borrows sky from the frames on either side and reaches farther out when both have the trail. The first and last frame have only one neighbor, so that check never ran, and a plane trail in the neighbor was pasted into the frame. They now reach farther out on the same side, or fill with sky.
 - **Fixed: the repair could paste back a trail that moves with the stars.** The repair slides the neighboring frame by the star motion, but only checked whether the neighbor's trail sat in the original place, not where it lands after the slide. On 20 test frames of a twilight aurora sequence the plane dashes left behind dropped from 15 to 6 (29 in the original frames).
 - **Improved: the run log now says what happened, where, why and with what result.** Every piece the cleaner keeps, drops, thins or adds is logged with its position, the rule that decided and the number it was judged against, so a trail that vanishes can be traced. The log's first record explains each entry in plain words, and a test fails if a new entry leaves out its position. This changes nothing about the cleaned pictures.
+- **Build: the Windows build no longer fails after every test passes.** The Windows test step could exit with an error after printing that all tests passed. The test runner now judges the tests by what they printed. This is the only difference from the 3.01 build that never shipped.
 - **Smoke tests:** 650 passing.
 
 ## v3.0-beta
