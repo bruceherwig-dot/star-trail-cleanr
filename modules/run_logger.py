@@ -49,6 +49,14 @@ LOG_LEGEND = {
             "(bright-pixel or star-motion veto judged them a real trail).",
         "final_trail_components": "How many separate trail blobs remained after all filtering.",
         "sky_mask_pixels_removed": "Detection pixels erased by the sky/foreground mask this frame.",
+        "mover_checked": "Step 1e (mover rescue): how many pieces the star-size rule dropped on this frame "
+            "were examined to see whether they moved.",
+        "mover_rescued": "Step 1e (mover rescue): a LIST of star-sized, non-red pieces the star-size rule "
+            "had dropped but that have NO blob within 15 px in any neighbouring frame, so they are not stars: "
+            "they moved (a plane's white strobe dash is the typical case). Each was added to the cleaning "
+            "mask. Fields: reason, action, bbox [x0, y0, x1, y1], why (the distances), result, partner_px "
+            "(distance in px to the nearest blob in each neighbour; null = none in view). A normal set rescues "
+            "none or a handful; hundreds means stars are being caught.",
     },
     "decision_event_fields": "Every keep-or-toss decision in a detect record's stages carries the same "
         "four parts, so you can read what happened without opening any code: 'reason' (the rule's name), "

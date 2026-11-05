@@ -941,6 +941,9 @@ def main():
                         help="Use the old fixed pixel-area floor (--min-area) instead of the star-size rule "
                              "(keep a detection if red, longer than the longest star, or fatter than a star; "
                              "star size measured per set). For A/B comparisons.")
+    parser.add_argument("--no-mover-rescue", action="store_true",
+                        help="Turn off the mover rescue (Step 1e), which keeps a star-sized dash that has no "
+                             "partner in the neighbouring frames because it moved. For A/B comparisons.")
     parser.add_argument("--foreground-mask", type=str, default=None,
                         help="Path to foreground mask (white=foreground to exclude)")
     parser.add_argument("--skip-boundary", type=int, default=0,
@@ -1901,6 +1904,7 @@ def main():
     segs_all = []           # per-frame polygon segment lists for independent repair
     corners_all = []        # per-frame polygon corner coordinate lists for JSON export
     edge_candidates_all = []  # per-frame lists of edge-touching detections that failed elongation
+    star_dropped_all = []     # per-frame lists of pieces the star-size rule dropped (for Step 1e, the mover rescue)
     detect_infos = []  # buffered per-frame detect data; written after static FP pass
     running_trail_total = 0
 
@@ -1969,6 +1973,7 @@ def main():
                                 foreground_mask=fg_mask, frame_name=fp.stem,
                                 cfg=new_cfg)
         _tacc("new_pipeline_s", time.perf_counter() - _t0)
+        star_dropped_all.append(list(getattr(state, "star_dropped", None) or []))
         for _sname, _ssec in state.stage_seconds.items():
             _tacc(f"dp_{_sname}_s", _ssec)
         if dbg is not None:
@@ -2245,6 +2250,57 @@ def main():
 
     _tacc("edge_rescue_s", time.perf_counter() - _t0)
 
+    # Step 1e - Mover rescue: keep a star-sized dash that MOVED.
+    #
+    # The star-size rule dropped these as "a star" (small, thin, not red). A plane's white strobe dash is
+    # that size, and leaves a dotted line in the stack (Silvana, Tree and Trails, frames 1586-1596). A star
+    # shows up again within 15 px in the next frame (that is how its size was measured); a dash has moved
+    # farther. A dropped piece with no blob within 15 px in any neighbouring frame is therefore not a star:
+    # it is added to the mask, to the repair polygons and to the export, like any detected trail.
+    # Runs after the static suppressor and the edge rescue, and the small-piece filter does not see it
+    # again. Each rescue is logged with its position and the distance to the nearest blob in each neighbour.
+    _t0 = time.perf_counter()
+    mover_logs = {}
+    n_movers = 0
+    if (not args.no_mover_rescue) and _star_len and any(len(sd) > 0 for sd in star_dropped_all):
+        from modules.mover_rescue import find_movers, polygon_for, partner_radius
+        _mover_radius = partner_radius((star_size or {}).get("shift"))
+        try:
+            for i, dropped in enumerate(star_dropped_all):
+                if not dropped or i >= len(masks_all):
+                    continue
+                nbs = [frames_8bit_all[j] for j in (i - 1, i + 1) if 0 <= j < len(frames_8bit_all)]
+                movers, checked = find_movers(dropped, frames_8bit_all[i], nbs, sky_mask, radius=_mover_radius)
+                entry = {"checked": checked, "rescued": []}
+                for mv in movers:
+                    cxi, cyi = int(mv["cx"]), int(mv["cy"])
+                    if masks_all[i][min(cyi, h - 1), min(cxi, w - 1)] > 0:
+                        continue                    # already inside a cleaning mask: nothing to add
+                    corners = polygon_for(mv["piece"])
+                    seg = np.zeros((h, w), dtype=np.uint8)
+                    cv2.fillPoly(seg, [np.array(corners, np.int32).reshape(-1, 1, 2)], 255)
+                    if sky_mask is not None:
+                        seg = apply_sky_mask(seg, sky_mask)
+                    if not (seg > 0).any():
+                        continue
+                    masks_all[i] = np.maximum(masks_all[i], seg)
+                    segs_all[i].append(seg)
+                    corners_all[i].append(corners)
+                    n_movers += 1
+                    entry["rescued"].append({
+                        "reason": "mover_rescued", "action": "added",
+                        "bbox": [int(c) for c in mv["piece"]["bbox"]],
+                        "why": mv["why"],
+                        "result": "added to the cleaning mask, the repair polygons and the export as a box",
+                        "partner_px": mv["partner_px"]})
+                mover_logs[i] = entry
+        except Exception as e:
+            print(f"  WARN: mover rescue failed and was skipped ({e})", flush=True)
+        if n_movers:
+            print(f"\nStep 1e - kept {n_movers} moving dash(es) the star-size rule would have dropped "
+                  f"(no partner in the neighbouring frames)", flush=True)
+    _tacc("mover_rescue_s", time.perf_counter() - _t0)
+
     # Write all detect records now that static FP suppression is complete.
     # final_trail_components is computed here (post-suppression) from masks_all.
     if logger is not None:
@@ -2289,6 +2345,9 @@ def main():
                     _harvest_sky += 1
                 else:
                     _harvest_fg += 1
+            if _i in mover_logs:
+                _dbg["mover_checked"] = mover_logs[_i]["checked"]
+                _dbg["mover_rescued"] = mover_logs[_i]["rescued"]
             _dbg["static_fp_suppressed"]    = _sfp
             _dbg["static_fp_kept_by_veto"]  = _veto_by_frame.get(_i, [])
             if _i in _sfp_polys_removed:

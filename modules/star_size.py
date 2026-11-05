@@ -77,13 +77,14 @@ def _gray(img):
 def measure_star_size(frames, fg_mask=None, max_pairs=2):
     """Star size for one set. frames: list of images (BGR or gray, in shooting order; None entries skipped).
     fg_mask: 255 = foreground (ignored). Returns {"length": px, "width": px, "stars": count} or None when
-    there are too few paired stars to trust (the caller then keeps its old fixed-size rule)."""
+    there are too few paired stars to trust (the caller then keeps its old fixed-size rule). "shift" is the median
+    distance a paired star moved between the two frames, in px."""
     usable = [i for i, f in enumerate(frames) if f is not None]
     pairs = [(a, b) for a, b in zip(usable, usable[1:]) if b == a + 1]
     if not pairs:
         return None
     picks = sorted({0, len(pairs) // 2})[:max_pairs]
-    lens, wids = [], []
+    lens, wids, shifts = [], [], []
     for pi in picks:
         a, b = pairs[pi]
         ga, gb = _gray(frames[a]), _gray(frames[b])
@@ -98,12 +99,17 @@ def measure_star_size(frames, fg_mask=None, max_pairs=2):
         ok = np.isfinite(d)
         lens.append(la[ok])
         wids.append(wa[ok])
+        shifts.append(d[ok])
     if not lens:
         return None
     lens = np.concatenate(lens)
     wids = np.concatenate(wids)
+    shifts = np.concatenate(shifts)
     if len(lens) < _MIN_STARS:
         return None
     return {"length": float(np.percentile(lens, _PCTL)),
             "width": float(np.percentile(wids, _PCTL)),
-            "stars": int(len(lens))}
+            "stars": int(len(lens)),
+            # How far a star moves between two frames in this set (median of the paired stars' distances), so
+            # the mover rescue can look for a partner only as far as a star could have gone.
+            "shift": float(np.median(shifts))}

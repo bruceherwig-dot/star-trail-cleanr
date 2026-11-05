@@ -211,6 +211,7 @@ class PipelineState:
     polygons: list[Any] = field(default_factory=list)         # fitted trail polygon corner sets
     polygon_segs: list[Any] = field(default_factory=list)     # per-polygon binary masks (1 per polygon, for repair + MaskViewR)
     final_mask: Optional[np.ndarray] = None                   # output mask
+    star_dropped: list[Any] = field(default_factory=list)     # pieces the star-size rule dropped (bbox + coords), for the mover rescue
     stage_seconds: dict = field(default_factory=dict)         # {stage_name: seconds} for timing reporting
     stage_log: list = field(default_factory=list)             # per-stage records (seconds + counts + events) for the run log
 
@@ -436,7 +437,7 @@ def _piece_is_red(mask: np.ndarray, img, img_is_rgb: bool) -> bool:
 
 def _props_with_log(mask: np.ndarray, cfg: StageConfig, log: StageLog,
                     skip_aspect: bool = False, frame_px=None,
-                    img=None, img_is_rgb: bool = False, offset=(0, 0)):
+                    img=None, img_is_rgb: bool = False, offset=(0, 0), dropped_out=None):
     """Region properties for one detection mask, or None if it fails a gate.
     Same gates as the shipped elongation filter, except the fat-blob gate is
     toggleable and every drop (and every fat-blob the gate would have killed)
@@ -449,7 +450,9 @@ def _props_with_log(mask: np.ndarray, cfg: StageConfig, log: StageLog,
     `mask` is a crop so thresholds match full-frame. Defaults to mask size.
     img / img_is_rgb: the frame pixels under `mask` (same size), used only for the red test of the star-size rule.
     offset: (row, col) of `mask`'s top-left corner in the full frame, so a logged drop carries a full-frame
-    position even when `mask` is a crop."""
+    position even when `mask` is a crop.
+    dropped_out: an optional list. A piece the star-size rule drops is appended to it as a dict (bbox and the
+    piece's pixel coords in full-frame row, col), so a later step can check whether it moved (modules/mover_rescue)."""
     area_scale = (frame_px if frame_px else (mask.shape[0] * mask.shape[1])) / _REF_FRAME_PX
     min_area = MIN_AREA * area_scale
     ys, xs = np.where(mask > 0)
@@ -485,6 +488,9 @@ def _props_with_log(mask: np.ndarray, cfg: StageConfig, log: StageLog,
                          "piece gone from this frame's detections",
                          gate="star_size", major=float(round(major, 1)), minor=float(round(minor, 1)),
                          star_len=round(cfg.star_len_px, 1), star_width=round(cfg.star_width_px, 1))
+            if dropped_out is not None:
+                dropped_out.append({"bbox": _box,
+                                    "coords": np.column_stack((ys + int(offset[0]), xs + int(offset[1])))})
             return None
     elif p.area < min_area:
         log.count("dropped_area")
@@ -962,6 +968,8 @@ def stage_fit_polygons(state: PipelineState, cfg: StageConfig,
     # pieces bypass the aspect gate -- the splitter already validated them as
     # real trail arms. Short stubby tips would otherwise be killed.
     det_list = []
+    _star_dropped = []          # pieces the star-size rule drops, kept for the mover rescue
+    state.star_dropped = _star_dropped
     frame_px = h * w
     t_premask = t_scan = t_split = t_par = t_props = 0.0
     n_split_fired = 0
@@ -1056,7 +1064,7 @@ def stage_fit_polygons(state: PipelineState, cfg: StageConfig,
                                         frame_px=frame_px,
                                         img=state.image[r0:r1 + 1, c0:c1 + 1],
                                         img_is_rgb=True,   # state.image is the RGB copy made at tiled inference
-                                        offset=(r0, c0))
+                                        offset=(r0, c0), dropped_out=_star_dropped)
                 t_props += time.perf_counter() - _t
                 if props is not None:
                     props["coords"] = props["coords"] + off
