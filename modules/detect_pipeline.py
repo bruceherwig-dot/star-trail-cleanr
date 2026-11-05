@@ -56,6 +56,7 @@ from .crossing_splitter import split_crossing, has_crossing_evidence
 from .trail_grouper import (
     group_detections, fit_polygon, fit_curved_group, _group_angle_spread,
     _try_split_parallel, _pred_to_mask, thin_fat_detections, bands_for_blob, ground_mark,
+    uncovered_pieces,
     _CURVED_MIN_XSPAN, _CURVED_MIN_ANGLE_SPREAD, MIN_AREA, _REF_FRAME_PX,
 )
 
@@ -625,11 +626,16 @@ def _polys_and_segs_deduped(polygons: list, h: int, w: int):
     return kept_polygons, kept_segs
 
 
-def _fit_groups(det_list: list, groups: list, h: int, w: int):
+def _fit_groups(det_list: list, groups: list, h: int, w: int, log=None):
     """Fit one polygon per group and rasterise them into a mask. Returns
     (final_mask, polygons). Curved fit is used when a group is long and bends;
     otherwise a single straight strip. Shared by stage 2 and the seam bridge so
-    both produce identical polygons."""
+    both produce identical polygons.
+
+    After each group is fitted, any long piece of the group's own pixels that
+    its polygons leave out gets a box of its own (see uncovered_pieces). With a
+    log given, each box is counted ("leftover_polygons_added") and logged with
+    its position."""
     final = np.zeros((h, w), dtype=np.uint8)
     polygons = []
     for grp in groups:
@@ -645,6 +651,14 @@ def _fit_groups(det_list: list, groups: list, h: int, w: int):
             pts = np.array(corners, dtype=np.int32).reshape(-1, 1, 2)
             cv2.fillPoly(final, [pts], 255)
             polygons.append(corners)
+        for corners in uncovered_pieces(all_coords, corner_sets, h, w):
+            pts = np.array(corners, dtype=np.int32).reshape(-1, 1, 2)
+            cv2.fillPoly(final, [pts], 255)
+            polygons.append(corners)
+            if log is not None:
+                log.count("leftover_polygons_added")
+                xs_, ys_ = [p[0] for p in corners], [p[1] for p in corners]
+                log.event("leftover_polygon_added", bbox=[min(xs_), min(ys_), max(xs_), max(ys_)])
     return final, polygons
 
 
@@ -1023,7 +1037,7 @@ def stage_fit_polygons(state: PipelineState, cfg: StageConfig,
 
     # Fit one polygon per group (curved fit when the group is long and bends).
     _t = time.perf_counter()
-    final, polygons = _fit_groups(det_list, groups, h, w)
+    final, polygons = _fit_groups(det_list, groups, h, w, log=log)
     t_fit = time.perf_counter() - _t
     log.event("fit_timing", group_s=round(t_group, 3), poly_fit_s=round(t_fit, 3))
 

@@ -1472,6 +1472,46 @@ def _cover_leftover_streaks(blob, bands):
     return bands
 
 
+def uncovered_pieces(coords, polygons, h, w):
+    """Boxes (corner lists) for long pieces of a group's pixels that its fitted polygons leave out.
+
+    WHAT: coords are the (row, col) pixels of every detection in one group, polygons are the corner
+    lists fitted to that group. A group fits ONE polygon, so when the model outlined a trail together
+    with a side lobe (a bright streak joined to a long diagonal by a thin neck) the polygon follows the
+    dominant direction and the lobe lies outside it. Anything long enough to be a streak that no
+    polygon covers gets its own box, found the same way as _cover_leftover_streaks.
+    WHY: the model outlined it, so thinning or fitting must not silently lose it (Joshua Tree 3030:
+    8,147 outlined pixels, 462 reached the cleaning mask, and nothing was logged).
+    WHEN NOT: a polygon that already covers the group leaves nothing, and outline slack thinner than
+    LEFTOVER_OPEN_PX is ignored, so an ordinary fitted trail gets no extra box.
+    HOW WE KNOW: the run log counts "leftover_polygons_added" and logs each box's position; a normal
+    run has a few per set, a run with hundreds means the fit is badly off.
+    """
+    if len(coords) == 0 or not polygons:
+        return []
+    r0, c0 = int(coords[:, 0].min()), int(coords[:, 1].min())
+    r1, c1 = int(coords[:, 0].max()), int(coords[:, 1].max())
+    blob = np.zeros((r1 - r0 + 1, c1 - c0 + 1), np.uint8)
+    blob[coords[:, 0] - r0, coords[:, 1] - c0] = 1
+    cov = np.zeros_like(blob)
+    for corners in polygons:
+        pts = (np.array(corners, np.int32).reshape(-1, 2) - np.array([c0, r0], np.int32)).reshape(-1, 1, 2)
+        cv2.fillPoly(cov, [pts], 1)
+    left = ((blob > 0) & (cv2.dilate(cov, np.ones((9, 9), np.uint8)) == 0)).astype(np.uint8)
+    left = cv2.morphologyEx(left, cv2.MORPH_OPEN, np.ones((LEFTOVER_OPEN_PX,) * 2, np.uint8))
+    n, lab, _st, _c = cv2.connectedComponentsWithStats(left, 8)
+    boxes = []
+    for i in range(1, n):
+        ys, xs = np.nonzero(lab == i)
+        pts = np.column_stack([xs, ys]).astype(np.float32)
+        (_, _), (rw, rh), _a = cv2.minAreaRect(pts)
+        if max(rw, rh) < LEFTOVER_MIN_LEN_PX:
+            continue
+        box = cv2.boxPoints(cv2.minAreaRect(pts)) + np.array([c0, r0], np.float32)
+        boxes.append(box.round().astype(int).tolist())
+    return boxes
+
+
 def bands_for_blob(blob):
     """Thin bands for a crossing blob (uint8 0/1 crop), or None to keep the blob as it is."""
     bands = _bands_from_blob(blob)
