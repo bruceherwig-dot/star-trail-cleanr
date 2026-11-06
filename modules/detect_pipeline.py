@@ -53,6 +53,7 @@ from skimage.measure import label as sklabel, regionprops as skregionprops
 
 from .io_safe import robust_imread
 from .crossing_splitter import split_crossing, has_crossing_evidence
+from .crossing_peel import peel_split
 from .trail_grouper import (
     group_detections, fit_polygon, fit_curved_group, _group_angle_spread,
     _try_split_parallel, _pred_to_mask, thin_fat_detections, bands_for_blob, ground_mark,
@@ -91,6 +92,12 @@ class StageConfig:
     # test suites see legacy behaviour; the STC worker turns it on. Every drop is
     # written to the run log with its position and both scores.
     ground_filter: bool = False
+    # Crossing peel (modules/crossing_peel.py): cut a tangle of crossing trails into one clean rectangle
+    # per trail (K, L, V, T, three or more trails, parallel trails), tried BEFORE the older spine-and-tips
+    # splitter. When it declines (not a crossing) the older splitter and rescue run exactly as before.
+    # OFF by default so test suites see legacy behaviour; the STC worker turns it on. Every split is
+    # written to the run log with its position, the line count and the angle between the arms.
+    peel_crossings: bool = False
 
     # Core tunables (carried over from the old pipeline; revisit per stage).
     tile_size: int = 640
@@ -1022,7 +1029,23 @@ def stage_fit_polygons(state: PipelineState, cfg: StageConfig,
         mc = m[r0:r1 + 1, c0:c1 + 1]
         off = np.array([r0, c0])
         _t = time.perf_counter()
-        crossing_pieces = split_crossing(mc, frame_px=frame_px)
+        crossing_pieces = None
+        if cfg.peel_crossings:
+            # Crossing peel first: one rectangle per trail for K, L, V, T, 3+ trail and parallel tangles.
+            # When it declines (a bend, a fork, a ragged chunk, too small) it returns the blob whole and
+            # the older splitter below runs exactly as before.
+            _peeled, _pinfo = peel_split(mc, frame_px=frame_px)
+            if len(_peeled) > 1:
+                crossing_pieces = _peeled
+                log.count("crossings_peeled")
+                log.decision("crossing_peel", "split", [c0, r0, c1, r1],
+                             "the model's outline holds %d straight lines (trail width about %s px) and the "
+                             "arms point %s degrees apart, or the blob shows real crossing evidence"
+                             % (_pinfo["lines"], _pinfo["trail_width"], _pinfo["arm_angle_apart"]),
+                             "cut into %d piece(s), one rectangle per trail" % len(_peeled),
+                             area=int((mc > 0).sum()))
+        if crossing_pieces is None:
+            crossing_pieces = split_crossing(mc, frame_px=frame_px)
         t_split += time.perf_counter() - _t
         is_confirmed_crossing = len(crossing_pieces) > 1
         if is_confirmed_crossing:

@@ -79,6 +79,11 @@ LOG_LEGEND = {
         "crossing_kept_whole": "The model outlined a crossing or tangle that the splitter could not cut "
             "into simple pieces, so it was kept as one outline. The crossing_bands event says what it "
             "became.",
+        "crossing_peel": "The crossing peel cut a tangle of crossing trails into one clean rectangle per "
+            "trail (K, L, V, T, three or more trails, or parallel trails). 'why' gives how many straight "
+            "lines it found, the trail width and the angle between the arms; 'result' says how many "
+            "pieces. If this event is missing for a tangle, the peel declined it (a gentle bend, a "
+            "near-straight fork, or a short ragged chunk) and the older splitter handled it.",
         "crossing_bands": "What a kept-whole crossing became: cut into thin bands (one per line direction, "
             "plus one for any long outline piece no band covered) or painted as the model's exact outline. "
             "The F problem fix lives here.",

@@ -944,6 +944,9 @@ def main():
     parser.add_argument("--no-mover-rescue", action="store_true",
                         help="Turn off the mover rescue (Step 1e), which keeps a star-sized dash that has no "
                              "partner in the neighbouring frames because it moved. For A/B comparisons.")
+    parser.add_argument("--no-peel-crossings", action="store_true",
+                        help="Turn off the crossing peel (one rectangle per trail where trails cross) and "
+                             "use only the older spine-and-tips splitter. For A/B comparisons.")
     parser.add_argument("--foreground-mask", type=str, default=None,
                         help="Path to foreground mask (white=foreground to exclude)")
     parser.add_argument("--skip-boundary", type=int, default=0,
@@ -1944,6 +1947,9 @@ def main():
         # outside the rough foreground mask) instead of a trail; each drop is
         # logged with its position and scores.
         ground_filter=True,
+        # Cut a tangle of crossing trails into one rectangle per trail (K, L, V, T, 3+ trails,
+        # parallel trails) before the older splitter runs; each split is logged with its position.
+        peel_crossings=not args.no_peel_crossings,
         # Hard-negative phantom logging is dev-only (Bruce's source runs), never
         # in the shipped frozen bundle. sys.frozen is True only in the bundle.
         log_phantom_negatives=not getattr(sys, "frozen", False),
