@@ -10133,6 +10133,12 @@ if __name__ == '__main__':
         sys.exit(1)
 
     app = QApplication(sys.argv)
+    # Qt refuses to load any image over 256 MB (about 67 megapixels) and returns
+    # nothing, silently. A full star trail from an 11,904 x 5,952 px camera is
+    # 283 MB, so the Star Trail preview and the Timelapse poster stayed blank even
+    # though the files were written (2026-11-08). 2 GB covers any camera made.
+    from PySide6.QtGui import QImageReader
+    QImageReader.setAllocationLimit(2048)
     # May be None when the port belonged to another program: we started anyway,
     # and _relaunch already tolerates a missing socket.
     app._lock_socket = _lock_socket  # exposed so _relaunch can close it before spawning
