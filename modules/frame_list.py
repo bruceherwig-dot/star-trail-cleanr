@@ -305,6 +305,59 @@ def order_by_capture_time(paths, times):
     return sorted(paths, key=lambda p: (times[p], natural_key(p)))
 
 
+def ordered_frame_list(folder, prefer_raw=True):
+    """The frames of `folder` in the exact order a run will use them: every image,
+    number-aware filename order, one file per frame (twins removed), then true
+    capture-time order when every frame carries a timestamp.
+
+    This is what the Step 4 Frame Range bar and the mask editor use, so that
+    "cut 1 from the start" means the same frame on screen as it does inside the
+    run. It repeats the first steps of the run's own frame listing (CleanerWorker
+    in star_trail_cleanr.py) on purpose: that code is order-sensitive and guarded
+    by tests, so it is left alone. Reading capture times takes a second or two on
+    a big folder, so callers run this off the screen thread."""
+    import glob
+    frames = sorted(set(
+        f for e in glob_patterns() for f in glob.glob(os.path.join(folder, e))
+    ), key=natural_key)
+    if not frames:
+        return []
+    frames = dedupe_frames(frames, prefer_raw=prefer_raw)
+    try:
+        from modules.io_safe import capture_time
+        times = {f: capture_time(f) for f in frames}
+        frames = order_by_capture_time(frames, times)
+    except Exception:
+        pass            # keep filename order, same as the run does
+    return frames
+
+
+def trim_from_end(frames, trim_end=0):
+    """Drop `trim_end` frames off the back of an ordered list. Never leaves fewer
+    than 3 (the run's hard minimum): a trim that would is ignored."""
+    n = max(0, int(trim_end or 0))
+    if n <= 0 or len(frames) - n < 3:
+        return frames
+    return frames[:len(frames) - n]
+
+
+def run_selection(frames, cut_start=0, cut_end=0, limit=""):
+    """Which frames a run will process, from the Step 4 choices: leave out
+    `cut_start` frames at the front and `cut_end` at the back, then take at most
+    `limit` of what is left, counting from the new front ("All Frames", "" or a
+    non-number means no cap). The same order of operations as the run itself:
+    range first, then the cap inside it."""
+    s = max(0, int(cut_start or 0))
+    out = frames[s:] if s else list(frames)
+    out = trim_from_end(out, cut_end)
+    if str(limit).strip() not in ("All Frames", ""):
+        try:
+            out = out[:max(0, int(limit))]
+        except ValueError:
+            pass
+    return out
+
+
 def write_manifest(manifest_path, ordered_paths):
     """Write the canonical ordered frame list (one absolute path per line) so
     the worker can use the GUI's exact order instead of re-deriving it. This

@@ -1355,7 +1355,7 @@ class CleanerWorker(QThread):
 
     def __init__(self, folder, output_folder, frame_limit, mask_path=None,
                  output_format="jpg", jpeg_quality=85, frame_start=0, frame_end=0,
-                 max_batch=20, mem_note="", twin_prefer="raw"):
+                 max_batch=20, mem_note="", twin_prefer="raw", trim_end=0):
         """Capture the run's settings; the actual work happens in run().
 
         Inputs:
@@ -1367,8 +1367,12 @@ class CleanerWorker(QThread):
                            ground/buildings (None = no mask)
           output_format  - "jpg" / "tif8" / "tif16"
           jpeg_quality   - 60-100, only used for JPG output
-          frame_start/frame_end - dev-only sub-range into the sorted frame list
-                           (0/0 = whole list)
+          frame_start/frame_end - sub-range into the ordered frame list
+                           (0/0 = whole list). The Step 4 Frame Range bar sets
+                           frame_start (frames left out at the front) and
+                           trim_end (frames left out at the back); frame_end is
+                           an absolute last-frame index kept for scripts.
+          trim_end       - frames to leave out at the BACK of the list (0 = none)
           max_batch      - largest batch the machine's RAM can hold (5-20),
                            chosen by the GUI's memory check
           mem_note       - human-readable record of how max_batch was decided,
@@ -1382,6 +1386,7 @@ class CleanerWorker(QThread):
         self.frame_limit = frame_limit
         self.frame_start = frame_start
         self.frame_end = frame_end
+        self.trim_end = trim_end
         self.mask_path = mask_path
         self.output_format = output_format
         self.jpeg_quality = jpeg_quality
@@ -1512,6 +1517,9 @@ class CleanerWorker(QThread):
                 frames = frames[self.frame_start : self.frame_end + 1]
             elif self.frame_start > 0:
                 frames = frames[self.frame_start:]
+            if self.trim_end > 0:
+                from modules.frame_list import trim_from_end
+                frames = trim_from_end(frames, self.trim_end)
             total = len(frames)
             if self.frame_limit not in ("All Frames", ""):
                 try:
@@ -2021,7 +2029,13 @@ class CleanerWorker(QThread):
                 else:
                     this_batch = min(batch_size, total - start)
                 _log_est("batch_start", i, 0, this_batch, None, None, force=True)
-                abs_start = start + self.frame_start
+                # The frame manifest is written AFTER the frame range is applied, so
+                # when the engine reads it, frame 0 of the manifest already IS the
+                # first chosen frame: adding frame_start again would skip that many
+                # frames twice. Only the no-manifest fallback (the engine lists the
+                # whole folder itself) needs the offset.
+                abs_start = (start if getattr(self, "_frame_manifest", None)
+                             else start + self.frame_start)
                 if getattr(sys, 'frozen', False):
                     cmd = [sys.executable, '--cleanr-worker', SCRIPT, folder,
                            "-o", output_folder, "--model", get_model_path(),
@@ -2910,6 +2924,9 @@ class MainWindow(QMainWindow):
     # own windows; these marshal its worker-thread callbacks onto the UI thread.
     update_found_quiet = Signal()   # newer version confirmed -> open install window
     update_none_quiet = Signal()    # check completed, already newest
+    # Step 4 Frame Range: the folder's frame list finished loading on a background
+    # thread (folder path, ordered list of paths, load token).
+    step4_frames_ready = Signal(str, object, int)
 
     def __init__(self):
         """Build the whole window: restore saved geometry (or open at a
@@ -3417,8 +3434,6 @@ class MainWindow(QMainWindow):
         # attributes to None FIRST so the frozen build (which builds no dev section)
         # never crashes on the references in _start_clean.
         self._dev_model_combo = None
-        self._dev_start_frame = None
-        self._dev_end_frame = None
         self._red_map_chk = None
         if _DEV_SWITCHER_ENABLED:
             layout.addSpacing(SECTION_GAP_PX)
@@ -3454,27 +3469,8 @@ class MainWindow(QMainWindow):
             layout.addSpacing(4)
             layout.addLayout(model_row)
 
-            # Frame range Start/End (moved from Main page Step 4).
-            range_row = QHBoxLayout()
-            range_row.setContentsMargins(16, 0, 0, 0)
-            _start_lbl = QLabel("Frame range, Start:")
-            _start_lbl.setStyleSheet(f"font-size: 14px; color: {BROWSER_TEXT};")
-            range_row.addWidget(_start_lbl)
-            self._dev_start_frame = QSpinBox()
-            self._dev_start_frame.setRange(0, 99999)
-            self._dev_start_frame.setFixedWidth(90)
-            range_row.addWidget(self._dev_start_frame)
-            range_row.addSpacing(12)
-            _end_lbl = QLabel("End (0 = last):")
-            _end_lbl.setStyleSheet(f"font-size: 14px; color: {BROWSER_TEXT};")
-            range_row.addWidget(_end_lbl)
-            self._dev_end_frame = QSpinBox()
-            self._dev_end_frame.setRange(0, 99999)
-            self._dev_end_frame.setFixedWidth(90)
-            range_row.addWidget(self._dev_end_frame)
-            range_row.addStretch()
-            layout.addSpacing(4)
-            layout.addLayout(range_row)
+            # (The dev Frame range Start/End boxes were retired when Step 4 on the
+            # Main page got the Frame Range bar every user can use.)
 
             # Red Trail Map (moved from Main page Output Options).
             red_row = QHBoxLayout()
@@ -4894,6 +4890,29 @@ class MainWindow(QMainWindow):
         self._frame_limit.setFixedWidth(160)
         layout.addWidget(self._frame_limit)
 
+        # Frame Range: leave out frames at the start and/or end of the sequence
+        # (a stray test shot, a twilight lead-in), the same two-grip bar as the Star
+        # Trail and Timelapse tabs. The number above is then "at most this many,
+        # counting from the start grip", so "test 20 frames from the middle" works.
+        # The bar and the file-name line under it fill in once the folder's frame
+        # list has loaded (see _refresh_step4_frames); the row hides itself when a
+        # folder has too few frames to trim. Not remembered between sessions.
+        self._step4_ordered = []          # the run's frame order for this folder
+        self._step4_folder = ""           # the folder that list belongs to
+        self._step4_token = 0             # newest load wins; stale ones are ignored
+        self._step4_row = FrameRangeRow(100, 1, 3)
+        self._step4_range = self._step4_row.slider
+        self._step4_range.changed.connect(lambda _s, _e: self._on_step4_range_changed())
+        layout.addWidget(self._step4_row)
+        self._step4_names = QLabel("")
+        self._step4_names.setStyleSheet(f"font-size: 14px; color: {MUTED_TEXT};")
+        self._step4_names.setWordWrap(True)
+        self._step4_names.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(self._step4_names)
+        self._frame_limit.currentTextChanged.connect(
+            lambda _t: self._update_step4_readout())
+        self.step4_frames_ready.connect(self._on_step4_frames_ready)
+
         # (The Dev frame range, the Model picker, and Red Trail Map all moved to the
         # developer section at the bottom of Settings on 2026-06-21, so the Main page
         # stays clean for regular users. Their attributes are set in _build_settings_tab.)
@@ -5561,6 +5580,21 @@ class MainWindow(QMainWindow):
                 self._frame_count_label.setText(
                     f"<b>{count:,}</b> frame{'s' if count != 1 else ''} found{dim_str}")
 
+        self._gray_frame_limit_choices(count)
+        # The Frame Range bar belongs to the folder: start it over, then load this
+        # folder's frame list in the background.
+        self._refresh_step4_frames(folder)
+
+        # The input folder just changed, which decides whether the Star Trail &
+        # Timelapse button can run on the original frames (see _update_open_btn_state).
+        if hasattr(self, "_setup_timelapse_btn") and hasattr(self, "_output_input"):
+            self._update_open_btn_state()
+
+    def _gray_frame_limit_choices(self, count):
+        """Hide the Step 4 number choices that are larger than the `count` frames
+        available (None = unknown, offer everything). `count` is the folder's
+        frame count, or -- once the Frame Range bar has been moved -- how many
+        frames the bar leaves in."""
         model = self._frame_limit.model()
         for i in range(self._frame_limit.count()):
             text = self._frame_limit.itemText(i)
@@ -5580,10 +5614,80 @@ class MainWindow(QMainWindow):
                     item.setFlags(flags & ~Qt.ItemIsEnabled)
             self._frame_limit.view().setRowHidden(i, not enabled)
 
-        # The input folder just changed, which decides whether the Star Trail &
-        # Timelapse button can run on the original frames (see _update_open_btn_state).
-        if hasattr(self, "_setup_timelapse_btn") and hasattr(self, "_output_input"):
-            self._update_open_btn_state()
+    # ── Step 4 Frame Range ────────────────────────────────────────────────────
+
+    def _refresh_step4_frames(self, folder):
+        """Start the Frame Range bar over for `folder` and load that folder's frame
+        list (in the order a run will use it) on a background thread -- reading
+        every frame's capture time takes a second or two on a big folder, and the
+        screen must not freeze. The answer comes back through step4_frames_ready;
+        a newer request makes any older answer stale."""
+        if not hasattr(self, "_step4_range"):
+            return                      # the screen is still being built
+        self._step4_token += 1
+        token = self._step4_token
+        self._step4_ordered = []
+        self._step4_folder = folder
+        self._step4_row.set_total(1)    # back to 0/0 and hidden until loaded
+        self._step4_names.setText("")
+        if not folder or not os.path.isdir(folder):
+            return
+
+        def _load():
+            try:
+                from modules.frame_list import ordered_frame_list
+                frames = ordered_frame_list(folder)
+            except Exception:
+                frames = []
+            try:
+                self.step4_frames_ready.emit(folder, frames, token)
+            except RuntimeError:
+                pass                    # the window closed while this was loading
+
+        import threading
+        threading.Thread(target=_load, daemon=True).start()
+
+    def _on_step4_frames_ready(self, folder, frames, token):
+        """The background load finished: point the bar at the real frame count and
+        show which files will be processed. Ignored if the folder changed again."""
+        if token != self._step4_token or folder != self._step4_folder:
+            return
+        self._step4_ordered = list(frames)
+        self._step4_row.set_total(len(frames))
+        self._update_step4_readout()
+
+    def _step4_selection(self):
+        """The frames the next run will process, or None while the list is still
+        loading. Same order of operations as the run: bar first, then the number."""
+        if not self._step4_ordered:
+            return None
+        from modules.frame_list import run_selection
+        return run_selection(self._step4_ordered, self._step4_range.start(),
+                             self._step4_range.end(),
+                             self._frame_limit.currentText().strip())
+
+    def _update_step4_readout(self):
+        """The line under the bar: how many frames will be processed and the first
+        and last file, so a stray frame at either end is visible before the run."""
+        sel = self._step4_selection()
+        if not sel:
+            self._step4_names.setText("")
+            return
+        first, last = os.path.basename(sel[0]), os.path.basename(sel[-1])
+        n = len(sel)
+        if n == 1:
+            self._step4_names.setText(f"Will process 1 frame: {first}")
+        else:
+            self._step4_names.setText(
+                f"Will process <b>{n:,}</b> frames: {first} to {last}")
+
+    def _on_step4_range_changed(self):
+        """A grip moved: refresh the file-name line and hide number choices that no
+        longer fit in what the bar leaves."""
+        self._update_step4_readout()
+        if self._step4_ordered:
+            used = len(self._step4_ordered) - self._step4_range.start() - self._step4_range.end()
+            self._gray_frame_limit_choices(used)
 
     # A JPEG holds 8 bits per channel and cannot hold more -- that is the format,
     # not a property of any particular file. So an all-JPEG input folder is known
@@ -5901,7 +6005,24 @@ class MainWindow(QMainWindow):
             self._mask_window = MaskEditorWindow(self)
             self._mask_window.mask_saved.connect(self._on_mask_saved)
 
-        self._mask_window.load_frames(frames, 0)
+        # Open on the first frame the run will actually process: in the run's own
+        # order, after the Step 4 Frame Range bar. The editor used to open the
+        # alphabetically first file, and in the Katrina Brown folder that was a
+        # stray 20 mm foreground shot (not part of the sequence) -- the mask got
+        # painted on its horizon and then missed the real one by ~400 px.
+        _open_at = 0
+        try:
+            _sel = self._step4_selection() if self._step4_folder == folder else None
+            if _sel:
+                _byname = {os.path.normpath(f): i for i, f in enumerate(frames)}
+                for _p in _sel:
+                    _hit = _byname.get(os.path.normpath(_p))
+                    if _hit is not None:
+                        _open_at = _hit
+                        break
+        except Exception:
+            _open_at = 0
+        self._mask_window.load_frames(frames, _open_at)
 
         # Load existing mask if available (new spot in the cleaned folder, or legacy)
         migrate_workspace(folder)
@@ -6012,6 +6133,11 @@ class MainWindow(QMainWindow):
                                      else min(int(_lim_text), len(_frames)))
                 except ValueError:
                     _total_frames = len(_frames)
+                # Once the Frame Range bar has this folder's list, count what the
+                # run will actually process (bar first, then the number).
+                _sel = self._step4_selection() if self._step4_folder == folder else None
+                if _sel is not None:
+                    _total_frames = len(_sel)
 
                 if _total_frames < 3:
                     from PySide6.QtWidgets import QMessageBox as _QMB
@@ -6325,14 +6451,17 @@ class MainWindow(QMainWindow):
 
         out_fmt = self._current_output_format()
         self._run_cancelled = False
-        frame_start = self._dev_start_frame.value() if self._dev_start_frame is not None else 0
-        frame_end = self._dev_end_frame.value() if self._dev_end_frame is not None else 0
+        # Frames left out at each end, from the Step 4 Frame Range bar. Both stay 0
+        # until the bar has loaded this folder's frame list (it re-points on every
+        # folder change), so a stale choice can never ride along to another folder.
+        frame_start = self._step4_range.start()
+        trim_end = self._step4_range.end()
         self.worker = CleanerWorker(
             folder, output, self._frame_limit.currentText(), self._mask_path,
             output_format=out_fmt,
             jpeg_quality=self._jpeg_quality.value(),
             frame_start=frame_start,
-            frame_end=frame_end,
+            trim_end=trim_end,
             max_batch=getattr(self, "_max_batch", 20),
             mem_note=getattr(self, "_mem_note", ""),
             twin_prefer=getattr(self, "_twin_prefer", "raw"))
