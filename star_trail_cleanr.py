@@ -977,6 +977,33 @@ def workspace_path(output_folder, filename):
     return os.path.join(output_workspace(output_folder, create=True), filename)
 
 
+def _gray_out_combo_item(combo, data, tooltip=""):
+    """Make the dropdown entry whose data is `data` visible but unselectable
+    (grayed out), with an optional tooltip saying why."""
+    idx = combo.findData(data)
+    item = combo.model().item(idx) if idx >= 0 else None
+    if item is not None:
+        item.setFlags(item.flags() & ~Qt.ItemIsEnabled & ~Qt.ItemIsSelectable)
+        if tooltip:
+            item.setToolTip(tooltip)
+
+
+def folder_has_image_frames(folder):
+    """True when `folder` itself (not its subfolders) holds at least one image
+    frame. Used to tell a finished cleaning run (frames written to the output
+    folder) from an output folder that is empty or holds only a workspace, so the
+    Star Trail & Timelapse window can gray out its "Cleaned" source until a run
+    has actually produced frames."""
+    if not folder or not os.path.isdir(folder):
+        return False
+    from modules.frame_list import IMAGE_EXTS
+    try:
+        return any(e.is_file() and os.path.splitext(e.name)[1].lower() in IMAGE_EXTS
+                   for e in os.scandir(folder))
+    except OSError:
+        return False
+
+
 def migrate_workspace(input_folder):
     """One-shot migration: move legacy files into cleanr_workspace/."""
     if not input_folder or not os.path.isdir(input_folder):
@@ -5553,6 +5580,11 @@ class MainWindow(QMainWindow):
                     item.setFlags(flags & ~Qt.ItemIsEnabled)
             self._frame_limit.view().setRowHidden(i, not enabled)
 
+        # The input folder just changed, which decides whether the Star Trail &
+        # Timelapse button can run on the original frames (see _update_open_btn_state).
+        if hasattr(self, "_setup_timelapse_btn") and hasattr(self, "_output_input"):
+            self._update_open_btn_state()
+
     # A JPEG holds 8 bits per channel and cannot hold more -- that is the format,
     # not a property of any particular file. So an all-JPEG input folder is known
     # to be 8-bit from the file names alone, with nothing opened and no delay.
@@ -7644,7 +7676,10 @@ class MainWindow(QMainWindow):
         if folder and os.path.isdir(folder):
             has_files = any(os.scandir(folder))
         self._setup_open_btn.setEnabled(has_files)
-        self._setup_timelapse_btn.setEnabled(has_files)
+        # The Star Trail & Timelapse window can also run on the ORIGINAL frames
+        # before any cleaning, so it is available whenever either folder has images.
+        self._setup_timelapse_btn.setEnabled(
+            has_files or folder_has_image_frames(self._folder_input.text().strip()))
 
     def _open_output_from_setup(self):
         """Setup page "Open Cleaned Folder" button. Open the output folder
@@ -7668,8 +7703,17 @@ class MainWindow(QMainWindow):
         folder = self._output_input.text().strip()
         if not folder:
             folder = getattr(self, '_done_output_folder', None)
-        if not folder or not os.path.isdir(folder):
-            self._error_label.setText("No cleaned frames yet. Run cleaning first.")
+        input_folder = self._folder_input.text().strip()
+        # No output folder chosen yet: use the default "cleaned" folder inside the
+        # originals, where the star trail workspace will live.
+        if not folder and folder_has_image_frames(input_folder):
+            folder = os.path.join(input_folder, "cleaned")
+        # Runs on the cleaned frames when a run has produced them, otherwise on the
+        # original frames alone (the window grays out "Cleaned" in that case).
+        if not folder or not (folder_has_image_frames(folder)
+                              or folder_has_image_frames(input_folder)):
+            self._error_label.setText(
+                "No frames yet. Choose a folder with your images in Step 1.")
             return
         try:
             star_path = star_trail_in(folder, "STC_cleaned_star_trail")
@@ -7938,6 +7982,12 @@ class TimelapsePanel(QWidget):
         if original_folder and os.path.isdir(original_folder):
             self._source_cb.addItem("Original", "original")
             self._source_cb.setCurrentIndex(self._source_cb.findData("original"))
+        # Until a cleaning run has written frames there is nothing to pick under
+        # "Cleaned", so it stays in the list but grayed out (Original is then the
+        # only usable choice).
+        if not folder_has_image_frames(cleaned_folder):
+            _gray_out_combo_item(self._source_cb, "cleaned",
+                                 "Available after a cleaning run finishes.")
         _row("Source", self._source_cb)
 
         # Frame Range: leave out frames at the start and/or the end. A timelapse has
@@ -8782,13 +8832,24 @@ class StarTrailPanel(QWidget):
         # choice = Cleaned.
         self._src_cb = QComboBox()
         self._src_cb.addItem("Cleaned", "cleaned")
+        # True once a cleaning run has written frames to the output folder. Until
+        # then "Cleaned" is grayed out and the tab opens on Original, and a build
+        # must not try to match its shot list to cleaned frames that don't exist.
+        self._has_cleaned = folder_has_image_frames(cleaned_folder)
         if self._original:
             self._src_cb.addItem("Original", "original")
-            # Source is NOT remembered between sessions: this tab opens on
-            # Cleaned every time, matching the Timelapse tab, which no longer
-            # remembers its own choices either (see _restore_choices there).
-            # Both windows opening the same way every time is the point.
-            _row("Source", self._src_cb)
+        # Source is NOT remembered between sessions: this tab opens on Cleaned
+        # every time (Original when there are no cleaned frames yet), matching the
+        # Timelapse tab, which no longer remembers its own choices either (see
+        # _restore_choices there). Both windows opening the same way every time is
+        # the point. The row is always shown so the choice, and why Cleaned is
+        # unavailable, is visible.
+        if not self._has_cleaned:
+            _gray_out_combo_item(self._src_cb, "cleaned",
+                                 "Available after a cleaning run finishes.")
+            if self._original:
+                self._src_cb.setCurrentIndex(self._src_cb.findData("original"))
+        _row("Source", self._src_cb)
 
         # Frame Range: leave out frames at the start and/or the end of the
         # sequence. Counts are what the person sees -- every shot found, the
@@ -8799,7 +8860,7 @@ class StarTrailPanel(QWidget):
         self._frame_range = None
         try:
             import make_share_clip as _msc
-            _total = (len(_msc._list_frames(self._cleaned))
+            _total = (len(_msc._list_frames(self._selected_source_dir()))
                       + _msc.SKIP_FIRST + _msc.SKIP_LAST)
             _min_keep = _msc.MIN_FRAMES_SHOWN
         except Exception:
@@ -9120,7 +9181,7 @@ class StarTrailPanel(QWidget):
         args = ["--star-trail", "--cleaned", _src, "--out", self._pending_out,
                 "--comet-tail", str(comet), "--thicken", str(thick),
                 "--out-format", (self._fmt_cb.currentData() or "jpg")]
-        if _src is not self._cleaned:
+        if _src is not self._cleaned and self._has_cleaned:
             # Building from originals: match the shot list to the cleaned build
             # (same shots, same skip, one file per shot even with RAW+JPG twins)
             # so before and after are comparable by construction.
