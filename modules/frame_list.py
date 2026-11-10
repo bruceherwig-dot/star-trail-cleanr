@@ -108,11 +108,14 @@ RAW_EXTS = {
     ".gpr",                          # GoPro
 }
 _TIF_EXTS = {".tif", ".tiff"}
-_JPG_EXTS = {".jpg", ".jpeg"}
-# Every extension the app accepts as a frame: JPG, PNG, TIFF, plus all RAW
+# .insp is an Insta360 photo: a plain JPEG (it starts with the JPEG marker and every
+# JPEG reader opens it) with the camera's own data appended after the picture. So it
+# ranks, and counts as 8-bit, exactly like a .jpg.
+_JPG_EXTS = {".jpg", ".jpeg", ".insp"}
+# Every extension the app accepts as a frame: JPG, Insta360 .insp, PNG, TIFF, plus all RAW
 # formats above. Note PNG has no dedicated rank set of its own, so in twin
 # de-duplication it is treated as a generic non-RAW "other" format.
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff"} | RAW_EXTS
+IMAGE_EXTS = {".jpg", ".jpeg", ".insp", ".png", ".tif", ".tiff"} | RAW_EXTS
 
 # Minimum frame size for trail detection. The detector tiles each frame into
 # 640px windows; a frame whose shorter side is below this both detects poorly

@@ -1039,7 +1039,7 @@ def main():
     else:
         logger = None
 
-    def _write_output(stem: str, img: np.ndarray, icc_profile=None, exif_bytes=None, dpi=None):
+    def _write_output(stem: str, img: np.ndarray, icc_profile=None, exif_bytes=None, dpi=None, src=None):
         """Save one cleaned frame, turning a write failure into a clear user message.
 
         Wraps _write_output_inner so that a write failure prints a plain-English
@@ -1064,7 +1064,7 @@ def main():
         from PIL import Image
         try:
             _r = _write_output_inner(stem, img, icc_profile=icc_profile,
-                                     exif_bytes=exif_bytes, dpi=dpi)
+                                     exif_bytes=exif_bytes, dpi=dpi, src=src)
             _write_output.written += 1
             return _r
         except (PermissionError, OSError) as _err:
@@ -1115,7 +1115,7 @@ def main():
             return None
         return np.ascontiguousarray(rgb[:, :, 0])
 
-    def _write_output_inner(stem: str, img: np.ndarray, icc_profile=None, exif_bytes=None, dpi=None):
+    def _write_output_inner(stem: str, img: np.ndarray, icc_profile=None, exif_bytes=None, dpi=None, src=None):
         """Encode and write one cleaned frame in the chosen output format.
 
         Branches on args.output_format:
@@ -1149,6 +1149,19 @@ def main():
                 save_kwargs["dpi"] = dpi
             out_path = str(cleaned_dir / (stem + ".jpg"))
             pil.save(out_path, "JPEG", **save_kwargs)
+            # An Insta360 .insp source keeps the camera's own data: its header blocks
+            # and trailer are copied onto the cleaned picture and the file is named
+            # .insp (see modules/insp_carry.py). A source that is not a well-formed
+            # .insp, or any failure, leaves the plain .jpg just written.
+            if src is not None and str(src).lower().endswith(".insp"):
+                from modules.insp_carry import carry_insta360
+                _insp_path = str(cleaned_dir / (stem + ".insp"))
+                if carry_insta360(str(src), out_path, _insp_path):
+                    out_path = _insp_path
+                else:
+                    print(f"  NOTE: could not read the Insta360 data in "
+                          f"{os.path.basename(str(src))}; wrote a plain .jpg for it.",
+                          flush=True)
         elif args.output_format == "tif8":
             out = img if img.dtype == np.uint8 else (img >> 8).astype(np.uint8)
             rgb = cv2.cvtColor(out, cv2.COLOR_BGR2RGB)
@@ -2458,7 +2471,7 @@ def main():
                 _rep_s = time.perf_counter() - _t0
                 _tacc("repair_s", _rep_s)
                 _tw = time.perf_counter()
-                _write_output(fp.stem, cleaned, icc_profile=icc_profile, exif_bytes=frame_exif, dpi=dpi)
+                _write_output(fp.stem, cleaned, icc_profile=icc_profile, exif_bytes=frame_exif, dpi=dpi, src=fp)
                 _tacc("write_s", time.perf_counter() - _tw)
                 n_repaired += 1
                 if logger is not None:
@@ -2470,7 +2483,7 @@ def main():
                     logger.log(repair_dbg)
             else:
                 _tw = time.perf_counter()
-                _write_output(fp.stem, img, icc_profile=icc_profile, exif_bytes=frame_exif, dpi=dpi)
+                _write_output(fp.stem, img, icc_profile=icc_profile, exif_bytes=frame_exif, dpi=dpi, src=fp)
                 _tacc("write_s", time.perf_counter() - _tw)
                 if logger is not None:
                     logger.log({"type": "repair", "frame": fp.stem,

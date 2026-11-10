@@ -660,7 +660,7 @@ def source_bitdepth(folder):
     if not names:
         return None
     exts = {os.path.splitext(n)[1].lower() for n in names}
-    if exts <= {".jpg", ".jpeg"}:
+    if exts <= {".jpg", ".jpeg", ".insp"}:
         return 8
     step = max(1, len(names) // 25)
     sample = names[::step][:25]
@@ -1475,7 +1475,7 @@ class CleanerWorker(QThread):
                 f for e in glob_patterns() for f in glob.glob(os.path.join(folder, e))
             ), key=natural_key)
             if not frames:
-                self.error.emit(f"No image files found in: {folder}")
+                self.error.emit(f"No frames found in: {folder}")
                 return
 
             # Remove duplicate twins (JPG/TIFF/RAW of the same frame) ONCE,
@@ -1544,7 +1544,7 @@ class CleanerWorker(QThread):
 
             if not readable:
                 self.error.emit(
-                    "Couldn't read any image files in this folder. "
+                    "Couldn't read any frames in this folder. "
                     "The files may be damaged or in an unsupported format."
                 )
                 return
@@ -3068,7 +3068,18 @@ class MainWindow(QMainWindow):
         SETTINGS.setValue("usage_consent_v2_made", True)
         _maybe_init_sentry()
 
-    def _lock_min_height(self):
+    def _refit_setup_height(self):
+        """Step 4's Frame Range row and file-name line appear (or disappear) after
+        the folder's frame list loads, a moment after the window first shows --
+        which is after _lock_min_height measured the page. Without this the page
+        grew past the window and the bottom buttons were clipped (2026-11-09).
+        Re-measure on the next pass of the event loop, once the layout has
+        settled; the window only ever GROWS here, never shrinks under the user."""
+        if not self._min_height_locked or not self.isVisible():
+            return
+        QTimer.singleShot(0, lambda: self._lock_min_height(grow_only=True))
+
+    def _lock_min_height(self, grow_only=False):
         """Set the window's minimum vertical size to the Setup tab's
         natural content height so Setup never clips below the Clean
         button. Maximum is intentionally unbounded so users can maximize
@@ -3087,7 +3098,7 @@ class MainWindow(QMainWindow):
             target = min(target, int(screen.availableGeometry().height() * 0.9))
         target = max(target, 600)
         self.setMinimumHeight(target)
-        if self.height() != target:
+        if (self.height() < target) if grow_only else (self.height() != target):
             self.resize(self.width(), target)
 
     # ── FAQ tab ──────────────────────────────────────────────────────────────
@@ -3122,7 +3133,7 @@ class MainWindow(QMainWindow):
 
         <h2 style='color:{BRAND_HEADING_BLUE}; margin-bottom:2px;'>What image formats can I use?</h2>
         <p style='margin-top:2px;'>Star Trail CleanR works with .JPG, .TIF 8/16-bit,
-        and RAW files.</p>
+        Insta360 .INSP, and RAW files.</p>
 
         <h2 style='color:{BRAND_HEADING_BLUE}; margin-bottom:2px;'>How do you find trails in my photographs?</h2>
         <p style='margin-top:2px;'>Each frame is run through an AI YOLO segmentation model
@@ -3141,8 +3152,8 @@ class MainWindow(QMainWindow):
 
         <h2 style='color:{BRAND_HEADING_BLUE}; margin-bottom:2px;'>What is the workflow?</h2>
         <ol style='margin-top:2px;'>
-        <li><b>Browse.</b> Choose the folder where your star trail images live.</li>
-        <li><b>Save.</b> Choose where to save your cleaned images. The default
+        <li><b>Browse.</b> Choose the folder where your star trail frames live.</li>
+        <li><b>Save.</b> Choose where to save your cleaned frames. The default
         is a 'cleaned' folder inside your originals.</li>
         <li><b>Mask (optional).</b> Paint over ground, buildings, and rocks so
         the AI ignores them. Trees can be left unmasked.</li>
@@ -4783,8 +4794,8 @@ class MainWindow(QMainWindow):
         step1_row = QHBoxLayout()
         step1_row.setSpacing(12)
         step1 = QLabel(
-            f"<span style='font-size:19pt; font-weight:bold; color:{BRAND_HEADING_BLUE};'>1. Select Folder with Your Star Trail Images</span>"
-            f"&nbsp;&nbsp;<span style='font-size:14pt; color:{MUTED_TEXT}; vertical-align:baseline;'>(.JPG, .TIF 8/16-bit, and RAW)</span>"
+            f"<span style='font-size:19pt; font-weight:bold; color:{BRAND_HEADING_BLUE};'>1. Select Folder with Your Star Trail Frames</span>"
+            f"&nbsp;&nbsp;<span style='font-size:14pt; color:{MUTED_TEXT}; vertical-align:baseline;'>(.JPG, .TIF 8/16-bit, .INSP, and RAW)</span>"
         )
         step1.setTextFormat(Qt.RichText)
         # Mirror row_in's 4:2 stretch proportions (field=4, buttons=1+1) so the
@@ -4876,7 +4887,7 @@ class MainWindow(QMainWindow):
 
         # ── Step 4: Number of Images ─────────────────────────────────────────
         step4 = QLabel(
-            f"<span style='font-size:19pt; font-weight:bold; color:{BRAND_HEADING_BLUE};'>4. Number of Images to Process</span>"
+            f"<span style='font-size:19pt; font-weight:bold; color:{BRAND_HEADING_BLUE};'>4. Number of Frames to Clean</span>"
             f"&nbsp;&nbsp;<span style='font-size:14pt; color:{MUTED_TEXT}; vertical-align:baseline;'>Recommended: test a small batch before doing a full run</span>"
         )
         step4.setTextFormat(Qt.RichText)
@@ -4900,9 +4911,11 @@ class MainWindow(QMainWindow):
         self._step4_ordered = []          # the run's frame order for this folder
         self._step4_folder = ""           # the folder that list belongs to
         self._step4_token = 0             # newest load wins; stale ones are ignored
-        self._step4_row = FrameRangeRow(100, 1, 3)
+        self._step4_row = FrameRangeRow(100, 1, 3, skip_words=True)
         self._step4_range = self._step4_row.slider
         self._step4_range.changed.connect(lambda _s, _e: self._on_step4_range_changed())
+        self._step4_busy = False          # True while we move the bar/dropdown ourselves
+        self._step4_prev = (0, 0)         # the bar's (start, end) before the last move
         layout.addWidget(self._step4_row)
         self._step4_names = QLabel("")
         self._step4_names.setStyleSheet(f"font-size: 14px; color: {MUTED_TEXT};")
@@ -4910,7 +4923,7 @@ class MainWindow(QMainWindow):
         self._step4_names.setTextInteractionFlags(Qt.TextSelectableByMouse)
         layout.addWidget(self._step4_names)
         self._frame_limit.currentTextChanged.connect(
-            lambda _t: self._update_step4_readout())
+            lambda _t: self._on_step4_limit_changed())
         self.step4_frames_ready.connect(self._on_step4_frames_ready)
 
         # (The Dev frame range, the Model picker, and Red Trail Map all moved to the
@@ -4975,7 +4988,7 @@ class MainWindow(QMainWindow):
         # ── Step 6: Run ──────────────────────────────────────────────────────
         step6 = QLabel(
             f"<span style='font-size:19pt; font-weight:bold; color:{BRAND_HEADING_BLUE};'>6. Remove airplane and satellite trails</span>"
-            f"&nbsp;&nbsp;<span style='font-size:14pt; color:{MUTED_TEXT}; vertical-align:baseline;'>Processing time depends on frame count, pixel count of your images, and computer speed</span>"
+            f"&nbsp;&nbsp;<span style='font-size:14pt; color:{MUTED_TEXT}; vertical-align:baseline;'>Processing time depends on frame count, pixel count of your frames, and computer speed</span>"
         )
         step6.setTextFormat(Qt.RichText)
         layout.addWidget(step6)
@@ -5562,7 +5575,7 @@ class MainWindow(QMainWindow):
             except OSError:
                 count = 0
             if count == 0:
-                self._frame_count_label.setText("No images found")
+                self._frame_count_label.setText("No frames found")
             else:
                 dim_str = ""
                 try:
@@ -5596,6 +5609,10 @@ class MainWindow(QMainWindow):
         frame count, or -- once the Frame Range bar has been moved -- how many
         frames the bar leaves in."""
         model = self._frame_limit.model()
+        # Flipping the list items' flags makes the combo snap its text back to the
+        # selected LIST entry, which wiped a number the person had typed (or dragged
+        # the Frame Range bar to) every time the folder changed: 10 or 185 became 250.
+        keep = self._frame_limit.currentText()
         for i in range(self._frame_limit.count()):
             text = self._frame_limit.itemText(i)
             if text == "All Frames" or count is None:
@@ -5613,6 +5630,8 @@ class MainWindow(QMainWindow):
                 else:
                     item.setFlags(flags & ~Qt.ItemIsEnabled)
             self._frame_limit.view().setRowHidden(i, not enabled)
+        if self._frame_limit.currentText() != keep:
+            self._frame_limit.setCurrentText(keep)
 
     # ── Step 4 Frame Range ────────────────────────────────────────────────────
 
@@ -5630,6 +5649,7 @@ class MainWindow(QMainWindow):
         self._step4_folder = folder
         self._step4_row.set_total(1)    # back to 0/0 and hidden until loaded
         self._step4_names.setText("")
+        self._refit_setup_height()
         if not folder or not os.path.isdir(folder):
             return
 
@@ -5654,7 +5674,10 @@ class MainWindow(QMainWindow):
             return
         self._step4_ordered = list(frames)
         self._step4_row.set_total(len(frames))
+        self._step4_prev = (0, 0)
+        self._apply_step4_limit_to_bar()    # the saved number decides the first window
         self._update_step4_readout()
+        self._refit_setup_height()          # the row and file line just appeared
 
     def _step4_selection(self):
         """The frames the next run will process, or None while the list is still
@@ -5676,23 +5699,71 @@ class MainWindow(QMainWindow):
         first, last = os.path.basename(sel[0]), os.path.basename(sel[-1])
         n = len(sel)
         if n == 1:
-            self._step4_names.setText(f"Will process 1 frame: {first}")
+            self._step4_names.setText(f"Will clean 1 frame: {first}")
         else:
             self._step4_names.setText(
-                f"Will process <b>{n:,}</b> frames: {first} to {last}")
+                f"Will clean <b>{n:,}</b> frames: {first} to {last}")
+
+    def _apply_step4_limit_to_bar(self):
+        """The dropdown decides the window: a number puts the right grip that many
+        frames after the left one and lets the left grip slide the window; All
+        Frames sends the right grip to the far end and lets the grips move apart."""
+        total = len(self._step4_ordered)
+        if total < 4:
+            return
+        text = self._frame_limit.currentText().strip()
+        bar = self._step4_range
+        start = bar.start()
+        self._step4_busy = True
+        try:
+            if text.isdigit():
+                n = max(3, min(int(text), total))
+                start = min(start, total - n)
+                bar.set_slide(True)
+                bar.set_range(start, total - start - n)
+            else:
+                bar.set_slide(False)
+                bar.set_range(start, 0)
+        finally:
+            self._step4_busy = False
+        self._step4_prev = (bar.start(), bar.end())
+
+    def _on_step4_limit_changed(self):
+        """The dropdown changed (a pick or typing): move the bar to match."""
+        if self._step4_busy:
+            return
+        self._apply_step4_limit_to_bar()
+        self._update_step4_readout()
 
     def _on_step4_range_changed(self):
-        """A grip moved: refresh the file-name line and hide number choices that no
-        longer fit in what the bar leaves."""
+        """A grip moved. Dragging the RIGHT grip sets how many frames to process,
+        so the dropdown follows it (All Frames when it reaches the far end).
+        Dragging the left grip never touches the dropdown: the window just slides
+        (or, on All Frames, shrinks)."""
+        if self._step4_busy:
+            return
+        bar = self._step4_range
+        s, e = bar.start(), bar.end()
+        ps, _pe = self._step4_prev
+        self._step4_prev = (s, e)
+        if s == ps and self._step4_ordered:        # only the right grip moved
+            used = len(self._step4_ordered) - s - e
+            self._step4_busy = True
+            try:
+                if e == 0:
+                    self._frame_limit.setCurrentText("All Frames")
+                    bar.set_slide(False)
+                else:
+                    self._frame_limit.setCurrentText(str(used))
+                    bar.set_slide(True)
+            finally:
+                self._step4_busy = False
         self._update_step4_readout()
-        if self._step4_ordered:
-            used = len(self._step4_ordered) - self._step4_range.start() - self._step4_range.end()
-            self._gray_frame_limit_choices(used)
 
     # A JPEG holds 8 bits per channel and cannot hold more -- that is the format,
     # not a property of any particular file. So an all-JPEG input folder is known
     # to be 8-bit from the file names alone, with nothing opened and no delay.
-    _EIGHT_BIT_ONLY_EXTS = {".jpg", ".jpeg"}
+    _EIGHT_BIT_ONLY_EXTS = {".jpg", ".jpeg", ".insp"}
 
     # The dropdown shows people words; the engine takes a short key. ONE place
     # translates between them, because two places did and they disagreed: the
@@ -5973,7 +6044,7 @@ class MainWindow(QMainWindow):
             f for e in glob_patterns() for f in glob.glob(os.path.join(folder, e))
         ))
         if not frames:
-            self._error_label.setText("No image files found in the selected folder.")
+            self._error_label.setText("No frames found in the selected folder.")
             return
 
         # Paint on what the run will actually use. The run keeps only the
@@ -6987,7 +7058,7 @@ class MainWindow(QMainWindow):
         # Build the body in plain English.
         parts = [
             "<b>Some frames in this folder will be skipped.</b>",
-            f"<p>Star Trail CleanR found <b>{total_found}</b> image files "
+            f"<p>Star Trail CleanR found <b>{total_found}</b> frames "
             f"in this folder. Of those, <b>{matching}</b> will be processed "
             f"and <b>{n_mismatched + n_unreadable}</b> will be skipped.</p>",
         ]
@@ -7842,7 +7913,7 @@ class MainWindow(QMainWindow):
         if not folder or not (folder_has_image_frames(folder)
                               or folder_has_image_frames(input_folder)):
             self._error_label.setText(
-                "No frames yet. Choose a folder with your images in Step 1.")
+                "No frames yet. Choose a folder with your frames in Step 1.")
             return
         try:
             star_path = star_trail_in(folder, "STC_cleaned_star_trail")
@@ -7865,7 +7936,7 @@ class MainWindow(QMainWindow):
             return False
         try:
             return any(e.is_file() and e.name.lower().endswith(
-                ('.jpg', '.jpeg', '.png', '.tif', '.tiff'))
+                ('.jpg', '.jpeg', '.insp', '.png', '.tif', '.tiff'))
                 for e in os.scandir(folder))
         except OSError:
             return False
@@ -8679,6 +8750,8 @@ class FrameRangeSlider(QWidget):
         self._min_keep = int(min_keep)
         self._start = 0
         self._end = 0
+        self._slide = False        # Step 4: dragging the start grip slides the window
+        self._verb = "Using"       # the word on the bar; Step 4 says "Cleaning"
         self._drag = None          # "start" or "end" while a grip is held
         self.setFixedHeight(36)
         self.setMinimumWidth(160)
@@ -8693,6 +8766,13 @@ class FrameRangeSlider(QWidget):
 
     def used(self):
         return self._total - self._start - self._end
+
+    def set_slide(self, on):
+        """Step 4 only. When on, dragging the START grip slides the whole window
+        (the number of frames kept stays the same and the end grip travels with it,
+        stopping at the end of the folder) instead of squeezing it. Off = the grips
+        move independently, as on the Star Trail and Timelapse tabs."""
+        self._slide = bool(on)
 
     def _room(self):
         """Most frames that can still be cut, in total, from both ends."""
@@ -8725,7 +8805,11 @@ class FrameRangeSlider(QWidget):
         if not self._drag:
             return
         x = e.position().x() - self._GRIP_W / 2
-        if self._drag == "start":
+        if self._drag == "start" and self._slide:
+            keep = self.used()
+            n = min(self._frames_at(x), self._total - keep)
+            self.set_range(n, self._total - n - keep)
+        elif self._drag == "start":
             n = min(self._frames_at(x), self._room() - self._end)
             self.set_range(n, self._end)
         else:
@@ -8779,7 +8863,7 @@ class FrameRangeSlider(QWidget):
         for x in (xs, xe):
             p.drawRoundedRect(QRectF(x, 0, gw, h), 5, 5)
         # the count, in a small pill on top of everything else (inside the bar)
-        txt = f"Using {self.used()} of {self._total} frames"
+        txt = f"{self._verb} {self.used()} of {self._total} frames"
         fm = p.fontMetrics()
         tw = fm.horizontalAdvance(txt) + 20
         pill = QRectF((self.width() - tw) / 2, inset + 3, tw, bh - 6)
@@ -8799,13 +8883,18 @@ class FrameRangeRow(QWidget):
     `slider.end()` when the job starts. `set_total` re-points the row at a different
     sequence, and hides it outright when there are too few frames to trim."""
 
-    def __init__(self, label_w, total, min_keep, parent=None):
+    def __init__(self, label_w, total, min_keep, parent=None, skip_words=False):
         super().__init__(parent)
         self._min_keep = int(min_keep)
+        # skip_words (Step 4): the two numbers read "Skip first 158" / "Skip last 0"
+        # instead of "-158" / "0", which looked like frame numbers on that screen.
+        self._skip_words = bool(skip_words)
         self.slider = FrameRangeSlider(max(1, total), min_keep)
+        if self._skip_words:
+            self.slider._verb = "Cleaning"   # Step 4 cleans frames; the other tabs "use" them
         self._lo, self._hi = QLabel("0"), QLabel("0")
         for n in (self._lo, self._hi):
-            n.setFixedWidth(44)
+            n.setFixedWidth(112 if self._skip_words else 44)
             n.setAlignment(Qt.AlignCenter)
             n.setStyleSheet(f"color: {BRAND_HEADING_BLUE}; font-weight: bold;")
         lab = QLabel("Frame Range")
@@ -8819,9 +8908,14 @@ class FrameRangeRow(QWidget):
         r.addWidget(self.slider, 1)
         r.addWidget(self._hi)
         self.slider.changed.connect(self._show)
+        self._show(0, 0)
         self.setVisible(total > min_keep)
 
     def _show(self, start, end):
+        if self._skip_words:
+            self._lo.setText(f"Skip first {start}")
+            self._hi.setText(f"Skip last {end}")
+            return
         self._lo.setText(f"-{start}" if start else "0")
         self._hi.setText(f"-{end}" if end else "0")
 
@@ -9035,7 +9129,7 @@ class StarTrailPanel(QWidget):
         # comet tails point the other way. Grayed out unless Comet Mode is selected.
         _revrow = QHBoxLayout()
         _revrow.addSpacing(36)
-        self._reverse_chk = QCheckBox("Process images in reverse order")
+        self._reverse_chk = QCheckBox("Process frames in reverse order")
         _revrow.addWidget(self._reverse_chk)
         _revrow.addStretch(1)
         lay.addLayout(_revrow)
