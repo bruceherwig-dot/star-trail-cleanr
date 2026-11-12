@@ -226,11 +226,13 @@ def test_step4_row_says_skip_first_and_skip_last():
     assert old._lo.text() == "-10" and old._hi.text() == "0"
 
 
-def test_step4_bar_says_cleaning_and_other_tabs_still_say_using():
+def test_step4_bar_has_no_count_box_and_other_tabs_keep_theirs():
+    """The count box sat over the right grip on Step 4, which says the number on the
+    line under the bar instead. The Star Trail and Timelapse tabs keep the box."""
     _qt_app()
     import star_trail_cleanr as S
-    assert S.FrameRangeRow(100, 708, 3, skip_words=True).slider._verb == "Cleaning"
-    assert S.FrameRangeRow(90, 572, 20).slider._verb == "Using"
+    assert S.FrameRangeRow(100, 708, 3, skip_words=True).slider._show_count is False
+    assert S.FrameRangeRow(90, 572, 20).slider._show_count is True
 
 
 def test_window_grows_when_the_frame_range_row_appears():

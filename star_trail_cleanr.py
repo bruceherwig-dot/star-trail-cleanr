@@ -5698,11 +5698,12 @@ class MainWindow(QMainWindow):
             return
         first, last = os.path.basename(sel[0]), os.path.basename(sel[-1])
         n = len(sel)
+        total = len(self._step4_ordered)
         if n == 1:
-            self._step4_names.setText(f"Will clean 1 frame: {first}")
+            self._step4_names.setText(f"Cleaning 1 of {total:,} frames: {first}")
         else:
             self._step4_names.setText(
-                f"Will clean <b>{n:,}</b> frames: {first} to {last}")
+                f"Cleaning <b>{n:,}</b> of {total:,} frames: {first} to {last}")
 
     def _apply_step4_limit_to_bar(self):
         """The dropdown decides the window: a number puts the right grip that many
@@ -8751,7 +8752,7 @@ class FrameRangeSlider(QWidget):
         self._start = 0
         self._end = 0
         self._slide = False        # Step 4: dragging the start grip slides the window
-        self._verb = "Using"       # the word on the bar; Step 4 says "Cleaning"
+        self._show_count = True    # the "Using N of M frames" box on the bar; Step 4 turns it off
         self._drag = None          # "start" or "end" while a grip is held
         self.setFixedHeight(36)
         self.setMinimumWidth(160)
@@ -8862,8 +8863,13 @@ class FrameRangeSlider(QWidget):
         p.setBrush(accent)
         for x in (xs, xe):
             p.drawRoundedRect(QRectF(x, 0, gw, h), 5, 5)
-        # the count, in a small pill on top of everything else (inside the bar)
-        txt = f"{self._verb} {self.used()} of {self._total} frames"
+        # the count, in a small pill on top of everything else (inside the bar).
+        # Step 4 leaves it off: the box sat over the right grip, and that screen
+        # says the same thing on the line underneath the bar.
+        if not self._show_count:
+            p.end()
+            return
+        txt = f"Using {self.used()} of {self._total} frames"
         fm = p.fontMetrics()
         tw = fm.horizontalAdvance(txt) + 20
         pill = QRectF((self.width() - tw) / 2, inset + 3, tw, bh - 6)
@@ -8891,7 +8897,7 @@ class FrameRangeRow(QWidget):
         self._skip_words = bool(skip_words)
         self.slider = FrameRangeSlider(max(1, total), min_keep)
         if self._skip_words:
-            self.slider._verb = "Cleaning"   # Step 4 cleans frames; the other tabs "use" them
+            self.slider._show_count = False  # Step 4 says the count under the bar instead
         self._lo, self._hi = QLabel("0"), QLabel("0")
         for n in (self._lo, self._hi):
             n.setFixedWidth(112 if self._skip_words else 44)
@@ -9088,13 +9094,26 @@ class StarTrailPanel(QWidget):
             _min_keep = _msc.MIN_FRAMES_SHOWN
         except Exception:
             _total, _min_keep = 0, 0
+        # Frames the stack really uses (the automatic skip taken off); 0 = unknown.
+        # Tapered Ends is switched off when this is known and too small to show it.
+        try:
+            self._seq_used = max(0, _total - _msc.SKIP_FIRST - _msc.SKIP_LAST) if _total else 0
+        except Exception:
+            self._seq_used = 0
         if _total > _min_keep > 0:
             _fr_row = FrameRangeRow(_LABEL_W, _total, _min_keep)
             self._frame_range = _fr_row.slider
             lay.addWidget(_fr_row)
 
-        from PySide6.QtWidgets import QRadioButton, QButtonGroup
-        # Blending mode radios, stacked vertically: Normal on top, Comet Mode below.
+        # Star Trail Style: the three styles side by side on ONE row, and directly
+        # under them ONE options row that shows only the options of the style picked
+        # (Comet: Trail Length + reverse order; Tapered Ends: Taper Length; Normal:
+        # nothing). Two rows in all, where separate greyed-out rows for every style
+        # made this tab so tall that the window could not fit it on a laptop screen
+        # and its text drew on top of the picture (2026-11-10). The options row is a
+        # stack that keeps the height of its tallest page, so picking a style never
+        # changes the window's height.
+        from PySide6.QtWidgets import QRadioButton, QButtonGroup, QStackedWidget
         _mode_w = QWidget()
         _mv = QVBoxLayout(_mode_w); _mv.setContentsMargins(0, 0, 0, 0); _mv.setSpacing(6)
         self._mode_normal = QRadioButton("Normal (Lighten)")
@@ -9102,38 +9121,62 @@ class StarTrailPanel(QWidget):
         self._mode_group = QButtonGroup(self)
         self._mode_group.addButton(self._mode_normal)
         self._mode_group.addButton(self._mode_comet)
+        # Tapered Ends: every trail fades in at its start and out at its end; the
+        # middle of the sequence stays full brightness (make_share_clip --taper).
+        self._mode_taper = QRadioButton("Tapered Ends")
+        self._mode_group.addButton(self._mode_taper)
         self._mode_normal.setChecked(True)
-        _mv.addWidget(self._mode_normal)
-        _mv.addWidget(self._mode_comet)
-        _row("Star Trail Style", _mode_w)
+        _rb = QHBoxLayout(); _rb.setContentsMargins(0, 0, 0, 0); _rb.setSpacing(18)
+        _rb.addWidget(self._mode_normal)
+        _rb.addWidget(self._mode_comet)
+        _rb.addWidget(self._mode_taper)
+        _rb.addStretch(1)
+        _mv.addLayout(_rb)
+        _too_short = 0 < getattr(self, "_seq_used", 0) < _msc.TAPER_MIN_SEQUENCE if _total else False
+        if _too_short:
+            self._mode_taper.setEnabled(False)
+            self._mode_taper.setToolTip("Needs at least "
+                                        f"{_msc.TAPER_MIN_SEQUENCE} frames to show.")
 
-        # Trail Length (Comet's sub-option), indented to the right to read as a child
-        # of Comet Mode. Grayed (control AND label) unless Comet Mode is selected.
-        # Fraction of the sequence (50/75/100/150/200%), so the tail scales to the frame count.
+        # Comet's options. Trail Length is a fraction of the sequence
+        # (50/75/100/150/200%), so the tail scales to the frame count.
         self._comet_len_cb = QComboBox()
         for label, frac in (("Short (50%)", 0.5), ("Medium (75%)", 0.75), ("Long (100%)", 1.0),
                             ("Extra Long (150%)", 1.5), ("Max (200%)", 2.0)):
             self._comet_len_cb.addItem(label, frac)
         self._comet_len_cb.setCurrentIndex(self._comet_len_cb.findData(1.0))   # default Long (100%)
-        _lenrow = QHBoxLayout()
-        _lenrow.addSpacing(36)
         self._len_label = QLabel("Trail Length")
-        self._len_label.setFixedWidth(_LABEL_W)
-        self._len_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        _llf = self._len_label.font(); _llf.setBold(True); self._len_label.setFont(_llf)
-        _lenrow.addWidget(self._len_label)
-        _lenrow.addWidget(self._comet_len_cb, 1)
-        lay.addLayout(_lenrow)
-
         # Reverse frame order (comet-only): flips which end of each trail fades, so the
-        # comet tails point the other way. Grayed out unless Comet Mode is selected.
-        _revrow = QHBoxLayout()
-        _revrow.addSpacing(36)
-        self._reverse_chk = QCheckBox("Process frames in reverse order")
-        _revrow.addWidget(self._reverse_chk)
-        _revrow.addStretch(1)
-        lay.addLayout(_revrow)
+        # comet tails point the other way.
+        self._reverse_chk = QCheckBox("Reverse order")
+        self._reverse_chk.setToolTip("Process the frames in reverse order, so the comet "
+                                     "tails point the other way.")
+        _cpage = QWidget()
+        _ch = QHBoxLayout(_cpage); _ch.setContentsMargins(0, 0, 0, 0); _ch.setSpacing(8)
+        _ch.addWidget(self._len_label)
+        _ch.addWidget(self._comet_len_cb, 1)
+        _ch.addWidget(self._reverse_chk)
 
+        # Tapered Ends' option: the share of the frames at EACH end that fade, so it
+        # scales with the sequence.
+        self._taper_cb = QComboBox()
+        for label, frac in (("Short (10%)", 0.1), ("Medium (20%)", 0.2), ("Long (30%)", 0.3)):
+            self._taper_cb.addItem(label, frac)
+        self._taper_cb.setCurrentIndex(self._taper_cb.findData(0.2))   # default Medium (20%)
+        self._taper_label = QLabel("Taper Length")
+        _tpage = QWidget()
+        _th = QHBoxLayout(_tpage); _th.setContentsMargins(0, 0, 0, 0); _th.setSpacing(8)
+        _th.addWidget(self._taper_label)
+        _th.addWidget(self._taper_cb, 1)
+
+        self._style_opts = QStackedWidget()
+        self._style_opts.addWidget(QWidget())      # 0: Normal, no options
+        self._style_opts.addWidget(_cpage)         # 1: Comet Mode
+        self._style_opts.addWidget(_tpage)         # 2: Tapered Ends
+        _mv.addWidget(self._style_opts)
+        _row("Star Trail Style", _mode_w)
+
+        self._mode_taper.toggled.connect(self._sync_comet_len)
         self._mode_comet.toggled.connect(self._sync_comet_len)
         self._sync_comet_len()
 
@@ -9235,12 +9278,19 @@ class StarTrailPanel(QWidget):
         _make_labels_selectable(self)   # house rule: all GUI text is copy/paste-able
 
     def _sync_comet_len(self, *_):
-        """Gray out the comet-only controls (Trail Length + label, reverse order)
-        unless Comet Mode is selected."""
+        """Show the options of the picked style only (the stack under the style
+        radios: nothing for Normal, Comet's for Comet, Taper Length for Tapered
+        Ends), and keep each style's controls live only while that style is picked."""
+        self._style_opts.setCurrentIndex(
+            1 if self._mode_comet.isChecked() else 2 if self._mode_taper.isChecked() else 0)
         on = self._mode_comet.isChecked()
         self._comet_len_cb.setEnabled(on)
         self._len_label.setEnabled(on)
         self._reverse_chk.setEnabled(on)
+        # Tapered Ends' own length choice, same rule: live only while it is selected.
+        _t = self._mode_taper.isChecked()
+        self._taper_cb.setEnabled(_t)
+        self._taper_label.setEnabled(_t)
 
     def _tick_spinner(self):
         """Update the build status: a spinning glyph, the current phase, and a
@@ -9300,6 +9350,8 @@ class StarTrailPanel(QWidget):
             tokens.append(f"comet-{length}")
             if self._reverse_chk.isChecked():
                 tokens.append("reverse")
+        elif self._mode_taper.isChecked():
+            tokens.append(f"taper-{int(round(float(self._taper_cb.currentData() or 0.2) * 100))}")
         else:
             tokens.append("plain")
         thick = int(self._size_cb.currentData() or 0)
@@ -9391,6 +9443,9 @@ class StarTrailPanel(QWidget):
         # turns it into a real frame count. 0 = plain trail (Blending Mode = Normal).
         comet = (float(self._comet_len_cb.currentData() or 0.5)
                  if self._mode_comet.isChecked() else 0.0)
+        # Tapered Ends: FRACTION of the frames at each end that fade (0 = off).
+        taper = (float(self._taper_cb.currentData() or 0.2)
+                 if self._mode_taper.isChecked() else 0.0)
         thick = int(self._size_cb.currentData() or 0)
         self._pending_out = self._build_out_path()   # option-named, never overwrites
         script = os.path.join(_base, "make_share_clip.py")
@@ -9402,7 +9457,8 @@ class StarTrailPanel(QWidget):
         # filename. The extension alone cannot tell 8-bit TIFF from 16-bit, so
         # inferring it made "TIFF 8-bit" impossible to ask for.
         args = ["--star-trail", "--cleaned", _src, "--out", self._pending_out,
-                "--comet-tail", str(comet), "--thicken", str(thick),
+                "--comet-tail", str(comet), "--taper", str(taper),
+                "--thicken", str(thick),
                 "--out-format", (self._fmt_cb.currentData() or "jpg")]
         if _src is not self._cleaned and self._has_cleaned:
             # Building from originals: match the shot list to the cleaned build
@@ -9462,7 +9518,8 @@ class StarTrailPanel(QWidget):
             self._spin_timer.timeout.connect(self._tick_spinner)
         self._spin_timer.start(200)
         self._tick_spinner()
-        for w in (self._hotpix_chk, self._mode_normal, self._mode_comet, self._comet_len_cb,
+        for w in (self._hotpix_chk, self._mode_normal, self._mode_comet, self._mode_taper,
+                  self._comet_len_cb, self._taper_cb,
                   self._reverse_chk, self._size_cb, self._bright_sl, self._src_cb, self._fmt_cb,
                   self._open_img_btn, self._open_dir_btn, self._frame_range):
             if w is not None:
@@ -9629,11 +9686,15 @@ class StarTrailPanel(QWidget):
             self._spin_timer.stop()          # stop the spinner/timer before final status
         self._build_btn.setText("Create Star Trail")
         self._build_btn.setEnabled(True)
-        for w in (self._hotpix_chk, self._mode_normal, self._mode_comet, self._comet_len_cb,
+        for w in (self._hotpix_chk, self._mode_normal, self._mode_comet, self._mode_taper,
+                  self._comet_len_cb, self._taper_cb,
                   self._reverse_chk, self._size_cb, self._bright_sl, self._src_cb, self._fmt_cb,
                   self._open_img_btn, self._open_dir_btn, self._frame_range):
             if w is not None:
                 w.setEnabled(True)
+        # A sequence too short to taper keeps its radio off after a build too.
+        if 0 < getattr(self, "_seq_used", 0) < 10:
+            self._mode_taper.setEnabled(False)
         self._sync_comet_len()   # re-gray Length if Blending Mode is Normal
         if self._build_cancelled:
             self._bar.setVisible(False)
@@ -9680,12 +9741,14 @@ class StarTrailPanel(QWidget):
                     usage_report.send({
                         "type": "startrail",
                         "app_version": VERSION,
-                        "style": "comet" if _comet else "normal",
+                        "style": ("comet" if _comet else
+                                  "taper" if self._mode_taper.isChecked() else "normal"),
                         "comet_length": (self._comet_len_cb.currentData()
                                          if _comet else None),
+                        "taper_length": (self._taper_cb.currentData()
+                                         if self._mode_taper.isChecked() else None),
                         "reversed": bool(_comet and self._reverse_chk.isChecked()),
-                        "thicken_px": self._size_cb.currentData(),
-                        "speck_cleanup": self._hotpix_chk.isChecked(),
+                        "thicken_px": self._size_cb.currentData(),                        "speck_cleanup": self._hotpix_chk.isChecked(),
                         "flash_finder": getattr(self, "_ff_counts", None),
                         "source": self._src_cb.currentData(),
                     })

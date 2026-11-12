@@ -943,6 +943,74 @@ def _comet_stack_fullres(dirpath, names, tail_frames):
     return np.clip(acc, 0, 255).astype(np.uint8)
 
 
+# Tapered Ends: how dark the very first / very last frame is, in photographic
+# stops. 7.5 stops is about 0.5% brightness -- effectively invisible -- and is the
+# depth the hand method this copies reaches over its 150-frame ramp.
+TAPER_DEPTH_STOPS = 7.5
+# The stops are LIGHT stops, like Photoshop's Exposure adjustment (which works in
+# linear light). The frames hold gamma-encoded values, so a light multiplier w is a
+# multiplier of w ** (1 / TAPER_GAMMA) on the stored numbers. Multiplying the stored
+# numbers by w directly made the fade about twice as steep as his.
+TAPER_GAMMA = 2.2
+TAPER_MIN_FRAMES = 3      # each end tapers at least this many frames
+TAPER_MIN_SEQUENCE = 10   # below this many frames a taper is too coarse to see
+
+
+def taper_ramp_frames(n_frames, fraction):
+    """How many frames each end of the sequence tapers over: `fraction` of the
+    sequence (0.1 / 0.2 / 0.3), never fewer than TAPER_MIN_FRAMES, and never more
+    than half the sequence (so the two ends cannot overlap)."""
+    k = int(round(float(fraction) * int(n_frames)))
+    return max(0, min(max(k, TAPER_MIN_FRAMES), int(n_frames) // 2))
+
+
+def taper_weight(i, n_frames, ramp):
+    """Brightness multiplier (0..1) for frame `i` of `n_frames`. The first and last
+    `ramp` frames climb from TAPER_DEPTH_STOPS dark up to full brightness; every
+    frame between them is 1.0 (untouched). A step of equal stops per frame is a
+    steady geometric fade, the same shape as Comet Mode's."""
+    if ramp <= 0:
+        return 1.0
+    d = min(i, n_frames - 1 - i)          # frames in from the nearest end
+    if d >= ramp:
+        return 1.0
+    return 2.0 ** (-TAPER_DEPTH_STOPS * (1.0 - d / float(ramp)))
+
+
+def _taper_stack_fullres(dirpath, names, fraction):
+    """Tapered Ends stack: every trail fades in at its start and out at its end,
+    while the middle of the sequence stays at full brightness. Each frame is dimmed
+    by taper_weight() by its distance from the nearest end of the sequence, then
+    folded in with lighten-max. Unlike Comet Mode the dimming depends only on the
+    frame's position, not on how old the star's earlier positions are. Capture order
+    matters (the ends are the ends), and `names` arrives in true capture order."""
+    n = len(names)
+    ramp = taper_ramp_frames(n, fraction)
+    acc = None
+    used = 0
+    for i, nm in enumerate(names):
+        im = robust_imread(os.path.join(dirpath, nm), cv2.IMREAD_COLOR)
+        if im is None:
+            continue
+        f = im.astype(np.float32)
+        w = taper_weight(i, n, ramp)
+        if w < 1.0:
+            f *= w ** (1.0 / TAPER_GAMMA)   # light multiplier -> stored-value multiplier
+        if acc is None:
+            acc = f
+        else:
+            if f.shape != acc.shape:
+                f = cv2.resize(f, (acc.shape[1], acc.shape[0]), interpolation=cv2.INTER_AREA)
+            np.maximum(acc, f, out=acc)
+        used += 1
+        print(f"  tapered star trail: {i + 1}/{n}", flush=True)
+    if acc is None:
+        return None
+    print(f"  tapered star trail: stacked {used} frames "
+          f"(ramp {ramp} frames at each end)", flush=True)
+    return np.clip(acc, 0, 255).astype(np.uint8)
+
+
 def _thicken(img, px, fg_mask=None):
     """Widen the long star trails by `px` pixels WITHOUT fattening the tiny noise
     specks. A plain dilation grows every bright pixel, so single-pixel chroma noise
@@ -1000,7 +1068,7 @@ def apply_brightness(img, amount):
 def make_star_trail(cleaned_dir, out_path=None, stack=None, comet_tail=0,
                     thicken_px=0, remove_hotpix=False, reverse=False,
                     match_cleaned=None, out_format="jpg",
-                    trim_start=0, trim_end=0, brightness_stops=0.0):
+                    trim_start=0, trim_end=0, brightness_stops=0.0, taper=0.0):
     """OUTPUT 1 — the quick-and-dirty full-resolution STAR TRAIL (`--star-trail`).
 
     `trim_start` / `trim_end`: extra frames to leave out of the front / back of the
@@ -1041,8 +1109,10 @@ def make_star_trail(cleaned_dir, out_path=None, stack=None, comet_tail=0,
     """
     _t_stack = time.time()
     names = None   # set by the stacking branch below; reused by the hot-pixel re-stack
-    if comet_tail and float(comet_tail) > 0:
-        # Comet mode is order-dependent, so it cannot reuse the order-independent
+    _taper_on = bool(taper) and float(taper) > 0
+    if _taper_on or (comet_tail and float(comet_tail) > 0):
+        # Tapered Ends (taper = fraction of the sequence at each end) and Comet mode
+        # are both order-dependent, so neither can reuse the order-independent
         # lighten-max stack the run already built. Rebuild from the cleaned folder
         # in true capture order instead. comet_tail is a FRACTION of the sequence
         # (0.5/0.75/1.0), so the tail scales to the frame count.
@@ -1053,13 +1123,18 @@ def make_star_trail(cleaned_dir, out_path=None, stack=None, comet_tail=0,
         if not names:
             raise SystemExit(f"no cleaned frames found in {cleaned_dir}")
         names = _apply_trim(names, trim_start, trim_end)   # before reverse: trim = capture order
-        if reverse:
-            names = names[::-1]      # flip which end of each comet tail fades
-            print("  comet: processing frames in reverse order", flush=True)
-        tail_frames = max(1, int(round(float(comet_tail) * len(names))))
-        stack = _comet_stack_fullres(cleaned_dir, names, tail_frames)
-        if stack is None:
-            raise SystemExit(f"comet stacking failed (cleaned dir = {cleaned_dir})")
+        if _taper_on:
+            stack = _taper_stack_fullres(cleaned_dir, names, float(taper))
+            if stack is None:
+                raise SystemExit(f"tapered stacking failed (cleaned dir = {cleaned_dir})")
+        else:
+            if reverse:
+                names = names[::-1]      # flip which end of each comet tail fades
+                print("  comet: processing frames in reverse order", flush=True)
+            tail_frames = max(1, int(round(float(comet_tail) * len(names))))
+            stack = _comet_stack_fullres(cleaned_dir, names, tail_frames)
+            if stack is None:
+                raise SystemExit(f"comet stacking failed (cleaned dir = {cleaned_dir})")
     elif stack is None:
         if not os.path.isdir(cleaned_dir):
             raise SystemExit(f"cleaned folder not found: {cleaned_dir}")
@@ -1206,6 +1281,10 @@ if __name__ == "__main__":
     ap.add_argument("--comet-tail", type=float, default=0.0,
                     help="star trail: comet tail length as a FRACTION of the sequence "
                          "(e.g. 0.5/0.75/1.0; 0 = plain trail)")
+    ap.add_argument("--taper", type=float, default=0.0,
+                    help="star trail: Tapered Ends -- trails fade in and out over this "
+                         "FRACTION of the sequence at each end (e.g. 0.1/0.2/0.3; "
+                         "0 = off). The middle stays at full brightness")
     ap.add_argument("--thicken", type=int, default=0,
                     help="star trail: widen the trails by this many pixels (0 = leave as shot)")
     ap.add_argument("--brightness", type=float, default=0.0,
@@ -1245,7 +1324,7 @@ if __name__ == "__main__":
         if not st_cleaned:
             ap.error("--star-trail needs --cleaned (or --original to default to <original>/cleaned)")
         make_star_trail(st_cleaned, args.out, out_format=args.out_format,
-                        comet_tail=args.comet_tail,
+                        comet_tail=args.comet_tail, taper=args.taper,
                         match_cleaned=args.match_cleaned,
                         thicken_px=args.thicken, remove_hotpix=args.remove_hotpix,
                         reverse=args.reverse,
