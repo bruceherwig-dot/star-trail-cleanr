@@ -621,22 +621,25 @@ if sys.platform == 'darwin':
     # frameworks remain validly signed, so we only re-seal the outermost
     # bundle). errSecCSBadResource (-67030) is the symptom; this is the cure.
     # Confirmed by Sparkle maintainer that ad-hoc + EdDSA is supported.
+    #
+    # A FAILURE HERE STOPS THE BUILD. Until 2026-11-15 it only printed a
+    # warning. On v3.04-beta the signing failed on a leftover Qt build file
+    # (PySide6 .../objects-RelWithDebInfo/...cpp.o), the warning scrolled past,
+    # and the Apple Silicon app shipped with NO seal: macOS told everyone who
+    # downloaded it that the app "is damaged and can't be opened", with no way
+    # round it. scripts/check_mac_signature.py removes that kind of leftover,
+    # signs, and checks the result; the same script runs again in CI on the
+    # finished disk image.
     print('\nRe-signing outer .app bundle (ad-hoc) to repair Info.plist seal...')
-    cs = subprocess.run(
-        ['codesign', '--force', '--sign', '-', dist_root],
-        capture_output=True,
+    seal = subprocess.run(
+        [sys.executable,
+         os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                      'scripts', 'check_mac_signature.py'),
+         '--seal', dist_root],
     )
-    if cs.returncode != 0:
-        print(f'  WARNING: codesign failed: {cs.stderr.decode().strip()}')
-    else:
-        verify = subprocess.run(
-            ['codesign', '--verify', '--verbose=2', dist_root],
-            capture_output=True,
-        )
-        if verify.returncode == 0:
-            print('  outer bundle signature: valid')
-        else:
-            print(f'  WARNING: outer bundle still invalid: {verify.stderr.decode().strip()}')
+    if seal.returncode != 0:
+        print('\nBUILD STOPPED: the Mac app could not be sealed (see above).')
+        sys.exit(1)
 
 if sys.platform == 'win32':
     # Place WinSparkle.dll at the top of the bundle (next to the .exe) so

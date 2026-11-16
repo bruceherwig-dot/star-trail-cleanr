@@ -2,6 +2,13 @@
 
 ---
 
+## v3.05-beta
+This release fixes one thing: the Apple Silicon Mac download of v3.04-beta could not be opened. Nothing in the cleaning, the Star Trail tab or the Windows and Linux builds changes. Tested on the real v3.04 app on one Mac, not yet on a fresh download.
+- **Fixed: "StarTrailCleanR is damaged and can't be opened" on Apple Silicon Macs.** The v3.04-beta Apple Silicon app went out without its signature seal. While the app was being built, the signing step stopped on leftover build files that two of the libraries we use had included, the build reported a warning and carried on. macOS told anyone who downloaded that build from the website that the app was damaged, and downloading it again gave the same result. The build now removes those leftover files (debug symbols and compiler object files, none of them used when the app runs) and seals the app. People who updated to v3.04 from inside the app were not affected, and the Intel Mac download was sealed correctly.
+- **Improved: a build without a valid seal can no longer be released.** The build now stops if the app cannot be sealed, and a new check opens the finished disk image, the file you download, and fails the build unless the app inside is sealed. Before this, nothing looked at the signature, so the fault went out unnoticed.
+- **Unchanged:** the app is still not notarized by Apple, so the first time you open it macOS shows its usual security warning. The steps in "Open Me First.txt" on the disk image still apply.
+- **Smoke tests:** 706 passing.
+
 ## v3.04-beta
 This release is about the Star Trail and Timelapse tabs and about choosing which frames a run uses. Tested on a handful of sequences and on an Insta360 camera's frames, not on a fresh camera.
 - **New: Tapered Ends star trail style.** On the Star Trail tab, pick Tapered Ends and each trail fades in over the first part of the sequence and fades out over the last part, while the middle stays at full brightness. A Taper Length choice (Short 10%, Medium 20%, Long 30% of the frames at each end) scales it from 100 frames to 1,000. The fade is done in light stops, so the ramp looks even. It needs at least 10 frames. The fade shows best on the sparse parts of the sky, such as the short inner rings near the pole. Where the sky is crowded, a faded end is hidden behind the bright middle of a neighboring trail.

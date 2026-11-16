@@ -124,6 +124,16 @@ jobs:
           done
           echo "hdiutil failed three times - this is not the usual transient"
           exit 1
+      - name: Signature gate
+        # Opens the FINISHED disk image -- the file a user downloads -- and
+        # fails the build unless the app inside carries a valid seal.
+        # v3.04-beta shipped an Apple Silicon app with no seal at all (the
+        # signing step failed on a leftover Qt build file and only printed a
+        # warning). macOS told everyone who downloaded it that the app "is
+        # damaged and can't be opened", with no Open Anyway. Nothing checked
+        # the signature, so the build was green. If this fails, fix the
+        # signing; do not skip the gate.
+        run: python scripts/check_mac_signature.py StarTrailCleanR-Mac-AppleSilicon.dmg
       - uses: actions/upload-artifact@v4
         with:
           name: StarTrailCleanR-Mac
@@ -206,6 +216,10 @@ jobs:
           done
           echo "hdiutil failed three times - this is not the usual transient"
           exit 1
+      - name: Signature gate
+        # Same gate as the Apple Silicon job: the app inside the finished disk
+        # image must carry a valid seal, or the build fails. See that job.
+        run: python scripts/check_mac_signature.py StarTrailCleanR-Mac-Intel.dmg
       - uses: actions/upload-artifact@v4
         with:
           name: StarTrailCleanR-Mac-Intel
