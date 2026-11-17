@@ -1885,6 +1885,10 @@ def main():
     _tload = time.perf_counter()
     model, _device_used = load_model(str(args.model), args.confidence, args.device)
     _model_load_s = time.perf_counter() - _tload
+    from modules.cpu_threads import use_cores_for_cpu_run
+    _cpu_threads = use_cores_for_cpu_run(_device_used)
+    if _cpu_threads:
+        print(f"  Processor run: AI step using {_cpu_threads} threads.", flush=True)
 
     # SAY WHAT IS ACTUALLY HAPPENING -- when it works as well as when it does
     # not. Bruce, 2026-08-23: "we want to let the user know when something fails,
