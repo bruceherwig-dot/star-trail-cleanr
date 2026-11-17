@@ -260,7 +260,7 @@ def test_production_callsites_use_robust_imread():
     assert "from modules.io_safe import robust_imread, robust_imread_diag" in text, (
         "astro_clean_v5.py no longer imports the io_safe helpers"
     )
-    assert "robust_imread_diag(fp, cv2.IMREAD_UNCHANGED)" in text, (
+    assert "robust_imread_diag(_p, cv2.IMREAD_UNCHANGED)" in text, (
         "frame-load loop no longer uses robust_imread_diag — without the "
         "diagnosis the worker can't tell the user why a read failed"
     )

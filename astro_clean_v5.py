@@ -1567,17 +1567,28 @@ def main():
     # frames only -- those are the frames this batch writes.
     _mono_src_n = 0
     _core_loaded_n = 0
-    for fi, fp in enumerate(frame_files_all):
+    # A few frames are read at once; they come back here one at a time, in file order,
+    # so everything below (progress lines, bad-file prompt, counters) is unchanged.
+    from modules.parallel_read import read_frames_in_order
+    _decode_secs = {}      # each frame's own read time, noted by the reader itself
+
+    def _read_one(_p):
+        _t = time.perf_counter()
+        _r = robust_imread_diag(_p, cv2.IMREAD_UNCHANGED)
+        _decode_secs[_p] = time.perf_counter() - _t
+        return _r
+
+    for fi, (fp, img, diag) in enumerate(read_frames_in_order(frame_files_all, _read_one)):
         is_core = core_start <= fi < core_end
         is_before_core = fi < core_start
         _crumb("LOAD", fi + 1, len(frame_files_all), fp.name)
-        _t_read1 = time.perf_counter()
-        img, diag = robust_imread_diag(fp, cv2.IMREAD_UNCHANGED)
         if fp.suffix.lower() in RAW_EXTS and img is not None:
             # RAW frames are debayered with rawpy, which is far slower than
             # decoding a JPG/TIFF. Track it so the per-frame cost of RAW input
             # is visible in the run log instead of hidden in total load time.
-            _raw_decode_s += time.perf_counter() - _t_read1
+            # Frames are read a few at a time, so these add up to more than the
+            # wall time of the read step.
+            _raw_decode_s += _decode_secs.get(fp, 0.0)
             _raw_decode_n += 1
         if img is None:
             # Best-effort developer telemetry — captured before we ask the GUI
