@@ -52,10 +52,142 @@ from typing import List
 MIN_BRIGHTNESS = 5
 
 
+# How many frames the whole-number search works on at once. Same number, and
+# same reason for keeping it small and FIXED, as _GROUP in the reference version
+# below: every frame in flight holds several full-size working copies, so
+# letting this grow with the batch or the core count would trade a speed problem
+# for a memory one on a big camera. Measured 2026-11-16 on 20 frames of 22 MP:
+# 4 at a time peaks about 1.2 GB (today's version: about 1.65 GB); 6 at a time
+# is a little faster but peaks about 1.74 GB.
+_GROUP_FAST = 4
+
+
+def _whole_number_search_applies(frames, threshold, min_channel_excess) -> bool:
+    """True when the whole-number search gives exactly the reference's answer.
+
+    That needs ordinary 8-bit colour frames, a brightness multiplier that is a
+    whole number (the default is 2), and a colour margin whose double is a whole
+    number (the default is 60). Anything else uses the reference version.
+    """
+    try:
+        if not frames:
+            return False
+        for f in frames:
+            if f.dtype != np.uint8 or f.ndim != 3 or f.shape[2] != 3:
+                return False
+        t = float(threshold)
+        e2 = 2.0 * float(min_channel_excess)
+        return (t.is_integer() and 1.0 <= t <= 255.0
+                and e2.is_integer() and 0.0 <= e2 <= 765.0)
+    except Exception:
+        return False
+
+
+def _build_hot_pixel_map_whole_numbers(frames, threshold, min_fraction,
+                                       min_channel_excess) -> np.ndarray:
+    """The same map as the reference version, with the same two tests, done in
+    whole-number arithmetic on 8-bit data instead of decimal arithmetic on
+    full-size copies. About a third less time and less memory (measured
+    2026-11-16); the map is identical, pixel for pixel.
+
+    Why each step gives the same yes or no as the reference:
+
+      * Brightness. The reference asks "pixel / background > threshold", with
+        a background below 1 treated as 1. For whole numbers that is the same
+        question as "pixel > threshold x max(background, 1)". The product is
+        capped at 255, which changes nothing: an 8-bit pixel can never be
+        greater than 255, so wherever the true product is 255 or more the
+        answer is "no" either way.
+      * Colour. The reference asks "max - (min + mid) / 2 >= margin". Doubling
+        both sides: "2 x max - (min + mid) >= 2 x margin", and since
+        min + mid = sum - max, that is "3 x max - sum >= 2 x margin", all in
+        whole numbers. 3 x max is never smaller than the sum, so nothing goes
+        negative.
+    """
+    h, w = frames[0].shape[:2]
+    n = len(frames)
+    min_hits = int(n * min_fraction)
+    t = int(threshold)
+    two_e = int(round(2.0 * float(min_channel_excess)))
+
+    def _one(frame):
+        """One frame's four yes/no planes: bright in B, G, R, and oddly coloured."""
+        hits = []
+        for ch in range(3):
+            plane = np.ascontiguousarray(frame[:, :, ch])
+            med = cv2.medianBlur(plane, 9)
+            limit = cv2.multiply(cv2.max(med, 1), t)      # caps at 255
+            hits.append((plane > limit) & (plane > MIN_BRIGHTNESS))
+        b, g, r = frame[:, :, 0], frame[:, :, 1], frame[:, :, 2]
+        chan_max = np.maximum(np.maximum(r, g), b)
+        total = b.astype(np.uint16)
+        total += g
+        total += r
+        excess = chan_max.astype(np.uint16)
+        excess *= 3
+        excess -= total                                   # 3 x max - sum, never negative
+        return hits, excess >= two_e
+
+    hit_b = np.zeros((h, w), dtype=np.uint16)
+    hit_g = np.zeros((h, w), dtype=np.uint16)
+    hit_r = np.zeros((h, w), dtype=np.uint16)
+    excess_hits = np.zeros((h, w), dtype=np.uint16)
+
+    def _tally(result):
+        hits, excess = result
+        hit_b[...] += hits[0]
+        hit_g[...] += hits[1]
+        hit_r[...] += hits[2]
+        excess_hits[...] += excess
+
+    pool = None
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+        pool = ThreadPoolExecutor(max_workers=_GROUP_FAST)
+    except Exception:
+        pool = None                     # no threads: do the same work in order
+    if pool is None:
+        for f in frames:
+            _tally(_one(f))
+    else:
+        with pool:
+            for i in range(0, n, _GROUP_FAST):
+                for result in pool.map(_one, frames[i:i + _GROUP_FAST]):
+                    _tally(result)
+
+    ratio_hot = ((hit_b >= min_hits) | (hit_g >= min_hits) |
+                 (hit_r >= min_hits))
+    excess_hot = (excess_hits >= min_hits)
+    return (ratio_hot & excess_hot).astype(np.uint8) * 255
+
+
 def build_hot_pixel_map(frames: List[np.ndarray], threshold: float = 2.0,
                         min_fraction: float = 0.8,
                         min_channel_excess: float = 60.0) -> np.ndarray:
     """Identify hot pixels by temporal consistency across the full frame.
+
+    This is the function the app calls. It returns exactly what
+    ``_build_hot_pixel_map_reference`` returns (see that function for the two
+    tests and what the parameters mean). For ordinary 8-bit colour frames with
+    the usual settings it gets there through the whole-number search, which is
+    faster and lighter; for anything else it runs the reference itself.
+    tests/test_hot_pixel_whole_numbers.py holds the two to the same answer.
+    """
+    if _whole_number_search_applies(frames, threshold, min_channel_excess):
+        return _build_hot_pixel_map_whole_numbers(
+            frames, threshold, min_fraction, min_channel_excess)
+    return _build_hot_pixel_map_reference(
+        frames, threshold, min_fraction, min_channel_excess)
+
+
+def _build_hot_pixel_map_reference(frames: List[np.ndarray], threshold: float = 2.0,
+                                   min_fraction: float = 0.8,
+                                   min_channel_excess: float = 60.0) -> np.ndarray:
+    """Identify hot pixels by temporal consistency across the full frame.
+
+    THE REFERENCE VERSION: the definition of the two tests, in plain decimal
+    arithmetic. ``build_hot_pixel_map`` uses it directly for unusual inputs and
+    the test suite uses it to check the faster whole-number search.
 
     Builds a single black-and-white map (same width/height as one frame)
     marking every sensor position that behaves like a stuck-bright pixel
