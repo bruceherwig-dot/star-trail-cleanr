@@ -418,8 +418,15 @@ def _track_stars(prev: np.ndarray, nxt: np.ndarray, trail_mask=None):
 # Each segment gets its own tracking + warp pass.
 # Log field: comp.split_into = number of segments returned.
 
-def _split_component(comp_full: np.ndarray) -> list:
+def _split_component(comp_full: np.ndarray, bbox=None) -> list:
     """Split a full-frame boolean component mask into sub-masks along the major axis.
+
+    `bbox` is the component's bounding box (x, y, width, height) when the caller
+    already knows it. Every step below then works inside that box and never
+    scans the whole photograph. This runs once per trail, and on a 24 MP frame a
+    single whole-frame pass costs several milliseconds, so the old whole-frame
+    versions of these steps added up to seconds per frame on a busy sky
+    (measured 2026-11-16). The masks returned are the same, pixel for pixel.
 
     The split threshold is frame-relative, not a fixed pixel count: MAX_SEG_LENGTH
     (500px) is the value calibrated for a full-size 6000x4000 frame, and it is scaled
@@ -442,22 +449,29 @@ def _split_component(comp_full: np.ndarray) -> list:
     # and it runs once per trail: 1.55s a frame on a busy sky against 0.55s.
     # The coordinates are shifted back before the fit, so the rectangle is the
     # same one (verified 2026-08-26, identical rect).
-    _rows = np.any(comp_full, axis=1)
-    _cols = np.any(comp_full, axis=0)
-    _rr = np.flatnonzero(_rows)
-    _cc = np.flatnonzero(_cols)
-    if len(_rr) == 0:
-        return []
-    _r0, _c0 = int(_rr[0]), int(_cc[0])
-    _sub = comp_full[_r0:int(_rr[-1]) + 1, _c0:int(_cc[-1]) + 1]
+    if bbox is not None:
+        _c0, _r0 = int(bbox[0]), int(bbox[1])
+        _r1, _c1 = _r0 + int(bbox[3]), _c0 + int(bbox[2])
+    else:
+        _rows = np.any(comp_full, axis=1)
+        _cols = np.any(comp_full, axis=0)
+        _rr = np.flatnonzero(_rows)
+        _cc = np.flatnonzero(_cols)
+        if len(_rr) == 0:
+            return []
+        _r0, _c0 = int(_rr[0]), int(_cc[0])
+        _r1, _c1 = int(_rr[-1]) + 1, int(_cc[-1]) + 1
+    _sub = comp_full[_r0:_r1, _c0:_c1]
     ys, xs = np.where(_sub)
+    if len(ys) == 0:
+        return []
     pts = np.column_stack([xs + _c0, ys + _r0]).astype(np.float32)
     rect = cv2.minAreaRect(pts.reshape(-1, 1, 2))
     trail_len = float(max(rect[1]))
 
     if trail_len <= seg_len_max:
         m = np.zeros(comp_full.shape, dtype=np.uint8)
-        m[comp_full] = 255
+        m[_r0:_r1, _c0:_c1][_sub] = 255      # only the box holds trail pixels
         return [m]
 
     n_segs = math.ceil(trail_len / seg_len_max)
@@ -476,10 +490,28 @@ def _split_component(comp_full: np.ndarray) -> list:
             a0 + t0 * (a1 - a0), a0 + t1 * (a1 - a0),
             b0 + t1 * (b1 - b0), b0 + t0 * (b1 - b0),
         ], dtype=np.int32)
-        seg = np.zeros((H, W), dtype=np.uint8)
-        cv2.fillPoly(seg, [corners.reshape(-1, 1, 2)], 255)
-        seg[~comp_full] = 0  # keep only actual trail pixels
-        if seg.any():
+        # Draw the segment's rectangle on a small canvas instead of the whole
+        # photograph, keep only actual trail pixels, then place the result in an
+        # otherwise empty full-frame mask. The canvas covers the trail's box AND
+        # the rectangle's own corners (which can poke past the box at a trail's
+        # ends), cut off only where the frame itself ends. That matters: OpenCV
+        # draws a polygon's edge slightly differently when the canvas cuts it,
+        # so a canvas of just the box changed a few end pixels (caught by
+        # tests/test_repair_box_work.py). With this canvas the drawing is cut in
+        # exactly the places the full-frame drawing was, and nowhere else.
+        _wx0 = max(0, min(_c0, int(corners[:, 0].min())))
+        _wy0 = max(0, min(_r0, int(corners[:, 1].min())))
+        _wx1 = min(W, max(_c1, int(corners[:, 0].max()) + 1))
+        _wy1 = min(H, max(_r1, int(corners[:, 1].max()) + 1))
+        _canvas = np.zeros((_wy1 - _wy0, _wx1 - _wx0), dtype=np.uint8)
+        _moved = corners - np.array([_wx0, _wy0], dtype=np.int32)
+        cv2.fillPoly(_canvas, [_moved.reshape(-1, 1, 2)], 255)
+        # Only the trail's box can hold trail pixels; take that part of the canvas.
+        seg_box = _canvas[_r0 - _wy0:_r1 - _wy0, _c0 - _wx0:_c1 - _wx0].copy()
+        seg_box[~_sub] = 0  # keep only actual trail pixels
+        if seg_box.any():
+            seg = np.zeros((H, W), dtype=np.uint8)
+            seg[_r0:_r1, _c0:_c1] = seg_box
             result.append(seg)
 
     return result if result else [np.uint8(comp_full) * 255]
@@ -594,7 +626,14 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
     if _timing_acc is None and debug_out is not None:
         _timing_acc = {}
 
+    # Seconds of the CURRENT segment already claimed by a named timer. The rest
+    # of the segment's time is reported as "compose_s" (see the segment loop),
+    # so no part of repair can go unreported. More than half of repair's time
+    # was invisible this way until 2026-11-16.
+    _seg_known = [0.0]
+
     def _addt(key, dt):
+        _seg_known[0] += dt
         if _timing_acc is not None:
             _timing_acc[key] = _timing_acc.get(key, 0.0) + dt
 
@@ -687,7 +726,7 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
     for _ci, (comp_area, bx, by, bw, bh, comp_full) in enumerate(_comp_iter, start=1):
         # ── Per-component setup ───────────────────────────────────────────────
         _ts = time.perf_counter()
-        sub_masks = _split_component(comp_full)
+        sub_masks = _split_component(comp_full, bbox=(bx, by, bw, bh))
         _addt("split_s", time.perf_counter() - _ts)
 
         comp_dbg = None
@@ -703,13 +742,30 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
         for seg_idx, sub_mask in enumerate(sub_masks):
             seg_info = {"seg": seg_idx} if comp_dbg is not None else None
 
-            sub_ys, sub_xs = np.where(sub_mask)
-            x0 = max(0, int(sub_xs.min()) - PAD)
-            y0 = max(0, int(sub_ys.min()) - PAD)
-            x1 = min(W, int(sub_xs.max()) + PAD)
-            y1 = min(H, int(sub_ys.max()) + PAD)
+            # Per-segment clock: everything this segment costs, so the part no
+            # named timer covers is reported as "compose_s" instead of vanishing.
+            _seg_t0 = time.perf_counter()
+            _seg_known[0] = 0.0
+
+            # WHERE IS THIS SEGMENT? Look only inside the component's own box.
+            # This used to be `np.where(sub_mask)` on the whole photograph: the
+            # coordinates of every lit pixel, found by scanning all 24 million.
+            # It ran once per segment and was 31% of all repair time on a busy
+            # sky (20 of 66 seconds on six frames, measured 2026-11-16). The
+            # segment lies inside the component's box, so two small reductions
+            # there give the same four numbers. Fifth appearance of the
+            # full-frame-work-per-component pattern (ARCHITECTURE.md).
+            _ts = time.perf_counter()
+            _sm = sub_mask[by:by + bh, bx:bx + bw]
+            _srr = np.flatnonzero(_sm.any(axis=1))
+            _scc = np.flatnonzero(_sm.any(axis=0))
+            x0 = max(0, bx + int(_scc[0]) - PAD)
+            y0 = max(0, by + int(_srr[0]) - PAD)
+            x1 = min(W, bx + int(_scc[-1]) + PAD)
+            y1 = min(H, by + int(_srr[-1]) + PAD)
 
             comp_mask = sub_mask[y0:y1, x0:x1] > 0
+            _addt("box_s", time.perf_counter() - _ts)
 
             # Always repair from all available neighbors.
             # The AND union block below sky-color-fills any pixel where BOTH neighbors
@@ -758,9 +814,10 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
             # known_problems). Every borrowed pixel below is pre-levelled with its
             # OWN source's nudge, and where a base neighbor must be chosen the
             # colour-closest one wins (Bruce's rule, 2026-06-10).
+            _ts_colour = time.perf_counter()
             _rp = neighbor_frames[prev_idx][y0:y1, x0:x1] if has_prev else None
             _rn = neighbor_frames[next_idx][y0:y1, x0:x1] if has_next else None
-            _pdirty = ((neighbor_masks[prev_idx][y0:y1, x0:x1] > 0)
+            _pdirty =((neighbor_masks[prev_idx][y0:y1, x0:x1] > 0)
                        if (has_prev and neighbor_masks is not None and neighbor_masks[prev_idx] is not None)
                        else np.zeros(comp_mask.shape, dtype=bool))
             _ndirty = ((neighbor_masks[next_idx][y0:y1, x0:x1] > 0)
@@ -829,6 +886,7 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                 raw_clean = _level(_rn, _off_n)
             else:
                 raw_clean = None
+            _addt("colour_s", time.perf_counter() - _ts_colour)
 
             if use_prev and use_next:
                 # ── Local star motion: the cascade (detect-and-measure + phase correlation) ──
@@ -936,8 +994,10 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                 # pasting it in flat. Falls back to a flat copy only if there are too
                 # few stars to track reliably, so it never makes a frame worse.
                 patch_prev = neighbor_frames[prev_idx][y0:y1, x0:x1]
+                _ts = time.perf_counter()
                 _dx, _dy, _ok, _n_stars, _cascade = _track_stars(
                     patch_prev, frame[y0:y1, x0:x1], trail_mask=comp_mask)
+                _addt("track_s", time.perf_counter() - _ts)
                 if _ok:
                     # prev's stars sit at p; in THIS frame they are at p+(dx,dy).
                     # Shift prev forward by (dx,dy) to land them on this frame.
@@ -953,8 +1013,10 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                 # frame and next and shift next BACK onto this frame's positions.
                 # Falls back to a flat copy only if tracking is unreliable.
                 patch_next = neighbor_frames[next_idx][y0:y1, x0:x1]
+                _ts = time.perf_counter()
                 _dx, _dy, _ok, _n_stars, _cascade = _track_stars(
                     frame[y0:y1, x0:x1], patch_next, trail_mask=comp_mask)
+                _addt("track_s", time.perf_counter() - _ts)
                 if _ok:
                     # next's stars sit at p+(dx,dy) relative to THIS frame's p.
                     # Shift next back by (-dx,-dy) to land them on this frame.
@@ -1017,9 +1079,13 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                     if _extra_e.any():
                         _nl, _lab, _st, _ = cv2.connectedComponentsWithStats(
                             _extra_e.astype(np.uint8), 8)
-                        for _k in range(1, _nl):
-                            if _st[_k, cv2.CC_STAT_AREA] <= _STAR_MAX_AREA:
-                                _still_e[_lab == _k] = False
+                        # Every star-sized blob at once: mark which labels are
+                        # small (never the background, label 0) and look each
+                        # pixel's label up in that list. Same pixels as testing
+                        # one blob at a time, without a pass over the window per blob.
+                        _small = _st[:, cv2.CC_STAT_AREA] <= _STAR_MAX_AREA
+                        _small[0] = False
+                        _still_e[_small[_lab]] = False
                     if _still_e.any():
                         synth[_still_e] = _unshift[_still_e]
                         _edge_still_px = int((_still_e & comp_mask).sum())
@@ -1043,9 +1109,11 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                 if _extra.any():
                     _nl, _lab, _st, _ = cv2.connectedComponentsWithStats(
                         _extra.astype(np.uint8), 8)
-                    for _k in range(1, _nl):
-                        if _st[_k, cv2.CC_STAT_AREA] <= _STAR_MAX_AREA:
-                            _still[_lab == _k] = False        # keep this slid star
+                    # Keep every slid star: all star-sized blobs in one lookup
+                    # (see the edge-frame block above; label 0 is the background).
+                    _small = _st[:, cv2.CC_STAT_AREA] <= _STAR_MAX_AREA
+                    _small[0] = False
+                    _still[_small[_lab]] = False
                 if _still.any():
                     synth[_still] = raw_clean[_still]
 
@@ -1214,6 +1282,7 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
             # darker than a fraction of the local sky with that min (a hard replace, no feather);
             # brighter sky pixels keep the slide so moving stars stay put.
             _fg_darken_px, _fg_sky = 0, None
+            _ts_darken = time.perf_counter()
             if _DARKEN_FOREGROUND and N > 1:
                 _w0 = max(0, frame_idx - _DARKEN_WINDOW)
                 _w1 = min(N, frame_idx + _DARKEN_WINDOW + 1)
@@ -1225,6 +1294,13 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                     _res_d, _fg_darken_px, _fg_sky = _darken_fill(
                         result[y0:y1, x0:x1], _dmin, _dmed, comp_mask, _collar, _maxv, frame.dtype)
                     result[y0:y1, x0:x1] = _res_d
+            _addt("darken_s", time.perf_counter() - _ts_darken)
+
+            # Whatever this segment cost that no named timer above claimed
+            # (choosing and composing the fill, the still-versus-moving routing).
+            if _timing_acc is not None:
+                _timing_acc["compose_s"] = (_timing_acc.get("compose_s", 0.0)
+                    + max(0.0, time.perf_counter() - _seg_t0 - _seg_known[0]))
 
             if seg_info is not None:
                 seg_info.update({

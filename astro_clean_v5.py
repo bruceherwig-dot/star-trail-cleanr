@@ -2470,6 +2470,11 @@ def main():
                                        debug_out=repair_dbg)
                 _rep_s = time.perf_counter() - _t0
                 _tacc("repair_s", _rep_s)
+                # Repair's own parts, so the timing summary can itemise them and
+                # state what is left over (keys arrive as "track_s", "paste_s"...).
+                if repair_dbg:
+                    for _rk, _rv in (repair_dbg.get("timing") or {}).items():
+                        _tacc("rp_" + _rk, float(_rv))
                 _tw = time.perf_counter()
                 _write_output(fp.stem, cleaned, icc_profile=icc_profile, exif_bytes=frame_exif, dpi=dpi, src=fp)
                 _tacc("write_s", time.perf_counter() - _tw)
@@ -2555,7 +2560,12 @@ def main():
                 continue
             _cnt, _tot = _timing[_key]
             _avg = _tot / _cnt if _cnt else 0.0
-            _name = "  " + _key[3:-2] if _key.startswith("dp_") else _key[:-2]
+            if _key.startswith("dp_"):
+                _name = "  " + _key[3:-2]
+            elif _key.startswith("rp_"):
+                _name = "  repair: " + _key[3:-2]   # a part of repair_frame
+            else:
+                _name = _key[:-2]
             print(f"  {_name:<26} {_cnt:>6}  {_fmt_s(_tot):>8}  {_fmt_s(_avg):>8}")
 
         # And prove the parts add up. A gap here means time is going somewhere
@@ -2567,6 +2577,15 @@ def main():
             _gap = _parent - _kids
             print(f"  {'  (detect unaccounted)':<26} {'':>6}  {_fmt_s(max(0.0, _gap)):>8}  "
                   f"{100.0 * _gap / _parent:>7.0f}%")
+        # The same proof for repair. Until 2026-11-16 repair reported six parts
+        # that added up to about a third of its time; the rest (one whole-frame
+        # scan per trail piece, mostly) showed nowhere.
+        _rparent = _timing.get("repair_s", (0, 0.0))[1]
+        _rkids = sum(v[1] for k, v in _timing.items() if k.startswith("rp_"))
+        if _rparent > 0 and _rkids > 0:
+            _rgap = _rparent - _rkids
+            print(f"  {'  (repair unaccounted)':<26} {'':>6}  {_fmt_s(max(0.0, _rgap)):>8}  "
+                  f"{100.0 * _rgap / _rparent:>7.0f}%")
 
     elapsed = time.time() - t_total
     mins, secs = divmod(int(elapsed), 60)
