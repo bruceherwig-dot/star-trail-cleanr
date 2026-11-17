@@ -876,6 +876,35 @@ _PHANTOM_KEEP_FRAC = 0.20  # drop a detection if < this fraction survives trimmi
 _PHANTOM_MASK_CACHE_BYTES = int(2.5 * 1024 ** 3)
 
 
+def _max_channel_gray(image: np.ndarray) -> np.ndarray:
+    """The brightest channel of each pixel, as an 8-bit grey image.
+
+    Same values as image.max(2).astype(np.uint8). For an ordinary 8-bit colour
+    frame the maximum of the three channel planes is worked out directly: 9 ms
+    against 144 ms on a 22 MP frame (measured 2026-11-17), and 1.4 of the 8.3
+    seconds phantom pruning took on 9 frames. Anything else (16-bit, one channel,
+    more channels) keeps the original expression.
+    """
+    if image.ndim == 3 and image.shape[2] == 3 and image.dtype == np.uint8:
+        return np.maximum(np.maximum(image[:, :, 0], image[:, :, 1]), image[:, :, 2])
+    return image.max(2).astype(np.uint8) if image.ndim == 3 else image.astype(np.uint8)
+
+
+def _union_of_masks(masks, h: int, w: int) -> np.ndarray:
+    """A 0/1 uint8 image that is 1 wherever any of the masks is non-zero.
+
+    Same array as setting union[m > 0] = 1 for each mask in turn, but each mask
+    is OR-ed in place (40 ms against 158 ms for 60 masks on a 22 MP frame,
+    measured 2026-11-17) and the 0/1 image is made once at the end. None entries
+    are skipped. Masks are (h, w) uint8, as _pred_to_mask returns.
+    """
+    acc = np.zeros((h, w), np.uint8)
+    for m in masks:
+        if m is not None:
+            cv2.bitwise_or(acc, m, dst=acc)
+    return (acc > 0).astype(np.uint8)
+
+
 def _phantom_local_sky(gray: np.ndarray) -> np.ndarray:
     """Estimate the local sky level (the thin streak vanishes under a heavy
     median), at quarter resolution for speed, upsampled back."""
@@ -921,24 +950,24 @@ def stage_prune_phantoms(state: PipelineState, cfg: StageConfig,
     if not preds:
         return state
     h, w = state.image.shape[:2]
-    gray = state.image.max(2).astype(np.uint8) if state.image.ndim == 3 else state.image.astype(np.uint8)
+    gray = _max_channel_gray(state.image)
 
     lean = len(preds) * h * w > _PHANTOM_MASK_CACHE_BYTES
-    union = np.zeros((h, w), np.uint8)
     if lean:
         # HUGE FRAME: never hold more than one detection's mask. The union is the same
         # either way; the masks are rebuilt below, and by the next stage, when needed.
         pred_masks = None
+        acc = np.zeros((h, w), np.uint8)
         for p in preds:
             m = _pred_to_mask(p, h, w)
             if m is not None:
-                union[m > 0] = 1
+                cv2.bitwise_or(acc, m, dst=acc)
             m = None
+        union = (acc > 0).astype(np.uint8)
+        del acc
     else:
         pred_masks = [_pred_to_mask(p, h, w) for p in preds]
-        for m in pred_masks:
-            if m is not None:
-                union[m > 0] = 1
+        union = _union_of_masks(pred_masks, h, w)
     if union.sum() == 0:
         state.pred_masks = pred_masks if pred_masks is not None else []   # next stage builds
         return state
