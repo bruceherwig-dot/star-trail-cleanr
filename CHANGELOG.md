@@ -2,6 +2,15 @@
 
 ---
 
+## v3.06-beta
+This release is about speed. Cleaned frames are unchanged: on the test sequences every cleaned frame and mask came out byte for byte the same as before. Timed on one Mac with nothing else running. Windows and Linux were not timed.
+- **Faster: runs on the processor are about 3 times faster.** When a run does not use a graphics card (Windows without the GPU pack or without an Nvidia card, Linux, Intel Macs), the AI step that finds the trails was limited to one processor thread, because the AI library sets that when it loads. The app now lets it use up to 6 threads (never more than the machine has, minus two kept free). On a processor-only test, 3 frames took 4m 43s before and 1m 28s after on one sequence, and 3m 29s before and 1m 01s after on another. Runs that use a graphics card (Nvidia, or the Mac's graphics chip) are not changed. The log says "Processor run: AI step using N threads" when this applies.
+- **Faster: repair is 33 to 45 percent faster.** Repair did several whole-frame passes for every trail piece. It now works only inside the box around each piece. Same pixels come out.
+- **Faster: the stuck-pixel search is about a third faster and uses less memory.** It answers the same two questions with whole-number arithmetic on the 8-bit data instead of decimal arithmetic on full-size copies. The map it produces is identical, which was checked pixel for pixel, including at the exact edge of both tests.
+- **Improved: the run log shows where repair spends its time**, so a slow repair can be traced to a part instead of an unexplained total. A line marks any time still unaccounted for.
+- **Not changed:** the first and last frame of a run use a random grain in their repair, so two runs of the same frames can differ slightly there. That was already true and is unchanged.
+- **Smoke tests:** 727 passing.
+
 ## v3.05-beta
 This release fixes one thing: the Apple Silicon Mac download of v3.04-beta could not be opened. Nothing in the cleaning, the Star Trail tab or the Windows and Linux builds changes. Tested on the real v3.04 app on one Mac, not yet on a fresh download.
 - **Fixed: "StarTrailCleanR is damaged and can't be opened" on Apple Silicon Macs.** The v3.04-beta Apple Silicon app went out without its signature seal. While the app was being built, the signing step stopped on leftover build files that two of the libraries we use had included, the build reported a warning and carried on. macOS told anyone who downloaded that build from the website that the app was damaged, and downloading it again gave the same result. The build now removes those leftover files (debug symbols and compiler object files, none of them used when the app runs) and seals the app. People who updated to v3.04 from inside the app were not affected, and the Intel Mac download was sealed correctly.
