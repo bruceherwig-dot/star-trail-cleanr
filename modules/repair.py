@@ -581,6 +581,42 @@ def _darken_fill(patch_now, dmin, dmed, comp_mask, collar, maxv, dt):
     return out, int(fg.sum()), sky
 
 
+def _darken_fill_windows(patch_now, window_crops, comp_mask, collar, dt):
+    """The same restore as _darken_fill, but the median and the minimum are worked
+    out only where they are used.
+
+    _darken_fill is handed the per-pixel median and minimum of the whole padded
+    crop, yet it only ever reads them at the trail's own pixels (the minimum at
+    an even smaller set). The trail is 1 to 8 percent of the crop, so most of that
+    work was thrown away: the median line alone took 5.5 s of 21.7 s of repair on
+    6 RAW frames (measured 2026-11-17). Here the cheap exits come first (too few
+    sky pixels, no sky level), then the windows are read at the trail pixels only.
+    The median or minimum of a pixel's values is the same wherever it is worked
+    out, so the result is identical (tests/test_darken_fill_masked.py).
+
+    patch_now: the already-repaired patch. window_crops: the neighbor frames'
+    crops of the same patch, in order. comp_mask / collar: as in _darken_fill.
+    dt: the frame's dtype. Returns (repaired_patch, foreground_px_filled, sky).
+    """
+    cpx = patch_now[collar]
+    if cpx.shape[0] < 20:
+        return patch_now, 0, None
+    sky = float(np.percentile(cpx.max(axis=1), 70))
+    if sky <= 0:
+        return patch_now, 0, None
+    if not comp_mask.any():
+        return patch_now, 0, sky
+    stack = np.stack([w[comp_mask] for w in window_crops])        # (frames, trail pixels, channels)
+    med = np.median(stack, axis=0).astype(dt)                     # typical value (the gate)
+    gate = med.max(axis=1).astype(np.float32) < _DARKEN_FG_FRAC * sky
+    if not gate.any():
+        return patch_now, 0, sky
+    ys, xs = np.nonzero(comp_mask)
+    out = patch_now.copy()
+    out[ys[gate], xs[gate]] = np.min(stack[:, gate], axis=0)      # crisp foreground (the min)
+    return out, int(gate.sum()), sky
+
+
 def repair_frame(frame: np.ndarray, mask: np.ndarray,
                  frame_idx: int,
                  neighbor_frames: list,
@@ -1300,12 +1336,9 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                 _w0 = max(0, frame_idx - _DARKEN_WINDOW)
                 _w1 = min(N, frame_idx + _DARKEN_WINDOW + 1)
                 if _w1 - _w0 >= 2:
-                    _wstack = np.stack([neighbor_frames[_k][y0:y1, x0:x1]
-                                        for _k in range(_w0, _w1)])
-                    _dmin = np.min(_wstack, axis=0)                       # crisp foreground (the replace)
-                    _dmed = np.median(_wstack, axis=0).astype(frame.dtype)  # typical value (the gate)
-                    _res_d, _fg_darken_px, _fg_sky = _darken_fill(
-                        result[y0:y1, x0:x1], _dmin, _dmed, comp_mask, _collar, _maxv, frame.dtype)
+                    _wins = [neighbor_frames[_k][y0:y1, x0:x1] for _k in range(_w0, _w1)]
+                    _res_d, _fg_darken_px, _fg_sky = _darken_fill_windows(
+                        result[y0:y1, x0:x1], _wins, comp_mask, _collar, frame.dtype)
                     result[y0:y1, x0:x1] = _res_d
             _addt("darken_s", time.perf_counter() - _ts_darken)
 
