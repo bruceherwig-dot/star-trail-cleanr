@@ -315,6 +315,50 @@ def _trail_streak(region, comp_mask):
 # agree (or one is strongly confident), else reports failure so the caller pastes the
 # unshifted neighbor instead of sliding the wrong way. Log field: seg.n_stars.
 
+def _find_star_streaks(g):
+    """Find the stars in one patch and return where each one sits.
+
+    A star in a long exposure is a short bright smear, not a point, so this
+    looks for small bright blobs standing above the local sky and takes each
+    one's brightness-weighted centre. Blobs too small to be a star or too
+    large to be one are ignored, and only the brightest handful are kept:
+    the caller needs a few stars that agree on how far the sky moved, not
+    every speck of noise, and keeping the list short is what stops the
+    pairing that follows from becoming unusably slow on a busy sky.
+
+    Each star's pixels are looked up inside that star's OWN bounding box, not
+    across the whole patch. The old version compared the entire patch against
+    each star's label, once per star: 11 of the 14.6 seconds the track step took
+    on 8 frames (measured 2026-11-17, 66,000 stars). The same pixels are summed
+    in the same order, so the numbers are identical to the last digit
+    (tests/test_track_star_boxes.py).
+
+    Returns a list of (x, y, total brightness), one per star.
+    """
+    sky = np.median(g)
+    thr = max(sky + 22, np.percentile(g, 92))
+    b = cv2.morphologyEx((g > thr).astype(np.uint8), cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+    n, lab, st, _ = cv2.connectedComponentsWithStats(b, 8)
+    out = []
+    for k in range(1, n):
+        if st[k, 4] < 6 or st[k, 4] > 4000:
+            continue
+        x0, y0 = int(st[k, cv2.CC_STAT_LEFT]), int(st[k, cv2.CC_STAT_TOP])
+        bw, bh = int(st[k, cv2.CC_STAT_WIDTH]), int(st[k, cv2.CC_STAT_HEIGHT])
+        ys, xs = np.where(lab[y0:y0 + bh, x0:x0 + bw] == k)
+        ys = ys + y0
+        xs = xs + x0
+        w = g[ys, xs].astype(np.float64)
+        out.append((float((xs * w).sum() / w.sum()),
+                    float((ys * w).sum() / w.sum()), float(w.sum())))
+    # Keep only the brightest few: the shift vote needs a handful of agreeing stars,
+    # not every noise speck. Bounds N so the pairing + voting below can't go O(N^4).
+    if len(out) > _MAX_TRACK_STARS:
+        out.sort(key=lambda s: s[2], reverse=True)
+        out = out[:_MAX_TRACK_STARS]
+    return out
+
+
 def _detect_shift(gp, gn):
     """Local star motion by DETECTING the star streaks as objects and voting on their
     shared displacement. A long-exposure star is a smooth streak with no corner for
@@ -324,38 +368,7 @@ def _detect_shift(gp, gn):
 
     gp, gn: 8-bit grayscale patches (prev, next). Returns ((dx,dy) or None, n_agreeing).
     """
-    def streaks(g):
-        """Find the stars in one patch and return where each one sits.
-
-        A star in a long exposure is a short bright smear, not a point, so this
-        looks for small bright blobs standing above the local sky and takes each
-        one's brightness-weighted centre. Blobs too small to be a star or too
-        large to be one are ignored, and only the brightest handful are kept:
-        the caller needs a few stars that agree on how far the sky moved, not
-        every speck of noise, and keeping the list short is what stops the
-        pairing that follows from becoming unusably slow on a busy sky.
-
-        Returns a list of (x, y, total brightness), one per star.
-        """
-        sky = np.median(g)
-        thr = max(sky + 22, np.percentile(g, 92))
-        b = cv2.morphologyEx((g > thr).astype(np.uint8), cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
-        n, lab, st, _ = cv2.connectedComponentsWithStats(b, 8)
-        out = []
-        for k in range(1, n):
-            if st[k, 4] < 6 or st[k, 4] > 4000:
-                continue
-            ys, xs = np.where(lab == k)
-            w = g[ys, xs].astype(np.float64)
-            out.append((float((xs * w).sum() / w.sum()),
-                        float((ys * w).sum() / w.sum()), float(w.sum())))
-        # Keep only the brightest few: the shift vote needs a handful of agreeing stars,
-        # not every noise speck. Bounds N so the pairing + voting below can't go O(N^4).
-        if len(out) > _MAX_TRACK_STARS:
-            out.sort(key=lambda s: s[2], reverse=True)
-            out = out[:_MAX_TRACK_STARS]
-        return out
-    sp, sn = streaks(gp), streaks(gn)
+    sp, sn = _find_star_streaks(gp), _find_star_streaks(gn)
     cands = []
     for px, py, pw in sp:
         for nx, ny, nw in sn:
