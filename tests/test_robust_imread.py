@@ -264,9 +264,13 @@ def test_production_callsites_use_robust_imread():
         "frame-load loop no longer uses robust_imread_diag — without the "
         "diagnosis the worker can't tell the user why a read failed"
     )
-    assert "orig = robust_imread(frame_files[i], cv2.IMREAD_UNCHANGED)" in text, (
-        "16-bit hot-pixel reload regressed to bare cv2.imread"
+    # The 16-bit stuck-pixel step no longer reads the frames again at all
+    # (2026-11-17); it paints on the frames already in memory. What must stay
+    # true is that it never goes back to a bare cv2.imread.
+    assert "repaint_ground_stuck_pixels_16bit(frames[i], dilated)" in text, (
+        "16-bit stuck-pixel step no longer uses the in-memory repaint"
     )
+    assert "cv2.imread(" not in text, "a bare cv2.imread crept back into the engine"
 
     dt_text = (REPO / "modules" / "detect_trails.py").read_text(encoding="utf-8")
     assert "from .io_safe import robust_imread" in dt_text, (

@@ -361,6 +361,27 @@ def ground_looks_like_scenery(hot_map: np.ndarray, fg_mask: np.ndarray):
     return ground_density > limit, ground_flags, ground_density, sky_density
 
 
+def repaint_ground_stuck_pixels_16bit(frame16: np.ndarray, dilated: np.ndarray) -> np.ndarray:
+    """Return a copy of a 16-bit frame with the ground stuck-pixel spots painted over.
+
+    The spots are filled from the surrounding pixels, worked out on an 8-bit
+    copy and scaled back up (x257). The frame passed in is not changed.
+
+    Until 2026-11-17 the engine read each frame off the disk again for this step,
+    which for a RAW file meant decoding it a second time (about 0.9 s a frame on a
+    24 MP RAW). The frame is already in memory, so it is used directly. That also
+    fixes a mixed batch: a frame that was 8-bit on disk and was brought up to
+    16-bit by the loader used to be read back as 8-bit here, and its spots came
+    out black.
+    """
+    out = frame16.copy()
+    on8 = (out >> 8).astype(np.uint8)
+    filled8 = cv2.inpaint(on8, dilated, 3, cv2.INPAINT_NS)
+    filled16 = filled8.astype(np.uint16) * 257
+    out[dilated > 0] = filled16[dilated > 0]
+    return out
+
+
 def fix_hot_pixels(frames: List[np.ndarray], threshold: float = 2.0,
                    min_fraction: float = 0.8) -> List[np.ndarray]:
     """Detect and repair hot pixels across a batch of frames.

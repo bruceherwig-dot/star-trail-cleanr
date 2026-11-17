@@ -1837,13 +1837,11 @@ def main():
 
         if dilated is not None and dilated.max() > 0:
             if is_16bit:
+                # The frames are already in memory, so they are used directly
+                # (this used to read every frame off the disk a second time).
+                from modules.hot_pixels import repaint_ground_stuck_pixels_16bit
                 for i in range(len(frames)):
-                    orig = robust_imread(frame_files[i], cv2.IMREAD_UNCHANGED)
-                    orig8 = (orig >> 8).astype(np.uint8)
-                    rep8 = cv2.inpaint(orig8, dilated, 3, cv2.INPAINT_NS)
-                    rep16 = rep8.astype(np.uint16) * 257
-                    orig[dilated > 0] = rep16[dilated > 0]
-                    frames[i] = orig
+                    frames[i] = repaint_ground_stuck_pixels_16bit(frames[i], dilated)
                 frames_8bit = [(f >> 8).astype(np.uint8) for f in frames]
             else:
                 for i in range(len(frames)):
