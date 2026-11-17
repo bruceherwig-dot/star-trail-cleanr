@@ -572,7 +572,7 @@ def _angle_diff(a, b):
     return min(d, 180.0 - d)
 
 
-def _polys_and_segs_deduped(polygons: list, h: int, w: int):
+def _polys_and_segs_deduped_reference(polygons: list, h: int, w: int):
     """Rasterise each fitted polygon into its OWN binary mask, then drop away
     redundant same-trail fragments so repair runs once per real trail AND the
     viewer shows one outline per trail.
@@ -593,6 +593,8 @@ def _polys_and_segs_deduped(polygons: list, h: int, w: int):
     final mask is unchanged; only the wasted repair pass and the duplicate
     outline go away. A bbox-overlap gate keeps the pairwise check cheap.
     """
+    # THE DEFINITION, kept so tests/test_polys_segs_dedupe_box.py can prove the faster
+    # version below gives exactly the same polygons and masks. Not called by the engine.
     segs = []
     for corners in polygons:
         seg = np.zeros((h, w), dtype=np.uint8)
@@ -650,6 +652,130 @@ def _polys_and_segs_deduped(polygons: list, h: int, w: int):
                 continue  # bboxes do not overlap -> not contained
             inter = int((bmasks[i][r1:r2 + 1, c1:c2 + 1]
                          & bmasks[j][r1:r2 + 1, c1:c2 + 1]).sum())
+            if inter / areas[i] >= _SEG_MERGE_CONTAINMENT:
+                parent[_find(i)] = _find(j)
+                break
+
+    # Collect the final groups: members sharing a representative are one trail.
+    comps = {}
+    for i in range(n):
+        comps.setdefault(_find(i), []).append(i)
+    keep_flags = [True] * n
+    for members in comps.values():
+        if len(members) == 1:
+            continue
+        # Keep the largest polygon of the group; fold the rest into its mask.
+        keep = max(members, key=lambda k: areas[k])
+        for k in members:
+            if k != keep:
+                segs[keep] = np.maximum(segs[keep], segs[k])  # fold pixels in (coverage preserved)
+                keep_flags[k] = False                          # drop the redundant fragment + its outline
+    kept_polygons = [polygons[i] for i in range(n) if keep_flags[i]]
+    kept_segs = [segs[i] for i in range(n) if keep_flags[i]]
+    return kept_polygons, kept_segs
+
+
+def _polys_and_segs_deduped(polygons: list, h: int, w: int):
+    """Rasterise each fitted polygon into its OWN binary mask, then drop away
+    redundant same-trail fragments so repair runs once per real trail AND the
+    viewer shows one outline per trail.
+
+    Returns (kept_polygons, kept_segs): index-aligned lists, one uint8 mask
+    (255=trail) per kept polygon. Star Bridge repair morphs each segment
+    independently (repair_frame's polygon_segs path), and MaskViewR outlines each
+    kept polygon, so what you see equals what gets repaired.
+
+    De-dup: a polygon that sits >=90% INSIDE a BIGGER polygon of similar angle is
+    a redundant piece of the same trail (the detector produced an extra fragment
+    on a trail another polygon already covers). It is NOT a crossing arm -- those
+    differ in angle and only overlap at the junction, never 90% contained -- so
+    crossings and genuinely separate trails are left untouched. Each redundant
+    piece has its pixels folded into the bigger polygon's segment, then the
+    redundant polygon AND its segment are dropped. ZERO coverage loss: the union
+    of the kept segments still equals the union of all original polygons, so the
+    final mask is unchanged; only the wasted repair pass and the duplicate
+    outline go away. A bbox-overlap gate keeps the pairwise check cheap.
+
+    SPEED: every area, extent and overlap is worked out inside the polygon's own
+    box, never across the whole photograph. The old version compared and summed a
+    full-frame mask per polygon: two lines took 6.3 of this function's 7.2 seconds
+    on 6 busy RAW frames (554 polygons, measured 2026-11-17). A filled polygon
+    cannot reach outside the bounding box of its own corners, so everything
+    outside the box is zero and the counts are the same. The masks returned are
+    still full-frame with the same pixels. The old version is kept above as
+    _polys_and_segs_deduped_reference, the definition the tests compare against
+    (tests/test_polys_segs_dedupe_box.py).
+    """
+    segs = []
+    boxes = []     # (y0, y1, x0, x1) inclusive, clipped to the frame; None if wholly outside it
+    for corners in polygons:
+        seg = np.zeros((h, w), dtype=np.uint8)
+        pts = np.asarray(corners, dtype=np.int32).reshape(-1, 1, 2)
+        cv2.fillPoly(seg, [pts], 255)
+        segs.append(seg)
+        # One pixel of margin on every side: cheap insurance, never a loss.
+        bx0 = max(0, int(pts[:, 0, 0].min()) - 1)
+        bx1 = min(w - 1, int(pts[:, 0, 0].max()) + 1)
+        by0 = max(0, int(pts[:, 0, 1].min()) - 1)
+        by1 = min(h - 1, int(pts[:, 0, 1].max()) + 1)
+        boxes.append(None if (bx0 > bx1 or by0 > by1) else (by0, by1, bx0, bx1))
+
+    n = len(segs)
+    if n < 2:
+        return polygons, segs
+
+    areas = []
+    bboxes = []    # tight extent of each mask (r1, r2, c1, c2), None for an empty mask
+    for seg, box in zip(segs, boxes):
+        if box is None:
+            areas.append(0)
+            bboxes.append(None)
+            continue
+        by0, by1, bx0, bx1 = box
+        sub = seg[by0:by1 + 1, bx0:bx1 + 1] > 0
+        area = int(sub.sum())
+        areas.append(area)
+        if area == 0:
+            bboxes.append(None)
+            continue
+        rr = np.where(sub.any(axis=1))[0]
+        cc = np.where(sub.any(axis=0))[0]
+        bboxes.append((int(rr[0]) + by0, int(rr[-1]) + by0,
+                       int(cc[0]) + bx0, int(cc[-1]) + bx0))
+    angles = [_poly_angle(p) for p in polygons]
+
+    # Union-find: parent[x] points toward the representative of x's group.
+    # _find walks to the representative, compressing the path as it goes so
+    # later lookups are fast. Polygons that turn out to be the same trail get
+    # unioned into one group below.
+    parent = list(range(n))
+    def _find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    # For every ordered pair (i, j) where j is the BIGGER polygon and the two
+    # share an angle, measure how much of i sits inside j. If >=90% of i is
+    # contained in j, i is a redundant fragment of j's trail -> union them.
+    for i in range(n):
+        if bboxes[i] is None:
+            continue
+        ri1, ri2, ci1, ci2 = bboxes[i]
+        for j in range(n):
+            if i == j or bboxes[j] is None or areas[j] <= areas[i]:
+                continue
+            if _angle_diff(angles[i], angles[j]) > _SEG_MERGE_ANGLE:
+                continue
+            # Intersect the two bounding boxes first; only count overlapping
+            # pixels inside that shared rectangle (cheap), never the whole frame.
+            rj1, rj2, cj1, cj2 = bboxes[j]
+            r1 = max(ri1, rj1); r2 = min(ri2, rj2)
+            c1 = max(ci1, cj1); c2 = min(ci2, cj2)
+            if r1 > r2 or c1 > c2:
+                continue  # bboxes do not overlap -> not contained
+            inter = int(((segs[i][r1:r2 + 1, c1:c2 + 1] > 0)
+                         & (segs[j][r1:r2 + 1, c1:c2 + 1] > 0)).sum())
             if inter / areas[i] >= _SEG_MERGE_CONTAINMENT:
                 parent[_find(i)] = _find(j)
                 break
