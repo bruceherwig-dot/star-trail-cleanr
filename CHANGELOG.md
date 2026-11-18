@@ -2,6 +2,18 @@
 
 ---
 
+## v3.10-beta
+This release is about speed one more time, and about the app being able to say where its own time goes. Cleaned frames are unchanged: on four test sets (RAW to JPG, RAW to 16-bit TIFF and two JPG sets) every cleaned frame and every mask file came out byte for byte the same as with v3.09. All tests ran on a Mac using its graphics chip. Windows and Linux were not measured.
+
+- **Faster: whole batches are 7 to 15 percent faster.** The same batches, run back to back with v3.09 and with this version: 34s down to 29s on 8 JPG frames of an aurora sequence, 24s down to 22s on 8 JPG frames of a Joshua Tree sequence, 61s down to 54s on 6 RAW frames written as JPG, and 61s down to 57s on the same 6 RAW frames written as 16-bit TIFF.
+- **Faster: removing the false alarms from fixed objects.** Before a detection that repeats in nearby frames is thrown out as a fixed object, the app checks whether it is much brighter than the sky around it (a real bright trail is kept). That check used to measure across the whole picture for every detection. It now looks only around the detection. The step went from about 2.1 seconds to 0.2 seconds on a trail-heavy set, with the same answers.
+- **Faster: finding each trail's outline.** Several steps found the edges of every detection by scanning the whole picture. Each detection now remembers the tile it was found in and the app looks only there. The same trick speeds up the step that removes phantom dotted lines, and the step that tidies crossings (its angle sorting is now done in one calculation instead of pair by pair).
+- **Faster: saving frames on a Mac.** The app stamps its name and version into each cleaned file's Finder comment. It used to start a separate AppleScript for every frame. It now stamps the whole batch in one go (and falls back to one file at a time if that ever fails). Saving a batch took 0.8 to 1.8 seconds instead of 1.9 to 3.5 seconds. The stamped comments are identical.
+- **New: the app now measures itself.** Every step that can take real time records when it ran, what it did and how long it took, and the timing table printed after each batch shows them, with a line for how much of each stage is still unexplained. The unexplained share of a batch went from 12 percent to 2 to 3 percent while finding these.
+- **New: a run timing block in the Star Log.** The saved Star Log only keeps the first 50 and last 100 lines of a run, so for a long run it used to hold the timing of just one batch. The Run Summary at the top now adds up every batch and says, in plain words, where the whole run's time went: the computer (cores, memory, graphics or processor), each stage's time and share, the biggest steps with a sentence saying what each is for, and what the steps did. It holds only numbers and step names, never file names or pictures.
+- **New: the anonymous usage report (only if you opted in) now carries where the time went.** Whole seconds per stage, the number of batches, your processor core count and memory size. Nothing else was added: no pictures, file names or folder names. This lets us explain a slow run without guessing.
+- **Smoke tests:** 811 passing.
+
 ## v3.09-beta
 This release is about speed once more, plus a rewrite of the text on the summary screen. Cleaned frames are unchanged: on four test sets and on a real 20-frame batch, every cleaned frame, every mask file and the saved stuck-pixel map came out the same as v3.08. Timed on one Mac using its graphics chip. Windows, Linux and Nvidia cards were not timed.
 - **Faster: a 20-frame batch of 22 megapixel JPG aurora frames took about 80 seconds with v3.08 and about 67 seconds with this version**, 14 percent less engine time (70 seconds down to 60). All 20 cleaned frames were identical.
