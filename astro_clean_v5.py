@@ -815,7 +815,10 @@ def _suppress_static_fps(masks_all, core_start, core_end,
                 if frames_all is not None and i < len(frames_all):
                     _comp_pixels_full = np.zeros(mask.shape, dtype=bool)
                     _comp_pixels_full[y1:y2 + 1, x1:x2 + 1] = comp_crop
+                    _tv = time.perf_counter()
                     is_bright, bright_ratio = _is_bright_trail(_comp_pixels_full, frames_all[i])
+                    step_timer.add("static.bright_trail_veto", time.perf_counter() - _tv)
+                    step_timer.count("static.bright_trail_veto", "kept_as_bright" if is_bright else "judged_static")
                     if is_bright:
                         match_desc = "; ".join(
                             f"frame {m['frame_idx']} via {m['source']} (IoU {m['iou_pct']}%)"
@@ -1263,7 +1266,9 @@ def main():
                 tiff_kwargs["resolutionunit"] = "inch"
             out_path = str(cleaned_dir / (stem + ".tif"))
             tifffile.imwrite(out_path, rgb, **tiff_kwargs)
+        _tfc = time.perf_counter()
         _write_finder_comment(out_path)
+        step_timer.add("write.finder_comment", time.perf_counter() - _tfc)
     cleaned_dir = output_dir
     cleaned_dir.mkdir(parents=True, exist_ok=True)
     masks_dir = (output_dir / WORKSPACE_NAME / "masks"
@@ -2034,8 +2039,10 @@ def main():
         mask = state.final_mask
         frame_segs = list(state.polygon_segs)
         frame_corners = list(state.polygons)
+        _tr = time.perf_counter()
         raw_labeled = _raw_labeled_from_state(state, *mask.shape[:2]) \
             if mask is not None else None
+        step_timer.add("batch.raw_labeled_map", time.perf_counter() - _tr)
         edge_candidates_all.append(edge_cands)
         if mask is None:
             masks_all.append(np.zeros((h, w), dtype=np.uint8))
@@ -2060,6 +2067,7 @@ def main():
             # foreground tiles), so trim each repair segment to sky here and drop
             # any that vanish -- keeps repair off the foreground. Corners stay
             # index-aligned with segs for the _polys.json export.
+            _tr = time.perf_counter()
             if frame_segs:
                 kept_segs, kept_corners = [], []
                 for _si, _seg in enumerate(frame_segs):
@@ -2070,6 +2078,7 @@ def main():
                             kept_corners.append(frame_corners[_si])
                 frame_segs = kept_segs
                 frame_corners = kept_corners
+            step_timer.add("batch.sky_trim_segments", time.perf_counter() - _tr)
 
         # Dev streaking-star filter: drop segs shorter than the measured ceiling (unless red),
         # and clear their pixels from the mask so mask/segs/repair/export stay consistent.
@@ -2196,6 +2205,7 @@ def main():
     # untouched polygons lose none. segs and corners are index-aligned pairs
     # (same contract as the sky-mask trim above).
     _sfp_polys_removed = {}
+    _tr = time.perf_counter()
     if _sfp_removed:
         for _fi, _rm in _sfp_removed.items():
             if _fi >= len(segs_all) or not segs_all[_fi]:
@@ -2219,6 +2229,7 @@ def main():
         if _total_polys_dropped:
             print(f"  Removed {_total_polys_dropped} rejected polygon(s) from the "
                   f"repair and export lists", flush=True)
+    step_timer.add("batch.drop_rejected_polygons", time.perf_counter() - _tr)
 
     # Step 1d - Edge rescue: recover trails that were clipped at the frame boundary.
     #
@@ -2354,6 +2365,7 @@ def main():
 
     # Write all detect records now that static FP suppression is complete.
     # final_trail_components is computed here (post-suppression) from masks_all.
+    _tr = time.perf_counter()
     if logger is not None:
         _sfp_by_frame  = (static_fp_dbg or {}).get("suppressed_by_frame", {})
         _veto_by_frame = (static_fp_dbg or {}).get("kept_by_veto_by_frame", {})
@@ -2422,6 +2434,8 @@ def main():
             "missed_trails_bridged": _harvest_miss,
         })
 
+    step_timer.add("batch.run_log_detect_records", time.perf_counter() - _tr)
+    _tr = time.perf_counter()
     masks_per_frame = masks_all[core_start:core_end]
     trail_frames = sum(1 for m in masks_per_frame if m.max() > 0)
     # Count individual trails (connected components) across all frames in this batch
@@ -2433,6 +2447,8 @@ def main():
         batch_trail_count += max(0, n_cc - 1)  # subtract background
 
     print(f"  Step 1 complete - {trail_frames}/{n} frames have trails", flush=True)
+    step_timer.add("batch.count_trails", time.perf_counter() - _tr)
+    _tr = time.perf_counter()
 
     if masks_dir:
         import json as _json
@@ -2458,6 +2474,8 @@ def main():
                 (masks_dir / (fp.stem + "_polys.json")).write_text(
                     _json.dumps(polys_data))
 
+    step_timer.add("batch.save_mask_files", time.perf_counter() - _tr)
+
     # ── Step 2: Repair ────────────────────────────────────────────────────
     sb = args.skip_boundary
     print(f"\nStep 2 - cleaning frames (skipping first/last {sb})", flush=True)
@@ -2476,6 +2494,7 @@ def main():
     total_trail = 0
     for i, (fp, img, mask) in enumerate(zip(frame_files, frames, masks_per_frame)):
         _crumb("CLEAN", i + 1, n, fp.name)
+        _tr = time.perf_counter()
         trail_px = int((mask > 0).sum())
         total_trail += trail_px
         if trail_px > 0:
@@ -2485,12 +2504,15 @@ def main():
             trail_count = 0
         trail_label = f"{trail_count} trail{'s' if trail_count != 1 else ''}"
         skip = (sb > 0) and (i < sb or i >= n - sb)
+        step_timer.add("batch.count_trails_per_frame", time.perf_counter() - _tr)
 
         if not skip:
             # Read THIS frame's own EXIF (capture date/time, exposure, lens, GPS) from its
             # source file and add only our Software comment + orientation tag. Per frame —
             # so cleaned frames never inherit a neighbor's capture time.
+            _tr = time.perf_counter()
             frame_exif = _stamp_exif(_frame_exif_bytes(fp))
+            step_timer.add("batch.read_frame_exif", time.perf_counter() - _tr)
             if trail_px > 0:
                 repair_dbg = {} if logger is not None else None
                 _t0 = time.perf_counter()
@@ -2630,7 +2652,9 @@ def main():
         # The same proof for every other stage that records its own steps.
         _GAP_PARENTS = (("phantom", "dp_prune_phantoms_s", "phantom pruning"),
                         ("fit", "dp_fit_polygons_s", "fit_polygons"),
-                        ("hotpix", "hot_pixel_s", "stuck-pixel step"))
+                        ("hotpix", "hot_pixel_s", "stuck-pixel step"),
+                        ("static", "static_fp_s", "static filter"),
+                        ("write", "write_s", "frame writing"))
         for _grp, _pkey, _plabel in _GAP_PARENTS:
             _pt = _timing.get(_pkey, (0, 0.0))[1]
             _u = step_timer.unaccounted(_pt, _snap, _grp)
@@ -2643,6 +2667,10 @@ def main():
                    "static_fp_s", "edge_rescue_s", "repair_s", "write_s")
         _batch_wall = time.time() - t_total
         _batch_kids = sum(_timing.get(k, (0, 0.0))[1] for k in _inside)
+        # Steps recorded under "batch." sit between the big stages (labelling, trimming,
+        # saving files, reading EXIF); they count toward what "Done in" covers.
+        _batch_kids += sum(v[1] for k, v in _snap["steps"].items()
+                           if step_timer.group_of(k) == "batch" and step_timer.is_top_level(k))
         if _batch_wall > 0 and _batch_kids > 0:
             _bgap = _batch_wall - _batch_kids
             _timing_gaps["batch"] = round(100.0 * _bgap / _batch_wall, 1)

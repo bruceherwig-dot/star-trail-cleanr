@@ -1159,7 +1159,9 @@ def stage_prune_phantoms(state: PipelineState, cfg: StageConfig,
             # the trimmed ones pay for that allocation now, not all 53.
             trimmed = np.zeros(m.shape, dtype=bool)
             trimmed[r0:r1, c0:c1] = sub_kept
-            new_preds.append(_SyntheticPred(trimmed, conf))
+            # The trimmed shape sits inside the box it was cut from, so it keeps that box
+            # (later stages search only there instead of across the whole frame).
+            new_preds.append(_SyntheticPred(trimmed, conf, box=(r0, r1, c0, c1)))
             # Deliberately NOT cached: let the next stage derive this one the
             # normal way, so the cache can never disagree with what the pipeline
             # would have produced on its own.
