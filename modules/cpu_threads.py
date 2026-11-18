@@ -34,3 +34,28 @@ def use_cores_for_cpu_run(device_used):
         return n
     except Exception:
         return None
+
+
+def restore_opencv_threads():
+    """Turn OpenCV's own threading back on after the AI library has switched it off.
+
+    Importing ultralytics runs cv2.setNumThreads(0) (ultralytics/utils/__init__.py,
+    "prevent OpenCV from multithreading (incompatible with PyTorch DataLoader)"). The
+    engine uses no DataLoader, so that only slowed it: OpenCV ran on one thread with
+    the other cores idle. Measured 2026-11-18 inside a real 20-frame batch, labelling
+    connected components cost 120 ms a call (70 calls, 8.2 s a batch) against 4.7 ms
+    with threads on, and the labels come out identical. Gaussian blur and colour
+    conversion are 7 and 4 times faster too.
+
+    Must be called AFTER the AI library is imported (the model load does that), or the
+    import switches the threads off again. Returns the thread count OpenCV ends up
+    with, or None if OpenCV could not be asked. Never raises.
+    """
+    try:
+        import cv2
+        n = int(cv2.getNumberOfCPUs())
+        if n > 1 and cv2.getNumThreads() < n:
+            cv2.setNumThreads(n)
+        return int(cv2.getNumThreads())
+    except Exception:
+        return None

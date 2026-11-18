@@ -1898,6 +1898,10 @@ def main():
     _cpu_threads = use_cores_for_cpu_run(_device_used)
     if _cpu_threads:
         print(f"  Processor run: AI step using {_cpu_threads} threads.", flush=True)
+    # The AI library turned OpenCV's threading off when it was imported; turn it back on
+    # (this has to come after the model is loaded, which is what imports it).
+    from modules.cpu_threads import restore_opencv_threads
+    restore_opencv_threads()
 
     # SAY WHAT IS ACTUALLY HAPPENING -- when it works as well as when it does
     # not. Bruce, 2026-08-23: "we want to let the user know when something fails,
