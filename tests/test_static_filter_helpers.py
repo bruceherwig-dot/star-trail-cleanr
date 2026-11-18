@@ -89,12 +89,14 @@ def test_dropping_rejected_outlines_matches_the_whole_frame_loop():
         segs, corners = [], []
         for _ in range(int(rng.integers(0, 9))):
             m = np.zeros((H, W), np.uint8)
+            cs = [[0, 0], [1, 1]]
             if rng.random() < 0.9:
                 x, y = int(rng.integers(0, W - 5)), int(rng.integers(0, H - 5))
-                cv2.rectangle(m, (x, y), (min(W - 1, x + int(rng.integers(1, 60))),
-                                          min(H - 1, y + int(rng.integers(1, 30)))), 255, -1)
+                x2, y2 = min(W - 1, x + int(rng.integers(1, 60))), min(H - 1, y + int(rng.integers(1, 30)))
+                cv2.rectangle(m, (x, y), (x2, y2), 255, -1)
+                cs = [[x, y], [x2, y], [x2, y2], [x, y2]]   # outlines are drawn from their corners
             segs.append(m)
-            corners.append([[0, 0], [1, 1]])
+            corners.append(cs)
         if rng.random() < 0.3 and corners:
             corners = corners[:-1]               # one outline without a corner list
         rm = np.zeros((H, W), bool)
@@ -115,3 +117,57 @@ def test_dropping_with_nothing_removed_keeps_everything_and_handles_other_dtypes
     seg16 = [np.full((H, W), 7, np.uint16)]
     rm = np.ones((H, W), bool)
     assert drop_rejected_segments(seg16, [[0]], rm)[2] == _old_drop(seg16, [[0]], rm)[2] == 1
+
+
+def _drawn_outlines(rng, h, w, n, trim_sky=False):
+    """Outlines drawn from their corners the way the engine draws them (filled polygon),
+    optionally trimmed like the sky trim (pixels only ever removed)."""
+    segs, corners = [], []
+    for _ in range(n):
+        pts = [[int(rng.integers(-20, w + 20)), int(rng.integers(-20, h + 20))] for _ in range(int(rng.integers(3, 6)))]
+        seg = np.zeros((h, w), np.uint8)
+        cv2.fillPoly(seg, [np.asarray(pts, np.int32).reshape(-1, 1, 2)], 255)
+        if trim_sky:
+            seg[: int(rng.integers(0, h // 2)), :] = 0
+        segs.append(seg)
+        corners.append(pts)
+    return segs, corners
+
+
+def test_boxed_drop_matches_the_whole_frame_loop_on_outlines_drawn_from_corners():
+    for seed in range(40):
+        rng = np.random.default_rng(1000 + seed)
+        h, w = int(rng.integers(40, 160)), int(rng.integers(40, 160))
+        segs, corners = _drawn_outlines(rng, h, w, int(rng.integers(0, 14)), trim_sky=bool(seed % 2))
+        rm = np.zeros((h, w), bool)
+        for _ in range(int(rng.integers(0, 4))):
+            y, x = int(rng.integers(0, h)), int(rng.integers(0, w))
+            rm[y:y + int(rng.integers(1, 40)), x:x + int(rng.integers(1, 40))] = True
+        # sometimes the removed area is exactly an outline's pixels (certain drop)
+        if segs and seed % 3 == 0:
+            rm |= segs[0] > 0
+        stats = {}
+        a = _old_drop(segs, corners, rm)
+        b = drop_rejected_segments(segs, corners, rm, stats)
+        assert a[2] == b[2], seed
+        assert [id(x) for x in a[0]] == [id(x) for x in b[0]], seed
+        assert a[1] == b[1], seed
+        if rm.any():
+            assert stats["boxed"] + stats["whole_frame"] == len(segs)
+
+
+def test_outlines_without_corners_fall_back_to_the_whole_frame_and_are_counted():
+    rng = np.random.default_rng(7)
+    segs, corners = _drawn_outlines(rng, 80, 90, 6)
+    rm = np.zeros((80, 90), bool)
+    rm[10:50, 10:50] = True
+    short = corners[:4]                       # two outlines have no corners
+    stats = {}
+    a = _old_drop(segs, short, rm)
+    b = drop_rejected_segments(segs, short, rm, stats)
+    assert a[2] == b[2] and a[1] == b[1] and [id(x) for x in a[0]] == [id(x) for x in b[0]]
+    assert stats["whole_frame"] == 2 and stats["boxed"] == 4
+    # unusable corner lists also fall back
+    stats = {}
+    b = drop_rejected_segments(segs, [[], None, "x", [[1, 2]], [], []], rm, stats)
+    assert b[2] == _old_drop(segs, [[], None, "x", [[1, 2]], [], []], rm)[2]

@@ -26,7 +26,9 @@ STEPS = {
     "batch.drop_rejected_polygons": (
         "Dropping outlines the static filter erased",
         "Removes from the cleaning and export lists any outline that the static filter mostly erased, so repair does not clean what was rejected.",
-        {"outlines_checked": "outlines looked at", "outlines_dropped": "outlines removed"}),
+        {"outlines_checked": "outlines looked at", "outlines_dropped": "outlines removed",
+         "counted_in_own_box": "outlines counted inside their own small box (fast)",
+         "counted_whole_frame": "outlines counted across the whole frame (slow, no usable corners)"}),
     "batch.run_log_detect_records": (
         "Writing the detailed detection log",
         "Saves the per-frame detection record to the developer log (only on a developer machine).",

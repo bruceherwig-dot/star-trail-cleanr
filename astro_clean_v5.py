@@ -2250,10 +2250,15 @@ def main():
         for _fi, _rm in _sfp_removed.items():
             if _fi >= len(segs_all) or not segs_all[_fi]:
                 continue
-            # Counted where the removed pixels are, not across the whole photograph for
+            # Counted inside each outline's own box and where the removed pixels are, not across the whole photograph for
             # every outline (modules/static_filter_helpers.py): same decision, 3.8 s faster.
+            _dr_stats = {}
             _kept_s, _kept_c, _n_drop = drop_rejected_segments(
-                segs_all[_fi], corners_all[_fi], _rm)
+                segs_all[_fi], corners_all[_fi], _rm, _dr_stats)
+            for _k, _v in _dr_stats.items():
+                if _v:
+                    step_timer.count("batch.drop_rejected_polygons",
+                                     "counted_in_own_box" if _k == "boxed" else "counted_whole_frame", _v)
             step_timer.count("batch.drop_rejected_polygons", "outlines_checked", len(segs_all[_fi]))
             if _n_drop:
                 segs_all[_fi] = _kept_s
