@@ -89,5 +89,5 @@ def test_the_stage_uses_the_helpers_and_no_per_detection_whole_frame_compare():
     b = src.index("    sky = _phantom_local_sky(gray)", a)
     head = src[a:b]
     assert "_max_channel_gray(state.image)" in head
-    assert "_union_of_masks(pred_masks, h, w)" in head
+    assert "_union_of_masks(pred_masks, h, w, boxes)" in head
     assert "union[m > 0] = 1" not in head

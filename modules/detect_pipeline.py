@@ -246,10 +246,13 @@ class _PredScoreWrap:
 class _SyntheticPred:
     """Duck-type replacement for a SAHI ObjectPrediction (same .mask.bool_mask
     and .score.value interface)."""
-    __slots__ = ("mask", "score")
-    def __init__(self, bool_mask, conf):
+    __slots__ = ("mask", "score", "box")
+    def __init__(self, bool_mask, conf, box=None):
         self.mask = _PredMaskWrap(bool_mask)
         self.score = _PredScoreWrap(float(conf))
+        # (r0, r1, c0, c1): an area known to hold every lit pixel of the mask (the
+        # tile it came from). None when not known. See _pred_box.
+        self.box = box
 
 
 def _load_as_rgb(image):
@@ -406,7 +409,8 @@ def _sahi_predict_skip(model, img_rgb, tile_size, overlap, fg_mask):
             global_mask[ty:ty + gh, tx:tx + gw] = (
                 local_u8[:gh, :gw].astype(bool))
             if global_mask.any():
-                preds.append(_SyntheticPred(global_mask, seg_conf))
+                preds.append(_SyntheticPred(global_mask, seg_conf,
+                                            box=(ty, ty + gh, tx, tx + gw)))
 
     return preds, n_skipped
 
@@ -890,18 +894,66 @@ def _max_channel_gray(image: np.ndarray) -> np.ndarray:
     return image.max(2).astype(np.uint8) if image.ndim == 3 else image.astype(np.uint8)
 
 
-def _union_of_masks(masks, h: int, w: int) -> np.ndarray:
+def _pred_box(pred, h: int, w: int):
+    """A box (r0, r1, c0, c1) that contains every lit pixel of this detection's mask.
+
+    Taken from the box the detection was made with (the tile it came from) when it
+    carries one; otherwise worked out from the outline points the mask is drawn from.
+    Either way no pass over the frame is needed. The filled shape can never reach past its own outline points,
+    so the box is at least as big as the lit pixels (it may be a little bigger,
+    which is harmless: callers only use it to skip empty frame area). Whenever the
+    outline is not available, or the mask had to be resized to the frame, the box is
+    the whole frame, which is always safe. Measured 2026-11-18: sweeping each of 949
+    detections across the full frame twice took 4.3 of the 11 s phantom pruning took.
+    """
+    whole = (0, h, 0, w)
+    try:
+        hint = getattr(pred, "box", None)
+        if hint is not None:
+            r0, r1, c0, c1 = (int(v) for v in hint)
+            r0, c0 = max(0, r0), max(0, c0)
+            r1, c1 = min(h, r1), min(w, c1)
+            return (r0, r1, c0, c1) if (r1 > r0 and c1 > c0) else (0, 0, 0, 0)
+        m = pred.mask
+        seg = getattr(m, "segmentation", None)
+        if not seg:
+            return whole
+        fh, fw = int(m.full_shape[0]), int(m.full_shape[1])
+        if (fh, fw) != (h, w):
+            return whole
+        pts = np.concatenate([np.array(q).reshape(-1, 2).round().astype(int) for q in seg])
+        c0 = max(0, int(pts[:, 0].min()))
+        c1 = min(w, int(pts[:, 0].max()) + 1)
+        r0 = max(0, int(pts[:, 1].min()))
+        r1 = min(h, int(pts[:, 1].max()) + 1)
+        if r1 <= r0 or c1 <= c0:
+            return (0, 0, 0, 0)
+        return (r0, r1, c0, c1)
+    except Exception:
+        return whole
+
+
+def _union_of_masks(masks, h: int, w: int, boxes=None) -> np.ndarray:
     """A 0/1 uint8 image that is 1 wherever any of the masks is non-zero.
 
     Same array as setting union[m > 0] = 1 for each mask in turn, but each mask
     is OR-ed in place (40 ms against 158 ms for 60 masks on a 22 MP frame,
     measured 2026-11-17) and the 0/1 image is made once at the end. None entries
-    are skipped. Masks are (h, w) uint8, as _pred_to_mask returns.
+    are skipped. Masks are (h, w) uint8, as _pred_to_mask returns. When boxes are
+    given (one (r0, r1, c0, c1) per mask, each holding every lit pixel of its
+    mask) only that part of each mask is OR-ed in; the answer is identical.
     """
     acc = np.zeros((h, w), np.uint8)
-    for m in masks:
-        if m is not None:
+    for k, m in enumerate(masks):
+        if m is None:
+            continue
+        if boxes is None:
             cv2.bitwise_or(acc, m, dst=acc)
+        else:
+            r0, r1, c0, c1 = boxes[k]
+            if r1 > r0 and c1 > c0:
+                a = acc[r0:r1, c0:c1]
+                np.bitwise_or(a, m[r0:r1, c0:c1], out=a)
     return (acc > 0).astype(np.uint8)
 
 
@@ -961,13 +1013,17 @@ def stage_prune_phantoms(state: PipelineState, cfg: StageConfig,
         for p in preds:
             m = _pred_to_mask(p, h, w)
             if m is not None:
-                cv2.bitwise_or(acc, m, dst=acc)
+                r0, r1, c0, c1 = _pred_box(p, h, w)
+                if r1 > r0 and c1 > c0:
+                    a = acc[r0:r1, c0:c1]
+                    np.bitwise_or(a, m[r0:r1, c0:c1], out=a)
             m = None
         union = (acc > 0).astype(np.uint8)
         del acc
     else:
         pred_masks = [_pred_to_mask(p, h, w) for p in preds]
-        union = _union_of_masks(pred_masks, h, w)
+        boxes = [_pred_box(p, h, w) for p in preds]
+        union = _union_of_masks(pred_masks, h, w, boxes)
     if union.sum() == 0:
         state.pred_masks = pred_masks if pred_masks is not None else []   # next stage builds
         return state
@@ -1052,16 +1108,14 @@ def stage_prune_phantoms(state: PipelineState, cfg: StageConfig,
         # 2026-08-09, the component loop directly above on 2026-08-25, and this
         # one, which I walked straight past while fixing that one. See the sharp
         # edges list in ARCHITECTURE.md.
-        rows = np.any(m, axis=1)
-        if not rows.any():
+        # The box comes from the detection's outline points (see _pred_box): same
+        # counts as the exact lit-pixel box, without two sweeps of the whole frame.
+        # A detection whose box is empty or whose mask has no lit pixel is kept as is.
+        r0, r1, c0, c1 = _pred_box(pred, h, w)
+        if r1 <= r0 or c1 <= c0 or not m[r0:r1, c0:c1].any():
             new_preds.append(pred)
             new_masks.append(None if lean else m)
             continue
-        cols = np.any(m, axis=0)
-        rr = np.where(rows)[0]
-        cc = np.where(cols)[0]
-        r0, r1 = int(rr[0]), int(rr[-1]) + 1
-        c0, c1 = int(cc[0]), int(cc[-1]) + 1
         sub = m[r0:r1, c0:c1] > 0
         orig = int(sub.sum())
         sub_kept = sub & notkill[r0:r1, c0:c1]
