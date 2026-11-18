@@ -160,7 +160,8 @@ from modules.detect_trails import (
     load_model, apply_sky_mask, filter_small_components
 )
 from modules import detect_pipeline as dp
-from modules import step_timer
+from modules import step_timer, step_guide
+from modules.static_filter_helpers import is_bright_trail_boxed, drop_rejected_segments
 from modules.trail_grouper import detection_props
 from modules.repair import repair_frame
 from modules.run_logger import RunLogger
@@ -813,10 +814,11 @@ def _suppress_static_fps(masks_all, core_start, core_end,
                 # real trail (nav light, strobe, or bright streak) -- keep it
                 # regardless of the neighbor match count.
                 if frames_all is not None and i < len(frames_all):
-                    _comp_pixels_full = np.zeros(mask.shape, dtype=bool)
-                    _comp_pixels_full[y1:y2 + 1, x1:x2 + 1] = comp_crop
+                    # Looked at on a crop around the component, not the whole photograph
+                    # (modules/static_filter_helpers.py): same answer, 1.9 s a batch faster.
                     _tv = time.perf_counter()
-                    is_bright, bright_ratio = _is_bright_trail(_comp_pixels_full, frames_all[i])
+                    is_bright, bright_ratio = is_bright_trail_boxed(
+                        comp_crop, (x1, y1, x2, y2), frames_all[i], _BRIGHT_TRAIL_RATIO)
                     step_timer.add("static.bright_trail_veto", time.perf_counter() - _tv)
                     step_timer.count("static.bright_trail_veto", "kept_as_bright" if is_bright else "judged_static")
                     if is_bright:
@@ -1140,6 +1142,7 @@ def main():
         always written as RGB.
         """
         from PIL import Image
+        _tenc = time.perf_counter()
         if args.output_format == "jpg":
             out = img if img.dtype == np.uint8 else (img >> 8).astype(np.uint8)
             rgb = cv2.cvtColor(out, cv2.COLOR_BGR2RGB)
@@ -1266,9 +1269,11 @@ def main():
                 tiff_kwargs["resolutionunit"] = "inch"
             out_path = str(cleaned_dir / (stem + ".tif"))
             tifffile.imwrite(out_path, rgb, **tiff_kwargs)
+        step_timer.add("write.encode", time.perf_counter() - _tenc)
+        step_timer.count("write.encode", "frames_" + str(args.output_format))
         _tfc = time.perf_counter()
-        _write_finder_comment(out_path)
-        step_timer.add("write.finder_comment", time.perf_counter() - _tfc)
+        _write_finder_comment(out_path)       # queued; stamped for the whole batch at once
+        step_timer.add("write.finder_comment_queue", time.perf_counter() - _tfc)
     cleaned_dir = output_dir
     cleaned_dir.mkdir(parents=True, exist_ok=True)
     masks_dir = (output_dir / WORKSPACE_NAME / "masks"
@@ -1444,6 +1449,8 @@ def main():
         cache[folder] = ok
         return ok
 
+    _finder_queue = []      # files waiting for their Finder comment (stamped together after the batch)
+
     def _write_finder_comment(out_path: str) -> None:
         """Stamp the app and version into the file's Finder Comments field, so a
         cleaned frame carries its own provenance. macOS only; a no-op elsewhere.
@@ -1464,17 +1471,50 @@ def main():
         if sys.platform != 'darwin':
             return
         if not _volume_keeps_xattrs(out_path):
+            step_timer.count("write.finder_comment_queue", "skipped_drive_cannot_hold_it")
             return
+        _finder_queue.append(out_path)
+
+    def _flush_finder_comments() -> None:
+        """Stamp every queued file with ONE Finder launch for the whole batch.
+
+        The comment used to be set by starting a separate AppleScript process for each
+        frame (170 to 210 ms each, measured 2026-11-18: 1.0 to 1.7 s a batch of 6 to 8
+        frames). The same comment now goes on the same files in one launch. If that one
+        launch fails, it falls back to one file at a time, as before."""
+        paths = list(_finder_queue)
+        _finder_queue.clear()
+        if not paths:
+            return
+        import subprocess as _sp
+        _safe = _stamp.replace('"', '').replace('\\', '')
+
+        def _q(path):
+            return path.replace('\\', '\\\\').replace('"', '\\"')
+        _t = time.perf_counter()
+        _ok = False
         try:
-            import subprocess as _sp
-            _safe = _stamp.replace('"', '')
-            _sp.run(
-                ['osascript', '-e',
-                 f'tell application "Finder" to set comment of (POSIX file "{out_path}" as alias) to "{_safe}"'],
-                capture_output=True, timeout=5,
-            )
+            script = 'tell application "Finder"\n' + "".join(
+                f'set comment of (POSIX file "{_q(p)}" as alias) to "{_safe}"\n' for p in paths
+            ) + 'end tell\n'
+            r = _sp.run(['osascript', '-'], input=script, text=True,
+                        capture_output=True, timeout=10 + 1.0 * len(paths))
+            _ok = (r.returncode == 0)
         except Exception:
-            pass
+            _ok = False
+        if _ok:
+            step_timer.count("batch.finder_comments", "stamped_in_one_launch", len(paths))
+        else:
+            step_timer.count("batch.finder_comments", "one_launch_failed_fell_back_to_each_file")
+            for p in paths:
+                try:
+                    _sp.run(['osascript', '-e',
+                             f'tell application "Finder" to set comment of (POSIX file "{p}" as alias) to "{_safe}"'],
+                            capture_output=True, timeout=5)
+                    step_timer.count("batch.finder_comments", "stamped_one_file")
+                except Exception:
+                    step_timer.count("batch.finder_comments", "failed_one_file")
+        step_timer.add("batch.finder_comments", time.perf_counter() - _t)
 
     def _fit_exif_for_jpeg(exif_bytes):
         """Ensure EXIF fits in JPEG's 65535-byte APP1 limit. Customer data takes priority.
@@ -2210,21 +2250,16 @@ def main():
         for _fi, _rm in _sfp_removed.items():
             if _fi >= len(segs_all) or not segs_all[_fi]:
                 continue
-            _kept_s, _kept_c = [], []
-            _n_drop = 0
-            for _sj, _seg in enumerate(segs_all[_fi]):
-                _seg_on = _seg > 0
-                _seg_px = int(_seg_on.sum())
-                if _seg_px and int((_seg_on & _rm).sum()) * 2 >= _seg_px:
-                    _n_drop += 1
-                    continue
-                _kept_s.append(_seg)
-                if _sj < len(corners_all[_fi]):
-                    _kept_c.append(corners_all[_fi][_sj])
+            # Counted where the removed pixels are, not across the whole photograph for
+            # every outline (modules/static_filter_helpers.py): same decision, 3.8 s faster.
+            _kept_s, _kept_c, _n_drop = drop_rejected_segments(
+                segs_all[_fi], corners_all[_fi], _rm)
+            step_timer.count("batch.drop_rejected_polygons", "outlines_checked", len(segs_all[_fi]))
             if _n_drop:
                 segs_all[_fi] = _kept_s
                 corners_all[_fi] = _kept_c
                 _sfp_polys_removed[_fi] = _n_drop
+                step_timer.count("batch.drop_rejected_polygons", "outlines_dropped", _n_drop)
         _total_polys_dropped = sum(_sfp_polys_removed.values())
         if _total_polys_dropped:
             print(f"  Removed {_total_polys_dropped} rejected polygon(s) from the "
@@ -2553,6 +2588,8 @@ def main():
         running_trail_total += trail_count
         print(f"FRAME_TRAIL_COUNT: {running_trail_total}", flush=True)
 
+    _flush_finder_comments()        # one Finder launch for the whole batch (macOS only)
+
     def _fmt_s(s):
         """Format a duration in seconds as a short human string for the timing table.
 
@@ -2653,7 +2690,6 @@ def main():
         _GAP_PARENTS = (("phantom", "dp_prune_phantoms_s", "phantom pruning"),
                         ("fit", "dp_fit_polygons_s", "fit_polygons"),
                         ("hotpix", "hot_pixel_s", "stuck-pixel step"),
-                        ("static", "static_fp_s", "static filter"),
                         ("write", "write_s", "frame writing"))
         for _grp, _pkey, _plabel in _GAP_PARENTS:
             _pt = _timing.get(_pkey, (0, 0.0))[1]
@@ -2702,6 +2738,19 @@ def main():
             "write": _sec("write_s")}), flush=True)
     except Exception:
         pass
+    # The whole batch's numbers for the run timing block in the Star Log (modules/run_timing_report.py):
+    # every timer's calls and seconds, what each step noted it did, and the batch's total seconds
+    # (the engine clock plus read, stuck-pixel, model load and star size, which run before it starts).
+    try:
+        import json as _json3
+        _outside_s = sum(_timing.get(k, (0, 0.0))[1]
+                         for k in ("frame_read_s", "hot_pixel_s", "model_load_s", "star_size_s"))
+        print("BATCH_STEP_DETAIL: " + _json3.dumps({
+            "batch_seconds": round((time.time() - t_total) + _outside_s, 2),
+            "timing": {k: [v[0], round(v[1], 3)] for k, v in _timing.items()},
+            "counts": _snap["counts"]}), flush=True)
+    except Exception:
+        pass
 
     elapsed = time.time() - t_total
     mins, secs = divmod(int(elapsed), 60)
@@ -2745,6 +2794,9 @@ def main():
             # What each step noted it did (modules/step_timer.py), and how much of each
             # parent stage its steps leave unexplained, in percent.
             "step_counts":          _snap["counts"],
+            # What each timed step is for, in plain words, so this log explains itself.
+            "step_guide":           {_n: {"label": _g[0], "purpose": _g[1], "counts": _g[2]}
+                                     for _n, _g in step_guide.STEPS.items() if _n in _snap["steps"] or _n in _snap["counts"]},
             "timing_gaps_percent":  _timing_gaps,
         })
         logger.close()

@@ -111,3 +111,19 @@ def test_the_run_log_and_the_app_report_carry_the_new_fields():
     gui = _src("star_trail_cleanr.py")
     assert "BATCH_STEP_SECONDS:" in gui and '"stage_seconds"' in gui
     assert '"cpu_cores"' in gui and '"ram_gb"' in gui
+
+
+def test_every_recorded_step_has_a_plain_english_entry():
+    """Documentation and timing travel together (Bruce, 2026-11-18): a step that records itself
+    must say what it is for, in plain words, in modules/step_guide.py."""
+    from modules import step_guide
+    code = "\n".join(_src(f) for f in ("modules/detect_pipeline.py", "modules/repair.py",
+                                       "modules/hot_pixels.py", "astro_clean_v5.py"))
+    recorded = set(re.findall(r'(?:_st|step_timer|_step_timer)\.(?:add|step|count)\(\s*"([a-z]+\.[a-z_]+)"', code))
+    assert recorded, "found no recorded steps: the scan is broken"
+    missing = sorted(n for n in recorded if n not in step_guide.STEPS)
+    assert not missing, f"steps with no plain-English entry in modules/step_guide.py: {missing}"
+    for name, (label, purpose, counts) in step_guide.STEPS.items():
+        assert label.strip() and len(purpose.split()) >= 6, name
+        assert isinstance(counts, dict)
+        assert "—" not in label + purpose and "–" not in label + purpose, name   # no dashes as punctuation

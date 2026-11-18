@@ -1794,6 +1794,8 @@ class CleanerWorker(QThread):
             total_trails_run = 0
             total_frames_run = 0
             step_seconds_run = {}       # where the run's time went, summed over batches (opt-in report)
+            from modules import run_timing_report as _rtr0
+            self.run_timing = _rtr0.new_accumulator()   # every step, every batch (the Star Log's run timing block)
             step_batches_run = 0
 
             import uuid, socket, csv as _csv, datetime as _dt
@@ -2152,6 +2154,13 @@ class CleanerWorker(QThread):
                         try:
                             total_trails_run += int(proc_line.split(":", 1)[1].strip())
                         except ValueError:
+                            pass
+                        continue
+                    if proc_line.startswith("BATCH_STEP_DETAIL:"):
+                        try:
+                            from modules import run_timing_report as _rtr
+                            _rtr.merge(self.run_timing, json.loads(proc_line.split(":", 1)[1].strip()))
+                        except Exception:
                             pass
                         continue
                     if proc_line.startswith("BATCH_STEP_SECONDS:"):
@@ -7830,6 +7839,26 @@ class MainWindow(QMainWindow):
             "",
             "================================================",
         ]
+
+        # The run timing block: where the WHOLE run's time went, summed over every batch. It sits here,
+        # above the scroll, because the scroll below is cut to its first 50 and last 100 lines (for a
+        # 29-batch run that kept the timing of one batch). See modules/run_timing_report.py.
+        try:
+            from modules import run_timing_report as _rtr
+            _w = getattr(self, "worker", None)
+            _acc = getattr(_w, "run_timing", None)
+            try:
+                import psutil as _psu
+                _ram = _psu.virtual_memory().total / (1024 ** 3)
+            except Exception:
+                _ram = None
+            _tl = _rtr.render(
+                _acc, run_seconds=(end - start).total_seconds(), frames=frames,
+                machine=_rtr.machine_summary(getattr(_w, "_worker_device", None), os.cpu_count(), _ram))
+            if _tl:
+                lines += [""] + _tl + ["", "================================================"]
+        except Exception:
+            pass
 
         # Append the Star Log content (what scrolled in the run window) so
         # this single file is enough to diagnose any run issue without
