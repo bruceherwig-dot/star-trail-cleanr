@@ -2,6 +2,13 @@
 
 ---
 
+## v3.08-beta
+This is a small speed release, again in repair. Cleaned frames are unchanged: on four test sets (RAW to JPG, RAW to 16-bit TIFF and two JPG sets) every cleaned frame and every mask file came out byte for byte the same as v3.07. Timed on one Mac using its graphics chip. Windows, Linux and Nvidia cards were not timed.
+- **Faster: repair is 14 to 30 percent faster.** Repair takes the brightest colour channel of each pixel about a dozen times per trail piece, and numpy's way of doing that was slow on these small patches. Taking the maximum of the three channels directly is about 13 times faster per call and gives the same values. The step that measures how far the stars moved between neighbor frames also compared every candidate star pair with every other in a Python loop; one array comparison now finds the same neighbors (that step went from 3.8s to 2.0s on 8 JPG frames).
+- **Faster: whole batches are 3 to 9 percent faster.** 35s down to 32s on 8 JPG frames of an aurora sequence, 27s down to 25s on 8 JPG frames of a Joshua Tree sequence, and 61s down to 59s on 6 RAW frames. The gain is small on its own.
+- **Together with v3.06 and v3.07:** a 20-frame batch of 22 megapixel JPG frames from the aurora sequence took 186s with the v3.05 code and 97s with this one, 48 percent less, and all 20 cleaned frames were identical. Runs that use the processor instead of a graphics chip gain less, because the AI step is most of their time and it is unchanged.
+- **Smoke tests:** 771 passing.
+
 ## v3.07-beta
 This release is about speed again, in the parts of a run that are not the AI. Cleaned frames are unchanged: on three test sequences (a RAW set and two JPG sets) every cleaned frame and every mask file came out byte for byte the same as v3.06. Timed on one Mac using its graphics chip. Windows, Linux and Nvidia cards were not timed.
 - **Faster: whole batches are 19 to 43 percent faster.** The same batches, run back to back with the v3.06 code and with this one: 79s down to 64s on 6 RAW frames, 51s down to 36s on 8 JPG frames of an aurora sequence, and 46s down to 26s on 8 JPG frames of a Joshua Tree sequence.
