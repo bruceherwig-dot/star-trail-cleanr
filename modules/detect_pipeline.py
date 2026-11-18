@@ -1225,15 +1225,22 @@ def stage_fit_polygons(state: PipelineState, cfg: StageConfig,
         # (1.6ms vs 49ms on a 24MP mask) and the exact same box, so the crop and
         # all downstream results are byte-identical.
         _t = time.perf_counter()
-        rows = np.any(m, axis=1)
+        # The scan itself runs only inside the area the detection is known to sit in
+        # (the tile it was made in; the whole frame when that is not known). The box
+        # found is still the exact tightest one around the lit pixels, so the crop
+        # handed on is identical. Measured 2026-11-18: the two whole-frame sweeps were
+        # 1.9 of the 4.0 s this stage took on a 20-frame batch.
+        br0, br1, bc0, bc1 = _pred_box(pred, h, w)
+        _sm = m[br0:br1, bc0:bc1]
+        rows = np.any(_sm, axis=1)
         if not rows.any():
             t_scan += time.perf_counter() - _t
             continue
-        cols = np.any(m, axis=0)
+        cols = np.any(_sm, axis=0)
         rr = np.where(rows)[0]
         cc = np.where(cols)[0]
-        r0, r1 = int(rr[0]), int(rr[-1])
-        c0, c1 = int(cc[0]), int(cc[-1])
+        r0, r1 = int(rr[0]) + br0, int(rr[-1]) + br0
+        c0, c1 = int(cc[0]) + bc0, int(cc[-1]) + bc0
         t_scan += time.perf_counter() - _t
         mc = m[r0:r1 + 1, c0:c1 + 1]
         off = np.array([r0, c0])

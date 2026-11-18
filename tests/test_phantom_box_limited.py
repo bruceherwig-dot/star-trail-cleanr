@@ -91,3 +91,27 @@ def test_a_detection_made_in_a_tile_carries_that_tile_as_its_box():
 
 def _pred_to_mask_from_bool(m):
     return m.astype(np.uint8) * 255
+
+
+def test_the_tight_box_found_inside_the_tile_is_the_same_as_the_whole_frame_search():
+    """Polygon fitting finds each detection's exact tightest box. Searching only inside
+    the tile box must give the same four numbers as searching the whole frame."""
+    from modules.detect_pipeline import _SyntheticPred
+    for seed in range(200):
+        rng = np.random.default_rng(5000 + seed)
+        h, w = int(rng.integers(60, 300)), int(rng.integers(60, 300))
+        ty, tx = int(rng.integers(0, h - 20)), int(rng.integers(0, w - 20))
+        th, tw = int(rng.integers(10, h - ty + 1)), int(rng.integers(10, w - tx + 1))
+        m = np.zeros((h, w), bool)
+        for _ in range(int(rng.integers(1, 4))):
+            a, b = int(rng.integers(ty, ty + th)), int(rng.integers(tx, tx + tw))
+            m[a:min(ty + th, a + int(rng.integers(1, 15))), b:min(tx + tw, b + int(rng.integers(1, 15)))] = True
+        mu8 = m.astype(np.uint8) * 255
+        rr, cc = np.where(np.any(mu8, axis=1))[0], np.where(np.any(mu8, axis=0))[0]
+        want = (int(rr[0]), int(rr[-1]), int(cc[0]), int(cc[-1]))
+        p = _SyntheticPred(m, 0.5, box=(ty, ty + th, tx, tx + tw))
+        br0, br1, bc0, bc1 = _pred_box(p, h, w)
+        sm = mu8[br0:br1, bc0:bc1]
+        r, c = np.where(np.any(sm, axis=1))[0], np.where(np.any(sm, axis=0))[0]
+        got = (int(r[0]) + br0, int(r[-1]) + br0, int(c[0]) + bc0, int(c[-1]) + bc0)
+        assert got == want, seed
