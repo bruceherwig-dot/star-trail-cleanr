@@ -77,6 +77,8 @@ is DISABLED -- a warm star read identically, so it deleted stars.
 """
 import math
 import time
+
+from . import step_timer as _step_timer
 import cv2
 import numpy as np
 
@@ -261,8 +263,11 @@ def _sky_fill(region, target_mask, comp_mask, feather=SKY_FILL_FEATHER):
     med, std = _sky_sample(region, comp_mask)
     if med is None:
         region[target_mask] = 0             # no sky to sample -> old black behavior
+        _step_timer.count("repair.grain_fill", "no_sky_to_sample_filled_black")
         return 0
     maxv = 65535 if region.dtype == np.uint16 else 255
+    _step_timer.count("repair.grain_fill", "sky_colour_and_grain_painted")
+    _step_timer.count("repair.grain_fill", "pixels", k)
     noise = np.random.normal(0.0, 1.0, (k, region.shape[2])) * (std + 1.0)
     region[target_mask] = np.clip(med + noise, 0, maxv).astype(region.dtype)
     # Feather only the seam: softly blend a thin band straddling the fill boundary
@@ -698,8 +703,11 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
     _tc = time.perf_counter()
     result = frame.copy()
     _copy_dt = time.perf_counter() - _tc
+    _tm = time.perf_counter()
     trail = mask > 0
-    if not trail.any():
+    _any_trail = trail.any()
+    _mask_check_dt = time.perf_counter() - _tm       # whole-frame mask test, once per call
+    if not _any_trail:
         return result
 
     # Per-step timing accumulator (diagnostic only; written to debug_out["timing"]).
@@ -719,6 +727,7 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
             _timing_acc[key] = _timing_acc.get(key, 0.0) + dt
 
     _addt("copy_s", _copy_dt)
+    _addt("mask_checks_s", _mask_check_dt)
 
     # When polygon segments are provided, repair each arm independently.
     # Each recursive call processes one narrow polygon with its own Star Bridge
@@ -727,7 +736,10 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
         if debug_out is not None:
             debug_out["components"] = []
         for _poly_i, seg_mask in enumerate(polygon_segs, start=1):
-            if not (seg_mask > 0).any():
+            _tm = time.perf_counter()
+            _seg_has_px = (seg_mask > 0).any()           # whole-frame mask test, once per trail piece
+            _addt("mask_checks_s", time.perf_counter() - _tm)
+            if not _seg_has_px:
                 continue
             # Thread a debug dict into each per-polygon pass and collect its one
             # component, so the run log records the fill method + cascade for EVERY
@@ -864,6 +876,8 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                 _streak = _trail_streak(frame[y0:y1, x0:x1], comp_mask)
                 _target = _streak if _streak.any() else comp_mask
                 _filled = _sky_fill(_win, _target, comp_mask)
+                _step_timer.count("repair.fill_method",
+                                  "crayon_sky_no_neighbors" if _filled > 0 else "black_no_sky")
                 if seg_info is not None:
                     # _filled>0 = the crayon sky-fill painted; _filled==0 = the RARE pure-black
                     # fallback (no neighbor AND too little surrounding sky to sample a colour).
@@ -1379,6 +1393,16 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
             if _timing_acc is not None:
                 _timing_acc["compose_s"] = (_timing_acc.get("compose_s", 0.0)
                     + max(0.0, time.perf_counter() - _seg_t0 - _seg_known[0]))
+
+            # What was done, for the run's timing table: which way this trail piece was filled.
+            _step_timer.count("repair.fill_method", _method)
+            if _ok:
+                _step_timer.count("repair.star_tracking", "tracked")
+            else:
+                _step_timer.count("repair.star_tracking", "not_tracked")
+            if _fg_darken_px:
+                _step_timer.count("repair.darken_restore", "pieces_restored")
+                _step_timer.count("repair.darken_restore", "pixels_restored", int(_fg_darken_px))
 
             if seg_info is not None:
                 seg_info.update({

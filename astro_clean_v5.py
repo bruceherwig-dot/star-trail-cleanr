@@ -160,6 +160,7 @@ from modules.detect_trails import (
     load_model, apply_sky_mask, filter_small_components
 )
 from modules import detect_pipeline as dp
+from modules import step_timer
 from modules.trail_grouper import detection_props
 from modules.repair import repair_frame
 from modules.run_logger import RunLogger
@@ -916,6 +917,7 @@ def main():
     `args`, `output_dir`, `cleaned_dir`, and the per-run `_stamp` string, so they
     can't be module-level functions without threading all of that through.
     """
+    step_timer.reset()      # this batch's own step times and counts (modules/step_timer.py)
     parser = argparse.ArgumentParser(
         description="astro_clean_v5 — YOLO-based airplane trail removal")
     parser.add_argument("input_dir")
@@ -1801,12 +1803,14 @@ def main():
         # map file so detections build up across batches instead of freezing on
         # batch 1 (a stuck pixel that only shows up later still gets caught).
         hot_map = build_hot_pixel_map(frames_8bit)
+        _tm = time.perf_counter()
         if args.hot_pixel_map and os.path.isfile(args.hot_pixel_map):
             prev = robust_imread(args.hot_pixel_map, cv2.IMREAD_GRAYSCALE)
             if prev is not None and prev.shape[:2] == hot_map.shape[:2]:
                 hot_map = cv2.bitwise_or(hot_map, prev)
         if args.hot_pixel_map and int((hot_map > 0).sum()) > 0:
             robust_imwrite(args.hot_pixel_map, hot_map)
+        step_timer.add("hotpix.map_merge_and_save", time.perf_counter() - _tm)
 
         # Foreground (ground) stuck pixels are repaired here, per frame, with the
         # plain inpaint (the textured ground hides it). SKY stuck pixels are NOT
@@ -1815,6 +1819,7 @@ def main():
         # star trail. The map saved above is the running union so that end step
         # has the complete set of stuck-pixel locations.
         dilated = None
+        _tg = time.perf_counter()
         if hot_map.max() > 0:
             from modules.hot_pixels import ground_looks_like_scenery
             _scenery, _gflags, _gdens, _sdens = ground_looks_like_scenery(
@@ -1834,8 +1839,16 @@ def main():
                 dilated = cv2.dilate(hot_map,
                     cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (13, 13)))
                 dilated = cv2.bitwise_and(dilated, fg_mask)
+        step_timer.add("hotpix.ground_check", time.perf_counter() - _tg)
+        if hot_map.max() > 0:
+            step_timer.count("hotpix.ground_check", "left_alone_looks_like_scenery" if _scenery else "ground_repaint_planned")
 
+        _tr = time.perf_counter()
+        _repainted = False
         if dilated is not None and dilated.max() > 0:
+            _repainted = True
+            step_timer.count("hotpix.repaint", "frames", len(frames))
+            step_timer.count("hotpix.repaint", "ground_pixels", int(np.count_nonzero(dilated)))
             if is_16bit:
                 # The frames are already in memory, so they are used directly
                 # (this used to read every frame off the disk a second time).
@@ -1851,6 +1864,8 @@ def main():
             for j, idx in enumerate(range(core_start, core_end)):
                 frames_all[idx] = frames[j]
                 frames_8bit_all[idx] = frames_8bit[j]
+        if _repainted:
+            step_timer.add("hotpix.repaint", time.perf_counter() - _tr)
     _hotpix_s = time.perf_counter() - _thot
 
     # Resolution scaling for min_area filter.
@@ -2529,6 +2544,13 @@ def main():
             return f"{s:.1f}s"
         return f"{s * 1000:.0f}ms"
 
+    # Everything the steps recorded themselves (modules/step_timer.py): merge their
+    # seconds into the table above, and keep what fired for the "what happened" block.
+    _snap = step_timer.snapshot()
+    _timing_gaps = {}
+    for _nm, (_calls, _secs) in _snap["steps"].items():
+        _timing["st_" + _nm + "_s"] = [_calls, _secs]
+
     if _timing:
         _STEP_ORDER = [
             ("new_pipeline_s",          "detect (new pipeline)"),
@@ -2581,6 +2603,8 @@ def main():
                 _name = "  " + _key[3:-2]
             elif _key.startswith("rp_"):
                 _name = "  repair: " + _key[3:-2]   # a part of repair_frame
+            elif _key.startswith("st_"):
+                _name = "  " + _key[3:-2]           # a step recorded by modules/step_timer.py
             else:
                 _name = _key[:-2]
             print(f"  {_name:<26} {_cnt:>6}  {_fmt_s(_tot):>8}  {_fmt_s(_avg):>8}")
@@ -2603,6 +2627,53 @@ def main():
             _rgap = _rparent - _rkids
             print(f"  {'  (repair unaccounted)':<26} {'':>6}  {_fmt_s(max(0.0, _rgap)):>8}  "
                   f"{100.0 * _rgap / _rparent:>7.0f}%")
+        # The same proof for every other stage that records its own steps.
+        _GAP_PARENTS = (("phantom", "dp_prune_phantoms_s", "phantom pruning"),
+                        ("fit", "dp_fit_polygons_s", "fit_polygons"),
+                        ("hotpix", "hot_pixel_s", "stuck-pixel step"))
+        for _grp, _pkey, _plabel in _GAP_PARENTS:
+            _pt = _timing.get(_pkey, (0, 0.0))[1]
+            _u = step_timer.unaccounted(_pt, _snap, _grp)
+            if _u is not None:
+                _timing_gaps[_grp] = round(_u[1], 1)
+                print(f"  {'  (' + _plabel + ' unaccounted)':<26} {'':>6}  {_fmt_s(max(0.0, _u[0])):>8}  "
+                      f"{_u[1]:>7.0f}%")
+        # The whole batch: what "Done in" covers, against the steps inside it.
+        _inside = ("new_pipeline_s", "apply_sky_mask_s", "filter_small_s", "second_scrub_s",
+                   "static_fp_s", "edge_rescue_s", "repair_s", "write_s")
+        _batch_wall = time.time() - t_total
+        _batch_kids = sum(_timing.get(k, (0, 0.0))[1] for k in _inside)
+        if _batch_wall > 0 and _batch_kids > 0:
+            _bgap = _batch_wall - _batch_kids
+            _timing_gaps["batch"] = round(100.0 * _bgap / _batch_wall, 1)
+            print(f"  {'  (batch unaccounted)':<26} {'':>6}  {_fmt_s(max(0.0, _bgap)):>8}  "
+                  f"{100.0 * _bgap / _batch_wall:>7.0f}%")
+        _outside = sum(_timing.get(k, (0, 0.0))[1]
+                       for k in ("frame_read_s", "hot_pixel_s", "model_load_s", "star_size_s"))
+        print(f"  {'  (before the clock starts)':<26} {'':>6}  {_fmt_s(_outside):>8}  "
+              f"(read, stuck-pixel step, model load, star size)")
+
+        # What fired and what it did: the counts each step noted, one line per step.
+        if _snap["counts"]:
+            print("\nWhat fired (steps that noted what they did):")
+            for _nm in sorted(_snap["counts"]):
+                _bits = ", ".join(f"{k} {v:,}" for k, v in sorted(_snap["counts"][_nm].items()))
+                print(f"  {_nm:<26} {_bits}")
+
+    # One line the app reads to add up where a whole run's time went (opt-in anonymous report).
+    def _sec(k):
+        return round(_timing.get(k, (0, 0.0))[1], 1)
+    try:
+        import json as _json2
+        print("BATCH_STEP_SECONDS: " + _json2.dumps({
+            "read": _sec("frame_read_s"), "stuck_pixels": _sec("hot_pixel_s"),
+            "model_load": _sec("model_load_s"), "star_size": _sec("star_size_s"),
+            "detect": _sec("new_pipeline_s"), "ai": _sec("dp_tiled_inference_s"),
+            "phantoms": _sec("dp_prune_phantoms_s"), "polygons": _sec("dp_fit_polygons_s"),
+            "static_filter": _sec("static_fp_s"), "repair": _sec("repair_s"),
+            "write": _sec("write_s")}), flush=True)
+    except Exception:
+        pass
 
     elapsed = time.time() - t_total
     mins, secs = divmod(int(elapsed), 60)
@@ -2643,6 +2714,10 @@ def main():
             "timing":               {k: {"calls": v[0], "total_s": round(v[1], 2),
                                          "avg_s": round(v[1] / v[0], 3) if v[0] else 0.0}
                                      for k, v in sorted(_timing.items())},
+            # What each step noted it did (modules/step_timer.py), and how much of each
+            # parent stage its steps leave unexplained, in percent.
+            "step_counts":          _snap["counts"],
+            "timing_gaps_percent":  _timing_gaps,
         })
         logger.close()
 

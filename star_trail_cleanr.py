@@ -1793,6 +1793,8 @@ class CleanerWorker(QThread):
             frames_cleaned = 0
             total_trails_run = 0
             total_frames_run = 0
+            step_seconds_run = {}       # where the run's time went, summed over batches (opt-in report)
+            step_batches_run = 0
 
             import uuid, socket, csv as _csv, datetime as _dt
             _run_id = str(uuid.uuid4())[:8]
@@ -2152,6 +2154,14 @@ class CleanerWorker(QThread):
                         except ValueError:
                             pass
                         continue
+                    if proc_line.startswith("BATCH_STEP_SECONDS:"):
+                        try:
+                            for _sk, _sv in json.loads(proc_line.split(":", 1)[1].strip()).items():
+                                step_seconds_run[_sk] = step_seconds_run.get(_sk, 0.0) + float(_sv)
+                            step_batches_run += 1
+                        except Exception:
+                            pass
+                        continue
                     if proc_line.startswith("BATCH_FRAME_COUNT:"):
                         try:
                             total_frames_run += int(proc_line.split(":", 1)[1].strip())
@@ -2418,6 +2428,18 @@ class CleanerWorker(QThread):
                         _ufacts["gpu"] = _ugpu
                     if _ugpu_status:
                         _ufacts["gpu_status"] = _ugpu_status
+                    # Where the time went, and what machine it ran on. Whole seconds per
+                    # step summed over the run's batches, so a slow report can be broken down
+                    # without guessing. Numbers only: no names, paths or images.
+                    if step_seconds_run:
+                        _ufacts["stage_seconds"] = {k: int(round(v)) for k, v in step_seconds_run.items()}
+                        _ufacts["batches"] = int(step_batches_run)
+                    try:
+                        _ufacts["cpu_cores"] = int(os.cpu_count() or 0)
+                        import psutil as _psu
+                        _ufacts["ram_gb"] = round(_psu.virtual_memory().total / (1024 ** 3), 1)
+                    except Exception:
+                        pass
                     _ufacts.update(_leader_gear_exif(frames))
                     from modules import usage_report
                     usage_report.send(_ufacts)

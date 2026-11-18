@@ -41,9 +41,13 @@ bright). NOTE: the code in this file as written detects and repairs HOT
 pixels; there is no separate dead/cold-pixel routine here despite the
 mention above.
 """
+import time
+
 import cv2
 import numpy as np
 from typing import List
+
+from . import step_timer as _step_timer
 
 # Pixels dimmer than this (0-255 scale) are ignored when looking for hot
 # pixels. Very dark pixels can show a large brightness ratio over their
@@ -286,15 +290,33 @@ def build_hot_pixel_map(frames: List[np.ndarray], threshold: float = 2.0,
     colour test leaves few candidates it runs the median test only near them
     (tests/test_hot_pixel_colour_first.py).
     """
+    _t0 = time.perf_counter()
     if _whole_number_search_applies(frames, threshold, min_channel_excess):
         fast = _build_hot_pixel_map_colour_first(
             frames, threshold, min_fraction, min_channel_excess)
         if fast is not None:
+            _record_search("colour_first_tiles", fast, len(frames), _t0)
             return fast
-        return _build_hot_pixel_map_whole_numbers(
+        out = _build_hot_pixel_map_whole_numbers(
             frames, threshold, min_fraction, min_channel_excess)
-    return _build_hot_pixel_map_reference(
+        _record_search("whole_numbers_fallback", out, len(frames), _t0)
+        return out
+    out = _build_hot_pixel_map_reference(
         frames, threshold, min_fraction, min_channel_excess)
+    _record_search("reference_unusual_input", out, len(frames), _t0)
+    return out
+
+
+def _record_search(path, found_map, n_frames, t0):
+    """Note which stuck-pixel search ran, over how many frames, how many pixels it marked,
+    and how long it took (see modules/step_timer.py). Observes only."""
+    try:
+        _step_timer.add("hotpix.search", time.perf_counter() - t0)
+        _step_timer.count("hotpix.search", path)
+        _step_timer.count("hotpix.search", "frames_searched", int(n_frames))
+        _step_timer.count("hotpix.search", "pixels_marked", int(np.count_nonzero(found_map)))
+    except Exception:
+        pass
 
 
 def _build_hot_pixel_map_reference(frames: List[np.ndarray], threshold: float = 2.0,

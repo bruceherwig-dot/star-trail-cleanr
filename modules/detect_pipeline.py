@@ -52,6 +52,7 @@ import numpy as np
 from skimage.measure import label as sklabel, regionprops as skregionprops
 
 from .io_safe import robust_imread
+from . import step_timer as _st
 from .crossing_splitter import split_crossing, has_crossing_evidence
 from .crossing_peel import peel_split
 from .trail_grouper import (
@@ -1002,13 +1003,18 @@ def stage_prune_phantoms(state: PipelineState, cfg: StageConfig,
     if not preds:
         return state
     h, w = state.image.shape[:2]
+    _tp = time.perf_counter()
     gray = _max_channel_gray(state.image)
+    _st.add("phantom.grey_image", time.perf_counter() - _tp)
+    _st.count("phantom.grey_image", "detections_in", len(preds))
 
     lean = len(preds) * h * w > _PHANTOM_MASK_CACHE_BYTES
     if lean:
         # HUGE FRAME: never hold more than one detection's mask. The union is the same
         # either way; the masks are rebuilt below, and by the next stage, when needed.
         pred_masks = None
+        _st.count("phantom.mask_build", "lean_one_at_a_time")
+        _tp = time.perf_counter()
         acc = np.zeros((h, w), np.uint8)
         for p in preds:
             m = _pred_to_mask(p, h, w)
@@ -1020,21 +1026,35 @@ def stage_prune_phantoms(state: PipelineState, cfg: StageConfig,
             m = None
         union = (acc > 0).astype(np.uint8)
         del acc
+        _st.add("phantom.mask_build", time.perf_counter() - _tp)
     else:
+        _tp = time.perf_counter()
         pred_masks = [_pred_to_mask(p, h, w) for p in preds]
+        _st.add("phantom.mask_build", time.perf_counter() - _tp)
+        _tp = time.perf_counter()
         boxes = [_pred_box(p, h, w) for p in preds]
+        # The fast path needs a tile box; each detection without one is searched across the whole frame.
+        _n_whole = sum(1 for b in boxes if b == (0, h, 0, w))
+        _st.count("phantom.mask_merge", "boxed", len(boxes) - _n_whole)
+        if _n_whole:
+            _st.count("phantom.mask_merge", "whole_frame_fallback", _n_whole)
         union = _union_of_masks(pred_masks, h, w, boxes)
+        _st.add("phantom.mask_merge", time.perf_counter() - _tp)
     if union.sum() == 0:
         state.pred_masks = pred_masks if pred_masks is not None else []   # next stage builds
         return state
 
+    _tp = time.perf_counter()
     sky = _phantom_local_sky(gray)
     real = (gray.astype(np.int16) - sky.astype(np.int16)) > _PHANTOM_SIG
+    _st.add("phantom.sky_estimate", time.perf_counter() - _tp)
+    _tp = time.perf_counter()
     se = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
                                    (2 * _PHANTOM_OPEN_R + 1, 2 * _PHANTOM_OPEN_R + 1))
     core = cv2.morphologyEx(union, cv2.MORPH_OPEN, se)
     thin = (union > 0) & (core == 0)
     ph = (thin & (~real)).astype(np.uint8)
+    _st.add("phantom.thin_parts", time.perf_counter() - _tp)
     # Only look at sky: never test or prune inside the foreground (sky-mask)
     # region, which also skips any tile that is 100% foreground.
     if state.foreground_mask is not None:
@@ -1046,8 +1066,12 @@ def stage_prune_phantoms(state: PipelineState, cfg: StageConfig,
         state.pred_masks = pred_masks if pred_masks is not None else []   # built already, or the next stage builds
         return state
 
+    _tp = time.perf_counter()
     bridged = cv2.dilate(ph, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15)))
     n, lab, st, _ = cv2.connectedComponentsWithStats(bridged)
+    _st.add("phantom.bridge_and_label", time.perf_counter() - _tp)
+    _st.count("phantom.bridge_and_label", "candidate_lines", max(0, n - 1))
+    _tp = time.perf_counter()
     kill = np.zeros((h, w), bool)
     n_lines = 0
     phantom_records = []   # one per removed phantom line -> hard-negative training data
@@ -1083,10 +1107,13 @@ def stage_prune_phantoms(state: PipelineState, cfg: StageConfig,
                 "area": ink,
                 "note": "thin FP over empty sky; nothing to see here (hard negative)",
             })
+    _st.add("phantom.judge_lines", time.perf_counter() - _tp)
+    _st.count("phantom.judge_lines", "removed_as_phantom", n_lines)
     if not kill.any():
         state.pred_masks = pred_masks if pred_masks is not None else []   # built already, or the next stage builds
         return state
 
+    _tp = time.perf_counter()
     new_preds = []
     new_masks = []
     n_dropped = n_trimmed = 0
@@ -1144,6 +1171,9 @@ def stage_prune_phantoms(state: PipelineState, cfg: StageConfig,
 
     state.raw_detections = new_preds
     state.pred_masks = new_masks
+    _st.add("phantom.trim_detections", time.perf_counter() - _tp)
+    _st.count("phantom.trim_detections", "dropped", n_dropped)
+    _st.count("phantom.trim_detections", "trimmed", n_trimmed)
     log.count("phantom_lines", n_lines)
     log.count("detections_dropped", n_dropped)
     log.count("detections_trimmed", n_trimmed)
@@ -1214,6 +1244,7 @@ def stage_fit_polygons(state: PipelineState, cfg: StageConfig,
         if m is None:
             m = _pred_to_mask(pred, h, w)
         t_premask += time.perf_counter() - _t
+        _st.add("fit.mask_build", time.perf_counter() - _t)
         if m is None:
             continue
         # Scan ONCE to find this detection's bounding box, then crop. The split
@@ -1235,6 +1266,7 @@ def stage_fit_polygons(state: PipelineState, cfg: StageConfig,
         rows = np.any(_sm, axis=1)
         if not rows.any():
             t_scan += time.perf_counter() - _t
+            _st.add("fit.edge_scan", time.perf_counter() - _t)
             continue
         cols = np.any(_sm, axis=0)
         rr = np.where(rows)[0]
@@ -1242,6 +1274,11 @@ def stage_fit_polygons(state: PipelineState, cfg: StageConfig,
         r0, r1 = int(rr[0]) + br0, int(rr[-1]) + br0
         c0, c1 = int(cc[0]) + bc0, int(cc[-1]) + bc0
         t_scan += time.perf_counter() - _t
+        _st.add("fit.edge_scan", time.perf_counter() - _t)
+        if (br0, br1, bc0, bc1) == (0, h, 0, w):
+            _st.count("fit.edge_scan", "searched_whole_frame")     # no tile box known: the slow path
+        else:
+            _st.count("fit.edge_scan", "searched_tile_box")
         mc = m[r0:r1 + 1, c0:c1 + 1]
         off = np.array([r0, c0])
         _t = time.perf_counter()
@@ -1250,8 +1287,12 @@ def stage_fit_polygons(state: PipelineState, cfg: StageConfig,
             # Crossing peel first: one rectangle per trail for K, L, V, T, 3+ trail and parallel tangles.
             # When it declines (a bend, a fork, a ragged chunk, too small) it returns the blob whole and
             # the older splitter below runs exactly as before.
+            _tp = time.perf_counter()
             _peeled, _pinfo = peel_split(mc, frame_px=frame_px)
+            _st.add("fit.peel_split", time.perf_counter() - _tp)
+            _st.count("fit.peel_split", "blobs_tried")
             if len(_peeled) > 1:
+                _st.count("fit.peel_split", "peeled_into_pieces", len(_peeled))
                 crossing_pieces = _peeled
                 log.count("crossings_peeled")
                 log.decision("crossing_peel", "split", [c0, r0, c1, r1],
@@ -1261,10 +1302,14 @@ def stage_fit_polygons(state: PipelineState, cfg: StageConfig,
                              "cut into %d piece(s), one rectangle per trail" % len(_peeled),
                              area=int((mc > 0).sum()))
         if crossing_pieces is None:
+            _tp = time.perf_counter()
             crossing_pieces = split_crossing(mc, frame_px=frame_px)
+            _st.add("fit.split_crossing", time.perf_counter() - _tp)
+            _st.count("fit.split_crossing", "blobs_tried")
         t_split += time.perf_counter() - _t
         is_confirmed_crossing = len(crossing_pieces) > 1
         if is_confirmed_crossing:
+            _st.count("fit.split_crossing", "confirmed_crossings")
             n_split_fired += 1
         else:
             # Crossing rescue: multi-touch tangles (3+ trails through one blob)
@@ -1280,7 +1325,10 @@ def stage_fit_polygons(state: PipelineState, cfg: StageConfig,
             # and trims arms). The repair cleans a whole tangle fine -- it
             # borrows sky by star tracking and needs no per-trail separation.
             _t = time.perf_counter()
-            if has_crossing_evidence(mc, frame_px=frame_px):
+            _has_ev = has_crossing_evidence(mc, frame_px=frame_px)
+            _st.add("fit.crossing_evidence", time.perf_counter() - _t)
+            if _has_ev:
+                _st.count("fit.crossing_evidence", "kept_whole")
                 n_kept_whole += 1
                 log.count("crossings_kept_whole")
                 log.decision("crossing_kept_whole", "kept", [c0, r0, c1, r1],
@@ -1296,6 +1344,9 @@ def stage_fit_polygons(state: PipelineState, cfg: StageConfig,
             _t = time.perf_counter()
             parallel_pieces = _try_split_parallel(cm, frame_px=frame_px)
             t_par += time.perf_counter() - _t
+            _st.add("fit.parallel_split", time.perf_counter() - _t)
+            if len(parallel_pieces) > 1:
+                _st.count("fit.parallel_split", "split_into_pieces", len(parallel_pieces))
             for em in parallel_pieces:
                 _t = time.perf_counter()
                 props = _props_with_log(em, cfg, log,
@@ -1305,6 +1356,8 @@ def stage_fit_polygons(state: PipelineState, cfg: StageConfig,
                                         img_is_rgb=True,   # state.image is the RGB copy made at tiled inference
                                         offset=(r0, c0), dropped_out=_star_dropped)
                 t_props += time.perf_counter() - _t
+                _st.add("fit.props", time.perf_counter() - _t)
+                _st.count("fit.props", "kept" if props is not None else "dropped")
                 if props is not None:
                     props["coords"] = props["coords"] + off
                     props["centroid"] = props["centroid"] + off
@@ -1327,22 +1380,28 @@ def stage_fit_polygons(state: PipelineState, cfg: StageConfig,
     # become one big box ("large square") or a stray box between the real trails.
     # Cut them to thin bands, or drop them when thin neighbours already cover them.
     _thin_events = []
+    _t = time.perf_counter()
     det_list, _thin = thin_fat_detections(det_list, h, w, events=_thin_events)
+    _st.add("fit.thin_fat", time.perf_counter() - _t)
     for _k, _n in _thin.items():
         if _n:
             log.count("fat_" + _k, _n)
+            _st.count("fit.thin_fat", _k, _n)
     _log_thin_events(log, _thin_events)
 
     # Group collinear, touching fragments into trails.
     _t = time.perf_counter()
     groups = group_detections(det_list) if det_list else []
     t_group = time.perf_counter() - _t
+    _st.add("fit.group", t_group)
+    _st.count("fit.group", "groups_made", len(groups))
     log.count("groups", len(groups))
 
     # Fit one polygon per group (curved fit when the group is long and bends).
     _t = time.perf_counter()
     final, polygons = _fit_groups(det_list, groups, h, w, log=log)
     t_fit = time.perf_counter() - _t
+    _st.add("fit.poly_fit", t_fit)
     log.event("fit_timing", group_s=round(t_group, 3), poly_fit_s=round(t_fit, 3))
 
     # Rescued crossing tangles enter the final mask as their EXACT model
@@ -1352,6 +1411,7 @@ def stage_fit_polygons(state: PipelineState, cfg: StageConfig,
     # vertical stub) without the quad's fat over-coverage.
     # When the tangle has two or more clear line directions it is painted as one
     # thin band per line (and a rectangle per band) instead of one fat blob.
+    _t_resc = time.perf_counter()
     for _mb, _rb, _cb in rescued_blobs:
         _bands = bands_for_blob(_mb)
         _bbox = [_cb, _rb, _cb + _mb.shape[1] - 1, _rb + _mb.shape[0] - 1]
@@ -1380,7 +1440,11 @@ def stage_fit_polygons(state: PipelineState, cfg: StageConfig,
             if len(_cn) < 3:
                 continue
             polygons.append((_cn + np.array([_cb, _rb])).tolist())
+    if rescued_blobs:
+        _st.add("fit.rescued_bands", time.perf_counter() - _t_resc)
+        _st.count("fit.rescued_bands", "blobs", len(rescued_blobs))
 
+    _t_fin = time.perf_counter()
     log.count("polygons", len(polygons))
     log.count("mask_components",
               max(0, cv2.connectedComponents(
@@ -1393,6 +1457,7 @@ def stage_fit_polygons(state: PipelineState, cfg: StageConfig,
     state.pred_masks = []
     state.polygons, state.polygon_segs = _polys_and_segs_deduped(polygons, h, w)
     state.final_mask = final
+    _st.add("fit.finish", time.perf_counter() - _t_fin)
     return state
 
 

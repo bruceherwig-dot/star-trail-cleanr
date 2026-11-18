@@ -30,7 +30,7 @@ import urllib.request
 import uuid
 
 ENDPOINT = "https://api.startrailcleanr.com/collect.php"
-SCHEMA_VERSION = 3          # 3 adds previous_version / updated_via
+SCHEMA_VERSION = 4          # 3 adds previous_version / updated_via; 4 adds stage_seconds / batches / cpu_cores / ram_gb
 _TIMEOUT_S = 8
 
 _APP_DIR = os.path.join(os.path.expanduser("~"), ".star_trail_cleanr")
