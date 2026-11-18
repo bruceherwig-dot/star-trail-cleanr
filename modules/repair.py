@@ -286,7 +286,7 @@ def _trail_streak(region, comp_mask):
     """Within comp_mask, return just the actual bright trail streak -- the large or
     elongated bright components -- leaving compact star blobs out, so stars sitting in
     the fat part of the mask can be kept. Used when there is no neighbor to borrow."""
-    lum = region.max(axis=2).astype(np.int32)
+    lum = _chan_max(region).astype(np.int32)
     bg = lum[~comp_mask]
     if bg.size < 20:
         return comp_mask.copy()
@@ -314,6 +314,21 @@ def _trail_streak(region, comp_mask):
 # and returns a confidence; _track_stars runs both and trusts the shift only when they
 # agree (or one is strongly confident), else reports failure so the caller pastes the
 # unshifted neighbor instead of sliding the wrong way. Log field: seg.n_stars.
+
+def _chan_max(a):
+    """The brightest channel of each pixel: the same values as a.max(axis=2).
+
+    For an ordinary three-channel patch the maximum of the three channel planes is
+    taken directly, which is about 13 times faster than numpy's reduction over a
+    short last axis (1.16 ms against 0.086 ms on a 170,000-pixel patch, measured
+    2026-11-17). Repair makes this call a dozen times per trail piece; on 6 busy
+    RAW frames those lines cost about 2.5 s. Any other shape keeps the original
+    call. The dtype is unchanged either way.
+    """
+    if a.ndim == 3 and a.shape[2] == 3:
+        return np.maximum(np.maximum(a[:, :, 0], a[:, :, 1]), a[:, :, 2])
+    return a.max(axis=2)
+
 
 def _find_star_streaks(g):
     """Find the stars in one patch and return where each one sits.
@@ -377,14 +392,31 @@ def _detect_shift(gp, gn):
                 cands.append((dx, dy, min(pw, nw)))
     if not cands:
         return None, 0
-    best = None
-    for dx, dy, _ in cands:
-        v = [c for c in cands if (c[0] - dx) ** 2 + (c[1] - dy) ** 2 <= 16]
-        s = sum(c[2] for c in v)
-        if best is None or s > best[0]:
-            best = (s, np.average([c[0] for c in v], weights=[c[2] for c in v]),
-                       np.average([c[1] for c in v], weights=[c[2] for c in v]), len(v))
-    return (best[1], best[2]), best[3]
+    # Which candidates sit within 4 px (squared distance <= 16) of each candidate.
+    # This used to be a Python loop that scanned every candidate for every candidate
+    # (about half of the star tracking time on 8 JPG frames, measured 2026-11-17);
+    # one array comparison now finds the same sets. The weights are still added up
+    # with Python's own sum, in the same order, because Python 3.12 and later add
+    # floats with compensated summation that numpy's sums do not reproduce. A pair
+    # whose squared distance lands within 1e-6 of 16 is re-decided with the original
+    # expression, so the boundary can never depend on how a power is rounded.
+    arr = np.array(cands, dtype=np.float64)
+    xs_, ys_, ws_ = arr[:, 0], arr[:, 1], arr[:, 2]
+    wlist = ws_.tolist()
+    d2 = (xs_[None, :] - xs_[:, None]) ** 2 + (ys_[None, :] - ys_[:, None]) ** 2
+    member = d2 <= 16
+    for bi, bj in zip(*np.nonzero(np.abs(d2 - 16.0) < 1e-6)):
+        member[bi, bj] = ((cands[bj][0] - cands[bi][0]) ** 2
+                          + (cands[bj][1] - cands[bi][1]) ** 2 <= 16)
+    best_s, best_idx = None, None
+    for i in range(len(cands)):
+        idx = np.flatnonzero(member[i]).tolist()
+        total = sum(wlist[k] for k in idx)
+        if best_s is None or total > best_s:
+            best_s, best_idx = total, idx
+    v = [cands[k] for k in best_idx]
+    return (np.average([c[0] for c in v], weights=[c[2] for c in v]),
+            np.average([c[1] for c in v], weights=[c[2] for c in v])), len(v)
 
 
 def _phase_shift(gp, gn):
@@ -573,7 +605,7 @@ def _darken_fill(patch_now, dmin, dmed, comp_mask, collar, maxv, dt):
         return patch_now, 0, None
     # Gate on the MEDIAN across the window (typical value), not the darkest frame -- the min
     # of a sky pixel is the star-free sky floor and reads as false "dark foreground".
-    fg = comp_mask & (dmed.max(axis=2).astype(np.float32) < _DARKEN_FG_FRAC * sky)
+    fg = comp_mask & (_chan_max(dmed).astype(np.float32) < _DARKEN_FG_FRAC * sky)
     if not fg.any():
         return patch_now, 0, sky
     out = patch_now.copy()
@@ -879,7 +911,7 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
             # 70th percentile); fall back to the full ring if too little sky is left to measure.
             _dilc = ((cv2.dilate(comp_mask.astype(np.uint8), _RING_KERNEL) > 0)
                      & ~trail[y0:y1, x0:x1])
-            _wmax = frame[y0:y1, x0:x1].max(2)
+            _wmax = _chan_max(frame[y0:y1, x0:x1])
             if int(_dilc.sum()) >= 20:
                 _sl = np.percentile(_wmax[_dilc], 70)                 # the collar's own sky level
                 _sky_only = _dilc & (_wmax > _COLLAR_SKY_FRAC * _sl)  # keep sky, drop dark foreground
@@ -1107,8 +1139,8 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                     _sky_lvl = float(np.median(_cpx.max(axis=1))) if _cpx.shape[0] >= 20 else 128.0
                     # Static where BOTH same-side neighbors are clean AND agree in brightness.
                     _still_e = ((~_nd) & (~_fd) &
-                                (np.abs(_near.max(axis=2).astype(np.int16) -
-                                        _far.max(axis=2).astype(np.int16)) < _STILL_TOL))
+                                (np.abs(_chan_max(_near).astype(np.int16) -
+                                        _chan_max(_far).astype(np.int16)) < _STILL_TOL))
                     # ALSO static: dark silhouette foreground in the near neighbor. Every user
                     # shoots on a fixed tripod, so opaque foreground (trunk, rock, building) is
                     # pixel-identical in every frame, and no trail or star is ever IN FRONT of
@@ -1116,15 +1148,15 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
                     # FAT trail mask claims the spot is dirty (the mask overhangs clean trunk --
                     # that veto is what left the poly-3 trunk notch: f2's mask covered the trunk
                     # edge, blocked the still test, and the slid fill nicked it). Dark = keep put.
-                    _still_e |= (_near.max(axis=2).astype(np.int16) < 0.5 * _sky_lvl)
+                    _still_e |= (_chan_max(_near).astype(np.int16) < 0.5 * _sky_lvl)
                     # Protect a slid star -- BUT only where it sits over SKY. A real star is
                     # never in front of the opaque trunk/rock, so a small bright patch over DARK
                     # foreground is sky slid over a foreground edge and MUST stay unshifted, not
                     # be rescued (that was the poly-3 notch: a bright sliver at a thin branch tip).
                     _extra_e = (_still_e
-                                & ((synth.max(axis=2).astype(np.int16) -
-                                    _unshift.max(axis=2).astype(np.int16)) > _STAR_MARGIN)
-                                & (_unshift.max(axis=2).astype(np.int16) > 0.5 * _sky_lvl))
+                                & ((_chan_max(synth).astype(np.int16) -
+                                    _chan_max(_unshift).astype(np.int16)) > _STAR_MARGIN)
+                                & (_chan_max(_unshift).astype(np.int16) > 0.5 * _sky_lvl))
                     if _extra_e.any():
                         _nl, _lab, _st, _ = cv2.connectedComponentsWithStats(
                             _extra_e.astype(np.uint8), 8)
@@ -1147,14 +1179,14 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
             if (_STILL_ROUTING and _rp is not None and _rn is not None
                     and raw_clean is not None):
                 _still = ((~_pdirty) & (~_ndirty) &
-                          (np.abs(_rp.max(axis=2).astype(np.int16) -
-                                  _rn.max(axis=2).astype(np.int16)) < _STILL_TOL))
+                          (np.abs(_chan_max(_rp).astype(np.int16) -
+                                  _chan_max(_rn).astype(np.int16)) < _STILL_TOL))
                 # Protect slid stars: a small bright blob the slide adds over the still
                 # background is a star at its correct (slid) position, so DON'T overwrite it
                 # with the star-free unshifted scene. Large bright regions (glow slid over
                 # foreground) are not stars and stay routed.
-                _extra = (_still & ((synth.max(axis=2).astype(np.int16) -
-                                     raw_clean.max(axis=2).astype(np.int16)) > _STAR_MARGIN))
+                _extra = (_still & ((_chan_max(synth).astype(np.int16) -
+                                     _chan_max(raw_clean).astype(np.int16)) > _STAR_MARGIN))
                 if _extra.any():
                     _nl, _lab, _st, _ = cv2.connectedComponentsWithStats(
                         _extra.astype(np.uint8), 8)
@@ -1314,11 +1346,11 @@ def repair_frame(frame: np.ndarray, mask: np.ndarray,
             # dark region medians dark (untouched); a star is bright (untouched). medianBlur ksize
             # 5 supports 8- and 16-bit, so it works on TIFFs too.
             _res = result[y0:y1, x0:x1]
-            _rmax = _res.max(axis=2).astype(np.int16)
+            _rmax = _chan_max(_res).astype(np.int16)
             _spk = comp_mask & (_rmax < _SPECKLE_DARK)
             if _spk.any():
                 _med = cv2.medianBlur(_res, 5)
-                _spk &= (_med.max(axis=2).astype(np.int16) - _rmax > _SPECKLE_MARGIN)
+                _spk &= (_chan_max(_med).astype(np.int16) - _rmax > _SPECKLE_MARGIN)
                 if _spk.any():
                     _res[_spk] = _med[_spk]
             _addt("paste_s", time.perf_counter() - _tp)
