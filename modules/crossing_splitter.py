@@ -177,6 +177,72 @@ def _dbscan_angles(angles, eps, min_samples):
     visited = [False] * n
     cluster_id = 0
 
+    # Neighbours of angle i: every angle within eps degrees of it (incl. itself), in
+    # index order. Worked out for all angles at once with the same arithmetic as
+    # _angle_dist (absolute difference, then the smaller of d and 180 - d), so the
+    # same angles are neighbours and the clusters come out identical. The one-pair-
+    # at-a-time loop this replaced was 3.7 of 5 s inside split_crossing on a busy
+    # 6-frame set (measured 2026-11-18).
+    arr = np.asarray(angles, dtype=np.float64)
+
+    def nbrs(i):
+        d = np.abs(arr[i] - arr)
+        return np.flatnonzero(np.minimum(d, 180.0 - d) <= eps).tolist()
+
+    for i in range(n):
+        if visited[i]:
+            continue
+        visited[i] = True
+        hood = nbrs(i)
+        # Too few neighbours -> not a core point; leave as noise for now (it may
+        # still be pulled into a cluster later as a border point).
+        if len(hood) < min_samples:
+            continue
+        # Start a new cluster from this core point and flood-fill outward.
+        labels[i] = cluster_id
+        seed = list(hood)
+        while seed:
+            q = seed.pop()
+            if not visited[q]:
+                visited[q] = True
+                q_hood = nbrs(q)
+                # Only core points expand the cluster further.
+                if len(q_hood) >= min_samples:
+                    seed.extend(q_hood)
+            # Absorb q as a border point if it isn't already claimed.
+            if labels[q] == -1:
+                labels[q] = cluster_id
+        cluster_id += 1
+
+    return labels, cluster_id
+
+
+def _dbscan_angles_reference(angles, eps, min_samples):
+    """THE ORIGINAL, kept as the test definition for _dbscan_angles (tests/test_dbscan_angles_numpy.py).
+
+    Group a list of orientation angles into clusters using DBSCAN.
+
+    This is a hand-rolled, from-scratch DBSCAN that runs on 1-D angle values
+    using the wrap-aware ``_angle_dist`` as its distance metric (so it correctly
+    treats angles near 0 and near 180 as close). It exists to find how many
+    distinct trail directions are present in a blob: each cluster is one
+    candidate trail orientation.
+
+    angles: list of angles in degrees, each in [0, 180).
+    eps: angular neighbourhood radius in degrees -- two angles within eps are
+        considered neighbours.
+    min_samples: minimum neighbours (including self) an angle needs to be a
+        "core" point that can grow a cluster.
+
+    Returns (labels, cluster_count) where ``labels[i]`` is the cluster id for
+    angle i (or -1 for noise/unclustered), and ``cluster_count`` is the number
+    of clusters formed.
+    """
+    n = len(angles)
+    labels = [-1] * n        # -1 means "not yet assigned to any cluster" (noise)
+    visited = [False] * n
+    cluster_id = 0
+
     # Neighbours of angle i: every angle within eps degrees of it (incl. itself).
     def nbrs(i):
         return [j for j in range(n) if _angle_dist(angles[i], angles[j]) <= eps]
