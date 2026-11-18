@@ -195,5 +195,7 @@ def test_the_picture_says_what_it_is_and_how_to_watch_it():
         sp = S.SummaryPanel("<b>done</b>", None, str(clip))
         texts = [lbl.text() for lbl in sp.findChildren(QLabel)]
     assert any("before and after clip" in t for t in texts), "the picture must say what it is"
-    assert any("Click thumbnail to watch" in t and "open folder" in t for t in texts)
+    assert any("open folder" in t for t in texts)
+    assert not any("Click thumbnail to watch" in t for t in texts), \
+        "the play button on the picture says it; the extra line was removed on purpose"
     assert sp._video_lbl is not None and "href='folder'" in sp._video_lbl.text()

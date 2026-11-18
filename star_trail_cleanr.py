@@ -6852,9 +6852,9 @@ class MainWindow(QMainWindow):
         # Shared call-to-action so both summary variants stay in step.
         stack_cta = (
             "<b>Ready for the fun part!</b><br>"
-            "Create your star trail or timelapse right here on the <b>Star Trail</b> "
-            "and <b>Timelapse</b> tabs above. Prefer to do it yourself? Open the "
-            "Cleaned Folder and load the frames into your favorite stacker "
+            "Your star trail is already saved! Watch the before and after below, then "
+            "see your star trail on the next tab. Prefer to do it yourself? Load the "
+            "cleaned frames into your favorite stacker<br>"
             "(StarStaX, Sequator, Photoshop, etc.)."
         )
         if total_trails <= 0:
@@ -9993,8 +9993,9 @@ class SummaryPanel(QWidget):
                 lbl.setMinimumWidth(60)
                 return lbl
             _what = _side("Check out this cool before and after clip", Qt.AlignRight)
+            # No "click the thumbnail" line: the play button on the picture says it
+            # (Bruce, 2026-11-18). Only the folder link sits beside it.
             vid = _side(
-                "Click thumbnail to watch<br><br>"
                 f"<a href='folder' style='color:{BRAND_HEADING_BLUE};'>"
                 "Click here to open folder</a>", Qt.AlignLeft)
             vid.setOpenExternalLinks(False)
