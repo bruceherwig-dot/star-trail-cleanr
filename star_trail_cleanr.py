@@ -1230,6 +1230,49 @@ def native_crash_message(returncode):
             "will help us fix it.")
 
 
+class StderrDrain:
+    """Reads the engine's error output while the engine runs.
+
+    WHY THIS EXISTS (2026-11-19, reported by a Windows user with 900 JPEGs).
+    The engine's stderr is a pipe with a small buffer. OpenCV writes one
+    warning per frame it cannot decode, so a few batches fill the pipe, the
+    engine blocks on the write, and the GUI (which only read stderr after the
+    engine exited) waits forever for the next line of stdout: a deadlock at
+    batch 2. Draining on a thread for the whole life of the process means the
+    pipe can never fill. Only the first and last lines are kept so a flood of
+    warnings cannot eat memory; the crash-report path reads them via text().
+    """
+
+    def __init__(self, stream, keep_head=300, keep_tail=300):
+        self._head, self._tail = [], []
+        self._keep_head, self._keep_tail = keep_head, keep_tail
+        self._elided = 0
+        self._lock = threading.Lock()
+        self._thread = threading.Thread(target=self._run, args=(stream,), daemon=True)
+        self._thread.start()
+
+    def _run(self, stream):
+        try:
+            for line in stream:
+                with self._lock:
+                    if len(self._head) < self._keep_head:
+                        self._head.append(line)
+                    else:
+                        self._tail.append(line)
+                        if len(self._tail) > self._keep_tail:
+                            self._tail.pop(0)
+                            self._elided += 1
+        except (ValueError, OSError):
+            pass
+
+    def text(self, wait=5.0):
+        """Everything kept so far (waits briefly for the reader to finish)."""
+        self._thread.join(wait)
+        with self._lock:
+            mid = [f"... ({self._elided} lines elided) ...\n"] if self._elided else []
+            return "".join(self._head + mid + self._tail)
+
+
 def worker_error_message(stderr_text, stdout_lines, returncode=None):
     """The message to show the user when an engine batch exits non-zero.
 
@@ -2086,6 +2129,7 @@ class CleanerWorker(QThread):
                     text=True, encoding="utf-8", errors="replace", bufsize=1,
                     env=worker_env,
                 )
+                self._stderr_drain = StderrDrain(self._proc.stderr)
                 cur_step = 0
                 detect_count = 0
                 repair_count = 0
@@ -2271,7 +2315,7 @@ class CleanerWorker(QThread):
                 if self._cancelled:
                     return
                 if self._proc.returncode != 0:
-                    stderr_text = self._proc.stderr.read().strip()
+                    stderr_text = self._stderr_drain.text().strip()
                     err_msg = worker_error_message(stderr_text, proc_stdout_lines,
                                                    self._proc.returncode)
 
