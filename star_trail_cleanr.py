@@ -4997,6 +4997,15 @@ class MainWindow(QMainWindow):
         self._step4_names.setWordWrap(True)
         self._step4_names.setTextInteractionFlags(Qt.TextSelectableByMouse)
         layout.addWidget(self._step4_names)
+        # A pause in the shoot shows here the moment the folder loads, before Run.
+        self._step4_gap_note = QLabel("")
+        self._step4_gap_note.setStyleSheet(
+            f"font-size: 14px; color: {BRAND_NOTICE_ORANGE};")
+        self._step4_gap_note.setWordWrap(True)
+        self._step4_gap_note.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._step4_gap_note.setVisible(False)
+        self._step4_gaps = (0, [])        # (load token, gaps) from the background load
+        layout.addWidget(self._step4_gap_note)
         self._frame_limit.currentTextChanged.connect(
             lambda _t: self._on_step4_limit_changed())
         self.step4_frames_ready.connect(self._on_step4_frames_ready)
@@ -5724,16 +5733,18 @@ class MainWindow(QMainWindow):
         self._step4_folder = folder
         self._step4_row.set_total(1)    # back to 0/0 and hidden until loaded
         self._step4_names.setText("")
+        self._step4_gap_note.setVisible(False)
         self._refit_setup_height()
         if not folder or not os.path.isdir(folder):
             return
 
         def _load():
             try:
-                from modules.frame_list import ordered_frame_list
-                frames = ordered_frame_list(folder)
+                from modules.frame_list import ordered_frame_list_and_gaps
+                frames, gaps = ordered_frame_list_and_gaps(folder)
             except Exception:
-                frames = []
+                frames, gaps = [], []
+            self._step4_gaps = (token, gaps)
             try:
                 self.step4_frames_ready.emit(folder, frames, token)
             except RuntimeError:
@@ -5752,6 +5763,13 @@ class MainWindow(QMainWindow):
         self._step4_prev = (0, 0)
         self._apply_step4_limit_to_bar()    # the saved number decides the first window
         self._update_step4_readout()
+        gap_token, gaps = self._step4_gaps
+        if gap_token == token and gaps:
+            from modules.frame_list import gap_notice
+            self._step4_gap_note.setText("<br>".join(gap_notice(frames, gaps)))
+            self._step4_gap_note.setVisible(True)
+        else:
+            self._step4_gap_note.setVisible(False)
         self._refit_setup_height()          # the row and file line just appeared
 
     def _step4_selection(self):

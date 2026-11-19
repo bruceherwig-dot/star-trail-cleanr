@@ -319,20 +319,92 @@ def ordered_frame_list(folder, prefer_raw=True):
     in star_trail_cleanr.py) on purpose: that code is order-sensitive and guarded
     by tests, so it is left alone. Reading capture times takes a second or two on
     a big folder, so callers run this off the screen thread."""
+    return ordered_frame_list_and_gaps(folder, prefer_raw=prefer_raw)[0]
+
+
+# A pause in the shoot (battery swap, card swap, stopped to reframe) breaks every
+# star trail at that spot, and the cleaning step cannot repair a trail that was
+# never shot. A gap counts as unusual when it is this many times the typical gap
+# between neighbouring frames, and never when it is shorter than the floor.
+# Starting guesses, to be tuned on real sets.
+GAP_FACTOR = 3.0
+GAP_FLOOR_SECONDS = 30.0
+GAP_MIN_FRAMES = 4          # fewer frames than this has no "typical" gap
+GAP_MAX_REPORTED = 3        # the biggest few are shown, never a wall of them
+
+
+def find_time_gaps(frames, times):
+    """Unusually long pauses between neighbouring frames, for a warning at load.
+
+    `frames` is the run's ordered list and `times` a dict path -> datetime or
+    None (the shutter time). Returns a list of (position, seconds, typical),
+    `position` being the 0-based index of the frame BEFORE the pause. At most
+    GAP_MAX_REPORTED, the longest ones, listed in shooting order.
+
+    Silent (returns []) when it cannot judge: any frame without a shutter time,
+    too few frames, or no positive gaps to take a typical value from. It only
+    reads; it never reorders or drops a frame."""
+    frames = list(frames)
+    if len(frames) < GAP_MIN_FRAMES:
+        return []
+    stamps = [times.get(f) for f in frames]
+    if any(t is None for t in stamps):
+        return []
+    diffs = [(stamps[i + 1] - stamps[i]).total_seconds() for i in range(len(stamps) - 1)]
+    positive = sorted(d for d in diffs if d > 0)
+    if not positive:
+        return []
+    mid = len(positive) // 2
+    typical = positive[mid] if len(positive) % 2 else (positive[mid - 1] + positive[mid]) / 2.0
+    limit = max(GAP_FLOOR_SECONDS, GAP_FACTOR * typical)
+    big = [(i, d, typical) for i, d in enumerate(diffs) if d > limit]
+    big = sorted(big, key=lambda g: -g[1])[:GAP_MAX_REPORTED]
+    return sorted(big, key=lambda g: g[0])
+
+
+def format_duration(seconds):
+    """Plain wording for a length of time: '45s', '3m 35s', '1h 4m'."""
+    s = int(round(seconds))
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        m, r = divmod(s, 60)
+        return f"{m}m {r}s" if r else f"{m}m"
+    h, r = divmod(s, 3600)
+    m = r // 60
+    return f"{h}h {m}m" if m else f"{h}h"
+
+
+def gap_notice(frames, gaps):
+    """One line of plain English per unusual gap, naming the frames either side."""
+    lines = []
+    for pos, secs, typical in gaps:
+        a = os.path.splitext(os.path.basename(str(frames[pos])))[0]
+        b = os.path.splitext(os.path.basename(str(frames[pos + 1])))[0]
+        lines.append(f"{format_duration(secs)} pause between {a} and {b} "
+                     f"(typical gap {format_duration(typical)}): trails will break there.")
+    return lines
+
+
+def ordered_frame_list_and_gaps(folder, prefer_raw=True):
+    """ordered_frame_list plus the unusual time gaps in it: (frames, gaps). The
+    capture times are read once and used for both the ordering and the gap check."""
     import glob
     frames = sorted(set(
         f for e in glob_patterns() for f in glob.glob(os.path.join(folder, e))
     ), key=natural_key)
     if not frames:
-        return []
+        return [], []
     frames = dedupe_frames(frames, prefer_raw=prefer_raw)
+    gaps = []
     try:
         from modules.io_safe import capture_time
         times = {f: capture_time(f) for f in frames}
         frames = order_by_capture_time(frames, times)
+        gaps = find_time_gaps(frames, times)
     except Exception:
         pass            # keep filename order, same as the run does
-    return frames
+    return frames, gaps
 
 
 def trim_from_end(frames, trim_end=0):
