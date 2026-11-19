@@ -591,7 +591,28 @@ def split_crossing(mask, frame_px=None):
 _EVIDENCE_MAX_FILL = 0.45
 
 
+_EVIDENCE_LAST = None    # (frame_px, copy of the mask, answer) of the most recent call
+
+
 def has_crossing_evidence(mask, frame_px=None):
+    """Is this blob a believable multi-trail crossing, even if it can't be split?
+
+    SPEED: the pipeline asks this about the same blob right after the crossing peel's own guard
+    already asked it (measured 2026-11-18: 52 repeat asks on 6 busy frames, about 0.2 s). The answer
+    to the most recent blob is remembered and reused only when the blob and frame size are exactly
+    the same, so the answer never differs. The work itself is _has_crossing_evidence_uncached."""
+    global _EVIDENCE_LAST
+    last = _EVIDENCE_LAST
+    if (last is not None and last[0] == frame_px and last[1].shape == mask.shape
+            and np.array_equal(last[1], mask)):
+        _st.count("fit.crossing_evidence", "answer_reused")
+        return last[2]
+    answer = _has_crossing_evidence_uncached(mask, frame_px)
+    _EVIDENCE_LAST = (frame_px, np.array(mask, copy=True), answer)
+    return answer
+
+
+def _has_crossing_evidence_uncached(mask, frame_px=None):
     """Is this blob a believable multi-trail crossing, even if it can't be split?
 
     Used as a RESCUE check by the detection pipeline: when split_crossing()

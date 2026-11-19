@@ -75,12 +75,9 @@ def _trail_width(blob):
     return (2.0 * float(np.median(v)) if len(v) else 0.0), sk
 
 
-def _best_line(pts, w):
-    """Strongest straight line through skeleton points pts (n,2 as x,y).
-
-    Tries every whole degree; for each, bins the points by perpendicular position and
-    keeps the angle and position with the most points (a bin plus its two neighbours).
-    Returns (theta_deg, rho, member_mask) where members lie within about 1.6 bins."""
+def _best_line_reference(pts, w):
+    """The original angle-by-angle search, kept as the definition of the answer
+    (tests/test_crossing_peel_speed.py compares the fast version against it)."""
     best_score, best_th, best_rho = 0.0, 0, 0.0
     tol = max(1.5, 0.30 * w)
     for th in range(0, 180):
@@ -96,6 +93,53 @@ def _best_line(pts, w):
     a = np.radians(best_th)
     perp = -pts[:, 0] * np.sin(a) + pts[:, 1] * np.cos(a)
     return best_th, best_rho, np.abs(perp - best_rho) <= 1.6 * tol
+
+
+# The sine and cosine of each whole degree, worked out one angle at a time exactly as the original
+# did, so the fast search below sees bit-for-bit the same numbers.
+_SIN = np.array([np.sin(np.radians(th)) for th in range(180)])
+_COS = np.array([np.cos(np.radians(th)) for th in range(180)])
+_FAST_SEARCH_MAX_CELLS = 6_000_000     # points x 180 angles; a bigger blob uses the one-by-one search
+
+
+def _best_line(pts, w):
+    """Strongest straight line through skeleton points pts (n,2 as x,y).
+
+    Tries every whole degree; for each, bins the points by perpendicular position and
+    keeps the angle and position with the most points (a bin plus its two neighbours).
+    Returns (theta_deg, rho, member_mask) where members lie within about 1.6 bins.
+
+    SPEED: all 180 angles are worked out together in one table instead of one numpy round
+    per angle (measured 2026-11-18: 0.98 s of the 3.2 s the peel took on 6 busy frames).
+    Same numbers, same tie-breaking (first angle, first bin), including the original's
+    wrap-around of the first and last bin; the one-by-one version above is the definition."""
+    n = len(pts)
+    if n == 0 or n * 180 > _FAST_SEARCH_MAX_CELLS:
+        return _best_line_reference(pts, w)
+    tol = max(1.5, 0.30 * w)
+    perp = -pts[:, 0][None, :] * _SIN[:, None] + pts[:, 1][None, :] * _COS[:, None]     # (180, n)
+    lo = perp.min(axis=1)
+    nb = ((perp.max(axis=1) - lo) / tol).astype(int) + 2                                 # bins per angle
+    width = int(nb.max())
+    idx = ((perp - lo[:, None]) / tol).astype(int)
+    flat = idx + (np.arange(180) * width)[:, None]
+    h = np.bincount(flat.ravel(), minlength=180 * width).astype(float).reshape(180, width)
+    hs = h.copy()
+    hs[:, 1:] += h[:, :-1]
+    hs[:, :-1] += h[:, 1:]
+    rows = np.arange(180)
+    hs[rows, 0] += h[rows, nb - 1]            # the original's wrap-around: last bin joins the first ...
+    hs[rows, nb - 1] += h[rows, 0]            # ... and the first joins the last
+    hs[np.arange(width)[None, :] >= nb[:, None]] = -1.0     # bins past an angle's own range do not exist
+    ks = hs.argmax(axis=1)
+    scores = hs[rows, ks]
+    th = int(scores.argmax())                  # first angle holding the top score
+    if not scores[th] > 0.0:
+        th, rho = 0, 0.0
+    else:
+        rho = lo[th] + int(ks[th]) * tol + tol / 2
+    a_perp = -pts[:, 0] * _SIN[th] + pts[:, 1] * _COS[th]
+    return th, rho, np.abs(a_perp - rho) <= 1.6 * tol
 
 
 def _apart(a, b):

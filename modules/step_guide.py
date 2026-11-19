@@ -172,7 +172,7 @@ STEPS = {
     "fit.crossing_evidence": (
         "Checking whether a blob is a tangle",
         "For a blob that would not split, checks whether it still shows two or more line directions, which means a tangle to keep whole.",
-        {"kept_whole": "tangles kept as one piece"}),
+        {"kept_whole": "tangles kept as one piece", "answer_reused": "checks answered from the identical blob just checked (no new work)"}),
     "fit.parallel_split": (
         "Separating side-by-side trails",
         "Splits a blob made of two parallel trails stuck together.",
