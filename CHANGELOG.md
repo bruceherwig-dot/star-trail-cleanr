@@ -2,6 +2,15 @@
 
 ---
 
+## v3.11-beta
+This release fixes a freeze that could stop a long run at the start of batch 2, and adds a little more speed in the crossing-trail steps. Thank you to the user who reported the freeze and worked out the cause. Cleaned frames are unchanged: on four test sets every cleaned frame and every mask file came out byte for byte the same as with v3.10.
+
+- **Fixed: a run could freeze at "Batch 2" and never finish (seen on Windows with about 900 large JPG frames).** The app only read the engine's error messages after the engine had finished. Some JPG files make the image library print one warning per frame it cannot decode (the engine then reads those frames another way, so the cleaning itself was fine). About 20 frames of warnings fit in the small pipe between the app and the engine, so batch 1 finished, and during batch 2 the pipe filled, the engine stopped to wait, and the app waited for the engine, so neither moved and the engine used no processor time at all. The app now reads the engine's messages the whole time it runs, so the pipe can never fill. If a batch really does fail, the crash report still carries the engine's first and last 300 lines of messages. A new test floods a stand-in engine with 20,000 warnings and fails if the run ever hangs.
+- **Faster: the crossing-trail steps.** Outlines that get dropped are now counted inside their own small box instead of across the whole picture (a test batch from one set went from 1.3 seconds to 0.03 seconds for that step). The line search in the crossing step now tries all 180 angles at once, and the tangle check reuses its answer when it sees an identical blob (that set's crossing step went from 3.4 seconds to 2.5 seconds and the tangle check from 0.72 seconds to 0.13 seconds).
+- **New: finer timers.** The timing table now also shows the inside of the crossing-trail steps, so the next speed-up can be aimed at the real cost.
+- **Behind the scenes:** each release now moves the project's main page on GitHub forward to match what shipped, so the version history link in the About tab and the NVIDIA setup guide link always work.
+- **Smoke tests:** 822 passing.
+
 ## v3.10-beta
 This release is about speed one more time, and about the app being able to say where its own time goes. Cleaned frames are unchanged: on four test sets (RAW to JPG, RAW to 16-bit TIFF and two JPG sets) every cleaned frame and every mask file came out byte for byte the same as with v3.09. All tests ran on a Mac using its graphics chip. Windows and Linux were not measured.
 
