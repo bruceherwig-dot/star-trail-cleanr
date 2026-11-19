@@ -46,6 +46,7 @@ import numpy as np
 from skimage.morphology import skeletonize
 
 from .crossing_splitter import has_crossing_evidence, _SPLIT_AREA_MIN, _REF_FRAME_PX
+from . import step_timer as _st    # records time and what fired, per sub-step (modules/step_guide.py explains each)
 
 # -- Constants ----------------------------------------------------------------
 MIN_LINE_WIDTHS = 1.5      # a line must be at least this many trail widths long to count
@@ -161,7 +162,8 @@ def _peel_lines(blob, w, sk):
         if alive.sum() < MIN_LINE_WIDTHS * w * 0.5:
             break
         p = pts[alive]
-        th, rho, mem = _best_line(p, w)
+        with _st.step("fit.peel_split.line_search"):
+            th, rho, mem = _best_line(p, w)
         a = np.radians(th)
         ux, uy = np.cos(a), np.sin(a)
         along = p[:, 0] * ux + p[:, 1] * uy
@@ -307,35 +309,47 @@ def peel_split(mask, frame_px=None):
     area_scale = (frame_px if frame_px else h * w_img) / _REF_FRAME_PX
     info = {"reason": "too_small", "lines": 0, "pieces": 1, "trail_width": 0.0, "arm_angle_apart": 0.0}
     if area < _SPLIT_AREA_MIN * area_scale:
+        _st.count("fit.peel_split", "left_whole_too_small")
         return [mask], info
     blob = (mask > 0).astype(np.uint8)
-    w, sk = _trail_width(blob)
+    with _st.step("fit.peel_split.skeleton"):
+        w, sk = _trail_width(blob)
     info["trail_width"] = round(w, 1)
     if w < MIN_TRAIL_WIDTH_PX:
         info["reason"] = "no_lines"
+        _st.count("fit.peel_split", "left_whole_too_thin")
         return [mask], info
-    lines = _peel_lines(blob, w, sk)
+    with _st.step("fit.peel_split.peel_lines"):
+        lines = _peel_lines(blob, w, sk)
     if len(lines) < 2:
         info["reason"] = "no_lines"
+        _st.count("fit.peel_split", "left_whole_fewer_than_two_lines")
         return [mask], info
-    lines = _merge_collinear(lines, w)
+    with _st.step("fit.peel_split.merge_pieces"):
+        lines = _merge_collinear(lines, w)
     info["lines"] = len(lines)
     if len(lines) < 2:
         info["reason"] = "no_lines"
+        _st.count("fit.peel_split", "left_whole_merged_to_one_line")
         return [mask], info
     # the guard: judged on the LINE pieces only (leftover chunks point every which way)
-    arm_pieces = [p for p in lines if (p > 0).sum() >= 5 and _long_side(p) >= MIN_ARM_WIDTHS * w]
-    arms = [_axis_angle(p) for p in arm_pieces]
-    apart = max((_apart(a, b) for i, a in enumerate(arms) for b in arms[i + 1:]), default=0.0)
-    info["arm_angle_apart"] = round(float(apart), 1)
-    # below GUARD_DEG the older splitter's crossing evidence may still say crossing (a low-angle X), but only
-    # when the lines run THROUGH each other: two lines meeting end to end at a shallow angle are a bend
-    if apart < GUARD_DEG and not (has_crossing_evidence(mask, frame_px=frame_px)
-                                  and _has_interior_crossing(arm_pieces, w)):
+    with _st.step("fit.peel_split.guard"):
+        arm_pieces = [p for p in lines if (p > 0).sum() >= 5 and _long_side(p) >= MIN_ARM_WIDTHS * w]
+        arms = [_axis_angle(p) for p in arm_pieces]
+        apart = max((_apart(a, b) for i, a in enumerate(arms) for b in arms[i + 1:]), default=0.0)
+        info["arm_angle_apart"] = round(float(apart), 1)
+        # below GUARD_DEG the older splitter's crossing evidence may still say crossing (a low-angle X), but only
+        # when the lines run THROUGH each other: two lines meeting end to end at a shallow angle are a bend
+        keep_whole = apart < GUARD_DEG and not (has_crossing_evidence(mask, frame_px=frame_px)
+                                                and _has_interior_crossing(arm_pieces, w))
+    if keep_whole:
         info["reason"] = "not_a_crossing"
+        _st.count("fit.peel_split", "left_whole_not_a_crossing")
         return [mask], info
-    lines, extra = _add_leftovers(blob, lines, w)
-    pieces = [_to_rectangle(p) for p in lines] + extra
+    with _st.step("fit.peel_split.leftovers"):
+        lines, extra = _add_leftovers(blob, lines, w)
+    with _st.step("fit.peel_split.rectangles"):
+        pieces = [_to_rectangle(p) for p in lines] + extra
     info["reason"] = "split"
     info["pieces"] = len(pieces)
     return pieces, info

@@ -120,7 +120,51 @@ STEPS = {
     "fit.peel_split": (
         "Cutting crossings into one rectangle per trail",
         "Where several trails cross or lie side by side in one blob, finds the straight lines and cuts the blob into one rectangle per trail.",
-        {"blobs_tried": "blobs examined", "peeled_into_pieces": "rectangles made"}),
+        {"blobs_tried": "blobs examined", "peeled_into_pieces": "rectangles made",
+         "left_whole_too_small": "blobs left whole: too small to be a crossing",
+         "left_whole_too_thin": "blobs left whole: trail too thin to peel",
+         "left_whole_fewer_than_two_lines": "blobs left whole: fewer than two straight lines found",
+         "left_whole_merged_to_one_line": "blobs left whole: the lines joined into one trail",
+         "left_whole_not_a_crossing": "blobs left whole: a bend, fork or ragged edge, not a crossing"}),
+    "fit.peel_split.skeleton": (
+        "Peel: thinning the blob and measuring the trail width",
+        "Inside the peel step: thins each blob to its centre line and measures how wide one trail is.", {}),
+    "fit.peel_split.peel_lines": (
+        "Peel: peeling straight lines off the blob",
+        "Inside the peel step: repeatedly finds the strongest straight line, claims the blob pixels along it, and sets it aside (includes the line search below).", {}),
+    "fit.peel_split.line_search": (
+        "Peel: searching every angle for the best line",
+        "Inside the peel step: tries each whole degree to find the angle with the most centre-line points on one line. Part of peeling lines, not extra time.", {}),
+    "fit.peel_split.merge_pieces": (
+        "Peel: joining pieces of one broken trail",
+        "Inside the peel step: joins line pieces that are really one trail broken in two where a crossing pinches the outline.", {}),
+    "fit.peel_split.guard": (
+        "Peel: deciding whether it is a real crossing",
+        "Inside the peel step: checks the lines point far enough apart (or show crossing evidence) so a bend or ragged edge is left whole.", {}),
+    "fit.peel_split.leftovers": (
+        "Peel: handling pixels no line claimed",
+        "Inside the peel step: merges thin fringe back into its trail and keeps real leftover chunks as their own pieces.", {}),
+    "fit.peel_split.rectangles": (
+        "Peel: turning each line into a rectangle",
+        "Inside the peel step: replaces each line piece by a clean rectangle along its axis.", {}),
+    "fit.split_crossing.blob_shape": (
+        "Older splitter: measuring the blob's shape",
+        "Inside the older crossing splitter: fits the tightest rotated box to see whether the blob is squat (a crossing) or long and thin.", {}),
+    "fit.split_crossing.line_search": (
+        "Older splitter: searching for straight lines",
+        "Inside the older crossing splitter: looks for straight line segments in the blob.", {}),
+    "fit.split_crossing.angle_clustering": (
+        "Older splitter: grouping lines by direction",
+        "Inside the older crossing splitter: groups the line segments by direction to see if there are two or more trail directions.", {}),
+    "fit.crossing_evidence.blob_shape": (
+        "Tangle check: measuring the blob's shape",
+        "Inside the tangle check: fits the tightest rotated box and works out how full it is (solid blobs are not tangles).", {}),
+    "fit.crossing_evidence.line_search": (
+        "Tangle check: searching for straight lines",
+        "Inside the tangle check: looks for straight line segments in the blob.", {}),
+    "fit.crossing_evidence.angle_clustering": (
+        "Tangle check: grouping lines by direction",
+        "Inside the tangle check: groups the line segments by direction to see if there are two or more trail directions.", {}),
     "fit.split_crossing": (
         "Splitting simple crossings",
         "The older way of separating two trails that cross, used when the peel step does not apply.",

@@ -58,6 +58,7 @@ import cv2
 import math
 import numpy as np
 from skimage.measure import label as sklabel, regionprops as skregionprops
+from . import step_timer as _st    # records time per sub-step (modules/step_guide.py explains each)
 
 
 # -- Constants ----------------------------------------------------------------
@@ -357,7 +358,8 @@ def split_crossing(mask, frame_px=None):
     blob_u8 = (mask > 0).astype(np.uint8) * 255
     ys, xs = np.where(blob_u8 > 0)
     pts = np.column_stack([xs, ys]).astype(np.float32)
-    rect = cv2.minAreaRect(pts.reshape(-1, 1, 2))
+    with _st.step("fit.split_crossing.blob_shape"):
+        rect = cv2.minAreaRect(pts.reshape(-1, 1, 2))
     major_len = max(rect[1])      # rect[1] is (width, height) of the box
     minor_len = min(rect[1])
     if minor_len < 1:
@@ -374,10 +376,11 @@ def split_crossing(mask, frame_px=None):
     col_lo, col_hi = int(xs.min()), int(xs.max())
     blob_crop = blob_u8[row_lo:row_hi + 1, col_lo:col_hi + 1]
     local_threshold = 10 if area < 20000 else _HOUGH_THRESHOLD
-    lines_crop = cv2.HoughLinesP(blob_crop, 1, np.pi / 180,
-                                 threshold=local_threshold,
-                                 minLineLength=_HOUGH_MIN_LINE,
-                                 maxLineGap=_HOUGH_MAX_GAP)
+    with _st.step("fit.split_crossing.line_search"):
+        lines_crop = cv2.HoughLinesP(blob_crop, 1, np.pi / 180,
+                                     threshold=local_threshold,
+                                     minLineLength=_HOUGH_MIN_LINE,
+                                     maxLineGap=_HOUGH_MAX_GAP)
     if lines_crop is None or len(lines_crop) < 2:
         return [mask]  # need at least 2 line segments to detect a crossing
 
@@ -390,8 +393,9 @@ def split_crossing(mask, frame_px=None):
     # -- Angle clustering ------------------------------------------------------
     # Group the line segments by orientation. Each cluster is one candidate
     # trail direction; a true crossing produces 2+ clusters at different angles.
-    angles = [_line_angle_deg(L[0]) for L in lines]
-    labels, _ = _dbscan_angles(angles, _DBSCAN_EPS, _DBSCAN_MIN_SAMPLES)
+    with _st.step("fit.split_crossing.angle_clustering"):
+        angles = [_line_angle_deg(L[0]) for L in lines]
+        labels, _ = _dbscan_angles(angles, _DBSCAN_EPS, _DBSCAN_MIN_SAMPLES)
     unique = sorted(set(l for l in labels if l >= 0))  # drop noise (-1)
     if not unique:
         return [mask]  # no coherent direction found
@@ -612,7 +616,8 @@ def has_crossing_evidence(mask, frame_px=None):
         return False                    # too small to be a multi-trail tangle
     ys, xs = np.where(mask > 0)
     pts = np.column_stack([xs, ys]).astype(np.float32)
-    rect = cv2.minAreaRect(pts.reshape(-1, 1, 2))
+    with _st.step("fit.crossing_evidence.blob_shape"):
+        rect = cv2.minAreaRect(pts.reshape(-1, 1, 2))
     major_len = max(rect[1])
     minor_len = max(1e-6, min(rect[1]))
     fill = area / max(1.0, major_len * minor_len)
@@ -621,14 +626,16 @@ def has_crossing_evidence(mask, frame_px=None):
     blob_u8 = (mask > 0).astype(np.uint8) * 255
     crop = blob_u8[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
     local_threshold = 10 if area < 20000 else _HOUGH_THRESHOLD
-    lines = cv2.HoughLinesP(crop, 1, np.pi / 180,
-                            threshold=local_threshold,
-                            minLineLength=_HOUGH_MIN_LINE,
-                            maxLineGap=_HOUGH_MAX_GAP)
+    with _st.step("fit.crossing_evidence.line_search"):
+        lines = cv2.HoughLinesP(crop, 1, np.pi / 180,
+                                threshold=local_threshold,
+                                minLineLength=_HOUGH_MIN_LINE,
+                                maxLineGap=_HOUGH_MAX_GAP)
     if lines is None or len(lines) < 2:
         return False                    # no coherent line structure at all
-    angles = [_line_angle_deg(L[0]) for L in lines]
-    labels, _ = _dbscan_angles(angles, _DBSCAN_EPS, _DBSCAN_MIN_SAMPLES)
+    with _st.step("fit.crossing_evidence.angle_clustering"):
+        angles = [_line_angle_deg(L[0]) for L in lines]
+        labels, _ = _dbscan_angles(angles, _DBSCAN_EPS, _DBSCAN_MIN_SAMPLES)
     unique = sorted(set(l for l in labels if l >= 0))
     if len(unique) < 2:
         return False                    # one direction = a single trail, not a crossing
