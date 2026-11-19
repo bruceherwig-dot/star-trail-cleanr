@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Star Trail CleanR · Community Stats</title>
+<style>
+  :root{
+    --navy:#0a1e3f; --navy2:#0c2c5c; --blue:#1a6fc4; --blue-h:#1580e0;
+    --sub:#a8c0e0; --star:#f3d08a;
+    --bg:#ffffff; --bg2:#f4f7fb; --text:#16263f; --muted:#5b6b82; --line:#e3e9f2;
+    --maxw:1080px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;line-height:1.6;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:var(--maxw);margin:0 auto;padding:0 24px}
+  a{color:inherit;text-decoration:none}
+  header{position:sticky;top:0;z-index:50;background:var(--navy);border-bottom:1px solid rgba(255,255,255,.08)}
+  nav{max-width:var(--maxw);margin:0 auto;padding:0 24px;height:66px;display:flex;align-items:center;justify-content:space-between}
+  .brand{display:flex;align-items:center;gap:11px;font-weight:600;font-size:18px;color:#fff;letter-spacing:.2px}
+  .brand .logotile{width:40px;height:40px;border-radius:10px;background:#fff;display:flex;align-items:center;justify-content:center;flex:none}
+  .brand .logotile img{width:34px;height:34px;border-radius:7px;display:block}
+  .navlinks{display:flex;gap:26px;align-items:center;font-size:15px}
+  .navlinks a{color:var(--sub);white-space:nowrap}
+  .navlinks a:hover,.navlinks a.on{color:#fff}
+  .btn{display:inline-block;background:var(--blue);color:#fff;font-weight:600;padding:11px 20px;border-radius:8px;font-size:15px}
+  .btn:hover{background:var(--blue-h)}
+  .pagehead{background:var(--bg2);border-bottom:1px solid var(--line);padding:54px 0 44px}
+  .kicker{color:var(--blue);font-weight:600;font-size:14px;letter-spacing:1px;text-transform:uppercase}
+  .pagehead h1{font-size:40px;letter-spacing:-1px;color:var(--navy);margin:10px 0 8px}
+  .pagehead p{color:var(--muted);font-size:16px;max-width:620px}
+  .tiles{display:grid;grid-template-columns:repeat(5,1fr);gap:18px;margin:44px 0 8px}
+  .tiles.bottom{grid-template-columns:repeat(4,minmax(0,240px));justify-content:center}
+  .tile{background:var(--bg2);border:1px solid var(--line);border-radius:14px;padding:22px 18px;text-align:center}
+  .tile .num{font-size:40px;font-weight:700;letter-spacing:-1px;color:var(--navy);font-variant-numeric:tabular-nums;line-height:1}
+  .tile .lbl{color:var(--muted);font-size:14px;margin-top:10px}
+  .cards{display:grid;grid-template-columns:repeat(2,1fr);gap:22px;margin:34px 0}
+  .card{background:var(--bg);border:1px solid var(--line);border-radius:14px;padding:24px}
+  .card h3{font-size:13px;text-transform:uppercase;letter-spacing:1px;color:var(--blue);font-weight:600;margin-bottom:18px}
+  .cnote{color:var(--muted);font-size:12px;line-height:1.55;margin:-10px 0 16px}
+  .row{display:flex;align-items:center;gap:12px;margin:11px 0;font-size:15px}
+  .row.hidden{display:none}
+  .row .name{flex:none;width:160px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .row .track{flex:1;height:9px;background:var(--bg2);border-radius:6px;overflow:hidden}
+  .row .fill{height:100%;background:var(--blue);border-radius:6px}
+  .row .val{flex:none;width:74px;text-align:right;color:var(--muted);font-variant-numeric:tabular-nums}
+  /* Wide rows: long combined names (full recipe, settings, lenses) get the whole
+     row width and drop the progress bar, so nothing gets clipped by an ellipsis. */
+  .row.wide .name{flex:1;width:auto;white-space:normal}
+  .row.wide .track{display:none}
+  .showall{display:inline-block;margin-top:14px;color:var(--blue);font-weight:600;font-size:14px;cursor:pointer}
+  .showall:hover{text-decoration:underline}
+  .empty{color:var(--muted);font-size:14px;padding:4px 0}
+  .facts{display:grid;grid-template-columns:repeat(4,1fr);gap:18px}
+  .fact .fnum{font-size:26px;font-weight:700;color:var(--navy);font-variant-numeric:tabular-nums}
+  .fact .flbl{font-size:13px;color:var(--muted)}
+  .note{text-align:center;color:var(--muted);font-size:13px;margin:8px 0 50px}
+  footer{background:var(--navy);color:var(--sub);padding:38px 0;font-size:14px}
+  footer .wrap{display:flex;justify-content:space-between;flex-wrap:wrap;gap:14px}
+  footer .brandf{color:#fff;font-weight:600}
+  footer a{color:#fff;text-decoration:underline}
+  @media(max-width:760px){
+    .navlinks{display:none}
+    .tiles{grid-template-columns:repeat(2,1fr)}
+    .tiles.bottom{grid-template-columns:repeat(2,1fr)}
+    .facts{grid-template-columns:repeat(2,1fr)}
+    .cards{grid-template-columns:1fr}
+    .pagehead h1{font-size:30px}
+    .row .name{width:120px}
+  }
+
+  /* --- mobile hamburger menu --- */
+  .navtoggle{display:none;background:none;border:0;color:#fff;font-size:26px;line-height:1;cursor:pointer;padding:4px 8px}
+  @media(max-width:720px){
+    nav{flex-wrap:wrap;height:auto;min-height:66px}
+    .navtoggle{display:block;order:2}
+    .brand{order:1}
+    nav .btn{display:none}
+    .navlinks{order:3}
+    header.open .navlinks{display:flex;flex-direction:column;flex-basis:100%;width:100%;padding:4px 0 14px;gap:0}
+    header.open .navlinks a{padding:11px 2px;font-size:17px}
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <nav>
+    <a class="brand" href="index.html"><span class="logotile"><img src="logo.png" alt="Star Trail CleanR logo"></span> Star Trail CleanR</a>
+    <div class="navlinks">
+      <a href="index.html#how">How it works</a>
+      <a href="index.html#gallery">Gallery</a>
+      <a href="index.html#download">Download</a>
+      <a href="research.html">Research</a>
+      <a href="how-to-photograph-star-trails.html">Star Trail Basics</a>
+      <a href="index.html#thanks">Thanks</a>
+      <a href="index.html#about">About</a>
+    </div>
+    <a class="btn" href="index.html#download">Download free</a>
+    <button class="navtoggle" aria-label="Menu" aria-expanded="false">&#9776;</button>
+</nav>
+</header>
+
+<section class="pagehead">
+  <div class="wrap">
+    <div class="kicker">Community Stats</div>
+    <h1>Star Trail CleanR by the numbers</h1>
+    <p>Totals from photographers who opted in to share anonymous usage. No images, file names, or locations beyond country. Refreshed continually.</p>
+  </div>
+</section>
+
+<div class="wrap">
+
+  <div class="tiles">
+    <div class="tile"><div class="num" id="t-trails">…</div><div class="lbl">Trails cleaned</div></div>
+    <div class="tile"><div class="num" id="t-hours">…</div><div class="lbl">Hours saved</div></div>
+    <div class="tile"><div class="num" id="t-downloads">…</div><div class="lbl">Downloads</div></div>
+    <div class="tile"><div class="num" id="t-users">…</div><div class="lbl">Verified users since June 24, 2026</div></div>
+    <div class="tile"><div class="num" id="t-countries">…</div><div class="lbl">Countries</div></div>
+  </div>
+
+  <div class="cards">
+    <div class="card"><h3>Platforms</h3>
+      <div class="cnote">One per photographer, taken from their most recent run. Everyone counts here, including people whose only run was a short test batch.</div>
+      <div id="c-platforms"><div class="empty">Loading…</div></div></div>
+    <div class="card"><h3>Source files</h3>
+      <div class="cnote">One per run. Test batches of 20 frames or fewer are left out, so a warm-up doesn't count as a real set.</div>
+      <div id="c-formats"><div class="empty">Loading…</div></div></div>
+    <div class="card"><h3>Orientation</h3>
+      <div class="cnote">One per run. Test batches are left out. Perfectly square frames are skipped, so these two won't always add up to the run total.</div>
+      <div id="c-orientation"><div class="empty">Loading…</div></div></div>
+    <div class="card"><h3>GPU vs CPU</h3>
+      <div class="cnote">One per photographer, not per run, so someone who runs ten times on a GPU doesn't tip the split. Test batches are left out. Anyone who has used both is counted under both, so these can add up to more than the photographer total.</div>
+      <div id="c-gpu-cpu"><div class="empty">Loading…</div></div></div>
+    <div class="card"><h3>Most-used cameras</h3>
+      <div class="cnote">One per photographer, not per run, so nobody can climb the list by running the app more. Test batches are left out. Anyone who shoots two bodies is counted under both, so these can add up to more than the photographer total.</div>
+      <div id="c-cameras"><div class="empty">Loading…</div></div></div>
+    <div class="card"><h3>Most-used camera brands</h3>
+      <div class="cnote">One per photographer. Test batches are left out. Someone who shoots two makes appears under both. Unknown means the run carried no readable camera name (RAW files and stripped JPEGs don't report one).</div>
+      <div id="c-brands"><div class="empty">Loading…</div></div></div>
+    <div class="card"><h3>Full frame vs crop</h3>
+      <div class="cnote">One per photographer. Test batches are left out. Read from the camera model, or from the crop factor (35mm-equivalent focal length) when the file reports it. "Not determined" means we couldn't tell (no readable camera name and no crop factor).</div>
+      <div id="c-sensor"><div class="empty">Loading…</div></div></div>
+    <div class="card"><h3>Most-used lenses</h3>
+      <div class="cnote">One per photographer. Test batches are left out. Anyone who shoots two lenses appears under both. Unknown means no run carried a readable lens name, which is common with RAW files, stripped JPEGs, and manual or adapted lenses that report nothing to the camera.</div>
+      <div id="c-lenses"><div class="empty">Loading…</div></div></div>
+    <div class="card"><h3>Most-used focal lengths</h3>
+      <div class="cnote">One per photographer, rounded to the nearest millimeter. Test batches are left out. A zoom used at two lengths counts at both. Unknown means no run carried a focal length, which is what a manual or adapted lens reports, since it tells the camera nothing about itself.</div>
+      <div id="c-focal"><div class="empty">Loading…</div></div></div>
+    <div class="card"><h3>Most-used ISO</h3>
+      <div class="cnote">One per photographer, not per run. Test batches are left out. Anyone who shoots at several ISOs counts at each, so these can total more than the photographer count.</div>
+      <div id="c-iso"><div class="empty">Loading…</div></div></div>
+    <div class="card"><h3>Most-used shutter speed</h3>
+      <div class="cnote">One per photographer, not per run. Test batches are left out. Anyone who shoots several shutter speeds counts at each.</div>
+      <div id="c-shutter"><div class="empty">Loading…</div></div></div>
+    <div class="card"><h3>Most-used aperture</h3>
+      <div class="cnote">One per photographer, not per run. Test batches are left out. Anyone who shoots several apertures counts at each.</div>
+      <div id="c-aperture"><div class="empty">Loading…</div></div></div>
+    <div class="card"><h3>Most-used settings</h3>
+      <div class="cnote">ISO, shutter speed, aperture, and focal length together, exactly as the set was shot. Counts every set rather than one per photographer, so a photographer who ran several sets shows up several times. Test batches are left out. When the lens didn't report aperture and focal length, that shows as "lens not reporting," and sets with no usable EXIF at all are grouped as "No data collected" at the bottom.</div>
+      <div id="c-recipe"><div class="empty">Loading…</div></div></div>
+    <div class="card"><h3>Megapixels per set</h3>
+      <div class="cnote">How big the frames in each cleaned set were, in megapixels. Counts every set rather than one per photographer, same as the settings list, and test batches are left out.</div>
+      <div id="c-mp"><div class="empty">Loading…</div></div></div>
+    <div class="card"><h3>Where in the world</h3>
+      <div class="cnote">One per photographer. Everyone counts here, including test batches. Photographers who ran before country lookup existed aren't shown.</div>
+      <div id="c-countries"><div class="empty">Loading…</div></div></div>
+    <div class="card"><h3>Versions in use<span id="ver-cur"></span></h3>
+      <div class="cnote">One per photographer, taken from their most recent run, so this shows what people are on today rather than every version they've ever used.</div>
+      <div id="c-versions"><div class="empty">Loading…</div></div></div>
+    <div class="card" style="grid-column:1/-1"><h3>On an average run</h3>
+      <div class="cnote">Runs over 20 frames only. The app asks people to try a short batch first, and those warm-ups would drag every average down, so they're left out.</div>
+      <div class="facts">
+        <div class="fact"><div class="fnum" id="f-frames">…</div><div class="flbl">Frames per run, average</div></div>
+        <div class="fact"><div class="fnum" id="f-tpf">…</div><div class="flbl">Trails removed per frame</div></div>
+        <div class="fact"><div class="fnum" id="f-trails">…</div><div class="flbl">Trails per run, average</div></div>
+        <div class="fact"><div class="fnum" id="f-saved">…</div><div class="flbl">Time saved per run</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="tiles bottom">
+    <div class="tile"><div class="num" id="t-runs">…</div><div class="lbl">Times run</div></div>
+    <div class="tile"><div class="num" id="t-gpu">…</div><div class="lbl">Windows users on the GPU</div></div>
+    <div class="tile"><div class="num" id="t-st">…</div><div class="lbl">Star trails created</div></div>
+    <div class="tile"><div class="num" id="t-tl">…</div><div class="lbl">Timelapse videos created</div></div>
+  </div>
+
+  <div class="note">Most lists rank by the number of photographers using each item, so one heavy user can't skew them, and they grow as more gear is seen. The exceptions are noted on each card. Short test batches of 20 frames or fewer don't count toward the gear and settings lists. No images, file names, or any personal information is ever collected.</div>
+
+</div>
+
+<footer>
+  <div class="wrap">
+    <div><span class="brandf">Star Trail CleanR</span> &middot; Remove the Trails. Keep the Stars.</div>
+    <div>Free beta &middot; <a href="stats.html">Stats</a> &middot; <a href="https://www.instagram.com/bruceherwig" target="_blank" rel="noopener">@bruceherwig</a></div>
+  </div>
+</footer>
+
+<script>
+function fmtNum(n){return (n==null?0:n).toLocaleString();}
+function fmtDur(sec){sec=Math.round(sec||0);var h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60),s=sec%60;if(h>0)return h+'h '+m+'m';if(m>0)return m+'m '+s+'s';return s+'s';}
+function animate(el,target,suffix){var t=Math.round(target||0),d=1200,t0=null,sfx=suffix||'';
+  function step(ts){if(!t0)t0=ts;var p=Math.min(1,(ts-t0)/d);
+    el.textContent=Math.round(t*(1-Math.pow(1-p,3))).toLocaleString()+sfx;
+    if(p<1)requestAnimationFrame(step);}
+  requestAnimationFrame(step);}
+function esc(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML;}
+function bars(id, items, unit, wide){
+  var el=document.getElementById(id);
+  if(!items||!items.length){el.innerHTML='<div class="empty">Not enough data yet.</div>';return;}
+  var max=items[0].count||1, total=items.reduce(function(s,i){return s+i.count;},0)||1, html='';
+  items.forEach(function(it,idx){
+    var w=Math.round(it.count/max*100);
+    var pct=Math.round(it.count/total*100);
+    var val=unit==='pct'?pct+'%':(unit==='both'?fmtNum(it.count)+' ('+pct+'%)':fmtNum(it.count));
+    html+='<div class="row'+(wide?' wide':'')+(idx>=8?' extra hidden':'')+'"><span class="name" title="'+esc(it.name)+'">'+esc(it.name)+'</span><span class="track"><span class="fill" style="width:'+w+'%"></span></span><span class="val">'+val+'</span></div>';
+  });
+  if(items.length>8) html+='<a class="showall" data-n="'+items.length+'">Show all '+items.length+'</a>';
+  el.innerHTML=html;
+}
+document.addEventListener('click',function(e){
+  var t=e.target;
+  if(t&&t.classList&&t.classList.contains('showall')){
+    var card=t.closest('.card');
+    var expanded=card.classList.toggle('expanded');
+    card.querySelectorAll('.row.extra').forEach(function(r){r.classList.toggle('hidden',!expanded);});
+    t.textContent=expanded?'Show less':'Show all '+t.getAttribute('data-n');
+    if(!expanded) card.scrollIntoView({behavior:'smooth',block:'start'});
+  }
+});
+fetch('https://api.startrailcleanr.com/stats.php',{cache:'no-store'})
+  .then(function(r){return r.json();})
+  .then(function(d){
+    animate(document.getElementById('t-runs'),d.runs);
+    animate(document.getElementById('t-trails'),d.trails_cleaned);
+    animate(document.getElementById('t-hours'),d.hours_saved);
+    animate(document.getElementById('t-downloads'),d.downloads_total);
+    animate(document.getElementById('t-users'),d.photographers!=null?d.photographers:d.users);
+    animate(document.getElementById('t-countries'),d.countries_count);
+    document.getElementById('t-countries').nextElementSibling.textContent=(d.countries_count===1?'Country':'Countries');
+    animate(document.getElementById('t-gpu'),d.windows_gpu,d.windows_gpu_pct!=null?' ('+d.windows_gpu_pct+'%)':'');
+    animate(document.getElementById('t-st'),d.startrails||0);
+    animate(document.getElementById('t-tl'),d.timelapses);
+    bars('c-platforms', d.platforms, 'pct');
+    bars('c-versions', d.versions, 'both');
+    var vc=document.getElementById('ver-cur'); if(vc&&d.current_version) vc.textContent=' (current '+d.current_version+')';
+    bars('c-formats', d.formats, 'pct');
+    bars('c-orientation', d.orientation, 'pct');
+    bars('c-gpu-cpu', d.gpu_vs_cpu, 'pct');
+    bars('c-cameras', d.cameras, 'count');
+    bars('c-brands', d.camera_brands, 'both');
+    bars('c-sensor', d.sensor, 'both');
+    bars('c-lenses', d.lenses, 'count', true);
+    bars('c-focal', d.focal_lengths, 'count');
+    bars('c-iso', d.iso, 'count');
+    bars('c-shutter', d.shutter, 'count');
+    bars('c-aperture', d.aperture, 'count');
+    bars('c-recipe', d.full_recipe, 'count', true);
+    bars('c-mp', d.megapixels, 'count');
+    bars('c-countries', d.countries, 'count');
+    document.getElementById('f-frames').textContent=fmtNum(d.avg_frames);
+    document.getElementById('f-trails').textContent=fmtNum(d.avg_trails_per_run);
+    document.getElementById('f-tpf').textContent=(d.trails_per_frame!=null?d.trails_per_frame:0);
+    document.getElementById('f-saved').textContent=fmtDur(d.avg_time_saved_sec);
+  })
+  .catch(function(){
+    document.querySelectorAll('.tile .num').forEach(function(n){if(n.textContent==='…')n.textContent='—';});
+    document.querySelectorAll('.card .empty').forEach(function(n){n.textContent='Stats are taking a moment. Refresh to retry.';});
+  });
+</script>
+
+<script>(function(){var h=document.querySelector("header"),t=h&&h.querySelector(".navtoggle");if(t){t.addEventListener("click",function(){var o=h.classList.toggle("open");t.setAttribute("aria-expanded",o?"true":"false");});}})();</script>
+</body>
+</html>

@@ -1,3 +1,56 @@
+"""Star Trail CleanR — the desktop app (this is the program the user runs).
+
+WHAT THIS PROGRAM IS FOR
+A photographer shoots a few hundred night-sky frames on a fixed tripod and
+stacks them into a star trail. Aircraft and satellites cross the sky during the
+shoot and leave straight streaks across the picture. This app finds those
+streaks and paints them out, frame by frame, while leaving the real stars alone,
+and hands back a cleaned copy of every frame to stack.
+
+THIS FILE IS THE WHOLE USER INTERFACE. It is large because it is the entire app:
+window, tabs, settings, the mask painter, the run screen, the star trail and
+timelapse builders, the update banner, and the run orchestration. It does NOT do
+any image cleaning itself.
+
+THE ONE STRUCTURAL IDEA — THIS FILE RUNS ITSELF AS A SEPARATE PROGRAM
+The cleaning engine lives in astro_clean_v5.py and runs as a SEPARATE PROCESS,
+not as an import. To spawn it, the app re-runs its own executable with
+`--cleanr-worker <script> ...` (see the top of this file, and SCRIPT /
+SHARE_SCRIPT below). The re-invoked process notices that flag and becomes the
+engine instead of opening a window.
+
+The reason is that a frozen app has no Python interpreter to call: `sys.executable`
+IS the app. So "run a script" has to mean "run myself, in worker mode".
+
+Consequences worth knowing before changing anything here:
+  - The GUI and the engine share NO memory. Everything the engine needs arrives
+    as command-line arguments, and everything it reports comes back as lines of
+    text on stdout, which the GUI parses to move the progress bar.
+  - A crash in the engine cannot take the window down, and a heavy run cannot
+    freeze the interface.
+  - The two sides can DISAGREE, and that is the bug class to watch for. The GUI
+    decides which frames to clean and in what order and writes them to a
+    manifest file; the engine reads that manifest verbatim. When those two lists
+    were built at different moments, users got "need >= 3 frames (got 0)" and
+    could not run the app at all (fixed 2026-08-21; the tests that lock it are in
+    tests/test_manifest_matches_plan.py).
+
+HOW ONE RUN GOES
+  1. Scan the folder: list frames, drop duplicate RAW/JPG/TIFF twins, order by
+     capture time, measure every frame, keep the dominant size.
+  2. Plan batches of up to 20 frames (star motion over a longer span breaks the
+     repair) and write the frame manifest.
+  3. For each batch, spawn the engine and stream its output into the progress bar.
+  4. At the end, build the share outputs (star trail stack, before/after video)
+     and, if the user opted in, send one anonymous usage report.
+
+WHERE THE REST LIVES
+  - astro_clean_v5.py     the cleaning engine (detect + repair), one batch per run
+  - modules/              the real work: detection, repair, image IO, updates
+  - make_share_clip.py    star trail stacks and the before/after video
+  - ARCHITECTURE.md       the map of the whole codebase, read that first
+  - AUTO_UPDATE.md        how updating works; read before touching any of it
+"""
 import sys
 import os
 import re
@@ -25,13 +78,91 @@ if sys.platform == 'win32' and getattr(sys, 'frozen', False):
 if len(sys.argv) > 1 and sys.argv[1] == '--cleanr-worker':
     script = sys.argv[2]
     sys.argv = [script] + sys.argv[3:]
+    # A native crash (access violation inside a compiled library) kills the process
+    # with no Python error at all, so the crash report arrives blank (Sentry
+    # 7825670217, 2026-11-02). faulthandler writes the Python call stack to stderr
+    # at the moment of death, which lands in the report and names the step.
+    try:
+        import faulthandler
+        if sys.stderr is not None:
+            faulthandler.enable(file=sys.stderr, all_threads=True)
+    except Exception:
+        pass
     import runpy
     runpy.run_path(script, run_name='__main__')
     sys.exit(0)
 
+"""
+star_trail_cleanr.py — Star Trail CleanR desktop application (GUI)
+
+WHAT THIS APP DOES
+------------------
+Star Trail CleanR removes airplane and satellite trails from astrophotography
+image sequences. Astrophotographers capture hundreds of frames of the night sky
+over hours, then stack them into a single "star trail" composite. Any aircraft or
+satellite that crosses the field of view during those hours leaves a bright streak
+in the final image. This app finds those streaks and removes them — frame by frame,
+automatically — before the user stacks.
+
+WHO USES IT
+-----------
+Amateur and semi-professional astrophotographers shooting star trail sequences on
+fixed tripods. The foreground (landscape, buildings, trees) is perfectly static
+across every frame. The stars move in arcs. Anything else moving through the frame
+is a trail to be removed.
+
+THE TWO-STEP PIPELINE
+---------------------
+1. Detect: YOLO AI model (Trail DetectoR) finds trail pixels in each frame via
+   tiled inference (SAHI). The sky/foreground mask limits false positives.
+   Static false positives (objects at the same location in every frame) are
+   suppressed by comparing detections across neighboring frames.
+
+2. Repair: Star Bridge fills removed pixels by tracking star motion from the
+   frame before and after, then blending those two neighbor frames together to
+   synthesize what the frame would look like without the trail. Any trail pixel
+   that can't be repaired via star tracking is filled with the local sky color
+   plus matching grain (a feathered patch that blends into the surrounding sky),
+   falling back to pure black only when there isn't enough nearby sky to sample.
+   Black fill is invisible in a lighten-max stack because real star pixels in
+   other frames always win.
+
+HOW THIS FILE WORKS
+-------------------
+This file is both the GUI and the algorithm launcher. The PySide6 desktop app
+lives entirely in this file. When the user clicks Run, the app spawns itself as
+a subprocess with the --cleanr-worker flag, which causes the re-invoked process
+to immediately load and execute astro_clean_v5.py (the algorithm) instead of
+showing a window. This worker-subprocess model keeps the GUI responsive during
+long batch jobs and isolates model loading from the GUI process.
+
+The worker re-launch block at the top of this file handles that early re-dispatch.
+Everything below that block (imports, classes, main()) is GUI-only code that never
+runs in the worker.
+
+BATCH SIZE AND STAR ROTATION
+-----------------------------
+Frames are processed in batches of up to 20 at a time. This limit exists because
+star motion between frames accumulates over time — a batch that spans too many
+minutes of real time will have stars that have moved far enough to confuse the
+repair step. The GUI passes each batch's start index and frame count to the
+worker; the worker itself pulls in one extra frame before and after each batch
+(reading the neighboring files from the same folder) so the repair can stitch
+across batch edges.
+
+KEY FILES
+---------
+- astro_clean_v5.py: worker subprocess — detection + repair algorithm
+- modules/detect_trails.py: YOLO/SAHI inference, sky mask, per-frame detection
+- modules/trail_grouper.py: fragments → groups → polygons
+- modules/repair.py: Star Bridge morph repair per trail
+- assets/best.pt: shipped YOLO segmentation weights (Trail DetectoR)
+"""
+
 import glob
 import json
 import threading
+from pathlib import Path
 import time
 import subprocess
 import cv2
@@ -43,10 +174,11 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QComboBox, QProgressBar,
     QTextEdit, QFileDialog, QStackedWidget, QCheckBox, QFrame,
-    QSpinBox, QTabWidget, QTextBrowser, QScrollArea, QMessageBox,
+    QSpinBox, QTabWidget, QTextBrowser, QScrollArea, QMessageBox, QDialog, QSlider,
 )
-from PySide6.QtCore import Qt, QThread, Signal, QSettings, QTimer
-from PySide6.QtGui import QFont, QPixmap, QIcon, QPalette, QColor
+import queue
+from PySide6.QtCore import Qt, QThread, Signal, QSettings, QTimer, QProcess
+from PySide6.QtGui import QFont, QPixmap, QIcon, QPalette, QColor, QPainter, QIntValidator
 
 from mask_painter import MaskPainterWidget
 
@@ -56,15 +188,142 @@ else:
     _base = os.path.dirname(os.path.abspath(__file__))
 
 
+_APP_ERROR_LOG = os.path.join(os.path.expanduser("~"),
+                              ".star_trail_cleanr", "app_errors.log")
+
+# This run's star_log_*.txt (STC Extras). Every caught failure is mirrored into
+# it so the user has ONE file in ONE folder they already know (the View Star Log
+# button) -- never a scavenger hunt through hidden home folders. The hidden
+# app_errors.log stays only as the silent backup for errors with no run yet.
+_CURRENT_STAR_LOG = None
+
+
+def _set_current_star_log(path):
+    """Point error mirroring at this run's Star Log file."""
+    global _CURRENT_STAR_LOG
+    _CURRENT_STAR_LOG = path
+
+
+# Where the hot-pixel step's time goes (measured on Glenn, 321 frames: old step 107 s, sky pass 39 s,
+# ground search 30 s, sky repair 14 s, ground repair 12 s), in the order the engine runs them. Each (start, width) is a fraction of
+# the hot-pixel slice of the progress bar; the last 3% is left for finishing.
+_HOTPIX_SHARES = {"specks": (0.00, 0.35), "flashes": (0.35, 0.25), "repair": (0.60, 0.12),
+                  "ground": (0.72, 0.15), "repair_ground": (0.87, 0.10)}
+_HOTPIX_STAGES = {"finding flashes": ("flashes", "Finding flashes…"),
+                  "checking the ground": ("ground", "Checking the ground…"),
+                  "repairing flashes": ("repair", "Repairing flashes…"),
+                  "repairing the ground": ("repair_ground", "Repairing the ground…")}
+
+
+def _log_app_error(context, exc=None, detail=""):
+    """Append a timestamped entry to ~/.star_trail_cleanr/app_errors.log so GUI-side
+    failures leave a trace we can ask any user for. Frozen windowed builds (Windows
+    especially) have no console, so a swallowed exception is otherwise invisible: the
+    v2.76 field report of buttons that 'just did nothing' is exactly this class.
+    `context` says what was being attempted, `exc` (optional) adds the full traceback,
+    `detail` (optional) adds free-form text like a path. Never raises; capped at 1 MB
+    by starting the file over (old contents have served their purpose by then)."""
+    try:
+        import datetime
+        import traceback
+        entry = (f"\n[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] "
+                 f"v{VERSION} {sys.platform} | {context}\n")
+        if detail:
+            entry += f"  {detail}\n"
+        if exc is not None:
+            entry += "".join(traceback.format_exception(
+                type(exc), exc, exc.__traceback__))
+        # Mirror into this run's Star Log first: one file, one place the user
+        # already knows how to open.
+        if _CURRENT_STAR_LOG and os.path.isfile(_CURRENT_STAR_LOG):
+            try:
+                with open(_CURRENT_STAR_LOG, "a", encoding="utf-8") as f:
+                    f.write(entry)
+            except OSError:
+                pass
+        os.makedirs(os.path.dirname(_APP_ERROR_LOG), exist_ok=True)
+        mode = "a"
+        try:
+            if os.path.getsize(_APP_ERROR_LOG) > 1_000_000:
+                mode = "w"
+        except OSError:
+            pass
+        with open(_APP_ERROR_LOG, mode, encoding="utf-8") as f:
+            f.write(entry)
+    except Exception:
+        pass   # the error log must never become its own crash
+
+
+def _warn_user(title, text):
+    """Show a small warning dialog. Parentless on purpose: usable from any handler.
+    Never raises (a message box that crashes would defeat its own point)."""
+    try:
+        box = QMessageBox()
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle(title)
+        box.setText(text)
+        box.exec()
+    except Exception:
+        pass
+
+
 def _open_folder_in_file_manager(path):
     """Open a folder in the OS file manager. Windows: Explorer.
-    Mac: Finder via 'open'. Linux: whichever file manager is wired to xdg-open."""
-    if sys.platform == "win32":
-        os.startfile(path)
-    elif sys.platform == "darwin":
-        subprocess.run(["open", path])
-    else:
-        subprocess.run(["xdg-open", path])
+    Mac: Finder via 'open'. Linux: whichever file manager is wired to xdg-open.
+    On failure: logs the traceback to the app error log, tells the user what
+    happened instead of silently doing nothing, and returns False."""
+    try:
+        if sys.platform == "win32":
+            os.startfile(path)
+        elif sys.platform == "darwin":
+            subprocess.run(["open", path], check=True)
+        else:
+            subprocess.run(["xdg-open", path], check=True)
+        return True
+    except Exception as e:
+        _log_app_error("open folder in file manager", exc=e, detail=f"path: {path}")
+        _warn_user("Couldn't open the folder",
+                   f"Star Trail CleanR couldn't open this folder:\n\n{path}\n\n"
+                   f"Reason: {e}\n\n"
+                   "Details were saved to the error log in your home folder "
+                   "(.star_trail_cleanr/app_errors.log).")
+        return False
+
+
+# ── Run-time estimate: a calibrated ballpark ─────────────────────────────────
+# The goal is a useful "about this long" up front, not precision. Cost is driven
+# by three things we know before the run starts: frame count, megapixels, and
+# file format (RAW and big 16-bit TIFFs load far slower than JPG). These numbers
+# are seconds-per-frame PER MEGAPIXEL, calibrated from Bruce's own run history on
+# Apple Silicon. They are ONLY the cold-start guess for a machine we've never
+# timed; every run then tunes to the user's real hardware (live while it runs,
+# and saved for next time -- see the estimator block in the worker). An assumed
+# "average busy sky" of trails is already folded into these constants, so we
+# never count trails -- a heavy frame and a light frame wash out across a run.
+_EST_SEC_PER_MP = {
+    "jpg":    0.18,
+    "tiff8":  0.20,
+    "tiff16": 0.30,
+    "raw":    0.34,
+}
+_EST_SEC_PER_MP_DEFAULT = 0.22   # unknown format -> overall median of the above
+
+
+def _est_format_key(frames, dominant_bitdepth):
+    """Classify a run's input format for the cost model: 'raw', 'tiff16',
+    'tiff8', or 'jpg'. `frames` is the list of source filenames; `dominant_bitdepth`
+    is 8, 16, or None. Used to pick the right per-megapixel cost."""
+    try:
+        from modules.frame_list import is_raw as _is_raw
+        if frames and _is_raw(frames[0]):
+            return "raw"
+    except Exception:
+        pass
+    ext = os.path.splitext(frames[0])[1].lower() if frames else ""
+    if ext in (".tif", ".tiff"):
+        return "tiff16" if dominant_bitdepth == 16 else "tiff8"
+    return "jpg"
+
 
 # ── Theme system ─────────────────────────────────────────────────────────────
 # One central place for every color the app uses. Brand colors (header navy,
@@ -93,6 +352,7 @@ BRAND_QUIT_RED        = "#d93025"
 BRAND_QUIT_RED_HOVER  = "#b8271b"
 BRAND_NOTICE_ORANGE   = "#e68a00"   # update banner, model card, NVIDIA banner
 BRAND_NOTICE_HOVER    = "#fdf6e3"
+_GPU_BUILD_URL = "https://github.com/bruceherwig-dot/star-trail-cleanr/blob/main/docs/nvidia_gpu_setup.md"
 BRAND_SUPPORT_BG      = "#d0e4f5"
 BRAND_SUPPORT_FG      = "#1a3a5c"
 BRAND_SUPPORT_BORDER  = "#a0c4e0"
@@ -148,6 +408,38 @@ SECONDARY_BTN_BG    = THEME["light"]["secondary_btn"]
 BROWSER_BG          = THEME["light"]["browser_bg"]
 BROWSER_TEXT        = THEME["light"]["browser_text"]
 SUCCESS_TEXT        = THEME["light"]["success_text"]
+
+
+# ── Text style: ONE definition of how headings and body copy look ────────────
+# "It's just text — handle it the same." Both the HTML tabs (FAQ/About, whose
+# default stylesheet pulls these px values) and the widget tabs (Settings, via
+# make_section_heading / make_body_text) derive from these four numbers, so a
+# heading is a heading and a paragraph is a paragraph everywhere, with no per-tab
+# hand-tuning. The gap values are the FAQ's measured collapsed margins.
+HEADING_TEXT_PX = 20        # section headings (FAQ/About <h2>, Settings headings)
+BODY_TEXT_PX = 14           # descriptive body copy everywhere
+HEADING_BODY_GAP_PX = 2     # vertical gap from a heading to the body beneath it
+SECTION_GAP_PX = 16         # vertical gap between sections
+
+
+def make_section_heading(text):
+    """A section-heading label: blue, bold, HEADING_TEXT_PX. The widget-tab twin
+    of an FAQ/About <h2>. Colour is read at call time so it follows the active
+    theme. Use this for EVERY section heading instead of a hand-written stylesheet."""
+    lbl = QLabel(text)
+    lbl.setStyleSheet(
+        f"color: {BRAND_HEADING_BLUE}; font-size: {HEADING_TEXT_PX}px; font-weight: bold;")
+    return lbl
+
+
+def make_body_text(text):
+    """A wrapped body-copy label: BODY_TEXT_PX. The widget-tab twin of an
+    FAQ/About <p>. Colour is read at call time so it follows the active theme.
+    Use this for EVERY descriptive paragraph instead of a hand-written stylesheet."""
+    lbl = QLabel(text)
+    lbl.setStyleSheet(f"color: {BROWSER_TEXT}; font-size: {BODY_TEXT_PX}px;")
+    lbl.setWordWrap(True)
+    return lbl
 
 
 def _detect_mode():
@@ -247,20 +539,275 @@ def _apply_theme():
         app.setStyleSheet("")
 
 
+def _secondary_btn_css():
+    """Return the stylesheet string for the app's grey "secondary" buttons
+    (Browse, Open Folder, etc.). Pulls its colors from the current theme
+    globals, so it must be called at widget-creation time (after _apply_theme
+    has set the mode) for the button to match light/dark mode."""
+    return (
+        f"QPushButton {{ background-color: {SECONDARY_BTN_BG}; color: white; "
+        f"font-size: 15px; border-radius: 6px; border: none; padding: 0 8px; }}"
+        f"QPushButton:hover {{ background-color: {DISABLED_BTN_HOVER}; }}"
+        f"QPushButton:disabled {{ background-color: {DISABLED_BTN_BG}; color: {MUTED_TEXT}; }}"
+    )
+
+
+def _star_trail_builds(baseline_path, cleaned_folder):
+    """Every existing star trail for this workspace, newest first: the run's
+    instant baseline (STC_cleaned_star_trail), the matching original-source
+    trail (STC_original_star_trail), plus each Build output (STC_star_trail_*).
+    Empty list when none exist yet.
+
+    EVERY ONE OF THOSE CAN BE EITHER FORMAT, so each name is looked for in every
+    star-trail format rather than assuming one. Since 2.93 the run's two trails
+    follow the cleaned frames, and the Star Trail window's builds follow whatever
+    format the user chose there.
+
+    The two run-made trails never pile up across formats: writing one deletes its
+    other-format twin (drop_stale_twin), so a re-clean replaces the old trail
+    instead of leaving a stale one that still looks current. BUILDS do accumulate
+    on purpose -- each carries its settings in its name, format included -- so a
+    JPEG build and a TIFF build of the same look sit side by side.
+
+    The preview's left/right arrows page through exactly this list, newest first.
+
+    BOTH RUN-MADE NAMES ARE LISTED EXPLICITLY, and that is the whole point of this
+    function. Neither matches the Build glob, so each has to be asked for by name.
+    `baseline_path` is only a hint about WHERE to look, never the sole listing of
+    anything -- the caller moves that pointer to whatever is on screen as the user
+    pages, so a name that depends on it disappears the moment you browse past it.
+    That is exactly what happened: the cleaned trail was listed only through this
+    argument, so paging onto the original trail dropped the cleaned one from the
+    list, hid the arrows, and stranded the user on one picture with no way back
+    (reported 2026-08-30). The original-source name had already been given the
+    same treatment for the same reason."""
+    import glob
+    ws = os.path.dirname(baseline_path) if baseline_path else \
+        os.path.dirname(workspace_path(cleaned_folder, "x")) if cleaned_folder else None
+    cands = []
+    if baseline_path:
+        cands.append(baseline_path)
+    if ws and os.path.isdir(ws):
+        # Both formats: a folder can hold a JPEG trail from an older clean and a
+        # TIFF one from a newer, and the arrows must page through whatever is there.
+        from make_share_clip import STAR_TRAIL_EXTS
+        for _ext in STAR_TRAIL_EXTS:
+            cands += glob.glob(os.path.join(ws, "STC_star_trail_*" + _ext))
+            for _stem in ("STC_cleaned_star_trail", "STC_original_star_trail"):
+                cands.append(os.path.join(ws, _stem + _ext))
+    return sorted({c for c in cands if os.path.isfile(c)},
+                  key=os.path.getmtime, reverse=True)
+
+
+def cleaned_star_ext(cleaned_folder):
+    """The extension a star trail built from `cleaned_folder` should use.
+
+    ASKS THE FILES, not the app's current setting. This window can be opened on a
+    folder cleaned months ago, in a different session, with a different format
+    chosen -- the frames on disk are the only thing that knows what they are.
+
+    TIFF frames give a .tif trail, anything else a .jpg. Whether that TIFF ends up
+    8-bit or 16-bit is decided later by the depth of the stacked pixels
+    themselves (see make_share_clip.write_star_trail), so this only has to answer
+    the coarse question.
+
+    ONE TIFF ANYWHERE IN THE FOLDER IS ENOUGH. A folder cleaned once as JPEG and
+    again as TIFF holds both, and this has to give the SAME answer the stacker
+    does or the trail cannot be saved at all. The stacker keeps the TIFF copy of
+    a shot (see make_share_clip._list_frames), so its stack is 16-bit -- and a
+    16-bit picture cannot be written into a JPEG. Answering from whichever file
+    happened to sort first would have failed exactly that way, since "IMG_2946.jpg"
+    sorts ahead of "IMG_2946.tif"."""
+    try:
+        from modules.frame_list import IMAGE_EXTS
+        found = False
+        for n in sorted(os.listdir(cleaned_folder or "")):
+            e = os.path.splitext(n)[1].lower()
+            if e in (".tif", ".tiff"):
+                return ".tif"
+            found = found or e in IMAGE_EXTS
+        if found:
+            return ".jpg"
+    except OSError:
+        pass
+    return ".jpg"
+
+
+def source_bitdepth(folder):
+    """The depth the frames in `folder` can actually supply: 8, 16, or None when
+    it cannot be told. Used to decide which star-trail output formats are worth
+    offering -- a 16-bit file built from 8-bit frames is thirty times the size
+    for the same picture.
+
+    ASKS THE FRAMES THAT WOULD BE STACKED, via the same shot list the stacker
+    uses, so a folder holding both a JPEG and a TIFF copy of every shot is judged
+    on the copy that would actually be read.
+
+    An all-JPEG folder needs nothing opened -- JPEG is 8-bit by definition. A
+    TIFF's name tells us nothing about its depth, so those are read from the file
+    header (cheap, no pixels decoded). At most 25 frames spread across the
+    sequence are sampled: reading hundreds would stall the window, and the stack
+    settles at the deepest frame it sees, so the sample takes the maximum.
+
+    Returns None when nothing could be read, and the caller must then leave every
+    format enabled -- taking a choice away on a guess is worse than offering one
+    that turns out oversized."""
+    try:
+        import make_share_clip as _msc
+        names = _msc._list_frames(folder)
+    except Exception:
+        return None
+    if not names:
+        return None
+    exts = {os.path.splitext(n)[1].lower() for n in names}
+    if exts <= {".jpg", ".jpeg", ".insp"}:
+        return 8
+    step = max(1, len(names) // 25)
+    sample = names[::step][:25]
+    try:
+        from modules.io_safe import image_bitdepth
+    except Exception:
+        return None
+    depths = [d for d in (image_bitdepth(os.path.join(folder, n)) for n in sample)
+              if d is not None]
+    return max(depths) if depths else None
+
+
+def star_trail_in(folder, stem):
+    """The star trail named `stem` in `folder`'s workspace, whatever format it was
+    saved in, or the .jpg path when none exists yet.
+
+    Since 2.93 the star trail follows the cleaned frames' format, so this file is
+    a .jpg for a JPEG clean and a .tif for a TIFF one. Seven places used to name
+    ".jpg" outright, which would quietly find nothing the moment somebody cleaned
+    to TIFF -- the preview would say there was no star trail while the file sat
+    right there in the folder."""
+    from make_share_clip import STAR_TRAIL_EXTS
+    for ext in STAR_TRAIL_EXTS:
+        p = workspace_path(folder, stem + ext)
+        if os.path.isfile(p):
+            return p
+    return workspace_path(folder, stem + STAR_TRAIL_EXTS[0])
+
+
+def _newest_star_trail(baseline_path, cleaned_folder):
+    """Return the most recent star trail to preview, or the baseline path when
+    nothing exists yet (callers treat a missing file as 'no trail')."""
+    builds = _star_trail_builds(baseline_path, cleaned_folder)
+    return builds[0] if builds else baseline_path
+
+
+def _unique_path(path):
+    """Return `path` if it doesn't exist, otherwise the same name with a _2, _3, ...
+    suffix so a rebuild with identical options never overwrites an earlier one."""
+    if not os.path.exists(path):
+        return path
+    stem, ext = os.path.splitext(path)
+    i = 2
+    while os.path.exists(f"{stem}_{i}{ext}"):
+        i += 1
+    return f"{stem}_{i}{ext}"
+
+
+def _make_labels_selectable(widget):
+    """Make every text QLabel under `widget` copy/paste-able (house rule). Skips
+    labels that hold a pixmap (the preview/poster images) so they keep their
+    click cursor instead of a text I-beam."""
+    from PySide6.QtWidgets import QLabel
+    for lbl in widget.findChildren(QLabel):
+        pm = lbl.pixmap()
+        if pm is None or pm.isNull():
+            lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+
+
+def _hero_btn_css():
+    """Return the stylesheet string for the app's big blue "hero" action button
+    (the Setup page's 'Star Trail & Timelapse' button). Pair with setFixedHeight(48)."""
+    return (
+        f"QPushButton {{ background-color: {BRAND_HEADING_BLUE}; color: white; font-size: 22px; "
+        f"font-weight: bold; border-radius: 6px; border: none; }}"
+        f"QPushButton:hover {{ background-color: {BRAND_HEADING_HOVER}; }}"
+        f"QPushButton:disabled {{ background-color: {DISABLED_BTN_BG}; color: {MUTED_TEXT}; }}"
+    )
+
+
 SCRIPT = os.path.join(_base, "astro_clean_v5.py")
+# Post-run share outputs (star trail + video + Red Trail Map) render in a SEPARATE
+# process via this script, re-invoked the same way as the cleaning engine
+# (--cleanr-worker).
+SHARE_SCRIPT = os.path.join(_base, "make_share_clip.py")
+# Human-readable names for each share-render kind, used in the run-screen status
+# lines ("Your ... is ready." / "Could not create the ...").
+_SHARE_KIND_LABELS = {
+    "star_trail": "Preview Star Trail After Cleaning",
+    "video": "video",
+    "red": "Red Trail Map",
+}
 _bundled_model = os.path.join(_base, "best.pt")
 _DEV_FALLBACK_MODEL = os.path.join(
     os.path.expanduser("~"),
-    "Documents/yolo_runs/trail_detector_v11s_tiled/weights/best.pt")
+    "Documents/yolo_runs/trail_detector_v7a_scratch/weights/best.pt")
+
+# THE dev-only gate. Shown ONLY when running from SOURCE; a frozen build hides
+# everything behind it, so the built .app shows exactly what the public sees.
+# (Was keyed to per-feature ~/.star_trail_cleanr/.dev_* marker files, which also
+# showed in frozen builds; unified onto this single flag 2026-06-19/20.)
+#
+# RULE for every dev-only item (Model picker, Red Trail Map, Streaking-star
+# filter, and anything added later):
+#   1. Gate it on `_DEV_SWITCHER_ENABLED` — never a marker file.
+#   2. If it lives on the Settings page, append it at the BOTTOM of the list, so
+#      the public-facing settings stay on top and dev items collect at the end.
+_DEV_SWITCHER_ENABLED = not getattr(sys, "frozen", False)
+_YOLO_RUNS_DIR = Path.home() / "Documents" / "yolo_runs"
+
+
+def _get_dev_model_choices():
+    """Return the curated dev model menu: only the three product versions, labelled
+    v3/v4/v5, mapped to their yolo_runs folders. Every other experimental folder is
+    intentionally hidden -- the model files stay on disk, only the menu is trimmed.
+    Each entry is (label, best.pt path); an entry is omitted if its file is missing."""
+    mapping = [
+        ("v3", "trail_detector_v12s_tiled"),   # Trail DetectoR v3 (prior shipped)
+        ("v4", "trail_detector_v13s_tiled"),   # Trail DetectoR v4 (currently shipped)
+        ("v5", "trail_detector_v5"),           # Trail DetectoR v5 (new fine-tune)
+        ("v6", "trail_detector_v6_scratch"),   # Trail DetectoR v6 (from-scratch candidate, testing)
+        ("v7 A", "trail_detector_v7a_scratch"),  # Trail DetectoR v7 A (from-scratch, corrected labels, testing)
+    ]
+    choices = []
+    for label, folder in mapping:
+        pt = _YOLO_RUNS_DIR / folder / "weights" / "best.pt"
+        if pt.is_file():
+            choices.append((label, str(pt)))
+    return choices
+
+
+def _dev_override_label():
+    """Return the picker label (e.g. "v6") of the active dev model override, or
+    None when the switcher is off or no override is set. Lets the header,
+    diagnostics and run log name the model that actually runs, not the shipped one."""
+    if not _DEV_SWITCHER_ENABLED:
+        return None
+    override = SETTINGS.value("dev_model_override", "", type=str)
+    if not (override and os.path.isfile(override)):
+        return None
+    for label, pt in _get_dev_model_choices():
+        if pt == override:
+            return label
+    return None
 
 
 def get_model_path():
     """Return the best available trail-detector model path for this session.
 
-    Priority: user-folder download > bundled model > dev fallback.
+    Priority: dev override (if switcher enabled) > user-folder download > bundled model > dev fallback.
     Re-evaluated on each call so a mid-session model install is picked up
     on the next processing run.
     """
+    if _DEV_SWITCHER_ENABLED:
+        override = SETTINGS.value("dev_model_override", "", type=str)
+        if override and os.path.isfile(override):
+            return override
     try:
         from modules.user_folder import (
             get_installed_model_path, get_installed_model_version,
@@ -311,8 +858,27 @@ def _maybe_init_sentry():
             send_default_pii=False,
             release=f"star-trail-cleanr@{VERSION}",
         )
+        _sentry_ignore_handled_loggers()
     except Exception:
         pass
+
+
+def _sentry_ignore_handled_loggers():
+    """Stop image libraries' own error logging from being reported as crashes.
+
+    Sentry's default logging integration turns any logging.error() call into an
+    event, including ones from libraries we deliberately let fail. io_safe tries
+    OpenCV, then tifffile, then Pillow, and expects rejections along the way: a
+    file only one of them can read is normal. Pillow announces its refusals via
+    logging.error, so a TIFF that OpenCV and Pillow can't read but tifffile can
+    produced a crash report for a run that finished perfectly well.
+
+    Real failures still report: when every reader fails, the worker raises its
+    own error with the full per-reader diagnosis attached.
+    """
+    from sentry_sdk.integrations.logging import ignore_logger
+    for name in ("PIL", "PIL.TiffImagePlugin", "PIL.Image"):
+        ignore_logger(name)
 
 
 def _pre_window_update_check():
@@ -400,14 +966,42 @@ def _handle_launch_failure(exc):
         pass
 
 
-WORKSPACE_DIR = "cleanr_workspace"
+WORKSPACE_DIR = "cleanr_workspace"   # legacy name; existing sets still resolve via find_workspace()
+from modules.workspace import WORKSPACE_NAME, output_workspace, archive_old_logs  # noqa: E402
 
 
-def workspace_path(input_folder, filename):
-    """Return <input_folder>/cleanr_workspace/<filename>. Creates dir as needed."""
-    ws = os.path.join(input_folder, WORKSPACE_DIR)
-    os.makedirs(ws, exist_ok=True)
-    return os.path.join(ws, filename)
+def workspace_path(output_folder, filename):
+    """Return <output_folder>/STC Extras/<filename>, the WRITE path for a run's
+    artifacts, creating the folder. Callers pass the OUTPUT/cleaned folder now (the
+    workspace moved into the cleaned folder on 2026-06-19)."""
+    return os.path.join(output_workspace(output_folder, create=True), filename)
+
+
+def _gray_out_combo_item(combo, data, tooltip=""):
+    """Make the dropdown entry whose data is `data` visible but unselectable
+    (grayed out), with an optional tooltip saying why."""
+    idx = combo.findData(data)
+    item = combo.model().item(idx) if idx >= 0 else None
+    if item is not None:
+        item.setFlags(item.flags() & ~Qt.ItemIsEnabled & ~Qt.ItemIsSelectable)
+        if tooltip:
+            item.setToolTip(tooltip)
+
+
+def folder_has_image_frames(folder):
+    """True when `folder` itself (not its subfolders) holds at least one image
+    frame. Used to tell a finished cleaning run (frames written to the output
+    folder) from an output folder that is empty or holds only a workspace, so the
+    Star Trail & Timelapse window can gray out its "Cleaned" source until a run
+    has actually produced frames."""
+    if not folder or not os.path.isdir(folder):
+        return False
+    from modules.frame_list import IMAGE_EXTS
+    try:
+        return any(e.is_file() and os.path.splitext(e.name)[1].lower() in IMAGE_EXTS
+                   for e in os.scandir(folder))
+    except OSError:
+        return False
 
 
 def migrate_workspace(input_folder):
@@ -429,6 +1023,9 @@ def migrate_workspace(input_folder):
 
 
 def fmt_hms(seconds):
+    """Format a duration in seconds as "1h 07m 30s" (or "7m 30s" under an
+    hour), with zero-padded minutes and seconds. Used for elapsed/total times
+    in the run summary so columns line up. Negative inputs are clamped to 0."""
     seconds = max(0, int(seconds))
     h = seconds // 3600
     m = (seconds % 3600) // 60
@@ -436,6 +1033,95 @@ def fmt_hms(seconds):
     if h > 0:
         return f"{h}h {m:02d}m {s:02d}s"
     return f"{m}m {s:02d}s"
+
+
+def fmt_estimate(seconds):
+    """Format a duration like fmt_hms but WITHOUT zero-padding ("1h 7m 30s").
+    Used for the live "remaining" / "Estimated Time" labels where a compact,
+    non-padded look reads better. Negative inputs are clamped to 0."""
+    seconds = max(0, int(seconds))
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    s = seconds % 60
+    if h > 0:
+        return f"{h}h {m}m {s}s"
+    return f"{m}m {s}s"
+
+
+def _library_versions():
+    """The versions of the outside libraries whose behaviour can change a RESULT,
+    for the Star Log's technical block.
+
+    WHY IT IS WORTH A LINE. The build installs about fifteen other projects'
+    software, and most of them are asked for by name with no version, so two
+    builds of the same release can legitimately carry different ones. If one of
+    those ever changes what the detector finds, a user's Star Log is the only
+    evidence we get -- and without this it would not say which versions they had.
+    Established 2026-08-26, when a fresh install of the same libraries a few days
+    apart produced PyTorch 2.13.0 where the shipped Windows build carries 2.11.0.
+
+    Reads the version records rather than loading the libraries, so it costs
+    nothing: importing PyTorch alone takes seconds. PyTorch ships no version
+    record inside our frozen app, so its version is read out of the small file it
+    keeps for the purpose. Anything unreadable is simply left out -- a missing
+    line here must never be able to break a run's log.
+    """
+    out = []
+    for label, pkg in (("torch", "torch"), ("opencv", "opencv-contrib-python-headless"),
+                       ("numpy", "numpy"), ("ultralytics", "ultralytics")):
+        v = None
+        try:
+            from importlib.metadata import version as _v
+            v = _v(pkg)
+        except Exception:
+            pass
+        if v is None and pkg == "torch":
+            # Frozen bundles carry torch's own version.py but not its metadata.
+            try:
+                import re as _re
+                for base in (getattr(sys, "_MEIPASS", None), os.path.dirname(__file__)):
+                    if not base:
+                        continue
+                    p = os.path.join(base, "torch", "version.py")
+                    if os.path.isfile(p):
+                        m = _re.search(r"__version__\s*=\s*['\"]([^'\"]+)",
+                                       open(p, encoding="utf-8", errors="replace").read())
+                        if m:
+                            v = m.group(1)
+                            break
+            except Exception:
+                pass
+        if v:
+            out.append(f"{label} {v}")
+    return ", ".join(out)
+
+
+def _is_engine_noise(line):
+    """True if `line` is raw library/engine output (warnings, errors,
+    tracebacks) that must never reach the user-facing Star Log. A stray
+    "WARNING" or traceback reads as "the app is broken" and makes
+    non-technical users panic, even when it is harmless (e.g. an ultralytics
+    NMS time-limit notice on a very dense frame). These lines are still kept
+    on disk for debugging (the crash breadcrumb + run log); they just don't
+    scroll past the user. Our own calm status lines ("detecting 3/20",
+    "Step 1", "Batch complete") never match."""
+    s = line.strip()
+    if not s:
+        return False
+    low = s.lower()
+    if "⚠" in s:  # warning glyph, e.g. ultralytics "WARNING ⚠️ ..."
+        return True
+    if low.startswith(("warning", "warn ", "error", "error:", "critical", "traceback")):
+        return True
+    if low.startswith('file "') and '", line ' in low:  # traceback frame line
+        return True
+    if "nms time limit" in low:
+        return True
+    for w in ("UserWarning", "FutureWarning", "DeprecationWarning",
+              "RuntimeWarning", "PerformanceWarning"):
+        if w in s:
+            return True
+    return False
 
 
 def _windows_release_label():
@@ -455,17 +1141,205 @@ def _windows_release_label():
     return _p.release()
 
 
+def _leader_gear_exif(frames):
+    """Best-effort camera, lens, and image facts from the source frames, for
+    anonymous usage stats. Returns a dict of whatever is present: frame_count,
+    file_format, megapixels, camera, lens, lens_make (brand), focal_length,
+    focal_35mm (paired with focal_length to tell crop vs full frame), exposure,
+    aperture, ISO. frame_count and file_format are set even for RAW (which PIL
+    cannot open here); the rest need a readable image with EXIF. Never raises."""
+    out = {}
+    try:
+        if not frames:
+            return out
+        import os
+        # frame_count and file_format come from the file list itself, so they
+        # are set even for RAW frames that PIL cannot open below.
+        out["frame_count"] = len(frames)
+        ext = os.path.splitext(frames[0])[1].lstrip(".").lower()
+        if ext:
+            out["file_format"] = ext
+        # Size comes from the header reader, which understands RAW; the tags come
+        # from the shared EXIF reader, which finds them in a RAW's embedded
+        # preview. Opening the photograph with PIL used to do both and could do
+        # NEITHER for a RAW, so a third of all runs reported no camera and no
+        # lens (81% and 96% of RAW runs, measured 2026-08-27).
+        from modules.io_safe import exif_tags as _exif_tags, image_size as _size
+        wh = _size(frames[0])
+        if wh:
+            out["megapixels"] = round(wh[0] * wh[1] / 1_000_000, 1)
+        tags = _exif_tags(frames[0])
+        if not tags:
+            return out
+        cam = " ".join(
+            str(x).strip() for x in (tags.get("Make"), tags.get("Model")) if x
+        ).strip()
+        if cam:
+            out["camera"] = cam
+        lens = tags.get("LensModel")
+        if lens:
+            out["lens"] = str(lens).strip()
+        lens_make = tags.get("LensMake")
+        if lens_make:
+            out["lens_make"] = str(lens_make).strip()
+        for name, key, conv in (
+            ("FocalLength",            "focal_length", lambda v: round(float(v), 1)),
+            ("FocalLengthIn35mmFilm",  "focal_35mm",   lambda v: int(round(float(v)))),
+            ("ExposureTime",           "exposure_sec", lambda v: round(float(v), 4)),
+            ("FNumber",                "aperture",     lambda v: round(float(v), 1)),
+        ):
+            val = tags.get(name)
+            if val is not None:
+                try:
+                    out[key] = conv(val)
+                except Exception:
+                    pass
+        iso = tags.get("ISOSpeedRatings") or tags.get("PhotographicSensitivity")
+        if iso is not None:
+            try:
+                out["iso"] = int(iso[0] if isinstance(iso, (tuple, list)) else iso)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return out
+
+
+_NATIVE_CRASH_CODES = {
+    3221225477: "memory access violation",       # 0xC0000005
+    3221225725: "stack overflow",                # 0xC00000FD
+    3221225501: "illegal processor instruction",  # 0xC000001D
+    3221226505: "heap corruption",               # 0xC0000374
+    -11: "memory access violation",              # SIGSEGV (Mac/Linux)
+    -4: "illegal processor instruction",         # SIGILL
+}
+
+
+def native_crash_message(returncode):
+    """Plain-English text for an engine that died inside a compiled library, or
+    None for any other exit code. These deaths leave no Python error, so without
+    this the user sees only a bare number."""
+    kind = _NATIVE_CRASH_CODES.get(returncode)
+    if kind is None:
+        return None
+    return (f"The cleaning engine crashed inside the computer's own math libraries "
+            f"({kind}).\n"
+            "Things to try: restart Star Trail CleanR and run again; update Windows "
+            "and your graphics drivers; add Star Trail CleanR to your antivirus "
+            "exclusions. If it keeps happening, the crash report we receive "
+            "will help us fix it.")
+
+
+def worker_error_message(stderr_text, stdout_lines, returncode=None):
+    """The message to show the user when an engine batch exits non-zero.
+
+    KEEPS THE WHOLE ERROR BLOCK, not just its first line. The engine writes a
+    heading and then the part that actually helps: which folder, whether any
+    frames were already written, what that rules out, how much space is free.
+    This used to take only the last line starting with "ERROR:", so all of that
+    was discarded and the user got a sentence fragment.
+
+    Sean's Sentry report on 2026-09-08 is titled "Worker exited 2: ERROR: Cannot
+    write cleaned frame to:" and stops at the colon. That is not Sentry
+    truncating anything -- it is everything the app kept. Every multi-line
+    message the engine has ever printed reached users the same way.
+
+    THE ORDER OF CHOICE (2026-10-09):
+      1. A real Python crash -- the error stream holds a "Traceback (most recent call
+         last)" block -- shows its last meaningful line (the exception).
+      2. Otherwise, if the engine wrote its own "ERROR:" block on stdout, that is the
+         message. Everything from the last "ERROR:" line onward; the engine exits
+         immediately after printing one, so nothing unrelated follows it. Every
+         "ERROR:" print in the engine is followed by an exit, so none can be stale.
+      3. Otherwise the last meaningful error-stream line, then the last stdout line.
+
+    WHY WARNINGS MUST NOT WIN. This used to be "stderr wins whenever it has any
+    content", on the idea that content there means a crash. But libraries write
+    harmless warnings and hints there constantly. On every Mac run the SAHI library
+    prints a deprecation warning whose last line is the SOURCE CODE of the offending
+    call, so a disk that disconnected mid-run (Errno 6, "Device not configured")
+    reached the user, and Sentry, as
+        Worker exited 2: elif mps and getattr(torch, "has_mps", False) and ...
+    while the engine's own explanation sat unread on stdout (v1.992, 2026-10-09).
+
+    ONE-LINE CONSOLE NOTICES ARE NOT CONTENT (2026-10-07). A compiled library
+    prints "Press Ctrl-Break to quit" (Windows) or "Press Ctrl-C to quit" (Mac) on
+    the error stream. A Windows user with 102 MP frames got a crash report titled
+    "Worker exited 1: Press Ctrl-Break to quit", hiding both the engine's own ERROR
+    block and, in a real crash, the exception line just above it. They are skipped.
+    """
+    # A line that is only a console hint, never an error. Built here, not at module
+    # level: tests/test_windows_version_detection.py cuts this stretch of the file
+    # out and runs it on its own, so nothing new may execute at import time here.
+    _console_notice = re.compile(
+        r"^\s*Press\s+Ctrl[-+ ]?(?:C|Break)\s+to\s+quit\.?\s*$", re.I)
+    err_lines = [l for l in (stderr_text or "").splitlines()
+                 if l.strip() and not _console_notice.match(l)]
+    lines = list(stdout_lines or [])
+    start = None
+    for i, line in enumerate(lines):
+        if line.startswith("ERROR:"):
+            start = i
+    crashed = any(l.startswith("Traceback (most recent call last)") for l in err_lines)
+    if crashed:
+        return err_lines[-1]
+    if start is not None:
+        return "\n".join(l.rstrip() for l in lines[start:]).strip()
+    native = native_crash_message(returncode)
+    if native:
+        return native
+    if err_lines:
+        return err_lines[-1]
+    real = [l for l in lines if not _console_notice.match(l)]
+    return real[-1] if real else "unknown error"
+
+
 class CleanerWorker(QThread):
+    """Background thread that drives an entire cleaning run, end to end.
+
+    Why it exists: the actual detection + repair work runs in separate
+    subprocesses (one per batch of frames), and reading their output would
+    freeze the GUI if done on the main thread. This QThread does all the
+    orchestration off the main thread and talks back to the window only
+    through Qt signals (the GUI thread can safely react to those).
+
+    What it does, in order:
+      1. Globs the input folder, removes RAW/JPG/TIFF duplicate "twins",
+         applies any frame-range/limit, and checks every frame's resolution.
+      2. If frames would be skipped (wrong size, unreadable), it pauses and
+         asks the main thread to show a modal before continuing.
+      3. Splits the surviving frames into batches (size capped by available
+         memory) and launches the worker subprocess once per batch.
+      4. Parses each subprocess's stdout line-by-line to drive the progress
+         bars, the time estimate, the running trail counter, and the log.
+      5. Handles a worker asking what to do about an unreadable file
+         (the bad-file prompt) and crash reporting on non-zero exit.
+      6. Persists timing so the next run can seed its estimate.
+
+    The signals below are the ONLY way it communicates with the GUI; each
+    one is wired to a MainWindow handler in MainWindow._run.
+    """
     progress = Signal(int, int, str)   # pct, total, remaining_str
     status = Signal(str)               # log line
     batch_info = Signal(int, int)      # batch_num (1-based), n_batches
-    step_progress = Signal(int, int, int)  # step (1 or 2), current, total
+    step_progress = Signal(int, int, int, int, int)  # step, batch_current, batch_total, global_current, global_total
     step_detail = Signal(str)          # filename + detail text
     frame_count = Signal(int, int)     # frames_cleaned, total
     stats_ready = Signal(int, int)     # total_trails, total_frames_scanned
+    trail_count_update = Signal(int)   # running total trails after each batch
     timing_stats = Signal(float, float)  # initial_estimate_sec, actual_total_sec
     initial_estimate = Signal(float)   # initial estimate seconds (emitted once)
+    remaining_estimate = Signal(float) # live seconds-left, drives the Updated Estimate label
     warmup_active = Signal(bool)       # True = AI loading window, False = real per-frame progress kicked in
+    device_in_use = Signal(str)        # "cuda"/"mps"/"cpu" AS REPORTED BY THE ENGINE.
+                                       # The header badge is otherwise decided once
+                                       # at launch by asking THIS process what it
+                                       # could reach -- a different process from the
+                                       # one doing the work, which silently drops to
+                                       # the processor if the model will not load on
+                                       # the card. Without this the badge can read a
+                                       # green "GPU: NVIDIA" for a nine-hour run
+                                       # that never touched the card (2026-08-23).
     bad_file_prompt = Signal(str, str)  # path, diagnosis — main thread shows the modal
     too_many_bad_files = Signal(int)   # count — main thread shows the final notice
     frames_filter_prompt = Signal(dict)  # info dict — main thread shows the modal explaining skipped frames
@@ -480,16 +1354,58 @@ class CleanerWorker(QThread):
     BAD_FILE_SKIP_CAP = 1
 
     def __init__(self, folder, output_folder, frame_limit, mask_path=None,
-                 output_format="jpg", jpeg_quality=85):
+                 output_format="jpg", jpeg_quality=85, frame_start=0, frame_end=0,
+                 max_batch=20, mem_note="", twin_prefer="raw", trim_end=0):
+        """Capture the run's settings; the actual work happens in run().
+
+        Inputs:
+          folder         - input folder of source frames
+          output_folder  - where cleaned frames are written
+          frame_limit    - how many frames to process ("All Frames", "" or a
+                           number-as-string from the Step 4 dropdown)
+          mask_path      - optional foreground-mask PNG to keep the AI off the
+                           ground/buildings (None = no mask)
+          output_format  - "jpg" / "tif8" / "tif16"
+          jpeg_quality   - 60-100, only used for JPG output
+          frame_start/frame_end - sub-range into the ordered frame list
+                           (0/0 = whole list). The Step 4 Frame Range bar sets
+                           frame_start (frames left out at the front) and
+                           trim_end (frames left out at the back); frame_end is
+                           an absolute last-frame index kept for scripts.
+          trim_end       - frames to leave out at the BACK of the list (0 = none)
+          max_batch      - largest batch the machine's RAM can hold (5-20),
+                           chosen by the GUI's memory check
+          mem_note       - human-readable record of how max_batch was decided,
+                           logged at run start
+          twin_prefer    - "raw" or "nonraw": which to keep when a frame exists
+                           as both a RAW and a JPG/TIFF
+        """
         super().__init__()
         self.folder = folder
         self.output_folder = output_folder
         self.frame_limit = frame_limit
+        self.frame_start = frame_start
+        self.frame_end = frame_end
+        self.trim_end = trim_end
         self.mask_path = mask_path
         self.output_format = output_format
         self.jpeg_quality = jpeg_quality
+        # "raw" or "nonraw": when a frame exists as both a RAW and a JPG/TIFF,
+        # which to process. Chosen by the user in _validate's one-time prompt;
+        # passed through to each worker subprocess so both sides dedup alike.
+        self.twin_prefer = twin_prefer
+        # Largest batch the machine's memory can hold, chosen in _validate from
+        # free RAM + the frames' bit depth (falls back to 20). mem_note is a
+        # human-readable record of that decision, logged at run start.
+        self.max_batch = max_batch
+        self.mem_note = mem_note
         self._cancelled = False
         self._proc = None  # current subprocess
+        # Crash breadcrumb: if the PREVIOUS run ended without a clean-finish
+        # marker (e.g. the OS hard-killed the whole app on low memory), its last
+        # recorded steps are stashed here at this run's start and folded into the
+        # Star Log so the silent crash still reaches a support email.
+        self._prev_crash_log = ""
         # Bad-file dialog plumbing. The QThread blocks reading subprocess
         # stdout when it sees a prompt sentinel; the main thread shows the
         # modal and calls set_bad_file_decision() to release it.
@@ -537,48 +1453,86 @@ class CleanerWorker(QThread):
         self._graceful_stop_requested = True
 
     def run(self):
+        """The thread body — runs the whole job and emits signals as it goes.
+
+        This is QThread's entry point: it executes on the worker thread when
+        the GUI calls .start(). It builds the frame list, runs the pre-flight
+        resolution check, loops over batches launching one subprocess each,
+        parses their stdout to drive progress/estimates/counters, and emits
+        done() (or error()) at the end. Any uncaught exception is funneled to
+        the error signal so the GUI always learns the run ended.
+        """
         folder = self.folder
         output_folder = self.output_folder
 
         try:
             os.makedirs(output_folder, exist_ok=True)
 
-            exts = ["*.jpg", "*.jpeg", "*.png", "*.tif", "*.tiff",
-                    "*.JPG", "*.JPEG", "*.PNG", "*.TIF", "*.TIFF"]
+            from modules.frame_list import (
+                dedupe_frames, glob_patterns, frame_too_small, MIN_FRAME_SHORT_SIDE,
+                natural_key)
             frames = sorted(set(
-                f for e in exts for f in glob.glob(os.path.join(folder, e))
-            ))
+                f for e in glob_patterns() for f in glob.glob(os.path.join(folder, e))
+            ), key=natural_key)
             if not frames:
-                self.error.emit(f"No image files found in: {folder}")
+                self.error.emit(f"No frames found in: {folder}")
                 return
 
+            # Remove duplicate twins (JPG/TIFF/RAW of the same frame) ONCE,
+            # before counting or splitting into batches, so the frame count is
+            # the true number of unique photos and the worker (which applies the
+            # identical rule and the same RAW-vs-JPG/TIFF preference) stays in
+            # lockstep. Doing this here is what keeps a final batch from
+            # collapsing below the 3-frame minimum after the worker drops twins.
+            _pre_dedup = len(frames)
+            frames = dedupe_frames(frames, prefer_raw=(self.twin_prefer == "raw"))
+            self._deduped_pairs_count = _pre_dedup - len(frames)
+
+            # Order frames by TRUE capture time, not filename. A camera's file
+            # numbers can roll over mid-shoot (IMG_9999 -> IMG_0001) or frames
+            # can be merged from two cards, and then filename order no longer
+            # matches shooting order -- which puts a jump in the stack and makes
+            # the repair borrow from the wrong neighbors. All-or-nothing: only
+            # reorder when EVERY frame carries a timestamp, else keep filename
+            # order.
+            #
+            # The manifest is NOT written here. It is written further down, once
+            # the frame range, the frame limit and the resolution filter have all
+            # had their say, so it holds exactly the frames the batch plan counts
+            # -- see the write below. Writing it here is what broke two users on
+            # 2026-08-11: the engine was told "frames 0 to 11" but handed a list
+            # that still contained every file the GUI had decided to skip, sliced
+            # it, dropped the wrong-sized ones, and exited with "need >= 3 frames
+            # (got 0)" on every attempt.
+            self._frame_manifest = None
+            try:
+                from modules.io_safe import capture_time as _cap_time
+                from modules.frame_list import order_by_capture_time
+                _times = {f: _cap_time(f) for f in frames}
+                frames = order_by_capture_time(frames, _times)
+            except Exception:
+                pass          # keep filename order; the manifest is written either way
+
+            if self.frame_end > 0:
+                frames = frames[self.frame_start : self.frame_end + 1]
+            elif self.frame_start > 0:
+                frames = frames[self.frame_start:]
+            if self.trim_end > 0:
+                from modules.frame_list import trim_from_end
+                frames = trim_from_end(frames, self.trim_end)
             total = len(frames)
-            if self.frame_limit != "All Frames":
-                total = min(total, int(self.frame_limit))
+            if self.frame_limit not in ("All Frames", ""):
+                try:
+                    total = min(total, int(self.frame_limit))
+                except ValueError:
+                    pass
                 frames = frames[:total]
 
-            def _img_size(path):
-                """Return (width, height) for a frame's header. Tries Pillow
-                first (fast, handles JPEG/PNG/most TIFFs); falls back to
-                tifffile for TIFFs Pillow can't parse (BigTIFF, unusual
-                compression, multi-IFD layouts). Mirrors the worker's
-                cv2 → tifffile → PIL ladder so the GUI scan doesn't reject
-                files the worker would actually be able to process.
-                """
-                try:
-                    with Image.open(path) as img:
-                        return img.size
-                except Exception:
-                    pass
-                if path.lower().endswith(('.tif', '.tiff')):
-                    try:
-                        import tifffile
-                        with tifffile.TiffFile(path) as tf:
-                            page = tf.pages[0]
-                            return (page.imagewidth, page.imagelength)
-                    except Exception:
-                        return None
-                return None
+            from modules.io_safe import image_size as _img_size
+            # image_size returns (width, height) for JPEG/PNG (Pillow), TIFF
+            # (Pillow with tifffile fallback for BigTIFF/odd compression), and
+            # RAW (rawpy .sizes), mirroring the worker's read coverage so the
+            # GUI scan never rejects a file the worker could actually process.
 
             # Inspect every frame's size up front (not just a 10-sample) so
             # we know exactly what's in the folder. The pre-flight modal
@@ -590,14 +1544,27 @@ class CleanerWorker(QThread):
 
             if not readable:
                 self.error.emit(
-                    "Couldn't read any image files in this folder. "
+                    "Couldn't read any frames in this folder. "
                     "The files may be damaged or in an unsupported format."
                 )
                 return
 
             size_counts = Counter(readable.values())
             dominant = size_counts.most_common(1)[0][0]
-            matching = sorted(f for f, s in readable.items() if s == dominant)
+            if frame_too_small(dominant[0], dominant[1]):
+                self.error.emit(
+                    f"These images are too small for trail detection "
+                    f"(minimum {MIN_FRAME_SHORT_SIDE} pixels on the shorter side). "
+                    f"They look like downsized previews. Run Star Trail CleanR on "
+                    f"your full-size original images."
+                )
+                return
+            # Filter IN PLACE, never re-sort. `frames` is in capture-time order by
+            # now, and sorting these back into filename order silently undid it:
+            # the engine then cleaned the frames in shooting order while the batch
+            # plan assumed alphabetical, so every batch borrowed the wrong
+            # neighbours for repair. No crash, no warning, wrong picture.
+            matching = [f for f in frames if readable.get(f) == dominant]
             mismatched = sorted(f for f, s in readable.items() if s != dominant)
             unreadable_sorted = sorted(unreadable)
 
@@ -615,6 +1582,20 @@ class CleanerWorker(QThread):
                         "is_dominant": is_dominant,
                     })
 
+                # Spot the "some frames are sideways" case so the modal can say
+                # so plainly instead of listing generic causes: a skipped size
+                # that is the width/height swap of the dominant size is the
+                # opposite orientation, not a different camera or RAW conversion.
+                dw, dh = dominant
+                _swapped = (dh, dw)
+                orientation_skipped = sum(
+                    1 for f in mismatched if readable[f] == _swapped
+                )
+                dominant_orientation = "landscape" if dw >= dh else "portrait"
+                skipped_orientation = (
+                    "portrait" if dominant_orientation == "landscape" else "landscape"
+                )
+
                 self._frames_filter_response = None
                 self._frames_filter_event.clear()
                 self.frames_filter_prompt.emit({
@@ -626,8 +1607,11 @@ class CleanerWorker(QThread):
                     "breakdown": breakdown,
                     "mismatched_sample": [os.path.basename(p) for p in mismatched[:5]],
                     "unreadable_sample": [os.path.basename(p) for p in unreadable_sorted[:5]],
+                    "orientation_skipped": orientation_skipped,
+                    "dominant_orientation": dominant_orientation,
+                    "skipped_orientation": skipped_orientation,
                 })
-                self._frames_filter_event.wait()
+                self._frames_filter_event.wait(timeout=300)
                 if self._frames_filter_response != "CONTINUE" or self._cancelled:
                     self.error.emit(
                         "Run cancelled because some frames in this folder "
@@ -637,34 +1621,171 @@ class CleanerWorker(QThread):
 
             frames = matching
             total = len(frames)
-            if not frames:
-                self.error.emit("No image files matched the dominant resolution.")
+            if total < 3:
+                # THE COUNT IS ONLY REAL HERE. The check on the Main page counts
+                # the FILES in the folder, before anything has been thrown away.
+                # Between there and here, three separate steps shrink the list:
+                # the duplicate merge (a JPG/TIFF/RAW of one shot becomes one
+                # frame), the dominant-resolution filter, and the unreadable
+                # filter. Until 2026-09-04 nothing re-checked the total after
+                # them -- the only test was "is the list completely empty" -- so
+                # a folder that came out at 1 or 2 frames sailed into the engine,
+                # which then died mid-batch with its own wording ("this batch has
+                # only 1 frame(s)"). That is Sentry fbaf8485, a Windows user on
+                # 2.94 whose folder reduced to a single usable frame.
+                #
+                # Name the step that emptied it. "Not enough frames" alone sends
+                # someone back to a folder that visibly holds plenty of photos.
+                _why = []
+                _merged = getattr(self, "_deduped_pairs_count", 0)
+                if _merged:
+                    _why.append(
+                        f"{_merged} merged as duplicate copies of the same shot "
+                        f"(a JPG, TIFF and RAW of one photo count as one frame)")
+                if mismatched:
+                    _why.append(
+                        f"{len(mismatched)} skipped for being a different size "
+                        f"than {dominant[0]} × {dominant[1]}")
+                if unreadable_sorted:
+                    _why.append(
+                        f"{len(unreadable_sorted)} skipped because they "
+                        f"could not be read")
+                _msg = (
+                    "Star Trail CleanR needs at least 3 frames to run. Each "
+                    "frame is repaired using the frames on either side of it, "
+                    "so three is the minimum.\n\n"
+                    f"This folder holds {_pre_dedup} image file"
+                    f"{'s' if _pre_dedup != 1 else ''}, but only {total} "
+                    f"can be used")
+                _msg += (":\n\n" + "\n".join(f"• {r}" for r in _why)
+                         if _why else ".")
+                _msg += ("\n\nStar Trail CleanR works on the individual frames "
+                         "you shot, before they are stacked, not on a finished "
+                         "star trail image.")
+                self.error.emit(_msg)
                 return
+
+            # NOW write the manifest: the frame range, the frame limit and the
+            # resolution filter have all had their say, so this list and the batch
+            # plan below are the same list. The engine reads it verbatim, so the
+            # two sides cannot disagree about which frame is frame 0 -- which is
+            # the whole point, and what was broken when this was written earlier.
+            try:
+                from modules.frame_list import write_manifest
+                import tempfile as _tf
+                _mf = _tf.NamedTemporaryFile(
+                    prefix="stc_frames_", suffix=".txt", delete=False)
+                write_manifest(_mf.name, frames)
+                _mf.close()
+                self._frame_manifest = _mf.name
+            except Exception:
+                self._frame_manifest = None  # fall back to the worker's own listing
 
             # Stash skipped counts so the run summary can show them.
             self._skipped_resolution_count = len(mismatched)
             self._skipped_unreadable_count = len(unreadable_sorted)
             self._dominant_size_str = f"{dominant[0]} × {dominant[1]}"
 
-            MAX_BATCH = 20
+            # Bit-depth scan (header-only). A folder can hold a mix of 8-bit and
+            # 16-bit frames -- e.g. most frames have a 16-bit TIFF twin we keep,
+            # but a few tail frames are JPG-only (8-bit). Rather than fail on a
+            # late batch, the worker evens every batch out to one depth; here we
+            # pick that target (the majority across the whole sequence) and count
+            # how many frames it will touch, for an honest one-line note.
+            from modules.io_safe import image_bitdepth as _img_depth
+            _depths = [d for d in (_img_depth(f) for f in frames) if d is not None]
+            if _depths:
+                _n16 = sum(1 for d in _depths if d == 16)
+                _n8 = len(_depths) - _n16
+                # Majority wins; a tie favors 16-bit so the higher-precision
+                # frames are never the ones degraded.
+                self._dominant_bitdepth = 16 if _n16 >= _n8 else 8
+                self._normalized_depth_count = sum(
+                    1 for d in _depths if d != self._dominant_bitdepth)
+            else:
+                self._dominant_bitdepth = None
+                self._normalized_depth_count = 0
+
+            MAX_BATCH = self.max_batch  # memory-aware cap (20 unless RAM is tight)
             n_batches = (total + MAX_BATCH - 1) // MAX_BATCH
             batch_size = (total + n_batches - 1) // n_batches if n_batches else MAX_BATCH
             starts = list(range(0, total, batch_size))
+            if len(starts) > 1 and (total - starts[-1]) < 3:
+                starts.pop()
             n_batches = len(starts)
 
-            ref_pixels = 5472 * 3648
-            img_pixels = dominant[0] * dominant[1]
-            res_scale = img_pixels / ref_pixels
-            frames_in_batch = min(batch_size, total)
-            est_seconds = int(frames_in_batch * 5 * res_scale * n_batches)
+            # One run-log timestamp for the WHOLE run: every batch subprocess is
+            # handed this same stamp (--run-log-ts) so they all append to a single
+            # run_log_<ts>.jsonl instead of one file per 20-frame batch -- one clean
+            # log per run, easy to read.
+            _run_log_ts = time.strftime("%Y-%m-%d_%H-%M-%S")
 
             import re
             mask_note = " with foreground mask" if self.mask_path else ""
             skipped_total = self._skipped_resolution_count + self._skipped_unreadable_count
             header = (f"Processing {total} frames ({dominant[0]}\u00d7{dominant[1]}){mask_note}"
-                      + (f" \u2014 skipped {skipped_total} file(s)" if skipped_total else ""))
+                      + (f", skipped {skipped_total} file(s)" if skipped_total else ""))
+            _dups = getattr(self, "_deduped_pairs_count", 0)
+            if _dups:
+                header += (f"\nMerged {_dups} duplicate JPG/TIFF pair"
+                           f"{'s' if _dups != 1 else ''} (kept the TIFF)")
+            _normed = getattr(self, "_normalized_depth_count", 0)
+            if _normed:
+                _depth_label = "16-bit" if self._dominant_bitdepth == 16 else "8-bit"
+                header += (f"\nEvened out {_normed} frame"
+                           f"{'s' if _normed != 1 else ''} to {_depth_label} "
+                           f"(folder mixes 8-bit and 16-bit)")
             header += f"\n{n_batches} batch{'es' if n_batches > 1 else ''} to run"
             self.status.emit(header + "\nStarting\u2026")
+
+            # Run settings summary \u2014 always logged before the first subprocess
+            # launches so it survives silent worker crashes and lands in emails.
+            try:
+                from modules.detect_trails import best_device as _best_device
+                _dev = _best_device()
+                _device_str = {"mps": "GPU (Apple)", "cuda": "GPU (NVIDIA)"}.get(_dev, "CPU")
+            except Exception:
+                _dev = None
+                _device_str = "unknown device"
+            # Work out WHY, if this run is about to use the processor on a machine
+            # that has a graphics card. Computed once here and reused by the
+            # anonymous usage report at the end of the run.
+            self._gpu_status_code = None
+            try:
+                from modules.nvidia_detect import detect_nvidia as _detect_nv
+                from modules.gpu_pack import gpu_status as _gpu_status
+                _nv_outcome = _detect_nv()[0] if _dev is not None else None
+                self._gpu_status_code = _gpu_status(_dev or "cpu", _nv_outcome)
+            except Exception:
+                pass
+            try:
+                from modules.user_folder import get_installed_model_version as _gmv
+                _mv = _gmv()
+                _mm = re.match(r"model-v(\d+(?:\.\d+)?)", _mv or "")
+                _model_str = f"Trail DetectoR v{_mm.group(1)}" if _mm else (_mv or "bundled model")
+                _dev_lbl = _dev_override_label()
+                if _dev_lbl:
+                    _model_str = f"Trail DetectoR {_dev_lbl}"
+            except Exception:
+                _model_str = "unknown model"
+            _scrub_str = ("Second ScrubbeR on"
+                          if SETTINGS.value("second_scrub_enabled", False, type=bool)
+                          else "Second ScrubbeR off")
+            self.status.emit(
+                f"{_model_str}  |  {_device_str}  |  {self.output_format.upper()} output"
+                f"  |  {_scrub_str}"
+            )
+            # Never lose the graphics card silently: if this machine has one and the
+            # run is going to the processor anyway, say so in plain words and name
+            # the fix. Lands in the run window and therefore in the Star Log.
+            try:
+                from modules.gpu_pack import run_note as _gpu_run_note
+                _gpu_note = _gpu_run_note(self._gpu_status_code or "")
+                if _gpu_note:
+                    self.status.emit(_gpu_note)
+            except Exception:
+                pass
+
             self.progress.emit(0, 100, "")
             self.frame_count.emit(0, total)
 
@@ -672,6 +1793,10 @@ class CleanerWorker(QThread):
             frames_cleaned = 0
             total_trails_run = 0
             total_frames_run = 0
+            step_seconds_run = {}       # where the run's time went, summed over batches (opt-in report)
+            from modules import run_timing_report as _rtr0
+            self.run_timing = _rtr0.new_accumulator()   # every step, every batch (the Star Log's run timing block)
+            step_batches_run = 0
 
             import uuid, socket, csv as _csv, datetime as _dt
             _run_id = str(uuid.uuid4())[:8]
@@ -696,6 +1821,11 @@ class CleanerWorker(QThread):
 
             def _log_est(phase, batch_idx, frame_in_batch, batch_sz,
                          overall_pct, remaining, force=False, note=""):
+                """Append one row to the per-machine estimator CSV
+                (~/.star_trail_cleanr/estimator_log.csv). Used only to tune the
+                time-estimate model offline; never shown to the user. Throttled
+                to once every _LOG_INTERVAL seconds unless force=True. `phase`
+                is a stage tag ("detect"/"repair"/"batch_start"/etc.)."""
                 now = time.time()
                 if not force and (now - _last_log_t[0]) < _LOG_INTERVAL:
                     return
@@ -719,9 +1849,12 @@ class CleanerWorker(QThread):
                 except OSError:
                     pass
 
-            hot_map_file = workspace_path(folder, "hot_pixel_map.png")
+            hot_map_file = workspace_path(output_folder, "hot_pixel_map.png")
 
             def _cleanup_hot_map():
+                """Delete the cached hot-pixel map file if present (ignored if
+                it can't be removed). Used to clear a stale cache before batch 1
+                and to tidy up after the run."""
                 try:
                     if os.path.isfile(hot_map_file):
                         os.remove(hot_map_file)
@@ -733,6 +1866,7 @@ class CleanerWorker(QThread):
                 _cleanup_hot_map()
 
             def _add_log(line):
+                """Emit one line to the GUI's Star Log via the status signal."""
                 self.status.emit(line)
 
             # ── Cumulative-rate estimator state ──
@@ -744,27 +1878,37 @@ class CleanerWorker(QThread):
             EST_MIN_WORK_FOR_MEASURED = 2.0  # frame-equivalents before trusting measured rate
             EST_PAD_FACTOR = 1.20  # under-promise: bias estimate 20% high
 
-            # Load persisted timing from prior runs to seed the estimator per-machine
+            # ── Up-front seed: format + megapixel cost model, tuned per machine ──
+            # Calibrated model gives a same-machine-as-Bruce baseline; the prior
+            # run (if any) tells us how THIS computer compares, so a first-ever run
+            # uses the baseline and every run after tunes to the user's hardware.
             _timing_path = os.path.join(os.path.expanduser("~"),
                                         ".star_trail_cleanr", "last_timing.json")
-            seeded_sec_per_frame = None
+            megapixels = (dominant[0] * dominant[1]) / 1_000_000.0
+            est_format_key = _est_format_key(frames, getattr(self, "_dominant_bitdepth", None))
+            model_sec_per_frame = _EST_SEC_PER_MP.get(
+                est_format_key, _EST_SEC_PER_MP_DEFAULT) * megapixels
+
+            # machine_factor: how the LAST run's real speed compared to what the
+            # baseline model predicted for it. 1.0 = like Bruce's Mac, >1 slower,
+            # <1 faster. Stored with the format so a JPG run is never tuned by a
+            # RAW run's slower raw speed. Clamped so one odd run can't wildly skew.
+            machine_factor = 1.0
             try:
                 if os.path.isfile(_timing_path):
                     with open(_timing_path) as _tf:
                         _prior = json.load(_tf)
-                    _prior_pixels = int(_prior.get("image_pixels", 0))
-                    _prior_spf = float(_prior.get("sec_per_frame", 0))
-                    if _prior_spf > 0 and _prior_pixels > 0:
-                        cur_pixels = dominant[0] * dominant[1]
-                        seeded_sec_per_frame = _prior_spf * (cur_pixels / _prior_pixels)
-                    else:
-                        # Backward compatibility with old warm_batch_mean format
-                        _prior_per_batch = float(_prior.get("warm_batch_mean", 0))
-                        if _prior_per_batch > 0 and _prior_pixels > 0:
-                            cur_pixels = dominant[0] * dominant[1]
-                            seeded_sec_per_frame = (_prior_per_batch / 20.0) * (cur_pixels / _prior_pixels)
+                    _p_spf = float(_prior.get("sec_per_frame", 0))
+                    _p_px = int(_prior.get("image_pixels", 0))
+                    _p_fmt = _prior.get("format")
+                    if _p_spf > 0 and _p_px > 0:
+                        _p_k = _EST_SEC_PER_MP.get(_p_fmt, _EST_SEC_PER_MP_DEFAULT)
+                        _p_model = _p_k * (_p_px / 1_000_000.0)
+                        if _p_model > 0:
+                            machine_factor = min(4.0, max(0.25, _p_spf / _p_model))
             except (OSError, ValueError, KeyError):
                 pass
+            seeded_sec_per_frame = model_sec_per_frame * machine_factor
 
             est_processing_start_t = None   # set when first frame tick fires
             est_batches_done_frames = 0     # sum of frame counts of fully-completed batches
@@ -778,6 +1922,18 @@ class CleanerWorker(QThread):
             est_completed_batch_dts = []
 
             def _estimate_remaining(now, this_batch_size, phase, frame_num, frame_total):
+                """Estimate seconds left in the whole run using a cumulative
+                work-rate model. Each frame is 1 work unit split DETECT_FRAC /
+                REPAIR_FRAC across the two phases, so the rate stays steady
+                across batch boundaries (no lurching). Returns
+                (remaining_seconds_or_None, measured); see the comment below for
+                why `measured` matters."""
+                # Returns (remaining_seconds_or_None, measured). `measured` is True
+                # once we've timed real frames this run, False while still on the
+                # calibrated cost-model seed. The headline "Estimated Time" is now
+                # shown up front from that seed (see the run_start block); this live
+                # value just refines the "remaining" countdown toward real speed as
+                # the run progresses.
                 if phase == "detect":
                     frac = (frame_num / frame_total) * DETECT_FRAC
                 else:
@@ -786,7 +1942,7 @@ class CleanerWorker(QThread):
                 work_done = est_batches_done_frames + cur_batch_work
                 remaining_work = total - work_done
                 if remaining_work <= 0:
-                    return 0.0
+                    return 0.0, True
                 rate = None
                 if (est_processing_start_t is not None
                         and work_done >= EST_MIN_WORK_FOR_MEASURED):
@@ -795,12 +1951,61 @@ class CleanerWorker(QThread):
                         rate = work_done / elapsed  # frames/sec
                 if rate is None or rate <= 0:
                     if seeded_sec_per_frame is None or seeded_sec_per_frame <= 0:
-                        return None
-                    return remaining_work * seeded_sec_per_frame * EST_PAD_FACTOR
-                return (remaining_work / rate) * EST_PAD_FACTOR
+                        return None, False
+                    return remaining_work * seeded_sec_per_frame * EST_PAD_FACTOR, False
+                return (remaining_work / rate) * EST_PAD_FACTOR, True
 
             _log_est("run_start", None, None, None, 0, None, force=True,
-                     note=f"n={total} batches={n_batches} res={dominant[0]}x{dominant[1]}")
+                     note=f"n={total} batches={n_batches} res={dominant[0]}x{dominant[1]}"
+                          + f" fmt={est_format_key} mp={megapixels:.1f} mf={machine_factor:.2f}"
+                          + (f" {self.mem_note}" if self.mem_note else ""))
+
+            # Show a ballpark up front, before any frame runs, from the calibrated
+            # cost model (seeded_sec_per_frame is always set now). This is the
+            # headline the run summary records as "Estimated time"; the live value
+            # above then refines the "remaining" countdown as real speed comes in.
+            if seeded_sec_per_frame and seeded_sec_per_frame > 0:
+                est_initial_shown = total * seeded_sec_per_frame * EST_PAD_FACTOR
+                self.initial_estimate.emit(float(est_initial_shown))
+                self.progress.emit(0, 100, fmt_estimate(est_initial_shown))
+                self.remaining_estimate.emit(float(est_initial_shown))
+
+            # ── Crash breadcrumb: rotate this machine's progress log ──────────
+            # The worker subprocess appends a flushed line per frame as it runs.
+            # Read the prior run's log first: if it lacks the clean-finish marker
+            # the previous run was hard-killed (no exception, no Sentry trace, as
+            # in a macOS low-memory force-quit) — stash its tail so this run's
+            # Star Log carries that silent crash's fingerprint. Then start fresh.
+            _crumb_path = os.path.join(os.path.expanduser("~"),
+                                       ".star_trail_cleanr", "last_run_progress.log")
+            try:
+                _crumb_prev = _crumb_path[:-4] + ".prev.log"
+                os.makedirs(os.path.dirname(_crumb_path), exist_ok=True)
+                if os.path.isfile(_crumb_path):
+                    try:
+                        with open(_crumb_path, "r", encoding="utf-8",
+                                  errors="replace") as _pf:
+                            _prior = _pf.read()
+                    except OSError:
+                        _prior = ""
+                    if _prior.strip() and "=== RUN ENDED ===" not in _prior:
+                        self._prev_crash_log = "\n".join(
+                            _prior.rstrip().splitlines()[-25:])
+                    try:
+                        os.replace(_crumb_path, _crumb_prev)
+                    except OSError:
+                        pass
+                with open(_crumb_path, "w", encoding="utf-8") as _pf:
+                    _pf.write(
+                        f"=== RUN START "
+                        f"{_dt.datetime.now().isoformat(timespec='seconds')} "
+                        f"run_id={_run_id} ===\n"
+                        f"frames={total} batches={n_batches} "
+                        f"res={dominant[0]}x{dominant[1]} "
+                        f"out={self.output_format} {self.mem_note}\n"
+                    )
+            except Exception:
+                pass
 
             for i, start in enumerate(starts):
                 if self._cancelled:
@@ -819,24 +2024,55 @@ class CleanerWorker(QThread):
                 self.batch_info.emit(i + 1, n_batches)
                 _add_log(f"Batch {i+1}/{n_batches}")
 
-                this_batch = min(batch_size, total - start)
+                # The last batch absorbs any remainder: a tiny tail batch
+                # (<3 frames) is merged into the previous one above, so the
+                # final batch must cover everything left or those frames would
+                # be silently dropped -- which happens once batches are small.
+                if i == len(starts) - 1:
+                    this_batch = total - start
+                else:
+                    this_batch = min(batch_size, total - start)
                 _log_est("batch_start", i, 0, this_batch, None, None, force=True)
+                # The frame manifest is written AFTER the frame range is applied, so
+                # when the engine reads it, frame 0 of the manifest already IS the
+                # first chosen frame: adding frame_start again would skip that many
+                # frames twice. Only the no-manifest fallback (the engine lists the
+                # whole folder itself) needs the offset.
+                abs_start = (start if getattr(self, "_frame_manifest", None)
+                             else start + self.frame_start)
                 if getattr(sys, 'frozen', False):
                     cmd = [sys.executable, '--cleanr-worker', SCRIPT, folder,
                            "-o", output_folder, "--model", get_model_path(),
-                           "--start", str(start), "--batch", str(this_batch)]
+                           "--start", str(abs_start), "--batch", str(this_batch)]
                 else:
                     cmd = [sys.executable, "-u", SCRIPT, folder,
                            "-o", output_folder, "--model", get_model_path(),
-                           "--start", str(start), "--batch", str(this_batch)]
+                           "--start", str(abs_start), "--batch", str(this_batch)]
+                cmd.extend(["--run-log-ts", _run_log_ts])  # one log file per run
+                if getattr(self, "_frame_manifest", None):
+                    # Hand the engine the exact capture-time order (see above).
+                    cmd.extend(["--frame-manifest", self._frame_manifest])
 
                 if self.mask_path:
                     cmd.extend(["--foreground-mask", self.mask_path])
                     cmd.extend(["--hot-pixel-map", hot_map_file])
                 cmd.extend(["--output-format", self.output_format,
                             "--jpeg-quality", str(self.jpeg_quality)])
+                cmd.extend(["--twin-prefer", self.twin_prefer])
                 cmd.extend(["--expected-width", str(dominant[0]),
                             "--expected-height", str(dominant[1])])
+                if getattr(self, "_dominant_bitdepth", None):
+                    cmd.extend(["--expected-bitdepth", str(self._dominant_bitdepth)])
+                if SETTINGS.value("second_scrub_enabled", False, type=bool):
+                    cmd.append("--second-scrub")
+                # Dev-only: when the Red Trail Map box is on, have the worker save
+                # the lightweight per-frame detection polygons that feed the map.
+                # Gated on the dev flag so a regular user never produces them.
+                if (_DEV_SWITCHER_ENABLED
+                        and SETTINGS.value("red_trail_map_enabled", True, type=bool)):
+                    cmd.append("--save-detections")
+                if _DEV_SWITCHER_ENABLED and SETTINGS.value("streak_filter_enabled", False, type=bool):
+                    cmd.append("--streak-filter")
 
                 worker_env = os.environ.copy()
                 if (SETTINGS.value("crash_reporting_enabled", False, type=bool)
@@ -893,7 +2129,7 @@ class CleanerWorker(QThread):
                             self._bad_file_response = None
                             self._bad_file_event.clear()
                             self.bad_file_prompt.emit(path, diag)
-                            self._bad_file_event.wait()
+                            self._bad_file_event.wait(timeout=300)
                             decision = self._bad_file_response or "STOP"
                             if decision == "CONTINUE":
                                 self._run_skip_count += 1
@@ -908,10 +2144,31 @@ class CleanerWorker(QThread):
                         continue
 
                     # Parse stat lines emitted by astro_clean_v5
+                    if proc_line.startswith("FRAME_TRAIL_COUNT:"):
+                        try:
+                            self.trail_count_update.emit(total_trails_run + int(proc_line.split(":", 1)[1].strip()))
+                        except ValueError:
+                            pass
+                        continue
                     if proc_line.startswith("BATCH_TRAIL_COUNT:"):
                         try:
                             total_trails_run += int(proc_line.split(":", 1)[1].strip())
                         except ValueError:
+                            pass
+                        continue
+                    if proc_line.startswith("BATCH_STEP_DETAIL:"):
+                        try:
+                            from modules import run_timing_report as _rtr
+                            _rtr.merge(self.run_timing, json.loads(proc_line.split(":", 1)[1].strip()))
+                        except Exception:
+                            pass
+                        continue
+                    if proc_line.startswith("BATCH_STEP_SECONDS:"):
+                        try:
+                            for _sk, _sv in json.loads(proc_line.split(":", 1)[1].strip()).items():
+                                step_seconds_run[_sk] = step_seconds_run.get(_sk, 0.0) + float(_sv)
+                            step_batches_run += 1
+                        except Exception:
                             pass
                         continue
                     if proc_line.startswith("BATCH_FRAME_COUNT:"):
@@ -928,13 +2185,13 @@ class CleanerWorker(QThread):
                         self.warmup_active.emit(True)
                     if "Step 1" in proc_line and "detecting" in proc_line:
                         cur_step = 1
-                        self.step_progress.emit(1, 0, this_batch)
+                        self.step_progress.emit(1, 0, this_batch, start, total)
                         # Idempotent on the GUI side; harmless if already running.
                         self.warmup_active.emit(True)
-                    elif "Step 2" in proc_line and "repairing" in proc_line:
+                    elif "Step 2" in proc_line and "cleaning" in proc_line:
                         cur_step = 2
-                        self.step_progress.emit(1, this_batch, this_batch)
-                        self.step_progress.emit(2, 0, this_batch)
+                        self.step_progress.emit(1, this_batch, this_batch, start + this_batch, total)
+                        self.step_progress.emit(2, 0, this_batch, start, total)
 
                     # Parse frame progress within steps
                     sub_m = _sub_re.search(proc_line)
@@ -948,38 +2205,40 @@ class CleanerWorker(QThread):
                             if est_processing_start_t is None:
                                 est_processing_start_t = now_t
                             self.warmup_active.emit(False)
-                            self.step_progress.emit(1, frame_num, frame_total)
+                            self.step_progress.emit(1, frame_num, frame_total, start + frame_num, total)
                             self.step_detail.emit(proc_line)
 
-                            remaining = _estimate_remaining(now_t, this_batch, "detect", frame_num, frame_total)
+                            remaining, est_measured = _estimate_remaining(now_t, this_batch, "detect", frame_num, frame_total)
                             if remaining is not None:
                                 batch_pct = (detect_count / frame_total) * 0.67
                                 overall_pct = int(((i + batch_pct) / n_batches) * 100)
                                 overall_pct = max(0, min(99, overall_pct))
-                                self.progress.emit(overall_pct, 100, fmt_hms(remaining))
-                                if est_initial_shown is None:
+                                self.progress.emit(overall_pct, 100, fmt_estimate(remaining))
+                                self.remaining_estimate.emit(float(remaining))
+                                if est_initial_shown is None and est_measured:
                                     est_initial_shown = remaining + (now_t - t0)
                                     self.initial_estimate.emit(float(est_initial_shown))
                                 _log_est("detect", i, frame_num, frame_total,
                                          overall_pct, remaining)
 
-                        elif cur_step == 2 and "repairing " in proc_line:
+                        elif cur_step == 2 and "cleaning " in proc_line:
                             repair_count = frame_num
                             now_t = time.time()
                             if est_processing_start_t is None:
                                 est_processing_start_t = now_t
-                            self.step_progress.emit(2, frame_num, frame_total)
+                            self.step_progress.emit(2, frame_num, frame_total, start + frame_num, total)
                             frames_cleaned = start + frame_num
                             self.frame_count.emit(frames_cleaned, total)
                             self.step_detail.emit(proc_line)
 
-                            remaining = _estimate_remaining(now_t, this_batch, "repair", frame_num, frame_total)
+                            remaining, est_measured = _estimate_remaining(now_t, this_batch, "repair", frame_num, frame_total)
                             if remaining is not None:
                                 batch_pct = 0.67 + (repair_count / frame_total) * 0.33
                                 overall_pct = int(((i + batch_pct) / n_batches) * 100)
                                 overall_pct = max(0, min(99, overall_pct))
-                                self.progress.emit(overall_pct, 100, fmt_hms(remaining))
-                                if est_initial_shown is None:
+                                self.progress.emit(overall_pct, 100, fmt_estimate(remaining))
+                                self.remaining_estimate.emit(float(remaining))
+                                if est_initial_shown is None and est_measured:
                                     est_initial_shown = remaining + (now_t - t0)
                                     self.initial_estimate.emit(float(est_initial_shown))
                                 _log_est("repair", i, frame_num, frame_total,
@@ -988,15 +2247,33 @@ class CleanerWorker(QThread):
                         elif cur_step == 0:
                             self.step_detail.emit(proc_line)
 
-                    _add_log(f"  {proc_line}")
+                    # Never surface raw engine warnings/errors/tracebacks in the
+                    # user-facing Star Log -- they read as "the app is broken".
+                    # The raw line is still captured in proc_stdout_lines above
+                    # (crash report) and the on-disk run log for debugging.
+                    # The ENGINE says which processor it actually loaded the
+                    # model on. Believe that over the guess this process made
+                    # before the run: they are different processes, and the
+                    # engine silently falls back to the CPU if the model will
+                    # not load on the card. Reporting the guess is how a run
+                    # could show a green GPU badge while every frame was cleaned
+                    # on the processor (2026-08-23).
+                    if proc_line.startswith("STC_DEVICE:"):
+                        _rep = proc_line.split(":", 1)[1].strip()
+                        if _rep and _rep != getattr(self, "_worker_device", None):
+                            self._worker_device = _rep
+                            self.device_in_use.emit(_rep)
+                        continue
+                    if not _is_engine_noise(proc_line):
+                        _add_log(f"  {proc_line}")
 
                 self._proc.wait()
                 if self._cancelled:
                     return
                 if self._proc.returncode != 0:
                     stderr_text = self._proc.stderr.read().strip()
-                    err_lines = [l for l in stderr_text.splitlines() if l.strip()]
-                    err_msg = err_lines[-1] if err_lines else "unknown error"
+                    err_msg = worker_error_message(stderr_text, proc_stdout_lines,
+                                                   self._proc.returncode)
 
                     def _head_tail(lines, n=50):
                         """Return first n + last n lines joined, with a marker
@@ -1027,17 +2304,50 @@ class CleanerWorker(QThread):
                             os_tag = f"{sysname} {rel} ({_plat.machine()})"
                             with sentry_sdk.push_scope() as scope:
                                 scope.set_tag("component", "gui_worker_capture")
+                                scope.set_tag("app_version", VERSION)
                                 scope.set_tag("batch_index", str(i + 1))
                                 scope.set_tag("n_batches", str(n_batches))
                                 scope.set_tag("image_w", str(dominant[0]))
                                 scope.set_tag("image_h", str(dominant[1]))
                                 scope.set_tag("output_format", str(self.output_format))
                                 scope.set_tag("os", os_tag)
+                                # How the frame list got to its final size. Without
+                                # these, a report that a batch came up short says
+                                # nothing about WHICH step emptied the folder --
+                                # exactly the guesswork Sentry fbaf8485 forced.
+                                scope.set_tag("folder_files", str(_pre_dedup))
+                                scope.set_tag("frames_planned", str(total))
+                                scope.set_tag("merged_dupes",
+                                              str(getattr(self, "_deduped_pairs_count", 0)))
+                                scope.set_tag("skipped_size", str(len(mismatched)))
+                                scope.set_tag("skipped_unreadable",
+                                              str(len(unreadable_sorted)))
+                                scope.set_tag("exit_code_hex", hex(self._proc.returncode & 0xFFFFFFFF))
+                                try:
+                                    scope.set_tag("cpu", _plat.processor() or "unknown")
+                                    if sysname == "Windows":
+                                        import ctypes
+                                        # 40 = PF_AVX2_INSTRUCTIONS_AVAILABLE
+                                        scope.set_tag("cpu_avx2", str(bool(
+                                            ctypes.windll.kernel32.IsProcessorFeaturePresent(40))))
+                                except Exception:
+                                    pass
                                 scope.set_extra("stderr_preview", stderr_preview or "")
                                 scope.set_extra("stdout_preview", stdout_preview or "")
                                 scope.set_extra("stderr_full", stderr_text or "")
+                                # TITLE = FIRST LINE ONLY, and that is deliberate.
+                                # Sentry groups issues by this string, and err_msg
+                                # is now the engine's whole error block: the user's
+                                # folder path, how many frames they wrote, how much
+                                # space is on their drive. Passing all that here
+                                # would give every occurrence its own group, so ten
+                                # users hitting one bug would look like ten bugs.
+                                # The full text goes in an extra instead, where it
+                                # is read but does not shape the grouping.
+                                scope.set_extra("user_message", err_msg or "")
+                                _title = (err_msg or "unknown error").splitlines()[0]
                                 sentry_sdk.capture_message(
-                                    f"Worker exited {self._proc.returncode}: {err_msg}",
+                                    f"Worker exited {self._proc.returncode}: {_title}",
                                     level="error",
                                 )
                         except Exception:
@@ -1052,12 +2362,19 @@ class CleanerWorker(QThread):
                          force=True, note=f"cum_frames={est_batches_done_frames}")
 
                 # Mark both steps complete for this batch
-                self.step_progress.emit(2, this_batch, this_batch)
+                self.step_progress.emit(2, this_batch, this_batch, start + this_batch, total)
                 _add_log(f"Batch {i+1}/{n_batches} complete ({fmt_hms(time.time() - t0)} elapsed)")
 
             self.progress.emit(100, 100, "")
             _log_est("run_complete", None, None, None, 100, 0, force=True,
                      note=f"actual_total={round(time.time()-t0,2)}")
+            # Clean-finish marker: every batch wrote breadcrumbs above; stamp the
+            # log so the NEXT run can tell this run ended cleanly (no crash tail).
+            try:
+                with open(_crumb_path, "a", encoding="utf-8") as _pf:
+                    _pf.write("=== RUN COMPLETE ===\n")
+            except Exception:
+                pass
             done_msg = f"Done! {total} frames in {n_batches} batch{'es' if n_batches > 1 else ''} ({fmt_hms(time.time() - t0)})"
             _add_log(done_msg)
             self.step_detail.emit(done_msg)
@@ -1065,6 +2382,78 @@ class CleanerWorker(QThread):
             if est_initial_shown is not None:
                 self.timing_stats.emit(float(est_initial_shown),
                                        float(time.time() - t0))
+
+            # ── Anonymous usage report (opt-in). Wrapped so telemetry can NEVER
+            #    affect a real run; sent only if the user consented. ──
+            try:
+                if SETTINGS.value("crash_reporting_enabled", False, type=bool):
+                    import platform as _uplat
+                    _usys = _uplat.system()
+                    try:
+                        from modules.user_folder import get_installed_model_version as _umv
+                        _umodel = _umv() or None
+                    except Exception:
+                        _umodel = None
+                    try:
+                        _wdev = getattr(self, "_worker_device", None)
+                        # Prefer the engine's answer; fall back to our own only
+                        # when no batch ever reported one (a run that died early).
+                        _ugpu = ((_wdev in ("mps", "cuda")) if _wdev
+                                 else _best_device() in ("mps", "cuda"))
+                    except Exception:
+                        _ugpu = None
+                    # Why the run used what it used (see modules.gpu_pack.gpu_status).
+                    # Without this we can only see THAT a machine dropped to the
+                    # processor, never why, which left us guessing from one report.
+                    _ugpu_status = getattr(self, "_gpu_status_code", None)
+                    try:
+                        _wdev2 = getattr(self, "_worker_device", None)
+                        if _wdev2:
+                            from modules.gpu_pack import gpu_status as _gs2
+                            from modules.nvidia_detect import detect_nvidia as _dn2
+                            _ugpu_status = _gs2(_wdev2, _dn2()[0])
+                    except Exception:
+                        pass
+                    _ufacts = {
+                        "type": "run",
+                        "app_version": VERSION,
+                        "platform": _usys.lower(),
+                        "platform_arch": _uplat.machine(),
+                        "os_version": (_windows_release_label() if _usys == "Windows"
+                                       else _uplat.release()),
+                        "model": _umodel,
+                        "trails": int(total_trails_run),
+                        "frames": int(total_frames_run or total),
+                        "run_seconds": int(time.time() - t0),
+                        "outcome": "finished",
+                        "input_format": est_format_key,
+                        "output_format": self.output_format,
+                        "bit_depth": getattr(self, "_dominant_bitdepth", None),
+                        "megapixels": round(megapixels, 1),
+                        "width": int(dominant[0]),
+                        "height": int(dominant[1]),
+                    }
+                    if _ugpu is not None:
+                        _ufacts["gpu"] = _ugpu
+                    if _ugpu_status:
+                        _ufacts["gpu_status"] = _ugpu_status
+                    # Where the time went, and what machine it ran on. Whole seconds per
+                    # step summed over the run's batches, so a slow report can be broken down
+                    # without guessing. Numbers only: no names, paths or images.
+                    if step_seconds_run:
+                        _ufacts["stage_seconds"] = {k: int(round(v)) for k, v in step_seconds_run.items()}
+                        _ufacts["batches"] = int(step_batches_run)
+                    try:
+                        _ufacts["cpu_cores"] = int(os.cpu_count() or 0)
+                        import psutil as _psu
+                        _ufacts["ram_gb"] = round(_psu.virtual_memory().total / (1024 ** 3), 1)
+                    except Exception:
+                        pass
+                    _ufacts.update(_leader_gear_exif(frames))
+                    from modules import usage_report
+                    usage_report.send(_ufacts)
+            except Exception:
+                pass
 
             # Persist sec-per-frame for next run's estimator seed
             if est_processing_start_t is not None and est_batches_done_frames > 0:
@@ -1077,13 +2466,27 @@ class CleanerWorker(QThread):
                         json.dump({
                             "sec_per_frame": final_sec_per_frame,
                             "image_pixels": dominant[0] * dominant[1],
+                            "format": est_format_key,
                             "app_version": VERSION,
                         }, _tf)
                 except OSError:
                     pass
 
-            if self.mask_path:
-                _cleanup_hot_map()
+            # The hot-pixel map is KEPT (2026-08-09). Every batch adds what it
+            # found to it, so by the end of the run it is the record of where this
+            # camera's stuck pixels actually are -- built from all the frames, 20
+            # at a time, at a bar no star can clear. Deleting it here threw that
+            # away and left the Star Trail window's speck removal to re-derive
+            # everything from a 40-frame sample of the finished sequence, which is
+            # both weaker evidence and the reason it was marking real stars. It is
+            # still cleared before batch 1 (above), so it never carries over.
+
+            # Remove the per-run frame manifest temp file (best effort).
+            try:
+                if getattr(self, "_frame_manifest", None):
+                    os.remove(self._frame_manifest)
+            except OSError:
+                pass
 
             self.done.emit(output_folder)
 
@@ -1096,8 +2499,12 @@ class UpdateCheckThread(QThread):
     result_ready = Signal(dict)
 
     def run(self):
+        """Query GitHub for a newer app release; emit the result dict if one
+        exists. Any failure is swallowed silently."""
         from modules.update_check import check_for_update
-        result = check_for_update(VERSION)
+        # Runs off the UI thread, so it never delays startup -- give it room and
+        # retry, so one slow GitHub response can't blank the update banner.
+        result = check_for_update(VERSION, timeout_s=12, retries=3)
         if result:
             self.result_ready.emit(result)
 
@@ -1107,6 +2514,8 @@ class ModelUpdateCheckThread(QThread):
     result_ready = Signal(dict)
 
     def run(self):
+        """Query GitHub for a newer trail-detector model release; emit the
+        result dict if one exists. Any failure is swallowed silently."""
         from modules.model_update import check_for_model_update
         result = check_for_model_update()
         if result:
@@ -1118,9 +2527,25 @@ class NvidiaDetectThread(QThread):
     result_ready = Signal(str, str)
 
     def run(self):
+        """Probe for an NVIDIA GPU and emit (outcome, detail) — outcome is
+        "yes"/"no"/etc., detail is a human-readable note."""
         from modules.nvidia_detect import detect_nvidia
         outcome, detail = detect_nvidia()
         self.result_ready.emit(outcome, detail)
+
+
+class BestDeviceThread(QThread):
+    """Background torch device detection. Emits 'cuda', 'mps', or 'cpu'."""
+    result_ready = Signal(str)
+
+    def run(self):
+        """Determine the torch compute device and emit it ("cuda"/"mps"/"cpu"),
+        defaulting to "cpu" on any failure."""
+        try:
+            from modules.detect_trails import best_device
+            self.result_ready.emit(best_device())
+        except Exception:
+            self.result_ready.emit("cpu")
 
 
 class ModelDownloadThread(QThread):
@@ -1134,12 +2559,17 @@ class ModelDownloadThread(QThread):
     failed = Signal(str)          # short error string; not user-visible
 
     def __init__(self, url, target_path, version_tag, parent=None):
+        """Store the download `url`, the final `target_path` for the weights,
+        and the `version_tag` to record once the install succeeds."""
         super().__init__(parent)
         self.url = url
         self.target_path = target_path
         self.version_tag = version_tag
 
     def run(self):
+        """Stream the model file to a .tmp path emitting progress, then
+        atomically rename it into place and save the version tag. On any
+        failure, delete the partial .tmp and emit failed()."""
         import os as _os
         import urllib.request
         tmp_path = self.target_path + ".tmp"
@@ -1171,6 +2601,186 @@ class ModelDownloadThread(QThread):
             self.failed.emit(str(e))
 
 
+class GpuPackInstallThread(QThread):
+    """Downloads the CUDA PyTorch wheels and extracts them into the GPU override folder.
+
+    Emits progress(label, bytes_done, total_bytes) during download.
+    label changes per step; total_bytes=0 signals an indeterminate phase.
+    """
+    progress = Signal(str, float, float)
+    finished_ok = Signal()
+    failed = Signal(str)
+
+    def _download(self, label, urls, dest_path):
+        """Try each URL in order. On HTTP 403 (region block) or 404 (mirror lacks
+        the file) move to the next mirror silently. Raises RuntimeError with a
+        __blocked__ sentinel only if every mirror was blocked (403)."""
+        import urllib.request
+        import urllib.error
+        last_err = None
+        saw_block = False
+        for idx, url in enumerate(urls):
+            if idx > 0:
+                self.progress.emit(f"{label}: trying backup server...", 0, 0)
+            req = urllib.request.Request(url, headers={"User-Agent": "StarTrailCleanR-GpuPack"})
+            try:
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    total = float(resp.headers.get("Content-Length") or 0)
+                    done = 0.0
+                    with open(str(dest_path), "wb") as f:
+                        while True:
+                            chunk = resp.read(131072)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                            done += len(chunk)
+                            self.progress.emit(label, done, total)
+                return
+            except urllib.error.HTTPError as e:
+                last_err = e
+                # 403 = region/network block; 404 = this mirror doesn't carry the
+                # file. Either way, fall through to the next mirror rather than
+                # giving up on the first server.
+                if e.code == 403:
+                    saw_block = True
+                    continue
+                if e.code == 404:
+                    continue
+                raise RuntimeError(f"{label} failed: {e}") from e
+            except Exception as e:
+                raise RuntimeError(f"{label} failed: {e}") from e
+        if saw_block:
+            raise RuntimeError(
+                f"{label} blocked: all servers returned 403 Forbidden\n__blocked__"
+            ) from last_err
+        raise RuntimeError(f"{label} failed: {last_err}") from last_err
+
+    def run(self):
+        """Download and install the CUDA torch + torchvision wheels.
+
+        Everything is downloaded and unpacked into a STAGING folder first and
+        only swapped into service once it is complete. Two rules drive this:
+        a half-finished install must never cost someone the working GPU support
+        they already had, and we must never install a version the app will then
+        refuse to load. Emits finished_ok() on success or failed() with a
+        user-friendly message (permission, 403, or connection errors get
+        tailored text)."""
+        import shutil
+        import zipfile
+        from modules.gpu_pack import (resolve_available_url_set, get_staging_dir,
+                                       write_version_tag, swap_staged_into_place,
+                                       chmod_extracted_files)
+
+        # The app only loads a pack matching the version baked into this build,
+        # so installing anything else would burn a ~4 GB download on files that
+        # can never be used. If the version this build needs isn't downloadable,
+        # stop and say so rather than quietly substituting an older one.
+        self.progress.emit("Checking GPU support download...", 0, 0)
+        url_sets, healed = resolve_available_url_set()
+        if not url_sets:
+            self.failed.emit(
+                "Cannot determine download URLs for this build.\n"
+                "Try updating Star Trail CleanR first, then install GPU support again."
+            )
+            return
+        if healed:
+            self.failed.emit(
+                "GPU support isn't available for this version of Star Trail CleanR "
+                "right now.\n\n"
+                "Nothing on your computer has been changed. Please update to the "
+                "latest version and try again, or let us know if this keeps happening."
+            )
+            return
+
+        torch_urls = [s[0] for s in url_sets]
+        tv_urls    = [s[1] for s in url_sets]
+        torch_ver  = url_sets[0][2]
+        staging_dir = get_staging_dir()
+
+        # Wipe any leftovers from an earlier attempt. This folder is ours alone;
+        # the pack currently in service lives elsewhere and is untouched until
+        # the swap at the end.
+        self.progress.emit("Preparing...", 0, 0)
+        shutil.rmtree(str(staging_dir), ignore_errors=True)
+        try:
+            staging_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            self.failed.emit(
+                f"Cannot create the GPU support folder:\n{staging_dir}\n\n{e}\n\n"
+                "Check that you have permission to write to your AppData folder."
+            )
+            return
+
+        torch_whl = staging_dir / "torch_pack.whl"
+        tv_whl = staging_dir / "torchvision_pack.whl"
+
+        try:
+            self._download("Downloading GPU support (1 of 2)", torch_urls, torch_whl)
+            self.progress.emit("Installing GPU support (1 of 2)...", 0, 0)
+            with zipfile.ZipFile(str(torch_whl), "r") as zf:
+                zf.extractall(str(staging_dir))
+            torch_whl.unlink(missing_ok=True)
+            chmod_extracted_files(staging_dir)
+
+            self._download("Downloading GPU support (2 of 2)", tv_urls, tv_whl)
+            self.progress.emit("Installing GPU support (2 of 2)...", 0, 0)
+            with zipfile.ZipFile(str(tv_whl), "r") as zf:
+                zf.extractall(str(staging_dir))
+            tv_whl.unlink(missing_ok=True)
+            chmod_extracted_files(staging_dir)
+
+            # Only now does the pack in service get replaced.
+            self.progress.emit("Finishing up...", 0, 0)
+            swapped, swap_err = swap_staged_into_place()
+            if not swapped:
+                raise RuntimeError(
+                    f"The download finished but {swap_err}.\n\n"
+                    "Your previous GPU support has been left as it was. Reboot your "
+                    "computer, then reopen Star Trail CleanR and try again."
+                )
+
+            if not write_version_tag(torch_ver):
+                raise RuntimeError(
+                    "Files downloaded successfully but could not write the version tag.\n"
+                    "GPU support may not activate on restart. Try installing again."
+                )
+            self.finished_ok.emit()
+
+        except Exception as e:
+            # The half-finished download is ours and only ours: throwing it away
+            # cannot touch whatever pack is currently in service.
+            shutil.rmtree(str(staging_dir), ignore_errors=True)
+            msg = str(e)
+            # These three all happen while downloading or unpacking, before
+            # anything in service is touched, so each one gets the same promise:
+            # a failed install costs you nothing you already had.
+            reassure = ("\n\nAny GPU support you already had is untouched and still "
+                        "working.")
+            if "Errno 13" in msg or "Permission denied" in msg or "Access is denied" in msg:
+                msg = (
+                    "Installation failed: Windows denied access to a file.\n\n"
+                    "Reboot your computer, then reopen Star Trail CleanR and click "
+                    "Install GPU Support again. The reboot will release the locked files."
+                    f"{reassure}\n\nDetails: {e}"
+                )
+            elif "__blocked__" in msg or ("403" in msg and "Forbidden" in msg):
+                msg = (
+                    "Download blocked (HTTP 403).\n\n"
+                    "PyTorch's download servers are blocking requests from your network. "
+                    "We automatically tried an alternative server, but it was also blocked.\n\n"
+                    "The most reliable fix is to use a VPN: connect to any US or European "
+                    "server, then click Install GPU Support again.\n\n"
+                    "Click More Info for step-by-step instructions."
+                    f"{reassure}\n\nDetails: {e}"
+                )
+            elif "urlopen error" in msg or "ConnectionReset" in msg or "timed out" in msg:
+                msg = (
+                    "Download failed. Check your internet connection and try again."
+                    f"{reassure}\n\nDetails: {e}"
+                )
+            self.failed.emit(msg)
+
+
 class _XCloseButton(QPushButton):
     """Close button that paints two diagonal white lines via QPainter for
     pixel-perfect centering at any size. Avoids font-metric drift that left
@@ -1178,6 +2788,9 @@ class _XCloseButton(QPushButton):
     platforms. Background color and hover state come from the stylesheet."""
 
     def paintEvent(self, event):
+        """Draw the button's background (via the base class) then paint the two
+        white diagonal strokes of the X by hand, with a margin scaled to the
+        button size so the glyph stays centered at any size."""
         from PySide6.QtGui import QPainter, QPen
         super().paintEvent(event)
         painter = QPainter(self)
@@ -1191,8 +2804,166 @@ class _XCloseButton(QPushButton):
         painter.drawLine(w - margin, margin, margin, h - margin)
 
 
+class ShareStackThread(QThread):
+    """Builds the star-trail / before-after stacks DURING the clean run (on its own
+    thread) and renders them the instant the run finishes, so the star trail and video
+    appear right away instead of after a second full pass over every frame.
+
+    The cleaning worker is untouched. This only READS frames: the originals (all present
+    at run start) and the cleaned frames (folded in as each batch lands). It owns no
+    files the worker writes. On cancel it stops and produces nothing."""
+    done = Signal(dict)        # {kind: out_path} for what was produced
+    failed = Signal(str)
+
+    def __init__(self, original_dir, cleaned_dir, ws_dir, want_star, want_video,
+                 video_cmd_prefix=None, parent=None, comet_tail=0, thicken_px=0,
+                 want_original_star=False, output_format="jpg"):
+        super().__init__(parent)
+        from modules.share_stacker import ShareStacker   # lazy: keeps GUI startup light
+        self._stacker = ShareStacker(original_dir, cleaned_dir, want_star, want_video,
+                                     video_cmd_prefix=video_cmd_prefix,
+                                     comet_tail=comet_tail, thicken_px=thicken_px,
+                                     want_original_star=want_original_star)
+        self._want_original_star = want_original_star
+        # The run's chosen format, so the trail is saved the same way the frames
+        # were. It must be HANDED IN: run() used to read self.output_format,
+        # which nothing ever set, so the star trail step raised AttributeError at
+        # the end of every run and no trail was written (2026-08-30).
+        self._output_format = output_format
+        self._ws_dir = ws_dir
+        self._q = queue.Queue()
+        self._aborted = False
+
+    def notify_batch_done(self):
+        """Called at each batch boundary: fold any newly-cleaned frames into the after-stack."""
+        self._q.put("scan")
+
+    def finish(self):
+        """Called when the run finishes OK: do the last fold, then render."""
+        self._q.put("done")
+
+    def abort(self):
+        """Called on cancel: stop and discard (no outputs)."""
+        self._aborted = True
+        self._q.put("done")        # unblock the queue wait
+
+    def _abort_check(self):
+        return self._aborted
+
+    def run(self):
+        """Thread body. First build the before-stack from the originals (present now),
+        then wait for commands: 'scan' folds in the latest cleaned frames at each batch
+        boundary, 'done' breaks out to render. On a clean finish it renders the star
+        trail + video from the finished stacks and emits done(produced); on error it
+        emits failed(msg); on abort (cancel) it returns quietly with no output."""
+        try:
+            self._stacker.build_before(should_abort=self._abort_check)   # originals, available now
+            while True:
+                cmd = self._q.get()
+                if self._aborted:
+                    return
+                if cmd == "scan":
+                    self._stacker.scan_cleaned(should_abort=self._abort_check)
+                else:                      # "done"
+                    break
+            if self._aborted:
+                return
+            # The star trail is saved in whatever format the cleaned frames were,
+            # so a 16-bit clean keeps its depth all the way to the editor. The
+            # video stays .mp4 regardless -- an encoder cannot use more than 8
+            # bits, so there is nothing to preserve there.
+            from make_share_clip import star_trail_ext
+            _ste = star_trail_ext(self._output_format)
+            star = os.path.join(self._ws_dir, "STC_cleaned_star_trail" + _ste)
+            vid = os.path.join(self._ws_dir, "STC_share_video.mp4")
+            orig_star = (os.path.join(self._ws_dir, "STC_original_star_trail" + _ste)
+                         if self._want_original_star else None)
+            result = self._stacker.finalize(star_out=star, video_out=vid,
+                                            should_abort=self._abort_check,
+                                            original_star_out=orig_star,
+                                            out_format=self._output_format)
+            if not self._aborted:
+                self.done.emit(result)
+        except Exception as e:
+            if not self._aborted:
+                self.failed.emit(str(e))
+
+
+class ShareRenderThread(QThread):
+    """Renders ONE post-run share output in its own SEPARATE PROCESS, fully
+    independent of the other (re-invoked the same way as the cleaning engine).
+    Kept off the app's process on purpose: running the ffmpeg encoder inside the
+    app truncated the video partway through; this thread only waits on the
+    subprocess. `kind` is 'video' or 'red'. Wrapped so a failure here can never
+    affect the cleaning that already completed."""
+    done = Signal(str, str)    # (kind, output_path)
+    failed = Signal(str, str)  # (kind, message)
+
+    def __init__(self, kind, job_args, out_path, parent=None):
+        super().__init__(parent)
+        self._kind = kind
+        self._job_args = job_args
+        self._out_path = out_path
+
+    def run(self):
+        """Do the share-output job on a background thread so the window never
+        freezes while it works.
+
+        A frozen app has no separate Python to call, so it re-launches ITSELF in
+        worker mode to run the script (see --cleanr-worker in the module header).
+        Running from source calls Python normally. Either way the work happens in
+        another process, and success or failure comes back as a signal rather
+        than blocking the interface.
+        """
+        import subprocess
+        try:
+            os.makedirs(os.path.dirname(self._out_path), exist_ok=True)
+            if getattr(sys, "frozen", False):
+                cmd = [sys.executable, "--cleanr-worker", SHARE_SCRIPT] + self._job_args
+            else:
+                cmd = [sys.executable, "-u", SHARE_SCRIPT] + self._job_args
+            # Read the helper's output as UTF-8, never the computer's own encoding
+            # (gbk on a Chinese Windows crashed here: see io_safe.run_captured).
+            from modules.io_safe import run_captured
+            proc = run_captured(cmd)
+            if proc.returncode != 0:
+                msg = (proc.stderr or proc.stdout or "render failed").strip()
+                self.failed.emit(self._kind, msg[-400:])
+            else:
+                self.done.emit(self._kind, self._out_path)
+        except Exception as e:
+            self.failed.emit(self._kind, str(e))
+
+
 class MainWindow(QMainWindow):
+    """The app's single main window — everything the user sees and clicks.
+
+    It hosts a banner across the top and a four-tab area below it
+    (Main / FAQ / About / Settings). The "Main" tab is itself a two-page
+    stack: page 0 is the Setup form (pick folders, mask, format, then
+    "Clean My Stars!") and page 1 is the live processing view (progress bars,
+    Star Log, run-complete dialog). It owns the CleanerWorker thread for a
+    run and the separate MaskEditorWindow, and it runs three small background
+    threads at startup (app-update check, model-update check, GPU detection)
+    whose results populate the orange notice banners.
+
+    The bulk of this class is _build_* methods that construct each piece of
+    UI and _on_* methods that handle button clicks and worker signals.
+    """
+    update_failed = Signal()  # WinSparkle reported a failed user-initiated check
+    # Quiet-check outcomes (Windows, 2026-07-25): the engine checks without its
+    # own windows; these marshal its worker-thread callbacks onto the UI thread.
+    update_found_quiet = Signal()   # newer version confirmed -> open install window
+    update_none_quiet = Signal()    # check completed, already newest
+    # Step 4 Frame Range: the folder's frame list finished loading on a background
+    # thread (folder path, ordered list of paths, load token).
+    step4_frames_ready = Signal(str, object, int)
+
     def __init__(self):
+        """Build the whole window: restore saved geometry (or open at a
+        sensible first-launch size), assemble the banner + tabs + setup and
+        process pages, make every QLabel text-selectable for easy copy, and
+        kick off the three startup background checks."""
         super().__init__()
         self.setWindowTitle(f"Star Trail CleanR (Beta v{VERSION})")
         self.setMinimumWidth(720)
@@ -1221,13 +2992,19 @@ class MainWindow(QMainWindow):
             else:
                 self.resize(1300, 1300)
         self.worker = None
+        from modules.keep_awake import KeepAwake
+        self._keep_awake = KeepAwake()
+        self._all_share_threads = []   # every ShareStackThread started this session
         self._mask_path = None
         self._mask_window = None
+        self._nvidia_outcome = None
+        self._compute_device = None
+        self._gpu_install_via_banner = False
 
         # Main stacked widget: page 0 = setup, page 1 = processing
         self._stack = QStackedWidget()
 
-        # Tabs: Main / FAQ / About
+        # Tabs: Main / FAQ / About / Settings
         self._tabs = QTabWidget()
         self._tabs.tabBar().setExpanding(True)
         self._tabs.tabBar().setDocumentMode(True)
@@ -1235,13 +3012,15 @@ class MainWindow(QMainWindow):
             f"QTabWidget::pane {{ border: none; background: palette(window); }}"
             "QTabBar { qproperty-drawBase: 0; }"
             f"QTabBar::tab {{ background: {BRAND_TAB_INACTIVE_BG}; color: {BRAND_TAB_INACTIVE_FG}; padding: 14px 20px; "
-            "font-size: 19px; font-weight: bold; border: none; min-width: 200px; }"
+            "font-size: 19px; font-weight: bold; border: none; min-width: 200px; }}"
             f"QTabBar::tab:selected {{ background: {BRAND_TAB_ACTIVE_BG}; color: {BRAND_TAB_ACTIVE_FG}; }}"
             f"QTabBar::tab:hover:!selected {{ background: {BRAND_TAB_HOVER_BG}; color: {BRAND_TAB_ACTIVE_FG}; }}"
         )
         self._tabs.addTab(self._stack, "Main")
         self._tabs.addTab(self._build_faq_tab(), "FAQ")
         self._tabs.addTab(self._build_about_tab(), "About")
+        self._tabs.addTab(self._build_settings_tab(), "Settings")
+        self._tabs.tabBar().setUsesScrollButtons(True)
 
         # Container: banner on top, tabs below
         container = QWidget()
@@ -1252,7 +3031,12 @@ class MainWindow(QMainWindow):
         container_layout.addWidget(self._build_update_banner())
         container_layout.addWidget(self._build_model_update_card())
         container_layout.addWidget(self._build_nvidia_banner())
-        container_layout.addWidget(self._tabs)
+        # Stretch factor 1 on tabs so extra vertical space (when the user
+        # resizes or maximizes the window) goes into the tab area and
+        # through to the Run-tab Star Log + Setup-tab scroll area, rather
+        # than empty space at top or bottom. Banners stay their fixed
+        # heights; chrome stays the same size; only content grows.
+        container_layout.addWidget(self._tabs, 1)
         self.setCentralWidget(container)
 
         self._build_setup_page()
@@ -1263,6 +3047,10 @@ class MainWindow(QMainWindow):
             lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
 
         self._start_update_check()
+        # After-the-fact: if an app update silently brought a newer detector, tell
+        # the user once. Called after _start_update_check so a pending app-update
+        # banner (shown synchronously from cache) defers the notice.
+        self._maybe_announce_new_model()
         self._start_model_update_check()
         self._start_nvidia_detect()
 
@@ -1275,8 +3063,54 @@ class MainWindow(QMainWindow):
         if not self._min_height_locked:
             QTimer.singleShot(0, self._lock_min_height)
             self._min_height_locked = True
+        QTimer.singleShot(500, self._maybe_ask_crash_reporting)
 
-    def _lock_min_height(self):
+    def _maybe_ask_crash_reporting(self):
+        """First-run / upgrade consent for anonymous crash reports + usage data.
+        Fires once after the window is visible so it never blocks startup. Shown
+        when reporting is available (a build with the Sentry DSN and/or the
+        usage-data key). Re-shown once to existing users when usage data was
+        added, so the scope they agreed to matches what is actually sent."""
+        try:
+            from modules.usage_report import _get_secret as _usage_secret
+            _have_usage = bool(_usage_secret())
+        except Exception:
+            _have_usage = False
+        if not _SENTRY_DSN and not _have_usage:
+            return
+        if SETTINGS.contains("usage_consent_v2_made"):
+            return
+        prior = SETTINGS.value("crash_reporting_enabled", None)
+        prompt = QMessageBox(self)
+        prompt.setWindowTitle("Crash reports and usage data")
+        prompt.setIcon(QMessageBox.Question)
+        prompt.setText("Send anonymous crash reports and usage data to improve Star Trail CleanR?")
+        prompt.setInformativeText(
+            "Crash reports help us find and fix bugs, and an anonymous usage summary "
+            "helps improve the app and power the community totals on startrailcleanr.com, "
+            "never your images or personal info."
+        )
+        prompt.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        # Preserve a prior choice on the one-time re-prompt; default Yes for new users.
+        prompt.setDefaultButton(QMessageBox.No if prior is False else QMessageBox.Yes)
+        choice = prompt.exec()
+        SETTINGS.setValue("crash_reporting_enabled", choice == QMessageBox.Yes)
+        SETTINGS.setValue("crash_reporting_choice_made", True)
+        SETTINGS.setValue("usage_consent_v2_made", True)
+        _maybe_init_sentry()
+
+    def _refit_setup_height(self):
+        """Step 4's Frame Range row and file-name line appear (or disappear) after
+        the folder's frame list loads, a moment after the window first shows --
+        which is after _lock_min_height measured the page. Without this the page
+        grew past the window and the bottom buttons were clipped (2026-11-09).
+        Re-measure on the next pass of the event loop, once the layout has
+        settled; the window only ever GROWS here, never shrinks under the user."""
+        if not self._min_height_locked or not self.isVisible():
+            return
+        QTimer.singleShot(0, lambda: self._lock_min_height(grow_only=True))
+
+    def _lock_min_height(self, grow_only=False):
         """Set the window's minimum vertical size to the Setup tab's
         natural content height so Setup never clips below the Clean
         button. Maximum is intentionally unbounded so users can maximize
@@ -1295,61 +3129,79 @@ class MainWindow(QMainWindow):
             target = min(target, int(screen.availableGeometry().height() * 0.9))
         target = max(target, 600)
         self.setMinimumHeight(target)
-        if self.height() != target:
+        if (self.height() < target) if grow_only else (self.height() != target):
             self.resize(self.width(), target)
 
     # ── FAQ tab ──────────────────────────────────────────────────────────────
 
     def _build_faq_tab(self):
+        """Build the FAQ tab: a single read-only HTML browser explaining what
+        the app does, the Detect/Repair pipeline, the workflow, and the known
+        limitations. Returns the wrapper widget added to the tab bar."""
         wrap = QWidget()
         wrap_layout = QVBoxLayout(wrap)
-        wrap_layout.setContentsMargins(24, 24, 24, 24)
+        wrap_layout.setContentsMargins(16, 16, 16, 16)
         wrap_layout.setSpacing(0)
         browser = QTextBrowser()
         browser.setOpenExternalLinks(True)
-        browser.document().setDocumentMargin(20)
+        browser.document().setDocumentMargin(16)
         browser.setStyleSheet(
-            f"QTextBrowser {{ background: {BROWSER_BG}; color: {BROWSER_TEXT}; border: none; font-size: 15px; }}"
+            f"QTextBrowser {{ background: {BROWSER_BG}; color: {BROWSER_TEXT}; border: none; font-size: 13px; }}"
         )
+        # Body copy uses the shared BODY_TEXT_PX (Qt honours font-size on <p>).
+        # Section headings are <h2>: Qt sizes heading TAGS by its own scale of the
+        # base font and ignores any CSS font-size on them, so every <h2> renders at
+        # the shared heading size, and the Settings QLabel headings are set to that
+        # same size (HEADING_TEXT_PX). That's why "it's just text" looks the same.
+        browser.document().setDefaultStyleSheet(f"p, li {{ font-size: {BODY_TEXT_PX}px; }}")
         browser.setHtml(f"""
         <html><body style='font-family: Inter, -apple-system, Segoe UI, sans-serif; line-height: 1.5; margin:0; padding:0; color:{BROWSER_TEXT}; background-color:{BROWSER_BG};'>
         <p style='margin:0; padding:0; line-height:0; font-size:1px; height:0;'></p>
         <h2 style='color:{BRAND_HEADING_BLUE}; margin-top:0; margin-bottom:2px;'>Why Star Trail CleanR?</h2>
         <p style='margin-top:2px;'>Star Trail CleanR removes airplane and satellite trails
         from astrophotography sequences while preserving the real stars. The result is a
-        clean set of frames you can stack into a perfect star trail composite.</p>
+        clean set of frames you can stack into a star trail composite.</p>
 
-        <h2 style='color:{BRAND_HEADING_BLUE}; margin-bottom:2px;'>Trail Detection</h2>
-        <p style='margin-top:2px;'>Each frame is run through a YOLO segmentation model
+        <h2 style='color:{BRAND_HEADING_BLUE}; margin-bottom:2px;'>What image formats can I use?</h2>
+        <p style='margin-top:2px;'>Star Trail CleanR works with .JPG, .TIF 8/16-bit,
+        Insta360 .INSP, and RAW files.</p>
+
+        <h2 style='color:{BRAND_HEADING_BLUE}; margin-bottom:2px;'>How do you find trails in my photographs?</h2>
+        <p style='margin-top:2px;'>Each frame is run through an AI YOLO segmentation model
         trained on thousands of manually labeled airplane and satellite trails across many
-        cameras, lenses, and sky conditions. The model produces pixel-accurate masks for
-        every trail it finds.</p>
+        cameras, lenses, and sky conditions. The model traces a mask over the trails it
+        finds before we apply the repair.</p>
 
-        <h2 style='color:{BRAND_HEADING_BLUE}; margin-bottom:2px;'>The Fix: Star Bridge Repair</h2>
-        <p style='margin-top:2px;'>For each trail, Star Trail CleanR pulls clean pixels
-        from the frame immediately before and after, blending them across the trail using
-        a morphing technique called <i>Star Bridge</i>. This preserves the real stars
-        underneath the trail and keeps the brightness and color natural. No smudges,
-        no blank patches.</p>
+        <h2 style='color:{BRAND_HEADING_BLUE}; margin-bottom:2px;'>How do you remove the trails you find?</h2>
+        <p style='margin-top:2px;'>For each trail, Star Trail CleanR looks at the frames
+        just before and after, picks the neighbor whose sky best matches, and shifts it
+        so the stars line up exactly with the frame being repaired. Every borrowed pixel
+        is color-corrected to the local sky before it is laid over the trail, so the real
+        stars underneath come back at full brightness and the repair blends invisibly,
+        even against twilight gradients or a glowing horizon. We call this technique
+        <i>Star Bridge</i>. No smudges, no blank patches.</p>
 
-        <h2 style='color:{BRAND_HEADING_BLUE}; margin-bottom:2px;'>Workflow</h2>
+        <h2 style='color:{BRAND_HEADING_BLUE}; margin-bottom:2px;'>What is the workflow?</h2>
         <ol style='margin-top:2px;'>
-        <li><b>Browse.</b> Choose your folder of frames.</li>
+        <li><b>Browse.</b> Choose the folder where your star trail frames live.</li>
+        <li><b>Save.</b> Choose where to save your cleaned frames. The default
+        is a 'cleaned' folder inside your originals.</li>
         <li><b>Mask (optional).</b> Paint over ground, buildings, and rocks so
         the AI ignores them. Trees can be left unmasked.</li>
-        <li><b>Format.</b> Pick output format (JPG / TIFF 8-bit / TIFF 16-bit)
-        and JPEG quality.</li>
+        <li><b>Format.</b> Pick output format (.JPG, .TIF 8/16-bit)
+        and .JPG compression quality.</li>
         <li><b>Run.</b> Sit back. Cleaned frames land in a <code>cleaned/</code>
         folder next to your originals.</li>
-        <li><b>Stack.</b> Load the cleaned frames into your favorite stacker
-        (StarStaX, Sequator, Photoshop, etc.) for the final composite.</li>
+        <li><b>Stack.</b> Build your star trail or timelapse right in the app
+        (the Star Trail &amp; Timelapse window), or load the cleaned frames into
+        your favorite stacker (StarStaX, Sequator, Photoshop, etc.).</li>
         </ol>
 
-        <h2 style='color:{BRAND_HEADING_BLUE}; margin-bottom:2px;'>Limitations</h2>
+        <h2 style='color:{BRAND_HEADING_BLUE}; margin-bottom:2px;'>What are known limitations?</h2>
         <ul style='margin-top:2px;'>
         <li><b>Trail variety is bounded by the AI's training data.</b> If a type of
         trail isn't being detected well in your sequences, you can help train the next
-        version: zip 300+ frames from that scene and send them to
+        version: zip up to 300 frames from that scene and send them to
         <a href='mailto:bruceherwig+startrailcleanr@gmail.com?subject=Star%20Trail%20CleanR%20training%20frames'>bruceherwig+startrailcleanr@gmail.com</a>.
         For large folders, share a Dropbox, Google Drive, or WeTransfer link instead
         of attaching directly. The model gets smarter every time the community
@@ -1357,14 +3209,17 @@ class MainWindow(QMainWindow):
         <li><b>Meteors will be removed too.</b> Their streaks look similar to airplane
         and satellite trails, so the detector can't tell them apart. If you want to
         keep them, use your originals to mask them back in.</li>
-        <li><b>RAW files (.CR2, .NEF, .ARW, etc.) are not yet supported.</b> Convert
-        your sequence to JPG or TIFF first, then run Star Trail CleanR on the converted
-        frames.</li>
+        <li><b>Designed for wide-field star trail sequences,</b> not deep-sky tracked exposures.</li>
         <li><b>Not a one-click fix.</b> You'll still want to touch up the final
         composite in Photoshop or your editor of choice. But if we did our job
         right, it's a fraction of the time you used to spend.</li>
-        <li><b>Designed for wide-field star trail sequences,</b> not deep-sky tracked exposures.</li>
         </ul>
+
+        <h2 style='color:{BRAND_HEADING_BLUE}; margin-bottom:2px;'>Who helped make Star Trail CleanR?</h2>
+        <p style='margin-top:2px;'>So many people: the photographers who shared sequences for
+        training, the software and open-source projects it stands on, and the friends and mentors
+        who inspired it. See the full
+        <a href='https://startrailcleanr.com/#thanks'>Special Thanks</a> on startrailcleanr.com.</p>
 
         <p style='color:{HINT_TEXT}; margin-top:24px;'>Star Trail CleanR is free and offered as
         a gift to the astrophotography community.
@@ -1374,9 +3229,471 @@ class MainWindow(QMainWindow):
         wrap_layout.addWidget(browser)
         return wrap
 
+    # ── Settings tab ─────────────────────────────────────────────────────────
+
+    def _build_settings_tab(self):
+        """Build the Settings tab. Four sections, top to bottom: Updates
+        (manual check button), GPU Acceleration (status line + the Windows-only
+        NVIDIA GPU-pack install/clear/help controls and progress bar), Second
+        ScrubbeR (a 180-degree second detection pass toggle), and Crash
+        Reporting (anonymous Sentry opt-in). Stashes the widgets it later
+        toggles on self. Returns the wrapper widget for the tab bar."""
+        wrap = QWidget()
+        layout = QVBoxLayout(wrap)
+        # 32px all round to MATCH the FAQ/About content inset: those tabs stack a
+        # 16px wrapper margin AND a 16px QTextBrowser document margin (16+16=32).
+        # Settings has no document, so it carries the full 32 on the layout itself.
+        layout.setContentsMargins(32, 32, 32, 32)
+        layout.setSpacing(0)
+        layout.setAlignment(Qt.AlignTop)
+
+        layout.addWidget(make_section_heading("Updates"))
+        layout.addSpacing(HEADING_BODY_GAP_PX)
+        layout.addWidget(make_body_text(
+            "Star Trail CleanR checks for a new version every time you open it. Use this to check right now."))
+
+        check_btn = QPushButton("Check for Updates")
+        check_btn.setFixedHeight(34)
+        check_btn.setFixedWidth(200)
+        check_btn.setCursor(Qt.PointingHandCursor)
+        check_btn.setStyleSheet(
+            f"QPushButton {{ background-color: {SECONDARY_BTN_BG}; color: white; "
+            f"font-size: 13px; font-weight: bold; border-radius: 6px; border: none; }}"
+            f"QPushButton:hover {{ background-color: {DISABLED_BTN_HOVER}; }}"
+            f"QPushButton:disabled {{ background-color: {DISABLED_BTN_BG}; color: {MUTED_TEXT}; }}"
+        )
+        check_btn.clicked.connect(self._on_check_for_updates)
+        self._check_updates_btn = check_btn
+
+        run_hint = QLabel("A run is in progress. Updates are paused until it finishes.")
+        run_hint.setStyleSheet(f"color: {MUTED_TEXT}; font-size: 12px;")
+        run_hint.setVisible(False)
+        self._check_updates_run_hint = run_hint
+
+        btn_row = QHBoxLayout()
+        btn_row.setContentsMargins(16, 0, 0, 0)
+        btn_row.addWidget(check_btn)
+        btn_row.addSpacing(12)
+        btn_row.addWidget(run_hint)
+        btn_row.addStretch()
+        layout.addSpacing(4)
+        layout.addLayout(btn_row)
+
+        layout.addSpacing(SECTION_GAP_PX)
+
+        layout.addWidget(make_section_heading("GPU Acceleration"))
+
+        compute_status = QLabel("Detecting...")
+        compute_status.setStyleSheet(f"color: {MUTED_TEXT}; font-size: 14px; margin-left: 16px;")
+        compute_status.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._compute_status_label = compute_status
+        layout.addSpacing(4)
+        layout.addWidget(compute_status)
+
+        # GPU install controls wrapped in a container so when hidden they
+        # leave no dead spacing in the layout.
+        gpu_install_widget = QWidget()
+        gpu_install_layout = QVBoxLayout(gpu_install_widget)
+        gpu_install_layout.setContentsMargins(0, 0, 0, 0)
+        gpu_install_layout.setSpacing(0)
+        gpu_install_widget.setVisible(False)
+        self._gpu_install_widget = gpu_install_widget
+
+        gpu_upgrade_browser = QTextBrowser()
+        gpu_upgrade_browser.setOpenExternalLinks(False)
+        gpu_upgrade_browser.document().setDocumentMargin(4)
+        gpu_upgrade_browser.setStyleSheet(
+            f"QTextBrowser {{ background: {BROWSER_BG}; color: {BROWSER_TEXT}; border: none; font-size: 13px; }}"
+        )
+        # Body copy from the shared constant (no headings here).
+        gpu_upgrade_browser.document().setDefaultStyleSheet(f"p, li {{ font-size: {BODY_TEXT_PX}px; }}")
+        gpu_upgrade_browser.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        gpu_upgrade_browser.setHtml(f"""
+        <html><body style='font-family: Inter, -apple-system, Segoe UI, sans-serif; line-height: 1.5; margin:0; padding:0; color:{BROWSER_TEXT}; background-color:{BROWSER_BG};'>
+        <p style='margin-top:8px;'>An NVIDIA GPU is available. Installing GPU support downloads approximately 3-4 GB from pytorch.org. This is a one-time download that survives app updates automatically.</p>
+        </body></html>
+        """)
+        gpu_upgrade_browser.setFixedHeight(54)
+        self._gpu_upgrade_browser = gpu_upgrade_browser
+        gpu_install_layout.addSpacing(4)
+        gpu_install_layout.addWidget(gpu_upgrade_browser)
+
+        gpu_btn = QPushButton("Install GPU Support")
+        gpu_btn.setFixedHeight(34)
+        gpu_btn.setFixedWidth(200)
+        gpu_btn.setCursor(Qt.PointingHandCursor)
+        gpu_btn.setStyleSheet(
+            f"QPushButton {{ background-color: {SECONDARY_BTN_BG}; color: white; "
+            f"font-size: 13px; font-weight: bold; border-radius: 6px; border: none; }}"
+            f"QPushButton:hover {{ background-color: {DISABLED_BTN_HOVER}; }}"
+        )
+        gpu_btn.clicked.connect(self._on_nvidia_download_clicked)
+        self._gpu_download_btn = gpu_btn
+
+        gpu_btn_row = QHBoxLayout()
+        gpu_btn_row.setContentsMargins(16, 0, 0, 0)
+        gpu_btn_row.addWidget(gpu_btn)
+        gpu_btn_row.addStretch()
+        gpu_install_layout.addSpacing(4)
+        gpu_install_layout.addLayout(gpu_btn_row)
+
+        gpu_clear_btn = QPushButton("Clear GPU Support Files")
+        gpu_clear_btn.setFixedHeight(28)
+        gpu_clear_btn.setFixedWidth(200)
+        gpu_clear_btn.setCursor(Qt.PointingHandCursor)
+        gpu_clear_btn.setStyleSheet(
+            f"QPushButton {{ background-color: transparent; color: {MUTED_TEXT}; "
+            f"font-size: 12px; border: none; text-decoration: underline; }}"
+            f"QPushButton:hover {{ color: {BROWSER_TEXT}; }}"
+        )
+        gpu_clear_btn.clicked.connect(self._on_gpu_clear_clicked)
+        self._gpu_clear_btn = gpu_clear_btn
+        gpu_clear_row = QHBoxLayout()
+        gpu_clear_row.setContentsMargins(16, 0, 0, 0)
+        gpu_clear_row.addWidget(gpu_clear_btn)
+        gpu_clear_row.addStretch()
+        gpu_install_layout.addSpacing(2)
+        gpu_install_layout.addLayout(gpu_clear_row)
+
+        gpu_help_btn = QPushButton("GPU installation troubleshooting guide")
+        gpu_help_btn.setFixedHeight(28)
+        gpu_help_btn.setCursor(Qt.PointingHandCursor)
+        gpu_help_btn.setStyleSheet(
+            f"QPushButton {{ background-color: transparent; color: {MUTED_TEXT}; "
+            f"font-size: 12px; border: none; text-decoration: underline; }}"
+            f"QPushButton:hover {{ color: {BROWSER_TEXT}; }}"
+        )
+        gpu_help_btn.clicked.connect(self._on_gpu_help_clicked)
+        self._gpu_help_btn = gpu_help_btn
+        gpu_help_row = QHBoxLayout()
+        gpu_help_row.setContentsMargins(16, 0, 0, 0)
+        gpu_help_row.addWidget(gpu_help_btn)
+        gpu_help_row.addStretch()
+        gpu_install_layout.addSpacing(0)
+        gpu_install_layout.addLayout(gpu_help_row)
+
+        from PySide6.QtWidgets import QProgressBar
+        gpu_progress = QProgressBar()
+        gpu_progress.setRange(0, 100)
+        gpu_progress.setValue(0)
+        gpu_progress.setFixedHeight(20)
+        gpu_progress.setVisible(False)
+        self._gpu_progress = gpu_progress
+        gpu_install_layout.addSpacing(8)
+        gpu_install_layout.addWidget(gpu_progress)
+
+        gpu_progress_label = QLabel("")
+        gpu_progress_label.setStyleSheet(f"color: {MUTED_TEXT}; font-size: 12px; margin-left: 4px;")
+        gpu_progress_label.setVisible(False)
+        self._gpu_progress_label = gpu_progress_label
+        gpu_install_layout.addSpacing(2)
+        gpu_install_layout.addWidget(gpu_progress_label)
+
+        gpu_restart_btn = QPushButton("Restart Now to Activate GPU Support")
+        gpu_restart_btn.setFixedHeight(34)
+        gpu_restart_btn.setFixedWidth(290)
+        gpu_restart_btn.setCursor(Qt.PointingHandCursor)
+        gpu_restart_btn.setStyleSheet(
+            f"QPushButton {{ background-color: {SECONDARY_BTN_BG}; color: white; "
+            f"font-size: 13px; font-weight: bold; border-radius: 6px; border: none; }}"
+            f"QPushButton:hover {{ background-color: {DISABLED_BTN_HOVER}; }}"
+        )
+        gpu_restart_btn.clicked.connect(self._relaunch)
+        gpu_restart_btn.setVisible(False)
+        self._gpu_restart_btn = gpu_restart_btn
+        restart_row = QHBoxLayout()
+        restart_row.setContentsMargins(16, 0, 0, 0)
+        restart_row.addWidget(gpu_restart_btn)
+        restart_row.addStretch()
+        gpu_install_layout.addSpacing(8)
+        gpu_install_layout.addLayout(restart_row)
+
+        layout.addSpacing(4)
+        layout.addWidget(gpu_install_widget)
+
+        layout.addSpacing(SECTION_GAP_PX)
+
+        layout.addWidget(make_section_heading("Second ScrubbeR"))
+        layout.addSpacing(HEADING_BODY_GAP_PX)
+        layout.addWidget(make_body_text(
+            "Runs the trail detector a second time on each frame after rotating it 180°. Catches trails the first pass tends to miss. Detection takes roughly twice as long."))
+        layout.addWidget(make_body_text(
+            "Most helpful with earlier detection models. Less necessary now that the AI trains on rotated trail images at multiple angles."))
+
+        scrub_chk = QCheckBox("Enable Second ScrubbeR")
+        scrub_chk.setStyleSheet(f"QCheckBox {{ font-size: 14px; color: {BROWSER_TEXT}; margin-left: 16px; }}")
+        scrub_chk.setChecked(SETTINGS.value("second_scrub_enabled", False, type=bool))
+        scrub_chk.toggled.connect(lambda v: SETTINGS.setValue("second_scrub_enabled", v))
+        self._scrub_chk = scrub_chk
+
+        scrub_run_hint = QLabel("A run is in progress. Setting locked until it finishes.")
+        scrub_run_hint.setStyleSheet(f"color: {MUTED_TEXT}; font-size: 12px;")
+        scrub_run_hint.setVisible(False)
+        self._scrub_run_hint = scrub_run_hint
+
+        scrub_row = QHBoxLayout()
+        scrub_row.setContentsMargins(16, 0, 0, 0)
+        scrub_row.addWidget(scrub_chk)
+        scrub_row.addSpacing(12)
+        scrub_row.addWidget(scrub_run_hint)
+        scrub_row.addStretch()
+        layout.addSpacing(4)
+        layout.addLayout(scrub_row)
+
+        layout.addSpacing(SECTION_GAP_PX)
+
+        layout.addWidget(make_section_heading("Crash reports and usage data"))
+        layout.addSpacing(HEADING_BODY_GAP_PX)
+        layout.addWidget(make_body_text(
+            "Crash reports help us find and fix bugs, and an anonymous usage summary helps improve the app and power the community totals on startrailcleanr.com, never your images or personal info."))
+
+        crash_chk = QCheckBox("Send anonymous data")
+        crash_chk.setStyleSheet(f"QCheckBox {{ font-size: 14px; color: {BROWSER_TEXT}; margin-left: 16px; }}")
+        crash_chk.setChecked(SETTINGS.value("crash_reporting_enabled", False, type=bool))
+
+        def _on_crash_chk_toggled(v):
+            """Settings crash-reporting checkbox handler. `v` is the new
+            checked state."""
+            # Persist the choice and, if newly enabled, initialize Sentry right
+            # away so reporting starts this session without a restart.
+            SETTINGS.setValue("crash_reporting_enabled", v)
+            if v:
+                _maybe_init_sentry()
+
+        crash_chk.toggled.connect(_on_crash_chk_toggled)
+
+        crash_row = QHBoxLayout()
+        crash_row.setContentsMargins(16, 0, 0, 0)
+        crash_row.addWidget(crash_chk)
+        crash_row.addStretch()
+        layout.addSpacing(4)
+        layout.addLayout(crash_row)
+
+        # Dev-only items live at the BOTTOM of Settings (see the rule at
+        # _DEV_SWITCHER_ENABLED); they disappear entirely in the frozen app. The Model
+        # picker, Frame range, and Red Trail Map moved here from the Main page on
+        # 2026-06-21 so the Main page stays clean for regular users. Default the
+        # attributes to None FIRST so the frozen build (which builds no dev section)
+        # never crashes on the references in _start_clean.
+        self._dev_model_combo = None
+        self._red_map_chk = None
+        if _DEV_SWITCHER_ENABLED:
+            layout.addSpacing(SECTION_GAP_PX)
+            layout.addWidget(make_section_heading("Developer tools (dev)"))
+            layout.addSpacing(HEADING_BODY_GAP_PX)
+
+            # Detection model picker (moved from Main page Output Options).
+            model_row = QHBoxLayout()
+            model_row.setContentsMargins(16, 0, 0, 0)
+            _model_lbl = QLabel("Detection model:")
+            _model_lbl.setStyleSheet(f"font-size: 14px; color: {BROWSER_TEXT};")
+            model_row.addWidget(_model_lbl)
+            self._dev_model_combo = QComboBox()
+            self._dev_model_combo.setFixedWidth(260)
+            _choices = _get_dev_model_choices()
+            _saved = SETTINGS.value("dev_model_override", "", type=str)
+            _saved_idx = 0
+            for i, (name, pt_path) in enumerate(_choices):
+                self._dev_model_combo.addItem(name, pt_path)
+                if pt_path == _saved:
+                    _saved_idx = i
+            if _choices:
+                self._dev_model_combo.setCurrentIndex(_saved_idx)
+                SETTINGS.setValue("dev_model_override", _choices[_saved_idx][1])
+            def _on_dev_model_changed(idx):
+                SETTINGS.setValue("dev_model_override", self._dev_model_combo.itemData(idx))
+                _hs = getattr(self, "_header_subline", None)
+                if _hs is not None:
+                    _hs.setText(f"Beta v{VERSION}\n{self._current_model_display_name()}")
+            self._dev_model_combo.currentIndexChanged.connect(_on_dev_model_changed)
+            model_row.addWidget(self._dev_model_combo)
+            model_row.addStretch()
+            layout.addSpacing(4)
+            layout.addLayout(model_row)
+
+            # (The dev Frame range Start/End boxes were retired when Step 4 on the
+            # Main page got the Frame Range bar every user can use.)
+
+            # Red Trail Map (moved from Main page Output Options).
+            red_row = QHBoxLayout()
+            red_row.setContentsMargins(16, 0, 0, 0)
+            self._red_map_chk = QCheckBox("Make the Red Trail Map")
+            self._red_map_chk.setStyleSheet(f"QCheckBox {{ font-size: 14px; color: {BROWSER_TEXT}; margin-left: 16px; }}")
+            self._red_map_chk.setChecked(SETTINGS.value("red_trail_map_enabled", True, type=bool))
+            self._red_map_chk.toggled.connect(lambda v: SETTINGS.setValue("red_trail_map_enabled", v))
+            red_row.addWidget(self._red_map_chk)
+            red_row.addStretch()
+            layout.addSpacing(4)
+            layout.addLayout(red_row)
+
+            layout.addSpacing(SECTION_GAP_PX)
+            layout.addWidget(make_section_heading("Streaking-star filter (dev)"))
+            layout.addSpacing(HEADING_BODY_GAP_PX)
+            layout.addWidget(make_body_text(
+                "For long-exposure sets where the stars themselves streak into lines. "
+                "Measures how long the stars run in this set and leaves alone any "
+                "detection shorter than that (so streaking stars aren't erased), unless "
+                "it's a red nav light. Does nothing on sharp-star sets. Dev-only."))
+
+            streak_chk = QCheckBox("Filter streaking stars (dev)")
+            streak_chk.setStyleSheet(f"QCheckBox {{ font-size: 14px; color: {BROWSER_TEXT}; margin-left: 16px; }}")
+            streak_chk.setChecked(SETTINGS.value("streak_filter_enabled", False, type=bool))
+            streak_chk.toggled.connect(lambda v: SETTINGS.setValue("streak_filter_enabled", v))
+            self._streak_chk = streak_chk
+
+            streak_row = QHBoxLayout()
+            streak_row.setContentsMargins(16, 0, 0, 0)
+            streak_row.addWidget(streak_chk)
+            streak_row.addStretch()
+            layout.addSpacing(4)
+            layout.addLayout(streak_row)
+
+            # (Trail look controls — thickness + comet mode — moved to the
+            # post-run Star Trail window, applied on demand there.)
+
+        layout.addStretch()
+
+        # The Settings content (public sections plus the dev-only tools) can run
+        # taller than the window, so wrap it in a vertical scroll area exactly like
+        # the main page does, with the horizontal bar suppressed.
+        settings_scroll = QScrollArea()
+        settings_scroll.setWidget(wrap)
+        settings_scroll.setWidgetResizable(True)
+        settings_scroll.setFrameShape(QFrame.NoFrame)
+        settings_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        settings_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        return settings_scroll
+
+    def _set_updates_run_state(self, running):
+        """Enable or disable the Settings controls that must not change mid-run.
+        `running` True = a cleaning run is active, so grey out the "Check for
+        Updates" button and the Second ScrubbeR checkbox and show their "locked
+        until it finishes" hints; False restores them."""
+        if hasattr(self, '_check_updates_btn'):
+            self._check_updates_btn.setEnabled(not running)
+            self._check_updates_run_hint.setVisible(running)
+        if hasattr(self, '_scrub_chk'):
+            self._scrub_chk.setEnabled(not running)
+            self._scrub_run_hint.setVisible(running)
+
+    def _updater_unavailable_fallback(self):
+        """The built-in updater engine is not running, most often because
+        macOS disabled it (app launched from the disk image or another
+        non-Applications location). NEVER fail silently -- a mute Check for
+        Updates button is exactly what stranded a real Mac user on 2026-06-10.
+        Explain the cause in plain language, then open the download page so
+        the user can still update by hand."""
+        QMessageBox.information(
+            self, "Updater not available",
+            "The built-in updater isn't available in this session.\n\n"
+            "On a Mac this usually means the app isn't running from the "
+            "Applications folder: open the downloaded disk image, drag "
+            "Star Trail CleanR into Applications, and launch it from there. "
+            "Updates will then install themselves with one click.\n\n"
+            "Opening the download page so you can get the latest version "
+            "now.")
+        import webbrowser
+        webbrowser.open("https://startrailcleanr.com")
+
+    def _on_update_failed(self):
+        """Fires (via the update_failed signal) when WinSparkle reports a failed
+        user-initiated update check. With the narrow-URL fix in
+        winsparkle_updater (2026-07-27) this now means a genuine fetch problem,
+        such as no network or a proxy in the way; for months before that it
+        fired for everyone because the engine was handed a mangled URL, so this
+        dialog must never assert whose fault the failure is. It offers the part
+        that always helps: a one-click manual download."""
+        try:
+            from PySide6.QtCore import QUrl
+            from PySide6.QtGui import QDesktopServices
+            from modules.update_check import get_download_url
+            box = QMessageBox(self)
+            box.setWindowTitle("Couldn't install the update")
+            box.setIcon(QMessageBox.Warning)
+            # If the banner's own check (different connection method) already
+            # confirmed a newer version, name it -- the user should know WHAT
+            # they're missing, not just that the installer is blocked.
+            known = getattr(self, "_update_banner_tag", None)
+            box.setText(
+                f"Version {known} is available, but Star Trail CleanR couldn't "
+                "install it automatically." if known else
+                "Star Trail CleanR couldn't install the update automatically.")
+            box.setInformativeText(
+                "This is usually temporary, such as a network hiccup. It can also "
+                "happen when security software blocks the updater.\n\n"
+                "You can download the latest version directly and install it right "
+                "over your current one. Your settings and folders are kept.")
+            dl = box.addButton("Download Latest", QMessageBox.AcceptRole)
+            box.addButton("Close", QMessageBox.RejectRole)
+            box.setDefaultButton(dl)
+            box.exec()
+            if box.clickedButton() is dl:
+                QDesktopServices.openUrl(QUrl(get_download_url()))
+        except Exception:
+            pass
+
+    def _on_check_for_updates(self):
+        """Settings tab "Check for Updates" button. In a frozen build, trigger
+        the platform's in-app updater (Sparkle on Mac, WinSparkle on Windows);
+        on Linux or when running from source, just open the project website.
+        If the updater engine isn't running, show the visible fallback instead
+        of doing nothing."""
+        if getattr(sys, 'frozen', False):
+            if sys.platform == "darwin":
+                from modules.sparkle_updater import check_for_updates
+                if not check_for_updates():
+                    self._updater_unavailable_fallback()
+            elif sys.platform == "win32":
+                self._win_check_for_updates()
+            else:
+                import webbrowser
+                webbrowser.open("https://startrailcleanr.com")
+        else:
+            import webbrowser
+            webbrowser.open("https://startrailcleanr.com")
+
+    def _win_check_for_updates(self):
+        """Windows update check, quiet-first (2026-07-25). The engine checks
+        WITHOUT its own windows; the outcome comes back through the quiet
+        signals: found -> _on_quiet_update_found opens the engine's install
+        window; not found -> _on_quiet_update_none shows our up-to-date note;
+        failure -> _on_update_failed shows our explain-and-download dialog.
+        Machines whose Windows networking layer blocks the engine (a real
+        tester's machine) used to get the engine's dead-end 'Update Error!'
+        box first; now they only ever see our dialog. Falls back to the old
+        engine-UI check when quiet checking isn't available (old DLL), and to
+        the visible fallback when the engine never loaded."""
+        from modules.winsparkle_updater import check_for_updates_quiet, check_for_updates
+        if check_for_updates_quiet():
+            return
+        if not check_for_updates():
+            self._updater_unavailable_fallback()
+
+    def _on_quiet_update_found(self):
+        """A quiet Windows check confirmed a newer version: now open the
+        engine's normal install window (its fetch just succeeded, so this
+        cannot produce the error box)."""
+        from modules.winsparkle_updater import check_for_updates
+        if not check_for_updates():
+            self._updater_unavailable_fallback()
+
+    def _on_quiet_update_none(self):
+        """A quiet Windows check completed: already on the newest version."""
+        try:
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Information)
+            box.setWindowTitle("You're up to date")
+            box.setText(f"Star Trail CleanR {VERSION} is the newest version.")
+            box.exec()
+        except Exception:
+            pass
+
     # ── About tab ────────────────────────────────────────────────────────────
 
     def _build_about_tab(self):
+        """Build the About tab: Bruce's silhouette photo on the left and an
+        HTML bio + links + acknowledgments on the right. Returns the wrapper
+        widget for the tab bar."""
         wrap = QWidget()
         layout = QHBoxLayout(wrap)
         layout.setContentsMargins(24, 24, 24, 24)
@@ -1395,9 +3712,15 @@ class MainWindow(QMainWindow):
         bio = QTextBrowser()
         bio.setOpenExternalLinks(True)
         bio.setStyleSheet(
-            f"QTextBrowser {{ background: {BROWSER_BG}; color: {BROWSER_TEXT}; border: none; font-size: 15px; }}"
+            f"QTextBrowser {{ background: {BROWSER_BG}; color: {BROWSER_TEXT}; border: none; font-size: 13px; }}"
         )
-        bio.document().setDocumentMargin(20)
+        bio.document().setDocumentMargin(16)
+        # Body copy uses the shared BODY_TEXT_PX. EVERY section heading (the intro
+        # and the former sub-headings) is now an <h2> so they all render at the one
+        # heading size Qt gives heading tags -- matching the FAQ and the Settings
+        # headings. (Qt ignores CSS font-size on heading tags, so <h2> is the lever,
+        # not a font-size rule.) The photo stays in the left column of the layout.
+        bio.document().setDefaultStyleSheet(f"p, li {{ font-size: {BODY_TEXT_PX}px; }}")
         bio.setHtml(f"""
         <html><body style='font-family: Inter, -apple-system, Segoe UI, sans-serif; line-height: 1.5; margin:0; padding:0; color:{BROWSER_TEXT}; background-color:{BROWSER_BG};'>
         <p style='margin:0; padding:0; line-height:0; font-size:1px; height:0;'></p>
@@ -1412,27 +3735,27 @@ class MainWindow(QMainWindow):
         I wanted, Claude wrote the code, we tested it, I pushed back, we tried again.
         Star Trail CleanR wouldn't exist without that partnership.</p>
 
-        <p>Star Trail CleanR is my free gift to the astrophotography community that
-        has taught me so much.</p>
+        <p>Star Trail CleanR is my free gift to the astrophotography community.</p>
 
-        <h3 style='color:{BRAND_HEADING_BLUE}; margin:12px 0 2px 0;'>Links</h3>
+        <h2 style='color:{BRAND_HEADING_BLUE}; margin:{SECTION_GAP_PX}px 0 {HEADING_BODY_GAP_PX}px 0;'>Links</h2>
         <ul style='margin-top:2px;'>
         <li>Project site: <a href='https://startrailcleanr.com'>StarTrailCleanR.com</a></li>
         <li>Photos for sale: <a href='https://bruceherwigphotographer.square.site/shop/astrophotography/3?page=1&amp;limit=30&amp;sort_by=category_order&amp;sort_order=asc'>bruceherwig.com</a></li>
         <li>Blog: <a href='https://bruceherwig.wordpress.com'>bruceherwig.wordpress.com</a></li>
+        <li>Instagram: <a href='https://www.instagram.com/bruceherwig'>instagram.com/bruceherwig</a></li>
         </ul>
 
-        <h3 style='color:{BRAND_HEADING_BLUE}; margin:12px 0 2px 0;'>Acknowledgments</h3>
+        <h2 style='color:{BRAND_HEADING_BLUE}; margin:{SECTION_GAP_PX}px 0 {HEADING_BODY_GAP_PX}px 0;'>Acknowledgments</h2>
         <p style='margin-top:2px;'>Star Trail CleanR exists because of the generosity of fellow astrophotographers
         who shared their image sequences for AI training, tested early builds, and offered
-        feedback. Thank you, all of you.</p>
-        <p><a href='https://bruceherwig.wordpress.com/star-trail-cleanr/#Thanks'>See the
-        full list of contributors &rarr;</a></p>
+        feedback. Thank you, all.</p>
+        <p><a href='https://startrailcleanr.com/#thanks'>See the
+        full list of contributors</a></p>
 
-        <h3 style='color:{BRAND_HEADING_BLUE}; margin:12px 0 2px 0;'>Version History</h3>
+        <h2 style='color:{BRAND_HEADING_BLUE}; margin:{SECTION_GAP_PX}px 0 {HEADING_BODY_GAP_PX}px 0;'>Version History</h2>
         <p style='margin-top:2px;'>See the full <a href='https://github.com/bruceherwig-dot/star-trail-cleanr/blob/main/CHANGELOG.md'>version history on GitHub</a>.</p>
 
-        <h3 style='color:{BRAND_HEADING_BLUE}; margin:12px 0 2px 0;'>Share Your Work&hellip; Have a Suggestion?</h3>
+        <h2 style='color:{BRAND_HEADING_BLUE}; margin:{SECTION_GAP_PX}px 0 {HEADING_BODY_GAP_PX}px 0;'>Share Your Work&hellip; Have a Suggestion?</h2>
         <p style='margin-top:2px;'>Got a before-and-after you'd like to share? I would love to see it!<br>
         Have an idea or feedback to make Star Trail CleanR even better? I want to hear it!<br>
         Email me at <a href='mailto:bruceherwig+startrailcleanr@gmail.com?subject=Star%20Trail%20CleanR'>bruceherwig+startrailcleanr@gmail.com</a></p>
@@ -1447,6 +3770,11 @@ class MainWindow(QMainWindow):
     # ── Banner ───────────────────────────────────────────────────────────────
 
     def _build_banner(self):
+        """Build the fixed navy header bar at the very top of the window:
+        app icon, the title + a selectable "Beta vN / Trail DetectoR vN"
+        subline, a heart-shaped Support (tip jar) button, and the red close X.
+        Includes an invisible relaunch button used during development. Returns
+        the banner widget."""
         banner = QWidget()
         banner.setFixedHeight(80)
         banner.setStyleSheet(f"background-color: {BRAND_HEADER_BG};")
@@ -1484,9 +3812,36 @@ class MainWindow(QMainWindow):
             f"color: {BRAND_HEADER_SUB}; font-size: 12px; background: transparent;"
         )
         self._header_subline.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        text_col.addWidget(self._header_subline)
+        # The badge sits BESIDE the subline rather than inside it: the subline is
+        # one label so version + detector copy together as a block, and folding a
+        # live status into it would break that.
+        _sub_row = QHBoxLayout()
+        _sub_row.setContentsMargins(0, 0, 0, 0)
+        _sub_row.setSpacing(14)
+        _sub_row.addWidget(self._header_subline)
+        # Always-visible compute indicator. A user asked to see his graphics card
+        # was working BEFORE starting an hours-long run; until now the app only
+        # spoke up when something was wrong. Filled in by _refresh_compute_section
+        # once both detection threads report; blank until then, never guessing.
+        self._header_gpu = QLabel("")
+        self._header_gpu.setStyleSheet(
+            f"color: {BRAND_HEADER_SUB}; font-size: 12px; background: transparent;")
+        self._header_gpu.setAlignment(Qt.AlignBottom | Qt.AlignLeft)
+        _sub_row.addWidget(self._header_gpu, 0, Qt.AlignBottom)
+        _sub_row.addStretch()
+        text_col.addLayout(_sub_row)
         text_col.addStretch()
         outer.addWidget(text_wrap)
+        outer.addStretch()
+
+        self._header_spinner = QLabel("")
+        self._header_spinner.setStyleSheet(
+            f"color: {BRAND_HEADER_SUB}; font-size: 20px; background: transparent;")
+        self._header_spinner.setFixedWidth(24)
+        self._header_spinner.setAlignment(Qt.AlignCenter)
+        self._header_spinner.setVisible(False)
+        outer.addWidget(self._header_spinner)
+
         outer.addStretch()
 
         # Hidden relaunch button (invisible, to the left of Support)
@@ -1554,6 +3909,10 @@ class MainWindow(QMainWindow):
     # ── Update banner (hidden until a newer release is found on GitHub) ──────
 
     def _build_update_banner(self):
+        """Build the orange "new app version available" banner. Hidden until
+        the background UpdateCheckThread finds a newer release on GitHub
+        (_on_update_result reveals it). Has a Download button and a dismiss X.
+        Returns the banner widget."""
         banner = QFrame()
         banner.setFixedHeight(44)
         banner.setStyleSheet(f"QFrame {{ background-color: {BRAND_NOTICE_ORANGE}; }}")
@@ -1593,24 +3952,85 @@ class MainWindow(QMainWindow):
         self._update_banner = banner
         self._update_download_url = None
         self._update_banner_tag = ""
+        self._update_via_failsafe = False
         return banner
 
+    def _reveal_update_banner(self, tag, download_url, via_failsafe=False):
+        """Show the amber update banner for `tag`. Shared by the live check
+        (_on_update_result) and the optimistic startup path (_start_update_check),
+        so a known update is shown even if a given launch's live check is slow or
+        fails. Pure UI -- callers handle the dismissed-tag gating.
+
+        via_failsafe=True means the update was confirmed via our own server because
+        GitHub was unreachable (blocked). The banner then says to download from the
+        website, and the Download button offers a manual download instead of the
+        one-click updater (which reads a GitHub feed that would also be blocked)."""
+        self._update_banner_tag = tag
+        self._update_download_url = download_url
+        self._update_via_failsafe = via_failsafe
+        if via_failsafe:
+            self._update_label.setText(
+                f"Update available: {tag}. Download it from our website.")
+        else:
+            self._update_label.setText(f"New version available: {tag}")
+        self._update_banner.setVisible(True)
+        # App update takes priority over the model card: hide it so the user never
+        # sees two stacked orange Download prompts. The app update bundles the latest
+        # detector anyway. Covers the ordering where the model card showed first.
+        if hasattr(self, "_model_card"):
+            self._model_card.setVisible(False)
+
+    def _show_cached_update_banner(self):
+        """Optimistically show the banner from the last update we ever found
+        (persisted in settings), so a slow or failed live check on this launch
+        can't blank a known update -- the #1 way the notice silently goes missing.
+        Gated by the dismissed tag and by the remembered version still being newer
+        than the running one. Returns True if it revealed the banner."""
+        cached = SETTINGS.value("last_seen_update_tag", "", type=str) or ""
+        dismissed = SETTINGS.value("dismissed_update_tag", "", type=str) or ""
+        if not cached or cached == dismissed:
+            return False
+        from modules.update_check import parse_tag, parse_local, get_download_url
+        remote, local = parse_tag(cached), parse_local(VERSION)
+        if remote and local and remote > local:
+            self._reveal_update_banner(cached, get_download_url())
+            return True
+        return False
+
     def _start_update_check(self):
+        """Launch the background app-update check. First show the banner instantly
+        from memory (a known update survives a slow/failed check this launch), then
+        start the live check, which confirms/refreshes via _on_update_result."""
+        self._show_cached_update_banner()
         self._update_thread = UpdateCheckThread(self)
         self._update_thread.result_ready.connect(self._on_update_result)
         self._update_thread.start()
 
     def _on_update_result(self, result):
+        """Handle the background update check's result. `result` carries the
+        release "tag" and "download_url". Shows the amber update banner whenever a
+        newer release exists, UNLESS the user already dismissed this exact tag.
+
+        The banner is the PRIMARY, always-visible update notification on every
+        platform: it lives inside the main window and cannot hide behind it. Its
+        "Update" button drives the built-in one-click installer (Sparkle on Mac,
+        WinSparkle on Windows; Linux falls back to opening the download page).
+        We no longer auto-pop the engine's own floating window on launch -- it
+        could open behind the main window where the user never saw it (the 2.51
+        build did this on 2026-06-19) -- so there is exactly ONE prompt, the
+        banner, and no competing double-prompt to gate against. The found tag is
+        persisted so the next launch can show it instantly even before/without a
+        successful check (see _start_update_check)."""
         tag = result.get("tag", "")
-        # Stay quiet if the user has already dismissed this release tag
-        # (either via the pre-window popup or a previous banner click).
+        # Stay quiet if the user has already dismissed this release tag.
         dismissed = SETTINGS.value("dismissed_update_tag", "", type=str) or ""
         if dismissed == tag:
             return
-        self._update_banner_tag = tag
-        self._update_download_url = result.get("download_url")
-        self._update_label.setText(f"New version available: {tag}")
-        self._update_banner.setVisible(True)
+        # Remember it: a later launch shows the banner instantly even if that
+        # launch's GitHub check is slow or fails -- never a silent miss.
+        SETTINGS.setValue("last_seen_update_tag", tag)
+        self._reveal_update_banner(tag, result.get("download_url"),
+                                   result.get("via_failsafe", False))
 
     def _on_update_banner_dismissed(self):
         """Hide the banner and remember the user's dismissal so we don't show
@@ -1620,13 +4040,71 @@ class MainWindow(QMainWindow):
             SETTINGS.setValue("dismissed_update_tag", self._update_banner_tag)
 
     def _on_update_download(self):
-        if self._update_download_url:
-            import webbrowser
-            webbrowser.open(self._update_download_url)
+        """The orange update banner's Download button.
+
+        Plain English: on Mac and Windows this runs the built-in one-click
+        installer (Sparkle / WinSparkle). It downloads the new version,
+        installs it in place, and restarts the app for the user. No website,
+        no manual download, no reinstall. Only on Linux, which has no built-in
+        in-place updater, does this fall back to opening the GitHub download
+        page in the browser."""
+        # If this update was found via our own server because GitHub was
+        # unreachable (a country/network block), the one-click updater (Sparkle/
+        # WinSparkle) reads a GitHub-hosted feed too and would just fail. Skip it
+        # and offer a manual download from the website, which the user can reach.
+        if getattr(self, "_update_via_failsafe", False):
+            self._show_manual_update_dialog(self._update_banner_tag)
+            return
+        if sys.platform == "darwin":
+            from modules.sparkle_updater import check_for_updates
+            if not check_for_updates():
+                self._updater_unavailable_fallback()
+        elif sys.platform == "win32":
+            self._win_check_for_updates()
+        elif self._update_download_url:
+            from PySide6.QtCore import QUrl
+            from PySide6.QtGui import QDesktopServices
+            QDesktopServices.openUrl(QUrl(self._update_download_url))
+
+    def _show_manual_update_dialog(self, tag):
+        """Shown when the automatic update path (GitHub) was unreachable but our
+        own server confirmed a newer version exists. Explains, without alarm, that
+        we can't update automatically and points to the website to download it by
+        hand -- a link that loads even where GitHub is blocked."""
+        try:
+            from PySide6.QtCore import QUrl
+            from PySide6.QtGui import QDesktopServices
+            box = QMessageBox(self)
+            box.setWindowTitle("Download the update")
+            box.setIcon(QMessageBox.Information)
+            box.setText(
+                f"A newer version of Star Trail CleanR ({tag}) is available.")
+            box.setInformativeText(
+                "We couldn't update the app automatically. Something on your "
+                "network is blocking our update service, so this isn't a problem "
+                "with your computer or your files.\n\n"
+                "You can download the latest version from our website and install "
+                "it right over your current one. Your photos, settings, and "
+                "folders are all kept.")
+            openb = box.addButton("Open startrailcleanr.com", QMessageBox.AcceptRole)
+            box.addButton("Close", QMessageBox.RejectRole)
+            box.setDefaultButton(openb)
+            box.exec()
+            if box.clickedButton() is openb:
+                QDesktopServices.openUrl(
+                    QUrl("https://startrailcleanr.com/index.html#download"))
+        except Exception:
+            pass
 
     # ── Model update card (shows when GitHub has a newer trail detector) ─────
 
     def _build_model_update_card(self):
+        """Build the orange "new Trail DetectoR available" card. Hidden until
+        ModelUpdateCheckThread finds a newer model release. Carries a title,
+        summary, optional credits, a Download-now button (which swaps to an
+        inline progress bar then a "Got it"), and a "Not right now" button.
+        Unlike an app update, the model file downloads in-place into the user
+        folder. Returns the card widget."""
         card = QFrame()
         card.setVisible(False)
         card.setStyleSheet(f"QFrame {{ background-color: {BRAND_NOTICE_ORANGE}; }}")
@@ -1710,7 +4188,7 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _model_display_name(tag):
-        """'model-v2' becomes 'Trail Detector v2'. Falls back to the raw tag on parse failure."""
+        """'model-v2' becomes 'Trail DetectoR v2'. Falls back to the raw tag on parse failure."""
         if not tag:
             return "New model"
         m = re.match(r"^model-v(\d+(?:\.\d+)?)", tag)
@@ -1719,22 +4197,44 @@ class MainWindow(QMainWindow):
         num = m.group(1)
         if "." in num:
             num = num.rstrip("0").rstrip(".")
-        return f"Trail Detector v{num}"
+        return f"Trail DetectoR v{num}"
 
     def _current_model_display_name(self):
-        """Return 'Trail Detector N' for the currently-active model. Empty string on failure."""
+        """Return 'Trail DetectoR N' for the currently-active model. Empty string on failure."""
         try:
+            _dev_lbl = _dev_override_label()
+            if _dev_lbl:
+                return f"Trail DetectoR {_dev_lbl}"
             from modules.model_update import local_model_version
             return self._model_display_name(local_model_version())
         except Exception:
             return ""
 
     def _start_model_update_check(self):
+        """Launch the background trail-detector model-update check. Its result
+        feeds _on_model_update_result, which reveals the orange model card."""
         self._model_update_thread = ModelUpdateCheckThread(self)
         self._model_update_thread.result_ready.connect(self._on_model_update_result)
         self._model_update_thread.start()
 
     def _on_model_update_result(self, result):
+        """Populate and show the model-update card from the check's result
+        dict ("tag", "download_url", optional "summary"/"credits").
+
+        Suppressed while the app-update banner is showing. An app update already
+        bundles the latest detector, so two stacked orange prompts (app banner +
+        model card) were a confusing double-Download on Windows -- a user pressed
+        the model "Download now" (which quietly saves a file, no installer), saw
+        "nothing happen", and had to find the second Download. App update wins; the
+        model check re-runs next launch and only surfaces if a newer model exists."""
+        if self._update_banner.isVisible():
+            # The app update will deliver this detector silently. Stash its
+            # what's-new so the after-the-fact "now installed" notice can replay
+            # it once the new detector is actually active (see _maybe_announce_new_model).
+            summary = result.get("summary") or ""
+            if summary:
+                SETTINGS.setValue("pending_model_whatsnew", summary)
+            return
         self._model_download_tag = result.get("tag", "")
         self._model_download_url = result.get("download_url")
         display = self._model_display_name(self._model_download_tag)
@@ -1754,7 +4254,54 @@ class MainWindow(QMainWindow):
         self._model_gotit_btn.setVisible(False)
         self._model_card.setVisible(True)
 
+    def _maybe_announce_new_model(self):
+        """Tell the user once, after the fact, when a newer detector has become
+        active -- almost always because an app update quietly bundled it. Gated
+        purely on the model version going UP versus the one we last announced
+        (stored in settings), so it is update-path agnostic: it works the same
+        whether the app updated via the banner, via Settings 'Check for Updates',
+        or any future path. It never fires for an app-only update (same detector)
+        or for a fresh install. Reuses the orange model card in 'already installed'
+        mode with a single Close button."""
+        from modules.model_update import local_model_version, parse_model_tag
+        current = local_model_version()
+        last = SETTINGS.value("last_announced_model_version", "", type=str) or ""
+        if not last:
+            # Baseline silently the first time we ever record it -- a detector the
+            # user received with their initial install is not an "update".
+            SETTINGS.setValue("last_announced_model_version", current)
+            return
+        cur_n, last_n = parse_model_tag(current), parse_model_tag(last)
+        if cur_n is None or last_n is None or cur_n <= last_n:
+            return
+        # Don't compete with a pending app-update banner. Defer (leave the recorded
+        # version unchanged) so the notice fires on a later launch once they're caught up.
+        if self._update_banner.isVisible():
+            return
+        summary = SETTINGS.value("pending_model_whatsnew", "", type=str) or ""
+        self._show_model_installed_notice(current, summary)
+        SETTINGS.setValue("last_announced_model_version", current)
+        SETTINGS.remove("pending_model_whatsnew")
+
+    def _show_model_installed_notice(self, version_tag, summary):
+        """Post-update orange card: '<detector> is now installed' + its what's-new
+        line + a single Close button. No Download -- the detector is already active."""
+        display = self._model_display_name(version_tag)
+        self._model_title.setText(f"{display} is now installed")
+        self._model_summary.setText(summary or f"{display} is now installed.")
+        self._model_summary.setVisible(True)
+        self._model_credits.setVisible(False)
+        self._model_download_btn.setVisible(False)
+        self._model_notnow_btn.setVisible(False)
+        self._model_progress.setVisible(False)
+        self._model_gotit_btn.setText("Close")
+        self._model_gotit_btn.setVisible(True)
+        self._model_card.setVisible(True)
+
     def _on_model_download_clicked(self):
+        """Model card "Download now" button. Swap the buttons for a progress
+        bar and start a ModelDownloadThread streaming the new weights into the
+        user model folder. No-op if no download URL was set."""
         if not self._model_download_url:
             return
         self._model_download_btn.setVisible(False)
@@ -1774,9 +4321,14 @@ class MainWindow(QMainWindow):
         self._model_download_thread.start()
 
     def _on_model_notnow_clicked(self):
+        """Model card "Not right now" button — just hide the card for now;
+        the check runs again on the next launch."""
         self._model_card.setVisible(False)
 
     def _on_model_download_progress(self, done, total):
+        """Update the model card's progress bar from the download thread.
+        `done`/`total` are bytes; total==0 means the server gave no
+        Content-Length, so switch the bar to an indeterminate pulse."""
         if total > 0:
             pct = int(done * 100 / total)
             self._model_progress.setValue(pct)
@@ -1786,21 +4338,37 @@ class MainWindow(QMainWindow):
                 self._model_progress.setRange(0, 0)
 
     def _on_model_download_finished(self, version):
+        """Model download succeeded. Show "<model> installed" with a Got it
+        button and refresh the header subline to the newly active detector.
+        `version` is the installed release tag."""
         self._model_progress.setVisible(False)
         display = self._model_display_name(version)
         self._model_title.setText(f"{display} installed")
         self._model_summary.setVisible(False)
         self._model_credits.setVisible(False)
+        self._model_gotit_btn.setText("Got it")
         self._model_gotit_btn.setVisible(True)
         self._header_subline.setText(f"Beta v{VERSION}\n{display}")
+        # They downloaded it themselves and saw this card, so don't re-announce
+        # the same detector via the post-update "now installed" notice next launch.
+        SETTINGS.setValue("last_announced_model_version", version)
+        SETTINGS.remove("pending_model_whatsnew")
 
     def _on_model_download_failed(self, err):
+        """Model download failed. Stay quiet (the existing model still works):
+        hide the card and let the check retry on the next launch. `err` is a
+        short error string, not shown to the user."""
         # Silent fallback: hide the card, try again next launch.
         self._model_card.setVisible(False)
 
     # ── NVIDIA "coming soon" banner ──────────────────────────────────────────
 
     def _build_nvidia_banner(self):
+        """Build the orange "NVIDIA GPU detected — install GPU support" banner
+        (Windows only). Hidden until NvidiaDetectThread reports a usable card
+        and the GPU pack isn't already installed. Has Install / Later buttons
+        and an inline progress bar shared with the Settings-tab installer.
+        Returns the banner widget."""
         banner = QFrame()
         banner.setFixedHeight(44)
         banner.setStyleSheet(f"QFrame {{ background-color: {BRAND_NOTICE_ORANGE}; }}")
@@ -1810,7 +4378,7 @@ class MainWindow(QMainWindow):
         layout.setSpacing(12)
 
         self._nvidia_label = QLabel(
-            "NVIDIA GPU detected. Full GPU support is coming in a future update."
+            "NVIDIA GPU detected. Install GPU support for faster processing."
         )
         self._nvidia_label.setStyleSheet(
             "color: white; font-size: 14px; font-weight: bold; background: transparent;"
@@ -1818,47 +4386,390 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._nvidia_label)
         layout.addStretch()
 
-        gotit_btn = QPushButton("Got it")
-        gotit_btn.setFixedHeight(28)
-        gotit_btn.setStyleSheet(
+        download_btn = QPushButton("Install")
+        download_btn.setFixedHeight(28)
+        download_btn.setStyleSheet(
             f"QPushButton {{ background-color: white; color: {BRAND_NOTICE_ORANGE}; font-size: 13px; "
             f"font-weight: bold; border-radius: 4px; padding: 0 16px; border: none; }}"
             f"QPushButton:hover {{ background-color: {BRAND_NOTICE_HOVER}; }}"
         )
-        gotit_btn.clicked.connect(self._on_nvidia_gotit_clicked)
-        layout.addWidget(gotit_btn)
+        download_btn.clicked.connect(self._on_nvidia_download_clicked)
+        layout.addWidget(download_btn)
+        self._nvidia_install_btn = download_btn
+
+        later_btn = QPushButton("Later")
+        later_btn.setFixedHeight(28)
+        later_btn.setStyleSheet(
+            f"QPushButton {{ background-color: transparent; color: white; font-size: 13px; "
+            f"border-radius: 4px; padding: 0 12px; border: 1px solid white; }}"
+            f"QPushButton:hover {{ background-color: rgba(255,255,255,0.15); }}"
+        )
+        later_btn.clicked.connect(self._on_nvidia_later_clicked)
+        layout.addWidget(later_btn)
+        self._nvidia_later_btn = later_btn
+
+        from PySide6.QtWidgets import QProgressBar
+        nvidia_progress = QProgressBar()
+        nvidia_progress.setFixedHeight(16)
+        nvidia_progress.setFixedWidth(220)
+        nvidia_progress.setRange(0, 100)
+        nvidia_progress.setValue(0)
+        nvidia_progress.setVisible(False)
+        nvidia_progress.setStyleSheet(
+            "QProgressBar { background: rgba(255,255,255,0.3); border-radius: 4px; border: none; }"
+            "QProgressBar::chunk { background: white; border-radius: 4px; }"
+        )
+        layout.addWidget(nvidia_progress)
+        self._nvidia_banner_progress = nvidia_progress
+
+        nvidia_progress_label = QLabel("")
+        nvidia_progress_label.setStyleSheet(
+            "color: white; font-size: 12px; background: transparent;"
+        )
+        nvidia_progress_label.setVisible(False)
+        layout.addWidget(nvidia_progress_label)
+        self._nvidia_banner_label = nvidia_progress_label
 
         self._nvidia_banner = banner
         return banner
 
     def _start_nvidia_detect(self):
-        if SETTINGS.value("nvidia_coming_soon_dismissed", False, type=bool):
-            return
+        """Launch two background probes at startup: NvidiaDetectThread (is
+        there an NVIDIA card?) and BestDeviceThread (which torch device will
+        actually be used: cuda/mps/cpu). Both feed the Settings GPU status
+        line and the NVIDIA banner."""
         self._nvidia_thread = NvidiaDetectThread(self)
         self._nvidia_thread.result_ready.connect(self._on_nvidia_detect_result)
         self._nvidia_thread.start()
+        self._best_device_thread = BestDeviceThread(self)
+        self._best_device_thread.result_ready.connect(self._on_best_device_result)
+        self._best_device_thread.start()
 
     def _on_nvidia_detect_result(self, outcome, detail):
+        """Handle the NVIDIA-detection result. `outcome` is "yes"/"no"/etc.
+        Records it and refreshes the Settings compute-status section, which is
+        also what decides whether the GPU banner is shown (it needs both this
+        answer and the chosen torch device, which arrive on separate threads)."""
         print(f"[nvidia-detect] outcome={outcome} detail={detail}", flush=True)
-        if outcome == "yes":
-            self._nvidia_banner.setVisible(True)
+        self._nvidia_outcome = outcome
+        self._refresh_compute_section()
 
-    def _on_nvidia_gotit_clicked(self):
-        SETTINGS.setValue("nvidia_coming_soon_dismissed", True)
+    def _on_best_device_result(self, device):
+        """Record which compute device torch will use ("cuda"/"mps"/"cpu")
+        and refresh the Settings compute-status line accordingly.
+
+        This is a PREDICTION, made in this process at launch. What the cleaning
+        engine really used arrives later via _on_device_in_use and wins."""
+        self._compute_device = device
+        self._refresh_compute_section()
+
+    def _on_device_in_use(self, device):
+        """The cleaning engine reported which processor it ACTUALLY loaded the
+        model on. Correct the header badge and the Settings line to match.
+
+        The badge is otherwise decided once at startup by asking this process
+        what device it could reach. The engine is a separate process and falls
+        back to the processor without a word if the model will not load on the
+        card, so the badge could show a green "GPU: NVIDIA" through an entire
+        nine-hour run that never touched the card. A user hit exactly that and
+        spent the run watching Task Manager trying to work out the truth.
+
+        The correction STAYS after the run: the startup guess is the thing that
+        was wrong, so reverting to it would put the lie back."""
+        if not device or device == getattr(self, "_compute_device", None):
+            return
+        self._compute_device = device
+        self._refresh_compute_section()
+
+    def _on_nvidia_download_clicked(self):
+        """Install GPU Support button (fired from either the banner or the
+        Settings tab). Confirms the ~3-4 GB download with the user, then starts
+        a GpuPackInstallThread and wires the UI (banner or Settings progress
+        bar) to its progress/finished/failed signals."""
+        from PySide6.QtWidgets import QMessageBox
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Install GPU Support")
+        msg.setText(
+            "GPU support requires a one-time download of approximately 3-4 GB from pytorch.org.\n\n"
+            "Once installed, it survives Star Trail CleanR updates automatically.\n\n"
+            "Star Trail CleanR will need to restart after installation to activate GPU support."
+        )
+        msg.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
+        msg.button(QMessageBox.Ok).setText("Install")
+        msg.button(QMessageBox.Cancel).setText("Not Now")
+        if msg.exec() != QMessageBox.Ok:
+            return
+
+        self._gpu_install_via_banner = self._nvidia_banner.isVisible()
+        if self._gpu_install_via_banner:
+            self._nvidia_label.setVisible(False)
+            self._nvidia_install_btn.setVisible(False)
+            self._nvidia_later_btn.setVisible(False)
+            self._nvidia_banner_progress.setRange(0, 100)
+            self._nvidia_banner_progress.setValue(0)
+            self._nvidia_banner_progress.setVisible(True)
+            self._nvidia_banner_label.setText("Starting download...")
+            self._nvidia_banner_label.setVisible(True)
+        self._gpu_download_btn.setVisible(False)
+        self._gpu_upgrade_browser.setVisible(False)
+        self._gpu_progress.setRange(0, 100)
+        self._gpu_progress.setValue(0)
+        self._gpu_progress.setFormat("%p%")
+        self._gpu_progress.setVisible(True)
+        self._gpu_progress_label.setText("Starting download...")
+        self._gpu_progress_label.setVisible(True)
+
+        self._gpu_install_thread = GpuPackInstallThread(self)
+        self._gpu_install_thread.progress.connect(self._on_gpu_install_progress)
+        self._gpu_install_thread.finished_ok.connect(self._on_gpu_install_finished)
+        self._gpu_install_thread.failed.connect(self._on_gpu_install_failed)
+        self._gpu_install_thread.start()
+
+    def _on_gpu_install_progress(self, label, done, total):
+        """Update the GPU-install progress bar(s) from the install thread.
+        `label` is the current step text; `done`/`total` are bytes (total==0 =
+        indeterminate phase). Mirrors progress to the banner bar too when the
+        install was launched from the banner."""
+        if total > 0:
+            pct = int(done * 100 / total)
+            self._gpu_progress.setRange(0, 100)
+            self._gpu_progress.setValue(pct)
+            if self._gpu_install_via_banner:
+                self._nvidia_banner_progress.setRange(0, 100)
+                self._nvidia_banner_progress.setValue(pct)
+        else:
+            self._gpu_progress.setRange(0, 0)
+            if self._gpu_install_via_banner:
+                self._nvidia_banner_progress.setRange(0, 0)
+        self._gpu_progress_label.setText(label)
+        if self._gpu_install_via_banner:
+            self._nvidia_banner_label.setText(label)
+
+    def _on_gpu_install_finished(self):
+        """GPU pack installed. Hide progress UI and reveal the "Restart Now to
+        Activate GPU Support" button (the new torch wheels only take effect on
+        a fresh process)."""
+        if self._gpu_install_via_banner:
+            self._nvidia_banner.setVisible(False)
+            self._nvidia_label.setVisible(True)
+            self._nvidia_install_btn.setVisible(True)
+            self._nvidia_later_btn.setVisible(True)
+            self._nvidia_banner_progress.setVisible(False)
+            self._nvidia_banner_label.setVisible(False)
+        self._gpu_progress.setVisible(False)
+        self._gpu_progress_label.setVisible(False)
+        self._gpu_restart_btn.setVisible(True)
+        self._compute_status_label.setText("GPU support installed. Restart to activate.")
+
+    def _on_gpu_install_failed(self, err):
+        """GPU install failed. Restore the install controls and show an error
+        dialog with the message `err` (already user-friendly from the install
+        thread) plus a "More Info" link to the setup guide."""
+        from PySide6.QtWidgets import QMessageBox
+        if self._gpu_install_via_banner:
+            self._nvidia_banner_progress.setVisible(False)
+            self._nvidia_banner_label.setVisible(False)
+            self._nvidia_label.setVisible(True)
+            self._nvidia_install_btn.setVisible(True)
+            self._nvidia_later_btn.setVisible(True)
+        self._gpu_progress.setVisible(False)
+        self._gpu_progress_label.setVisible(False)
+        self._gpu_download_btn.setVisible(True)
+        self._gpu_upgrade_browser.setVisible(True)
+        box = QMessageBox(self)
+        box.setWindowTitle("GPU Installation Failed")
+        box.setIcon(QMessageBox.Critical)
+        box.setText(f"GPU support could not be installed.\n\n{err}")
+        box.addButton(QMessageBox.Ok)
+        info_btn = box.addButton("More Info", QMessageBox.HelpRole)
+        box.exec()
+        if box.clickedButton() is info_btn:
+            from PySide6.QtCore import QUrl
+            from PySide6.QtGui import QDesktopServices
+            QDesktopServices.openUrl(QUrl(_GPU_BUILD_URL))
+
+    def _on_gpu_help_clicked(self):
+        """Open the NVIDIA GPU-setup troubleshooting guide in the browser."""
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        QDesktopServices.openUrl(QUrl(_GPU_BUILD_URL))
+
+    def _on_gpu_clear_clicked(self):
+        """Settings "Clear GPU Support Files" link. After confirming, delete
+        the installed GPU pack so the user can start a clean reinstall; report
+        success or, if files are locked, point them at the folder to delete
+        manually."""
+        from PySide6.QtWidgets import QMessageBox
+        from modules.gpu_pack import clear_gpu_files, get_override_dir
+        confirm = QMessageBox.question(
+            self,
+            "Clear GPU Support Files",
+            "This will delete the GPU support files so you can start a fresh install.\n\n"
+            "You can reinstall them at any time from this Settings page.\n\n"
+            "Continue?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        ok, detail = clear_gpu_files()
+        if ok:
+            QMessageBox.information(
+                self,
+                "GPU Support Files Cleared",
+                "GPU support files have been removed. Click Install GPU Support to start fresh."
+            )
+        else:
+            override_dir = get_override_dir()
+            QMessageBox.critical(
+                self,
+                "Could Not Clear GPU Files",
+                f"Some files could not be removed. You can delete this folder manually:\n\n"
+                f"{override_dir}\n\n"
+                f"Details: {detail}"
+            )
+
+    def _on_nvidia_later_clicked(self):
+        """NVIDIA banner "Later" button. Remember the dismissal so the banner
+        stays hidden on future launches, and hide it now."""
+        SETTINGS.setValue("nvidia_banner_dismissed", True)
         self._nvidia_banner.setVisible(False)
+
+    def _refresh_compute_section(self):
+        """Rebuild the Settings tab's GPU-status line from the latest device and
+        NVIDIA-detection results, and decide whether the GPU banner belongs on
+        screen.
+
+        Both answers come from modules.gpu_pack.gpu_status, so the Settings tab,
+        the run log and the anonymous usage report can never tell three
+        different stories about the same machine. The Windows GPU controls show
+        whenever a reinstall would actually help.
+
+        Called from both the NVIDIA-detect and best-device threads, since the
+        verdict needs their two answers together. Safe to call before the
+        Settings widgets exist (returns early)."""
+        if not hasattr(self, "_compute_status_label"):
+            return
+        import platform as _pl
+        device = self._compute_device
+        if device is None:
+            return          # best-device thread hasn't reported yet
+        from modules.gpu_pack import gpu_status, status_message
+        code = gpu_status(device, self._nvidia_outcome)
+        status = status_message(code)
+        if not status:
+            return
+
+        self._compute_status_label.setText(status)
+        # Reinstalling the pack is the fix for all three of these; it is NOT a
+        # fix for a card the packed CUDA build doesn't support, so that case
+        # keeps the controls hidden.
+        show_upgrade = (
+            _pl.system() == "Windows"
+            and code in ("cpu_pack_missing", "cpu_pack_mismatch", "cpu_pack_unused")
+        )
+        self._gpu_install_widget.setVisible(show_upgrade)
+        self._gpu_upgrade_browser.setVisible(show_upgrade)
+        self._gpu_download_btn.setVisible(show_upgrade)
+        if hasattr(self, '_gpu_clear_btn'):
+            self._gpu_clear_btn.setVisible(show_upgrade)
+        if hasattr(self, '_gpu_help_btn'):
+            self._gpu_help_btn.setVisible(show_upgrade)
+        self._refresh_header_gpu_badge(code)
+        self._maybe_show_nvidia_banner(code)
+
+    def _refresh_header_gpu_badge(self, code):
+        """Update the compute indicator beside the version in the header.
+
+        Green when a graphics card is doing the work, amber and clickable
+        through to Settings when there's a card going unused, plain grey when
+        there's no card to use (a fact, not a fault). Remembers the code so the
+        click handler and the run summary can reuse this window's verdict."""
+        if not hasattr(self, "_header_gpu"):
+            return
+        from modules.gpu_pack import header_badge
+        text, tone = header_badge(code)
+        self._header_gpu_code = code
+        colour = {"ok": "#5cd65c", "warn": BRAND_NOTICE_ORANGE}.get(
+            tone, BRAND_HEADER_SUB)
+        self._header_gpu.setText(text)
+        self._header_gpu.setStyleSheet(
+            f"color: {colour}; font-size: 12px; font-weight: bold; "
+            f"background: transparent;")
+        if tone == "warn":
+            self._header_gpu.setCursor(Qt.PointingHandCursor)
+            self._header_gpu.setToolTip(
+                "This computer has a graphics card that isn't being used. "
+                "Click to open Settings.")
+            self._header_gpu.mousePressEvent = lambda e: self._open_settings_tab()
+        else:
+            self._header_gpu.setCursor(Qt.ArrowCursor)
+            self._header_gpu.setToolTip("")
+            self._header_gpu.mousePressEvent = lambda e: None
+
+    def _open_settings_tab(self):
+        """Jump to the Settings tab (from the header's GPU badge)."""
+        try:
+            for i in range(self._tabs.count()):
+                if self._tabs.tabText(i).strip().lower() == "settings":
+                    self._tabs.setCurrentIndex(i)
+                    return
+        except Exception:
+            pass
+
+    def _maybe_show_nvidia_banner(self, code):
+        """Show the orange GPU banner when there is a graphics card going unused
+        and a reinstall would bring it back. Only ever shows the banner; hiding
+        stays with the Later button and the install handlers, so this can't fight
+        them.
+
+        The "you could add GPU support" nudge respects a past Later click. The
+        two BROKEN cases do not: a user whose working GPU support stopped being
+        used has not dismissed anything, and silently dropping them to the
+        processor forever is the bug this whole change exists to kill.
+        """
+        if not hasattr(self, "_nvidia_banner"):
+            return
+        if getattr(self, "_gpu_install_thread", None) is not None \
+                and self._gpu_install_thread.isRunning():
+            return
+        if code == "cpu_pack_missing":
+            if SETTINGS.value("nvidia_banner_dismissed", False, type=bool):
+                return
+            self._nvidia_label.setText(
+                "NVIDIA GPU detected. Install GPU support for faster processing.")
+            self._nvidia_install_btn.setText("Install")
+        elif code in ("cpu_pack_mismatch", "cpu_pack_unused"):
+            # Kept to one line: the banner is a fixed 44px tall.
+            self._nvidia_label.setText(
+                "GPU support stopped working. Reinstall it to use your graphics card again.")
+            self._nvidia_install_btn.setText("Reinstall")
+        else:
+            return
+        self._nvidia_banner.setVisible(True)
 
     def _relaunch(self):
         """Close and reopen the app."""
         import subprocess
+        from PySide6.QtWidgets import QApplication as _QApp
+        _sock = getattr(_QApp.instance(), '_lock_socket', None)
+        release_single_instance(_sock)
         if getattr(sys, 'frozen', False):
-            subprocess.Popen([sys.executable])
+            subprocess.Popen([sys.executable, '--cleanr-relaunch'])
         else:
-            subprocess.Popen([sys.executable, os.path.abspath(__file__)])
+            subprocess.Popen([sys.executable, os.path.abspath(__file__), '--cleanr-relaunch'])
         self.close()
 
     # ── Setup page ───────────────────────────────────────────────────────────
 
     def _build_setup_page(self):
+        """Build page 0 of the Main tab: the six-step setup form the user fills
+        in before a run. Step 1 input folder + live frame count, Step 2 output
+        folder (auto-filled to a "cleaned" subfolder), Step 3 optional
+        foreground mask, Step 4 number of frames (plus dev-only start/end), Step
+        5 output format + JPEG quality (plus dev-only model picker), Step 6 the
+        big "Clean My Stars!" button. Wraps it all in a scroll area, restores
+        persisted choices from QSettings, and wires change handlers. Added to
+        the page stack as index 0."""
         page = QWidget()
         # Hold onto the inner widget so the window can lock its minimum
         # height to whatever the layout actually needs. See _lock_min_height.
@@ -1887,13 +4798,13 @@ class MainWindow(QMainWindow):
         layout.addWidget(headline)
 
         subtitle = QLabel(
-            "Drop in a folder of star trail frames and let the AI scrub out "
-            "airplane and satellite streaks."
+            "Point to a folder of star trail frames and our AI will do "
+            "its best to remove all the airplane and satellite trails."
         )
         sub_font = QFont()
         sub_font.setPointSize(13)
         subtitle.setFont(sub_font)
-        subtitle.setStyleSheet(f"color: {MUTED_TEXT};")
+        subtitle.setStyleSheet(f"color: {BROWSER_TEXT};")
         subtitle.setWordWrap(True)
         layout.addWidget(subtitle)
 
@@ -1904,26 +4815,30 @@ class MainWindow(QMainWindow):
         # has to align two QLabels of different fonts on the same line —
         # that produced overlap. Frame count is dynamic, lives in its own
         # label to the right.
-        # Option A: heading + frame count share one row. Heading on the left
-        # at its sizeHint width; count on the far right, pushed there by a
-        # stretch. No separate count row, no extra vertical space.
+        # Heading + frame count genuinely share ONE row: heading on the left,
+        # blue "N frames found (WxH)" count on the far right, pushed there by
+        # the stretch between them. No separate count row, so Step 1's
+        # heading-to-field gap is structurally identical to Step 2's. (An
+        # earlier version kept the count in its own stretch-proportioned row
+        # below the heading -- that row's height was a visible extra gap
+        # Bruce flagged on 2026-06-10.)
         step1_row = QHBoxLayout()
         step1_row.setSpacing(12)
         step1 = QLabel(
-            "<span style='font-size:19pt; font-weight:bold;'>1. Select Folder with Your Star Trail Images</span>"
-            f"&nbsp;&nbsp;<span style='font-size:14pt; color:{MUTED_TEXT}; vertical-align:baseline;'>(.JPG, .TIF \u2014 8 &amp; 16 bit files accepted)</span>"
+            f"<span style='font-size:19pt; font-weight:bold; color:{BRAND_HEADING_BLUE};'>1. Select Folder with Your Star Trail Frames</span>"
+            f"&nbsp;&nbsp;<span style='font-size:14pt; color:{MUTED_TEXT}; vertical-align:baseline;'>(.JPG, .TIF 8/16-bit, .INSP, and RAW)</span>"
         )
         step1.setTextFormat(Qt.RichText)
-        step1_row.addWidget(step1)
-        step1_row.addStretch(1)
+        # Mirror row_in's 4:2 stretch proportions (field=4, buttons=1+1) so the
+        # count label's slot sits exactly over the Browse + Open Folder buttons
+        # and the centered text stays centered over them at any window width.
+        step1_row.addWidget(step1, 4)
         self._frame_count_label = QLabel("")
-        # padding-right shifts the text leftward inside the label so it
-        # visually centers between Browse and Open Folder below it instead
-        # of hugging the right edge of the row.
+        self._frame_count_label.setAlignment(Qt.AlignCenter)
         self._frame_count_label.setStyleSheet(
-            "color: #5b9bd5; font-size: 15pt; padding-right: 100px;"
+            "color: #5b9bd5; font-size: 15pt;"
         )
-        step1_row.addWidget(self._frame_count_label)
+        step1_row.addWidget(self._frame_count_label, 2)
         layout.addLayout(step1_row)
 
         row_in = QHBoxLayout()
@@ -1934,18 +4849,22 @@ class MainWindow(QMainWindow):
         self._folder_input.editingFinished.connect(self._on_input_edited)
         row_in.addWidget(self._folder_input, 4)
         browse_in = QPushButton("Browse\u2026")
+        browse_in.setFixedHeight(34)
+        browse_in.setStyleSheet(_secondary_btn_css())
         browse_in.clicked.connect(self._browse_input)
         row_in.addWidget(browse_in, 1)
         self._input_open_btn = QPushButton("Open Folder")
+        self._input_open_btn.setFixedHeight(34)
+        self._input_open_btn.setStyleSheet(_secondary_btn_css())
         self._input_open_btn.setEnabled(False)
         self._input_open_btn.clicked.connect(self._open_setup_input_folder)
         row_in.addWidget(self._input_open_btn, 1)
         layout.addLayout(row_in)
-        layout.addSpacing(4)
+        layout.addSpacing(16)
 
         # ── Step 2: Select Output ────────────────────────────────────────────
         step2 = QLabel(
-            "<span style='font-size:19pt; font-weight:bold;'>2. Select Output Folder</span>"
+            f"<span style='font-size:19pt; font-weight:bold; color:{BRAND_HEADING_BLUE};'>2. Select Output Folder</span>"
             f"&nbsp;&nbsp;<span style='font-size:14pt; color:{MUTED_TEXT}; vertical-align:baseline;'>(default: a \u2018Cleaned\u2019 folder inside your originals)</span>"
         )
         step2.setTextFormat(Qt.RichText)
@@ -1957,19 +4876,23 @@ class MainWindow(QMainWindow):
         self._output_input.textChanged.connect(self._update_output_open_btn_state)
         row_out.addWidget(self._output_input, 4)
         browse_out = QPushButton("Browse\u2026")
+        browse_out.setFixedHeight(34)
+        browse_out.setStyleSheet(_secondary_btn_css())
         browse_out.clicked.connect(self._browse_output)
         row_out.addWidget(browse_out, 1)
         self._output_open_btn = QPushButton("Open Folder")
+        self._output_open_btn.setFixedHeight(34)
+        self._output_open_btn.setStyleSheet(_secondary_btn_css())
         self._output_open_btn.setEnabled(False)
         self._output_open_btn.clicked.connect(self._open_setup_output_folder)
         row_out.addWidget(self._output_open_btn, 1)
         layout.addLayout(row_out)
-        layout.addSpacing(4)
+        layout.addSpacing(16)
 
         # ── Step 3: Foreground Mask ──────────────────────────────────────────
         step3 = QLabel(
-            "<span style='font-size:19pt; font-weight:bold;'>3. Foreground Mask (optional)</span>"
-            f"&nbsp;&nbsp;<span style='font-size:14pt; color:{MUTED_TEXT}; vertical-align:baseline;'>Not required, but helpful \u2014 keeps the AI focused on the sky</span>"
+            f"<span style='font-size:19pt; font-weight:bold; color:{BRAND_HEADING_BLUE};'>3. Create Foreground Mask</span>"
+            f"&nbsp;&nbsp;<span style='font-size:14pt; color:{MUTED_TEXT}; vertical-align:baseline;'>Not required, but helpful: keeps the AI focused on the sky</span>"
         )
         step3.setTextFormat(Qt.RichText)
         layout.addWidget(step3)
@@ -1991,25 +4914,57 @@ class MainWindow(QMainWindow):
         mask_row.addWidget(self._mask_status)
         mask_row.addStretch()
         layout.addLayout(mask_row)
-        layout.addSpacing(4)
+        layout.addSpacing(16)
 
         # ── Step 4: Number of Images ─────────────────────────────────────────
         step4 = QLabel(
-            "<span style='font-size:19pt; font-weight:bold;'>4. Number of Images to Process</span>"
+            f"<span style='font-size:19pt; font-weight:bold; color:{BRAND_HEADING_BLUE};'>4. Number of Frames to Clean</span>"
             f"&nbsp;&nbsp;<span style='font-size:14pt; color:{MUTED_TEXT}; vertical-align:baseline;'>Recommended: test a small batch before doing a full run</span>"
         )
         step4.setTextFormat(Qt.RichText)
         layout.addWidget(step4)
 
         self._frame_limit = QComboBox()
-        self._frame_limit.addItems(["20", "50", "100", "250", "All Frames"])
-        self._frame_limit.setFixedWidth(140)
+        self._frame_limit.setEditable(True)
+        self._frame_limit.addItems(["20", "50", "100", "250", "500", "1000", "All Frames"])
+        self._frame_limit.lineEdit().setPlaceholderText("All Frames")
+        self._frame_limit.lineEdit().setValidator(QIntValidator(1, 999999))
+        self._frame_limit.setFixedWidth(160)
         layout.addWidget(self._frame_limit)
-        layout.addSpacing(4)
+
+        # Frame Range: leave out frames at the start and/or end of the sequence
+        # (a stray test shot, a twilight lead-in), the same two-grip bar as the Star
+        # Trail and Timelapse tabs. The number above is then "at most this many,
+        # counting from the start grip", so "test 20 frames from the middle" works.
+        # The bar and the file-name line under it fill in once the folder's frame
+        # list has loaded (see _refresh_step4_frames); the row hides itself when a
+        # folder has too few frames to trim. Not remembered between sessions.
+        self._step4_ordered = []          # the run's frame order for this folder
+        self._step4_folder = ""           # the folder that list belongs to
+        self._step4_token = 0             # newest load wins; stale ones are ignored
+        self._step4_row = FrameRangeRow(100, 1, 3, skip_words=True)
+        self._step4_range = self._step4_row.slider
+        self._step4_range.changed.connect(lambda _s, _e: self._on_step4_range_changed())
+        self._step4_busy = False          # True while we move the bar/dropdown ourselves
+        self._step4_prev = (0, 0)         # the bar's (start, end) before the last move
+        layout.addWidget(self._step4_row)
+        self._step4_names = QLabel("")
+        self._step4_names.setStyleSheet(f"font-size: 14px; color: {MUTED_TEXT};")
+        self._step4_names.setWordWrap(True)
+        self._step4_names.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(self._step4_names)
+        self._frame_limit.currentTextChanged.connect(
+            lambda _t: self._on_step4_limit_changed())
+        self.step4_frames_ready.connect(self._on_step4_frames_ready)
+
+        # (The Dev frame range, the Model picker, and Red Trail Map all moved to the
+        # developer section at the bottom of Settings on 2026-06-21, so the Main page
+        # stays clean for regular users. Their attributes are set in _build_settings_tab.)
+        layout.addSpacing(16)
 
         # ── Step 5: Output Options ───────────────────────────────────────────
         step5 = QLabel(
-            "<span style='font-size:19pt; font-weight:bold;'>5. Output Options</span>"
+            f"<span style='font-size:19pt; font-weight:bold; color:{BRAND_HEADING_BLUE};'>5. Output Options</span>"
             f"&nbsp;&nbsp;<span style='font-size:14pt; color:{MUTED_TEXT}; vertical-align:baseline;'>File format and quality</span>"
         )
         step5.setTextFormat(Qt.RichText)
@@ -2023,10 +4978,16 @@ class MainWindow(QMainWindow):
         self._format_combo = QComboBox()
         self._format_combo.addItems(["JPG", "TIFF 8-bit", "TIFF 16-bit"])
         self._format_combo.setFixedWidth(130)
+        # Set while WE change the format (see _sync_format_options): tells the
+        # persist hook below not to mistake our own switch for the user's choice.
+        self._format_auto_change = False
+        # What the user actually picked, kept aside while 16-bit is unavailable
+        # so their real preference comes back with the next 16-bit-capable folder.
+        self._format_user_choice = None
         hp_row.addWidget(self._format_combo)
         hp_row.addSpacing(12)
 
-        self._jpeg_quality_label = QLabel("JPEG quality:")
+        self._jpeg_quality_label = QLabel("JPG quality:")
         self._jpeg_quality_label.setFont(step_font)
         hp_row.addWidget(self._jpeg_quality_label)
         self._jpeg_quality = QSpinBox()
@@ -2047,13 +5008,33 @@ class MainWindow(QMainWindow):
         layout.addLayout(hp_row)
         layout.addSpacing(6)
 
+        # The old per-output checkboxes (star trail / before-after video / timelapse)
+        # were removed. The star trail and the before-after video now ALWAYS build
+        # during the run -- free, because they stack in parallel with the cleaning --
+        # and the combined Star Trail & Timelapse window opens automatically at the
+        # finish, where the user creates the star trail and timelapse videos on demand.
+        # The before-after clip is offered on that window's Summary tab.
+        layout.addSpacing(16)
+
         # ── Step 6: Run ──────────────────────────────────────────────────────
         step6 = QLabel(
-            "<span style='font-size:19pt; font-weight:bold;'>6. Remove airplane and satellite trails</span>"
-            f"&nbsp;&nbsp;<span style='font-size:14pt; color:{MUTED_TEXT}; vertical-align:baseline;'>Processing time depends on frame count, pixel count of your images, and computer speed</span>"
+            f"<span style='font-size:19pt; font-weight:bold; color:{BRAND_HEADING_BLUE};'>6. Remove airplane and satellite trails</span>"
+            f"&nbsp;&nbsp;<span style='font-size:14pt; color:{MUTED_TEXT}; vertical-align:baseline;'>Processing time depends on frame count, pixel count of your frames, and computer speed</span>"
         )
         step6.setTextFormat(Qt.RichText)
         layout.addWidget(step6)
+
+        # This describes what happens AFTER cleaning, so it belongs under the
+        # run step, next to the button that starts it -- not under the output
+        # format step above, where it read as part of choosing a file format.
+        share_note = QLabel(
+            "When cleaning finishes, the Star Trail & Timelapse window opens "
+            "automatically, where you can create your star trail and timelapse videos.")
+        share_note.setFont(step_font)
+        share_note.setWordWrap(True)
+        share_note.setStyleSheet(f"color: {MUTED_TEXT};")
+        share_note.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(share_note)
 
         self._error_label = QLabel("")
         self._error_label.setStyleSheet("color: red; font-size: 13px;")
@@ -2086,6 +5067,18 @@ class MainWindow(QMainWindow):
         self._setup_open_btn.setEnabled(False)
         self._setup_open_btn.clicked.connect(self._open_output_from_setup)
         btn_row.addWidget(self._setup_open_btn, 1)
+
+        self._setup_timelapse_btn = QPushButton("Star Trail && Timelapse")
+        self._setup_timelapse_btn.setFixedHeight(48)
+        self._setup_timelapse_btn.setStyleSheet(
+            f"QPushButton {{ background-color: {BRAND_HEADING_BLUE}; color: white; font-size: 22px; "
+            f"font-weight: bold; border-radius: 6px; border: none; }}"
+            f"QPushButton:hover {{ background-color: {BRAND_HEADING_HOVER}; }}"
+            f"QPushButton:disabled {{ background-color: {DISABLED_BTN_BG}; }}"
+        )
+        self._setup_timelapse_btn.setEnabled(False)
+        self._setup_timelapse_btn.clicked.connect(self._open_timelapse_from_setup)
+        btn_row.addWidget(self._setup_timelapse_btn, 1)
         layout.addLayout(btn_row)
 
         scroll = QScrollArea()
@@ -2114,10 +5107,15 @@ class MainWindow(QMainWindow):
         fli = self._frame_limit.findText(last_frame_limit)
         if fli >= 0:
             self._frame_limit.setCurrentIndex(fli)
+        else:
+            self._frame_limit.setCurrentText(last_frame_limit)
 
-        # Persist on change
+        # Persist on change -- but only the USER's changes. When a JPEG folder
+        # forces 16-bit off, _sync_format_options moves the dropdown itself, and
+        # saving that would overwrite the user's real preference for good.
         self._format_combo.currentTextChanged.connect(
-            lambda t: SETTINGS.setValue("output_format", t))
+            lambda t: None if self._format_auto_change
+            else SETTINGS.setValue("output_format", t))
         self._jpeg_quality.valueChanged.connect(
             lambda v: SETTINGS.setValue("jpeg_quality", int(v)))
         self._frame_limit.currentTextChanged.connect(
@@ -2130,6 +5128,13 @@ class MainWindow(QMainWindow):
     # ── Process page ─────────────────────────────────────────────────────────
 
     def _build_process_page(self):
+        """Build page 1 of the Main tab: the live processing view shown during
+        a run. Holds the running trail counter and per-frame stats, the fat
+        overall progress bar with time estimate/elapsed, the batch label, the
+        two per-step (Detecting / Repairing) bars, and a 50/50 split of the
+        scrolling Star Log on the left and a community/error-contact panel on
+        the right. Bottom row has Cancel and Open-Cleaned-Folder buttons.
+        Added to the page stack as index 1."""
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setSpacing(12)
@@ -2141,7 +5146,39 @@ class MainWindow(QMainWindow):
         title_font.setBold(True)
         title.setFont(title_font)
         self._process_title = title
-        layout.addWidget(title)
+
+        self._trail_counter_label = QLabel("")
+        self._trail_counter_label.setStyleSheet(
+            f"font-size: 22px; font-weight: bold; color: {MUTED_TEXT};"
+        )
+        self._trail_counter_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self._trail_counter_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+
+        # Secondary run stats under the trail counter: avg trails/frame and
+        # avg seconds/frame. Running averages over the whole run so far,
+        # refreshed once per frame (not on the 250ms clock).
+        self._run_stats_label = QLabel("")
+        self._run_stats_label.setStyleSheet(f"font-size: 14px; color: {MUTED_TEXT};")
+        self._run_stats_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self._run_stats_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._stats_frames_done = 0
+
+        self._run_source_label = QLabel("")
+        self._run_source_label.setStyleSheet(f"font-size: 19px; color: {MUTED_TEXT};")
+        self._run_source_label.setAlignment(Qt.AlignCenter | Qt.AlignVCenter)
+        self._run_source_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+
+        title_row = QHBoxLayout()
+        title_row.addWidget(title)
+        title_row.addStretch()
+        title_row.addWidget(self._run_source_label)
+        title_row.addStretch()
+        counter_col = QVBoxLayout()
+        counter_col.setSpacing(2)
+        counter_col.addWidget(self._trail_counter_label)
+        counter_col.addWidget(self._run_stats_label)
+        title_row.addLayout(counter_col)
+        layout.addLayout(title_row)
 
         # ── Overall progress bar (fat) ──
         frame_label_row = QHBoxLayout()
@@ -2176,7 +5213,13 @@ class MainWindow(QMainWindow):
         self._time_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         time_row.addWidget(self._time_label)
         time_row.addStretch()
+        self._updated_est_label = QLabel("")
+        self._updated_est_label.setStyleSheet(f"font-size: 14px; color: {MUTED_TEXT};")
+        self._updated_est_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        time_row.addWidget(self._updated_est_label)
+        time_row.addSpacing(20)
         self._elapsed_label = QLabel("")
+        self._elapsed_label.setStyleSheet(f"font-size: 14px; color: {MUTED_TEXT};")
         self._elapsed_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         time_row.addWidget(self._elapsed_label)
         layout.addLayout(time_row)
@@ -2201,6 +5244,7 @@ class MainWindow(QMainWindow):
         step1_row = QHBoxLayout()
         self._step1_label = QLabel("Detecting\nwaiting")
         self._step1_label.setFixedWidth(120)
+        self._step1_label.setWordWrap(True)
         self._step1_label.setStyleSheet(f"font-size: 14px; color: {HINT_TEXT};")
         self._step1_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         step1_row.addWidget(self._step1_label)
@@ -2222,6 +5266,7 @@ class MainWindow(QMainWindow):
         step2_row = QHBoxLayout()
         self._step2_label = QLabel("Repairing\nwaiting")
         self._step2_label.setFixedWidth(120)
+        self._step2_label.setWordWrap(True)
         self._step2_label.setStyleSheet(f"font-size: 14px; color: {HINT_TEXT};")
         self._step2_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         step2_row.addWidget(self._step2_label)
@@ -2256,12 +5301,37 @@ class MainWindow(QMainWindow):
         log_col.setSpacing(8)
         log_col.setContentsMargins(0, 0, 0, 0)
 
-        star_log_title = QLabel("Star Log")
-        star_log_title.setAlignment(Qt.AlignCenter)
-        star_log_title.setStyleSheet(
+        # Title row: centered "Star Log" heading with a "View Star Log" link to
+        # its right. The link opens the saved run-log text file; it stays hidden
+        # during a run and appears only once the run ends (finished/stopped/error).
+        _title_row = QHBoxLayout()
+        _title_row.setContentsMargins(0, 0, 0, 0)
+        _title_row.addStretch(1)
+        self._star_log_title = QLabel("Star Log")
+        self._star_log_title.setAlignment(Qt.AlignCenter)
+        self._star_log_title.setStyleSheet(
             f"font-size: 18px; font-weight: bold; color: {CARD_TEXT};"
         )
-        log_col.addWidget(star_log_title)
+        _title_row.addWidget(self._star_log_title)
+        # A flat QPushButton styled to look like a link. QLabel's <a> link did
+        # not reliably fire linkActivated in this layout; a button's clicked
+        # signal always fires.
+        self._view_log_link = QPushButton("View Star Log (with run detail)")
+        self._view_log_link.setFlat(True)
+        self._view_log_link.setCursor(Qt.PointingHandCursor)
+        _vlf = self._view_log_link.font()
+        _vlf.setPointSize(14)
+        _vlf.setUnderline(True)
+        self._view_log_link.setFont(_vlf)
+        self._view_log_link.setStyleSheet(
+            f"QPushButton {{ border: none; background: transparent; "
+            f"color: {BRAND_HEADING_BLUE}; padding: 0 0 0 10px; }}"
+        )
+        self._view_log_link.clicked.connect(self._view_star_log)
+        self._view_log_link.setVisible(False)
+        _title_row.addWidget(self._view_log_link)
+        _title_row.addStretch(1)
+        log_col.addLayout(_title_row)
 
         self._status_out = QTextEdit()
         self._status_out.setReadOnly(True)
@@ -2301,11 +5371,29 @@ class MainWindow(QMainWindow):
         self._open_folder_btn.clicked.connect(self._open_output_folder)
         btn_row.addWidget(self._open_folder_btn, 1)
 
+        # Same blue "Create Timelapse" as the Setup page. Hidden during the run;
+        # shown after it ends only when the cleaned output has frames to build
+        # from (see _switch_to_back_btn / _output_has_frames).
+        self._run_timelapse_btn = QPushButton("Star Trail && Timelapse")
+        self._run_timelapse_btn.setFixedHeight(48)
+        self._run_timelapse_btn.setStyleSheet(
+            f"QPushButton {{ background-color: {BRAND_HEADING_BLUE}; color: white; font-size: 22px; "
+            f"font-weight: bold; border-radius: 6px; border: none; }}"
+            f"QPushButton:hover {{ background-color: {BRAND_HEADING_HOVER}; }}"
+        )
+        self._run_timelapse_btn.clicked.connect(self._open_timelapse_from_run)
+        self._run_timelapse_btn.setVisible(False)
+        btn_row.addWidget(self._run_timelapse_btn, 1)
+
         layout.addLayout(btn_row)
 
         self._stack.addWidget(page)
 
     def _build_run_community_panel(self):
+        """Build the right-hand panel of the processing page: a "tag
+        @bruceherwig #StarTrailCleanR" social nudge and an error-report email
+        link that pre-fills app version + OS. Stashes the support email and a
+        pre-built mailto URL on self. Returns the panel widget."""
         import platform as _plat
         import urllib.parse as _urlp
         import html as _html
@@ -2349,6 +5437,11 @@ class MainWindow(QMainWindow):
         v = QVBoxLayout(panel)
         v.setContentsMargins(24, 0, 24, 12)
         v.setSpacing(0)
+        # Top stretch paired with the existing bottom stretch below so the
+        # content (community message + status flash) sits vertically
+        # centered in the panel at any window size, instead of pinned to
+        # the top.
+        v.addStretch(1)
 
         # Two separate QLabels — one per paragraph. Single-paragraph
         # plain word-wrapped QLabels size themselves cleanly via
@@ -2367,7 +5460,7 @@ class MainWindow(QMainWindow):
             "<div style='text-align:center;'>"
             f"<p style='margin:0; font-size:16px; color:{CARD_TEXT};'>"
             "Help spread the word! When you share on social media, "
-            "tag your image with <b>#StarTrailCleanR</b>"
+            "tag <b>@bruceherwig #StarTrailCleanR</b>"
             "</p>"
             f"<p style='margin:24px 0 0 0; font-size:16px; color:{CARD_TEXT};'>"
             "Did you get an error message? Take a screenshot and email "
@@ -2415,9 +5508,32 @@ class MainWindow(QMainWindow):
         pre-filled. A short status line confirms the click registered."""
         from PySide6.QtCore import QUrl as _QUrl
         from PySide6.QtGui import QDesktopServices as _QDS
+        import urllib.parse as _urlp
+        import platform as _plat
 
         QApplication.clipboard().setText(self._support_email)
-        _QDS.openUrl(_QUrl(url))
+
+        log_text = self._status_out.toPlainText() if hasattr(self, '_status_out') else ""
+        if len(log_text) > 1500:
+            log_text = "...(truncated)\n" + log_text[-1500:]
+
+        sysname = _plat.system()
+        machine = _plat.machine()
+        subject = "Star Trail CleanR error report"
+        body = (
+            "Hi Bruce,\n\n"
+            "[Describe what happened]\n\n"
+            f"App version: Beta v{VERSION}\n"
+            f"OS: {sysname} ({machine})\n\n"
+            "--- Star Log ---\n"
+            f"{log_text}\n"
+        )
+        mailto_url = (
+            f"mailto:{self._support_email}"
+            f"?subject={_urlp.quote(subject)}"
+            f"&body={_urlp.quote(body)}"
+        )
+        _QDS.openUrl(_QUrl(mailto_url))
         self._community_status.setText("Email copied. Paste it anywhere.")
         QTimer.singleShot(
             3000, lambda: self._community_status.setText("")
@@ -2426,6 +5542,9 @@ class MainWindow(QMainWindow):
     # ── Browse / validation ──────────────────────────────────────────────────
 
     def _browse_input(self):
+        """Step 1 Browse button. Open a folder picker (starting at the last
+        used input dir), set the chosen path, remember it, and refresh the mask
+        status and frame count."""
         last_dir = SETTINGS.value("last_input_dir", "")
         folder = QFileDialog.getExistingDirectory(self, "Select Input Folder", last_dir)
         if folder:
@@ -2435,29 +5554,46 @@ class MainWindow(QMainWindow):
             self._update_frame_count()
 
     def _on_input_edited(self):
+        """Fired when the user finishes typing in the input-folder field;
+        refresh the live frame count for the typed path."""
         self._update_frame_count()
 
     def _update_input_open_btn_state(self):
+        """Enable the Step 1 "Open Folder" button only when the input field
+        holds a real existing directory."""
         path = self._folder_input.text().strip()
         self._input_open_btn.setEnabled(bool(path) and os.path.isdir(path))
 
     def _update_output_open_btn_state(self):
+        """Enable the Step 2 "Open Folder" button only when the output field
+        holds a real existing directory."""
         path = self._output_input.text().strip()
         self._output_open_btn.setEnabled(bool(path) and os.path.isdir(path))
 
     def _open_setup_input_folder(self):
+        """Open the Step 1 input folder in the OS file manager (if it exists)."""
         path = self._folder_input.text().strip()
         if path and os.path.isdir(path):
             _open_folder_in_file_manager(path)
 
     def _open_setup_output_folder(self):
+        """Open the Step 2 output folder in the OS file manager (if it exists)."""
         path = self._output_input.text().strip()
         if path and os.path.isdir(path):
             _open_folder_in_file_manager(path)
 
     def _update_frame_count(self):
+        """Refresh the blue "N frames found (WxH)" label under Step 1 for the
+        current input folder, and grey out frame-limit dropdown choices that
+        exceed the available count. Counts files by image extension and reads
+        the first frame's dimensions for the size hint. Handles empty / missing
+        / no-image folders with their own messages.
+
+        Also re-checks which output formats make sense for these frames (see
+        _sync_format_options), since this already runs on every folder change."""
         folder = self._folder_input.text().strip()
-        exts = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
+        self._sync_format_options(folder)
+        from modules.frame_list import IMAGE_EXTS as exts
         count = None
         if not folder:
             self._frame_count_label.setText("")
@@ -2470,12 +5606,44 @@ class MainWindow(QMainWindow):
             except OSError:
                 count = 0
             if count == 0:
-                self._frame_count_label.setText("No images found")
+                self._frame_count_label.setText("No frames found")
             else:
+                dim_str = ""
+                try:
+                    first = next(
+                        os.path.join(folder, n) for n in sorted(os.listdir(folder))
+                        if os.path.splitext(n)[1].lower() in exts
+                    )
+                    from modules.io_safe import image_size as _image_size
+                    _sz = _image_size(first)
+                    if _sz is not None:
+                        _w, _h = _sz
+                        dim_str = f"  ({_w:,} x {_h:,}px)"
+                except Exception:
+                    pass
                 self._frame_count_label.setText(
-                    f"<b>{count:,}</b> frame{'s' if count != 1 else ''} found")
+                    f"<b>{count:,}</b> frame{'s' if count != 1 else ''} found{dim_str}")
 
+        self._gray_frame_limit_choices(count)
+        # The Frame Range bar belongs to the folder: start it over, then load this
+        # folder's frame list in the background.
+        self._refresh_step4_frames(folder)
+
+        # The input folder just changed, which decides whether the Star Trail &
+        # Timelapse button can run on the original frames (see _update_open_btn_state).
+        if hasattr(self, "_setup_timelapse_btn") and hasattr(self, "_output_input"):
+            self._update_open_btn_state()
+
+    def _gray_frame_limit_choices(self, count):
+        """Hide the Step 4 number choices that are larger than the `count` frames
+        available (None = unknown, offer everything). `count` is the folder's
+        frame count, or -- once the Frame Range bar has been moved -- how many
+        frames the bar leaves in."""
         model = self._frame_limit.model()
+        # Flipping the list items' flags makes the combo snap its text back to the
+        # selected LIST entry, which wiped a number the person had typed (or dragged
+        # the Frame Range bar to) every time the folder changed: 10 or 185 became 250.
+        keep = self._frame_limit.currentText()
         for i in range(self._frame_limit.count()):
             text = self._frame_limit.itemText(i)
             if text == "All Frames" or count is None:
@@ -2493,8 +5661,216 @@ class MainWindow(QMainWindow):
                 else:
                     item.setFlags(flags & ~Qt.ItemIsEnabled)
             self._frame_limit.view().setRowHidden(i, not enabled)
+        if self._frame_limit.currentText() != keep:
+            self._frame_limit.setCurrentText(keep)
+
+    # ── Step 4 Frame Range ────────────────────────────────────────────────────
+
+    def _refresh_step4_frames(self, folder):
+        """Start the Frame Range bar over for `folder` and load that folder's frame
+        list (in the order a run will use it) on a background thread -- reading
+        every frame's capture time takes a second or two on a big folder, and the
+        screen must not freeze. The answer comes back through step4_frames_ready;
+        a newer request makes any older answer stale."""
+        if not hasattr(self, "_step4_range"):
+            return                      # the screen is still being built
+        self._step4_token += 1
+        token = self._step4_token
+        self._step4_ordered = []
+        self._step4_folder = folder
+        self._step4_row.set_total(1)    # back to 0/0 and hidden until loaded
+        self._step4_names.setText("")
+        self._refit_setup_height()
+        if not folder or not os.path.isdir(folder):
+            return
+
+        def _load():
+            try:
+                from modules.frame_list import ordered_frame_list
+                frames = ordered_frame_list(folder)
+            except Exception:
+                frames = []
+            try:
+                self.step4_frames_ready.emit(folder, frames, token)
+            except RuntimeError:
+                pass                    # the window closed while this was loading
+
+        import threading
+        threading.Thread(target=_load, daemon=True).start()
+
+    def _on_step4_frames_ready(self, folder, frames, token):
+        """The background load finished: point the bar at the real frame count and
+        show which files will be processed. Ignored if the folder changed again."""
+        if token != self._step4_token or folder != self._step4_folder:
+            return
+        self._step4_ordered = list(frames)
+        self._step4_row.set_total(len(frames))
+        self._step4_prev = (0, 0)
+        self._apply_step4_limit_to_bar()    # the saved number decides the first window
+        self._update_step4_readout()
+        self._refit_setup_height()          # the row and file line just appeared
+
+    def _step4_selection(self):
+        """The frames the next run will process, or None while the list is still
+        loading. Same order of operations as the run: bar first, then the number."""
+        if not self._step4_ordered:
+            return None
+        from modules.frame_list import run_selection
+        return run_selection(self._step4_ordered, self._step4_range.start(),
+                             self._step4_range.end(),
+                             self._frame_limit.currentText().strip())
+
+    def _update_step4_readout(self):
+        """The line under the bar: how many frames will be processed and the first
+        and last file, so a stray frame at either end is visible before the run."""
+        sel = self._step4_selection()
+        if not sel:
+            self._step4_names.setText("")
+            return
+        first, last = os.path.basename(sel[0]), os.path.basename(sel[-1])
+        n = len(sel)
+        total = len(self._step4_ordered)
+        if n == 1:
+            self._step4_names.setText(f"Cleaning 1 of {total:,} frames: {first}")
+        else:
+            self._step4_names.setText(
+                f"Cleaning <b>{n:,}</b> of {total:,} frames: {first} to {last}")
+
+    def _apply_step4_limit_to_bar(self):
+        """The dropdown decides the window: a number puts the right grip that many
+        frames after the left one and lets the left grip slide the window; All
+        Frames sends the right grip to the far end and lets the grips move apart."""
+        total = len(self._step4_ordered)
+        if total < 4:
+            return
+        text = self._frame_limit.currentText().strip()
+        bar = self._step4_range
+        start = bar.start()
+        self._step4_busy = True
+        try:
+            if text.isdigit():
+                n = max(3, min(int(text), total))
+                start = min(start, total - n)
+                bar.set_slide(True)
+                bar.set_range(start, total - start - n)
+            else:
+                bar.set_slide(False)
+                bar.set_range(start, 0)
+        finally:
+            self._step4_busy = False
+        self._step4_prev = (bar.start(), bar.end())
+
+    def _on_step4_limit_changed(self):
+        """The dropdown changed (a pick or typing): move the bar to match."""
+        if self._step4_busy:
+            return
+        self._apply_step4_limit_to_bar()
+        self._update_step4_readout()
+
+    def _on_step4_range_changed(self):
+        """A grip moved. Dragging the RIGHT grip sets how many frames to process,
+        so the dropdown follows it (All Frames when it reaches the far end).
+        Dragging the left grip never touches the dropdown: the window just slides
+        (or, on All Frames, shrinks)."""
+        if self._step4_busy:
+            return
+        bar = self._step4_range
+        s, e = bar.start(), bar.end()
+        ps, _pe = self._step4_prev
+        self._step4_prev = (s, e)
+        if s == ps and self._step4_ordered:        # only the right grip moved
+            used = len(self._step4_ordered) - s - e
+            self._step4_busy = True
+            try:
+                if e == 0:
+                    self._frame_limit.setCurrentText("All Frames")
+                    bar.set_slide(False)
+                else:
+                    self._frame_limit.setCurrentText(str(used))
+                    bar.set_slide(True)
+            finally:
+                self._step4_busy = False
+        self._update_step4_readout()
+
+    # A JPEG holds 8 bits per channel and cannot hold more -- that is the format,
+    # not a property of any particular file. So an all-JPEG input folder is known
+    # to be 8-bit from the file names alone, with nothing opened and no delay.
+    _EIGHT_BIT_ONLY_EXTS = {".jpg", ".jpeg", ".insp"}
+
+    # The dropdown shows people words; the engine takes a short key. ONE place
+    # translates between them, because two places did and they disagreed: the
+    # star-trail builder was left reading a setting nobody ever gave it, and the
+    # trail step raised on every single run (2026-08-30).
+    _FORMAT_KEYS = {"JPG": "jpg", "TIFF 8-bit": "tif8", "TIFF 16-bit": "tif16"}
+
+    def _current_output_format(self):
+        """The output format the next run will use, as the engine's key: 'jpg',
+        'tif8' or 'tif16'. Anything unrecognised falls back to 'jpg'.
+
+        Everything that needs to know the format asks HERE -- the cleaning run,
+        and the star trail that has to be saved in the same format as the frames
+        the run wrote. They cannot be allowed to disagree."""
+        return self._FORMAT_KEYS.get(self._format_combo.currentText(), "jpg")
+
+    def _sync_format_options(self, folder):
+        """Grey out "TIFF 16-bit" when every source frame is a JPEG.
+
+        WHY. 16-bit output cannot recover detail the source never captured. The
+        engine simply scales 8-bit values up by 257 to fill the range, so a
+        16-bit TIFF made from JPEGs holds exactly 256 distinct levels in a file
+        roughly thirty times larger. Measured on a real 5472x3648 frame on
+        2026-08-30: 120 MB, 256 levels, and not one value in 59.8 million that
+        8 bits could not have held -- including inside the repaired areas, so
+        even Star Bridge's blending stays on the 8-bit grid. The option is all
+        cost and no benefit here, and nothing on screen said so.
+
+        TIFF 8-bit STAYS AVAILABLE, because it earns its place: it avoids
+        re-compressing as JPEG on the way out, worth about half a level of
+        difference on a real frame.
+
+        Only a folder that is ENTIRELY JPEG disables it. One RAW or TIFF among
+        the frames and all three options stay, since those frames can carry real
+        depth that the run would otherwise throw away."""
+        from modules.frame_list import IMAGE_EXTS
+        try:
+            exts = {os.path.splitext(n)[1].lower()
+                    for n in os.listdir(folder or "")
+                    if os.path.splitext(n)[1].lower() in IMAGE_EXTS}
+        except OSError:
+            exts = set()
+        # An empty or unreadable folder proves nothing -- leave every option open.
+        all_jpeg = bool(exts) and exts <= self._EIGHT_BIT_ONLY_EXTS
+
+        idx = self._format_combo.findText("TIFF 16-bit")
+        if idx < 0:
+            return
+        item = self._format_combo.model().item(idx)
+        if item is None:
+            return
+        flags = item.flags()
+        item.setFlags((flags & ~Qt.ItemIsEnabled) if all_jpeg
+                      else (flags | Qt.ItemIsEnabled))
+        item.setToolTip(
+            "Your frames are JPEG, which is already 8-bit. A 16-bit file would "
+            "be about thirty times larger without holding any more detail."
+            if all_jpeg else "")
+
+        self._format_auto_change = True
+        try:
+            if all_jpeg and self._format_combo.currentText() == "TIFF 16-bit":
+                # They asked for a TIFF, so they still get one -- just not the
+                # pointlessly large kind. Their real choice is kept for later.
+                self._format_user_choice = "TIFF 16-bit"
+                self._format_combo.setCurrentText("TIFF 8-bit")
+            elif not all_jpeg and self._format_user_choice:
+                self._format_combo.setCurrentText(self._format_user_choice)
+                self._format_user_choice = None
+        finally:
+            self._format_auto_change = False
 
     def _browse_output(self):
+        """Step 2 Browse button. Open a folder picker (starting at the last
+        used output dir), set and remember the chosen path."""
         last_dir = SETTINGS.value("last_output_dir", "")
         folder = QFileDialog.getExistingDirectory(self, "Select Output Folder", last_dir)
         if folder:
@@ -2502,6 +5878,10 @@ class MainWindow(QMainWindow):
             SETTINGS.setValue("last_output_dir", folder)
 
     def _auto_output(self, text):
+        """Auto-fill the output field as the user sets the input folder:
+        default to a "cleaned" subfolder inside the input. `text` is the new
+        input path. Normalizes to forward slashes so Windows doesn't show a
+        mixed-slash path."""
         if text and text.strip():
             # Normalize to forward slashes for display: Qt's QFileDialog
             # returns forward slashes on every platform, but os.path.join
@@ -2513,15 +5893,33 @@ class MainWindow(QMainWindow):
             self._update_mask_status()
             self._update_open_btn_state()
 
+    def _output_folder_for_workspace(self):
+        """The cleaned/output folder the run artifacts and the foreground mask live
+        under. Uses the Output Folder field; falls back to <input>/cleaned."""
+        out = self._output_input.text().strip()
+        if out:
+            return out
+        folder = self._folder_input.text().strip()
+        return os.path.join(folder, "cleaned") if folder else ""
+
+    def _find_foreground_mask(self):
+        """Path to an existing foreground mask: the new spot (in the cleaned folder)
+        first, then the legacy <input>/cleanr_workspace spot. '' if none."""
+        out = self._output_folder_for_workspace()
+        folder = self._folder_input.text().strip()
+        for c in (os.path.join(out, WORKSPACE_NAME, "foreground_mask.png") if out else "",
+                  os.path.join(folder, WORKSPACE_DIR, "foreground_mask.png") if folder else ""):
+            if c and os.path.exists(c):
+                return c
+        return ""
+
     def _update_mask_status(self):
-        """Check if a mask exists for the current input folder."""
+        """Check if a mask exists for the current input folder (new spot or legacy)."""
         folder = self._folder_input.text().strip()
         if folder:
             migrate_workspace(folder)
-            mask_path = os.path.join(folder, WORKSPACE_DIR, "foreground_mask.png")
-        else:
-            mask_path = ""
-        if mask_path and os.path.exists(mask_path):
+        mask_path = self._find_foreground_mask()
+        if mask_path:
             self._mask_path = mask_path
             self._mask_status.setText("\u2705 Mask saved")
             self._mask_status.setStyleSheet(f"color: {SUCCESS_TEXT}; font-size: 12px; margin-left: 8px;")
@@ -2534,7 +5932,138 @@ class MainWindow(QMainWindow):
 
     # ── Mask editor ──────────────────────────────────────────────────────────
 
+    def _open_creator_window(self, cleaned_folder, star_path, default_tab="summary",
+                             original_folder=None):
+        """Open the combined window (Summary / Star Trail / Timelapse) on the just-
+        cleaned frames, fronting the requested tab. Held on self so it isn't garbage-
+        collected while the user configures and builds/renders. The original (input)
+        folder is offered to the Timelapse tab as an alternate frame source."""
+        if original_folder is None:
+            original_folder = self._folder_input.text().strip() or None
+        # Only ever one creator window at a time: close any existing one first (its
+        # closeEvent stops whatever it was building/rendering).
+        existing = getattr(self, "_creator_window", None)
+        if existing is not None:
+            try:
+                existing.finished.disconnect()
+            except (TypeError, RuntimeError):
+                pass
+            try:
+                existing.close()
+            except Exception:
+                pass
+            self._creator_window = None
+        # The stats belong to ONE folder. Bruce switched folders and the Summary
+        # tab kept showing the previous run's numbers -- both the in-memory stats
+        # and the saved copy were restored with no memory of which folder they
+        # described. Now the folder rides along, and stats only show on a match;
+        # any other folder gets the neutral "appears here after you clean" text.
+        def _same_folder(a, b):
+            try:
+                return a and b and os.path.realpath(a) == os.path.realpath(b)
+            except OSError:
+                return False
+        summary_html = (getattr(self, "_stats_trail_line", "") or "") + \
+                       (getattr(self, "_stats_timing_line", "") or "")
+        if not _same_folder(getattr(self, "_stats_folder", None), cleaned_folder):
+            summary_html = ""
+        # Remember the last run's summary so the Summary tab still shows real numbers
+        # when the window is opened via a button or after an app restart.
+        if summary_html.strip():
+            SETTINGS.setValue("last_run_summary_html", summary_html)
+            SETTINGS.setValue("last_run_summary_folder", cleaned_folder)
+        elif _same_folder(SETTINGS.value("last_run_summary_folder", "", type=str),
+                          cleaned_folder):
+            summary_html = SETTINGS.value("last_run_summary_html", "", type=str)
+        # Open THIS creator's cleaned folder directly (not the main window's
+        # _done_output_folder, which is empty when the summary loads from saved stats).
+        def _open_this_folder(f=cleaned_folder):
+            if f and os.path.isdir(f):
+                _open_folder_in_file_manager(f)
+        self._creator_window = CreatorWindow(
+            cleaned_folder, star_path, original_folder,
+            summary_html=summary_html, on_open_folder=_open_this_folder, parent=self)
+        win = self._creator_window
+        win.select_tab(default_tab)
+        win.finished.connect(
+            lambda *_: (setattr(self, "_creator_window", None)
+                        if getattr(self, "_creator_window", None) is win else None))
+        win.show()
+        # Center it on the main window once it reports its real size (deferred).
+        QTimer.singleShot(0, self._center_creator_window)
+
+    def _center_creator_window(self):
+        """Center the creator window on the main window (it is the only post-run
+        window now that the summary is a tab inside it)."""
+        win = getattr(self, "_creator_window", None)
+        if win is None or not win.isVisible():
+            return
+        pf = self.frameGeometry()
+        if not (pf.isValid() and pf.width() > 0):
+            return
+        scr = self.screen()
+        ag = scr.availableGeometry() if scr is not None else pf
+        x = max(ag.x(), min(pf.x() + (pf.width() - win.width()) // 2,
+                            ag.x() + ag.width() - win.width()))
+        y = max(ag.y(), min(pf.y() + (pf.height() - win.height()) // 2,
+                            ag.y() + ag.height() - win.height()))
+        win.move(x, y)
+
+    def _arrange_post_run(self, expect_summary=False):
+        """Place the post-run summary dialog and the timelapse window relative to the
+        main (STC) window:
+
+          * one of them alone  -> centered on the main window;
+          * both present       -> side by side over the main window, summary on the
+            LEFT and timelapse on the RIGHT, a 50px gap between, each centered
+            top-to-bottom, never overlapping. If the pair is wider than the screen
+            it is centered together and clamped on screen.
+
+        The main window itself is never moved. expect_summary reserves the left slot
+        for the summary that is about to appear at run end, so the timelapse opens in
+        its final right-hand spot instead of centering first and then jumping."""
+        GAP = 50
+        # Left slot = the Run Complete summary (shown only when no star trail serves
+        # as the completion UI); right slot = the combined creator window.
+        summ = getattr(self, "_run_complete_dlg", None)
+        summ = summ if (summ is not None and summ.isVisible()) else None
+        tl = getattr(self, "_creator_window", None)
+        tl = tl if (tl is not None and tl.isVisible()) else None
+        pf = self.frameGeometry()
+        if not (pf.isValid() and pf.width() > 0):
+            return
+        scr = self.screen()
+        ag = scr.availableGeometry() if scr is not None else pf
+
+        def _clampx(x, w):
+            return max(ag.x(), min(x, ag.x() + ag.width() - w))
+
+        def _vcenter(win):
+            return max(ag.y(), min(pf.y() + (pf.height() - win.height()) // 2,
+                                   ag.y() + ag.height() - win.height()))
+
+        def _center(win):
+            win.move(_clampx(pf.x() + (pf.width() - win.width()) // 2, win.width()),
+                     _vcenter(win))
+
+        summ_w = summ.width() if summ is not None else (560 if expect_summary else 0)
+        if (summ is not None or (expect_summary and summ_w)) and tl is not None:
+            total = summ_w + GAP + tl.width()
+            left = _clampx(pf.x() + (pf.width() - total) // 2, total)
+            if summ is not None:
+                summ.move(left, _vcenter(summ))
+            tl.move(left + summ_w + GAP, _vcenter(tl))
+        elif summ is not None:
+            _center(summ)
+        elif tl is not None:
+            _center(tl)
+
     def _open_mask_editor(self):
+        """Step 3 Create/Edit Mask button. Open the separate MaskEditorWindow
+        on the first frame of the input folder so the user can paint over the
+        foreground (ground, buildings) the AI should ignore. Loads any existing
+        saved mask to edit. Shows an inline error if no input folder/images are
+        set yet."""
         folder = self._folder_input.text().strip()
         if not folder or not os.path.isdir(folder):
             self._error_label.setText("Select an input folder first (Step 1).")
@@ -2542,50 +6071,113 @@ class MainWindow(QMainWindow):
         self._error_label.setText("")
 
         # Find first image
-        exts = ["*.jpg", "*.jpeg", "*.png", "*.tif", "*.tiff",
-                "*.JPG", "*.JPEG", "*.PNG", "*.TIF", "*.TIFF"]
+        from modules.frame_list import glob_patterns
         frames = sorted(set(
-            f for e in exts for f in glob.glob(os.path.join(folder, e))
+            f for e in glob_patterns() for f in glob.glob(os.path.join(folder, e))
         ))
         if not frames:
-            self._error_label.setText("No image files found in the selected folder.")
+            self._error_label.setText("No frames found in the selected folder.")
             return
+
+        # Paint on what the run will actually use. The run keeps only the
+        # majority resolution and skips the rest; the editor used to open the
+        # alphabetical first file, so in a mixed-size folder a user could paint
+        # a mask at a size the run then rejected (a real user hit exactly this
+        # -- Sentry, 2026-08-03). Same-size filter as the run; if sizing fails
+        # for every frame, fall back to the plain list rather than blocking.
+        try:
+            from collections import Counter
+            from modules.io_safe import image_size as _isz
+            from PySide6.QtWidgets import QApplication as _QApp
+            _QApp.setOverrideCursor(Qt.WaitCursor)
+            try:
+                sizes = {f: _isz(f) for f in frames}
+            finally:
+                _QApp.restoreOverrideCursor()
+            counts = Counter(s for s in sizes.values() if s)
+            if counts:
+                dominant = counts.most_common(1)[0][0]
+                matching = [f for f in frames if sizes.get(f) == dominant]
+                if matching:
+                    frames = matching
+        except Exception:
+            pass
 
         # Create mask window if needed, or reuse
         if self._mask_window is None:
             self._mask_window = MaskEditorWindow(self)
             self._mask_window.mask_saved.connect(self._on_mask_saved)
 
-        self._mask_window.load_image(frames[0])
+        # Open on the first frame the run will actually process: in the run's own
+        # order, after the Step 4 Frame Range bar. The editor used to open the
+        # alphabetically first file, and in the Katrina Brown folder that was a
+        # stray 20 mm foreground shot (not part of the sequence) -- the mask got
+        # painted on its horizon and then missed the real one by ~400 px.
+        _open_at = 0
+        try:
+            _sel = self._step4_selection() if self._step4_folder == folder else None
+            if _sel:
+                _byname = {os.path.normpath(f): i for i, f in enumerate(frames)}
+                for _p in _sel:
+                    _hit = _byname.get(os.path.normpath(_p))
+                    if _hit is not None:
+                        _open_at = _hit
+                        break
+        except Exception:
+            _open_at = 0
+        self._mask_window.load_frames(frames, _open_at)
 
-        # Load existing mask if available
+        # Load existing mask if available (new spot in the cleaned folder, or legacy)
         migrate_workspace(folder)
-        mask_path = os.path.join(folder, WORKSPACE_DIR, "foreground_mask.png")
-        if os.path.exists(mask_path):
+        mask_path = self._find_foreground_mask()
+        if mask_path:
             self._mask_window.load_existing_mask(mask_path)
 
+        self._mask_window._painter._set_mode(False)
         self._mask_window.show()
         self._mask_window.raise_()
         self._mask_window.activateWindow()
 
     def _on_mask_saved(self, mask_np):
+        """Receive the painted mask from the mask editor. If it has painted pixels,
+        save it as the foreground mask PNG in the run-artifact folder inside the
+        cleaned folder; if it's blank, delete any existing mask (new spot AND the
+        legacy <input>/cleanr_workspace spot). Then refresh the Step 3 status."""
         folder = self._folder_input.text().strip()
-        if folder:
-            if mask_np.any():
-                mask_path = workspace_path(folder, "foreground_mask.png")
-                from modules.io_safe import robust_imwrite
-                robust_imwrite(mask_path, mask_np)
-                self._mask_path = mask_path
-            else:
-                mask_path = os.path.join(folder, WORKSPACE_DIR, "foreground_mask.png")
-                if os.path.exists(mask_path):
-                    os.remove(mask_path)
-                self._mask_path = None
-            self._update_mask_status()
+        if not folder:
+            return
+        out = self._output_folder_for_workspace()
+        if mask_np.any() and out:
+            mask_path = workspace_path(out, "foreground_mask.png")
+            from modules.io_safe import robust_imwrite
+            robust_imwrite(mask_path, mask_np)
+            self._mask_path = mask_path
+        else:
+            for old in (os.path.join(out, WORKSPACE_NAME, "foreground_mask.png") if out else "",
+                        os.path.join(folder, WORKSPACE_DIR, "foreground_mask.png")):
+                if old and os.path.exists(old):
+                    try:
+                        os.remove(old)
+                    except OSError:
+                        pass
+            self._mask_path = None
+        self._update_mask_status()
 
     # ── Run ──────────────────────────────────────────────────────────────────
 
     def _validate(self):
+        """Run every pre-flight check before a job starts and gather a few
+        run parameters as side effects. Returns (input_folder, output_folder)
+        if the run may proceed, or None if any check failed or the user
+        cancelled at a prompt.
+
+        Checks, in order: input/output folders are set and the input exists;
+        the output folder is writable (probe write); enough disk space and at
+        least 3 frames; a memory-aware batch cap (stored on self._max_batch /
+        self._mem_note); a saved mask is still readable; and, if any frame has
+        both a RAW and a JPG/TIFF, a one-time prompt for which to use (stored on
+        self._twin_prefer). The resource checks are best-effort and never block
+        a run on their own failure."""
         folder = self._folder_input.text().strip()
         if not folder:
             self._error_label.setText("Please select an input folder (Step 1).")
@@ -2609,22 +6201,259 @@ class MainWindow(QMainWindow):
                 _f.write("probe")
             os.remove(_probe_path)
         except (PermissionError, OSError) as _err:
+            import errno as _errno
             from PySide6.QtWidgets import QMessageBox as _QMB
-            _QMB.warning(
-                self,
-                "Cannot write to output folder",
-                f"Star Trail CleanR cannot write to:\n\n{output}\n\n"
-                "Pick a different folder, or check that it isn't on a read-only "
-                "drive, a OneDrive synced location, or a folder where files are "
-                "open in another app.\n\n"
-                f"(Detail: {type(_err).__name__}: {_err})"
-            )
+            if getattr(_err, "errno", None) == _errno.ENOSPC:
+                _QMB.warning(
+                    self,
+                    "Drive is full",
+                    f"The output drive is full.\n\n{output}\n\n"
+                    "Free up space on that drive, or pick a different output folder."
+                )
+            else:
+                _QMB.warning(
+                    self,
+                    "Cannot write to output folder",
+                    f"Star Trail CleanR cannot write to:\n\n{output}\n\n"
+                    "Pick a different folder, or check that it isn't on a read-only "
+                    "drive, a OneDrive synced location, or a folder where files are "
+                    "open in another app.\n\n"
+                    f"(Detail: {type(_err).__name__}: {_err})"
+                )
             return None
+
+        # Disk space + memory check: estimate resources needed before the run starts.
+        try:
+            import shutil as _shutil
+            from modules.frame_list import glob_patterns as _glob_patterns
+            _frames = sorted(set(
+                f for e in _glob_patterns() for f in glob.glob(os.path.join(folder, e))
+            ))
+            if _frames:
+                _lim_text = self._frame_limit.currentText().strip()
+                try:
+                    _total_frames = (len(_frames) if _lim_text in ("All Frames", "")
+                                     else min(int(_lim_text), len(_frames)))
+                except ValueError:
+                    _total_frames = len(_frames)
+                # Once the Frame Range bar has this folder's list, count what the
+                # run will actually process (bar first, then the number).
+                _sel = self._step4_selection() if self._step4_folder == folder else None
+                if _sel is not None:
+                    _total_frames = len(_sel)
+
+                if _total_frames < 3:
+                    from PySide6.QtWidgets import QMessageBox as _QMB
+                    _QMB.warning(
+                        self,
+                        "Not enough frames",
+                        f"Star Trail CleanR needs at least 3 frames to run.\n\n"
+                        f"Your folder has {_total_frames} image(s). "
+                        "Add more frames and try again.\n\n"
+                        "Star Trail CleanR works on individual frames before "
+                        "stacking, not on a finished star trail image.",
+                        _QMB.Ok,
+                    )
+                    return None
+
+                from modules.io_safe import image_size as _image_size
+                _sz0 = _image_size(_frames[0])
+                if _sz0 is None:
+                    raise ValueError("could not read first frame's size")
+                _w, _h = _sz0
+
+                _out_fmt = self._format_combo.currentText()
+                if _out_fmt == "TIFF 16-bit":
+                    _bpp = 6.0
+                elif _out_fmt == "TIFF 8-bit":
+                    _bpp = 3.0
+                else:
+                    _bpp = 0.6  # conservative for JPG quality 95
+                _estimated_bytes = int(_w * _h * _bpp * _total_frames)
+
+                def _fmt_gb(b):
+                    """Format a byte count as a one-decimal "N.N GB" string."""
+                    return f"{b / 1_073_741_824:.1f} GB"
+
+                _free_bytes = _shutil.disk_usage(output).free
+                if _free_bytes < _estimated_bytes:
+                    from PySide6.QtWidgets import QMessageBox as _QMB
+                    _dlg = _QMB(self)
+                    _dlg.setIcon(_QMB.Warning)
+                    _dlg.setWindowTitle("Low disk space")
+                    _dlg.setText(
+                        f"The output drive may not have enough space for this run.\n\n"
+                        f"Estimated space needed:  {_fmt_gb(_estimated_bytes)}\n"
+                        f"Free space available:      {_fmt_gb(_free_bytes)}\n\n"
+                        "You can continue anyway or cancel and pick a different output folder."
+                    )
+                    _cont_btn = _dlg.addButton("Continue", _QMB.AcceptRole)
+                    _dlg.addButton("Cancel", _QMB.RejectRole)
+                    _dlg.setDefaultButton(_cont_btn)
+                    _dlg.exec()
+                    if _dlg.clickedButton().text() == "Cancel":
+                        return None
+
+                # Memory-aware batch sizing. Loading frames plus the AI model
+                # can peak well past a modest Mac's RAM on big images, so the OS
+                # kills the worker (SIGBUS / SIGKILL). Predict the peak from the
+                # frames' real size and bit depth, then pick the largest batch
+                # that fits -- from 20 down to a floor of 5 (Star Bridge repair
+                # needs neighbor frames; fewer than ~5 hurts quality, and the
+                # worker hard-refuses below 3). Measured model on 6000x4000:
+                #     peak GB = 4.4 (model+torch) + 5 x (one decoded frame) x frames
+                # so per frame ~0.36 GB at 8-bit, ~0.72 GB at 16-bit.
+                self._max_batch = 20
+                self._mem_note = ""
+                try:
+                    import psutil as _psutil
+                    # Decoded in-memory bytes for ONE frame = w x h x channels x
+                    # bytes-per-sample. The file size on disk is NOT this (a
+                    # 12 MB JPG decodes to 72 MB). Read the real bit depth from
+                    # the header. PIL mislabels 16-bit RGB TIFFs, so use
+                    # tifffile for TIFFs; anything unreadable falls back to the
+                    # heavier 16-bit guess so we never over-size the batch.
+                    _suf = os.path.splitext(_frames[0])[1].lower()
+                    if _suf in (".tif", ".tiff"):
+                        try:
+                            import tifffile as _tf
+                            _pg = _tf.TiffFile(_frames[0]).pages[0]
+                            _bytes_per = max(1, _pg.dtype.itemsize)
+                            _spp = getattr(_pg, "samplesperpixel", 3) or 3
+                            _channels = 3 if _spp >= 3 else 1
+                        except Exception:
+                            _bytes_per, _channels = 2, 3  # conservative (16-bit RGB)
+                    else:
+                        # RAW debayers to 16-bit RGB (rawpy), so it weighs TWICE
+                        # what a JPG of the same resolution does. This branch
+                        # used to count everything non-TIFF as 8-bit, so a RAW
+                        # folder's batch came out ~2x too big and the worker was
+                        # killed mid-batch out of memory (tester's 20-CR3 run
+                        # "started working but stalled", 2026-06-12). JPG/PNG
+                        # stay 8-bit.
+                        from modules.frame_list import is_raw as _is_raw
+                        _bytes_per = 2 if _is_raw(_frames[0]) else 1
+                        _channels = 3
+                    _decoded_frame = _w * _h * _channels * _bytes_per
+                    _BASE = int(4.4 * 1_073_741_824)   # model + torch floor
+                    _PER_FRAME = 5 * _decoded_frame    # measured peak per frame
+                    _SAFETY = 0.8                      # leave 20% for OS + our window
+                    _available = _psutil.virtual_memory().available
+                    _usable = _available * _SAFETY
+                    _fit = int((_usable - _BASE) / _PER_FRAME) if _PER_FRAME else 20
+                    _bit = _bytes_per * 8
+                    # Raw memory the smallest safe batch (5 frames) actually needs,
+                    # WITHOUT the 20% cushion. Only warn when free memory is below
+                    # this -- i.e. the run genuinely might not fit. The cushion
+                    # still governs the batch SIZE below, but it must not trigger a
+                    # scary "not enough memory" dialog when the user objectively
+                    # has more free RAM than the job needs (Bruce, 2026-06-11: a
+                    # 6.5 GB-free / 5.2 GB-needed case warned anyway, because the
+                    # old gate compared against cushioned memory, not raw free).
+                    _need_raw = _BASE + _PER_FRAME * 5
+                    if _available < _need_raw:
+                        # Genuinely short: even the smallest batch's raw need is
+                        # more than the free memory. Tell the user honestly and let
+                        # them decide. (Don't shrink below the 5-frame quality floor.)
+                        from PySide6.QtWidgets import QMessageBox as _QMB
+                        _need = _fmt_gb(_need_raw)
+                        resp = _QMB.warning(
+                            self,
+                            "Not enough memory",
+                            f"These photos are large for this computer's available "
+                            f"memory, so the run may fail partway through.\n\n"
+                            f"Memory needed:           {_need}\n"
+                            f"Memory available now:  {_fmt_gb(_available)}\n\n"
+                            "Close any other open programs to free up memory, then "
+                            "try again.\n\n"
+                            "You can continue anyway or cancel.",
+                            _QMB.Ok | _QMB.Cancel,
+                            _QMB.Cancel,
+                        )
+                        if resp == _QMB.Cancel:
+                            return None
+                        self._max_batch = 5
+                    else:
+                        # Enough raw memory. Pick the largest batch the cushion
+                        # allows, but never below the 5-frame quality floor -- so a
+                        # tight-but-sufficient machine just runs at the small batch
+                        # with no warning, instead of being blocked.
+                        self._max_batch = max(5, min(20, _fit))
+                    self._mem_note = (
+                        f"mem_avail={_available // (1024 * 1024)}MB "
+                        f"bit={_bit} frame={_decoded_frame // (1024 * 1024)}MB "
+                        f"peak={_fmt_gb(_BASE + _PER_FRAME * self._max_batch)} "
+                        f"max_batch={self._max_batch}"
+                    )
+                except ImportError:
+                    pass
+        except Exception:
+            pass  # best-effort, never block a run on a failed resource check
+
+        # Pre-flight mask check: if a mask was saved but can't be read now,
+        # ask the user whether to proceed without it rather than crashing mid-run.
+        if self._mask_path:
+            try:
+                import cv2 as _cv2
+                _test = _cv2.imread(self._mask_path, _cv2.IMREAD_GRAYSCALE)
+            except Exception:
+                _test = None
+            if _test is None:
+                from PySide6.QtWidgets import QMessageBox as _QMB
+                resp = _QMB.warning(
+                    self,
+                    "Saved mask can't be opened",
+                    "The saved foreground mask couldn't be read:\n\n"
+                    f"{self._mask_path}\n\n"
+                    "The file may be corrupted or missing. "
+                    "Proceed without the mask (trails in the foreground area may be flagged), "
+                    "or cancel and re-draw it.",
+                    _QMB.Ok | _QMB.Cancel,
+                    _QMB.Cancel,
+                )
+                if resp == _QMB.Cancel:
+                    return None
+                self._mask_path = None
+
+        # RAW vs JPG/TIFF twin choice. If any frame exists as BOTH a RAW and a
+        # JPG/TIFF, ask once which to process (default RAW). When there are no
+        # such pairs, no prompt appears and the default is harmless. The choice
+        # is stored on self and handed to the worker so both sides dedup alike.
+        self._twin_prefer = "raw"
+        try:
+            from modules.frame_list import gather_frames, count_raw_twins
+            _all_files = gather_frames(folder)
+            _twins = count_raw_twins(_all_files)
+        except Exception:
+            _twins = 0
+        if _twins > 0:
+            from PySide6.QtWidgets import QMessageBox as _QMB
+            _dlg = _QMB(self)
+            _dlg.setIcon(_QMB.Question)
+            _dlg.setWindowTitle("RAW and JPEG/TIFF found")
+            _dlg.setText(
+                f"{_twins} of your frames have BOTH a RAW file and a "
+                f"JPEG/TIFF version.\n\n"
+                "Which should Star Trail CleanR process?"
+            )
+            _raw_btn = _dlg.addButton("Use RAW files", _QMB.AcceptRole)
+            _other_btn = _dlg.addButton("Use JPEG/TIFF", _QMB.RejectRole)
+            _dlg.setDefaultButton(_raw_btn)
+            _dlg.exec()
+            self._twin_prefer = "nonraw" if _dlg.clickedButton() is _other_btn else "raw"
 
         self._error_label.setText("")
         return folder, output
 
     def _run(self):
+        """"Clean My Stars!" button handler — start a cleaning run.
+
+        Validates via _validate (bails on failure), resets all the
+        processing-page widgets, switches to that page, starts the spinner and
+        AI-warmup heartbeat timers, then constructs the CleanerWorker with the
+        chosen settings, wires every worker signal to its handler, and starts
+        the thread. Also seeds the run-summary fields that the stats/timing
+        handlers fill in for the end-of-run log."""
         result = self._validate()
         if not result:
             return
@@ -2639,9 +6468,15 @@ class MainWindow(QMainWindow):
         self._run_total_frames = 0
         self._run_initial_est_sec = 0
         self._run_actual_sec = 0
+        self._run_cancelled = False        # set True by _cancel_run
+        self._stats_last_trail_count = 0   # live trail count for cancelled-run logs
 
         # Go to process page — reset all widgets
         self._process_title.setText("Cleaning in Progress")
+        _p = Path(folder)
+        _display = f"{_p.parent.name}/{_p.name}" if _p.parent.name else _p.name
+        self._run_source_label.setText(_display)
+        self._trail_counter_label.setText("")
         self._progress_bar.setValue(0)
         self._progress_bar.setFormat("%p%")
         self._progress_bar.setStyleSheet(
@@ -2651,9 +6486,14 @@ class MainWindow(QMainWindow):
             "x1:0, y1:0, x2:1, y2:0, stop:0 #4a9eff, stop:1 #66b3ff); border-radius: 9px; }"
         )
         self._frame_counter.setText("Scrubbing the stars\u2026")
-        self._initial_est_label.setText("")
+        self._initial_est_label.setText("Initial Estimate: estimating\u2026")
         self._time_label.setText("")
+        self._updated_est_label.setText("")
         self._elapsed_label.setText("")
+        self._has_estimate = False
+        self._last_remaining_sec = None
+        self._run_stats_label.setText("")
+        self._stats_frames_done = 0
         self._batch_label.setText("")
         self._step1_bar.setValue(0)
         self._step1_bar.setFormat("0%")
@@ -2664,6 +6504,7 @@ class MainWindow(QMainWindow):
         # Stats are now shown in a modal dialog (see _show_run_complete_dialog),
         # not in an inline label. No widget to reset here.
         self._status_out.setText("")
+        self._view_log_link.setVisible(False)  # reappears when the run ends
         self._cancel_btn.setText("Cancel Cleaning")
         self._cancel_btn.setEnabled(True)
         try:
@@ -2672,7 +6513,9 @@ class MainWindow(QMainWindow):
             pass
         self._cancel_btn.clicked.connect(self._cancel_run)
         self._cancel_btn.show()
+        self._run_timelapse_btn.setVisible(False)   # reappears post-run if frames exist
         self._stack.setCurrentIndex(1)
+        self._header_spinner.setVisible(True)
 
         self._spinner_chars = "|/-\\"
         self._spinner_idx = 0
@@ -2709,32 +6552,63 @@ class MainWindow(QMainWindow):
         # Set output folder now so the "Open Cleaned Folder" button works during the run
         self._done_output_folder = output
 
-        fmt_map = {"JPG": "jpg", "TIFF 8-bit": "tif8", "TIFF 16-bit": "tif16"}
-        out_fmt = fmt_map.get(self._format_combo.currentText(), "jpg")
+        out_fmt = self._current_output_format()
+        self._run_cancelled = False
+        # Frames left out at each end, from the Step 4 Frame Range bar. Both stay 0
+        # until the bar has loaded this folder's frame list (it re-points on every
+        # folder change), so a stale choice can never ride along to another folder.
+        frame_start = self._step4_range.start()
+        trim_end = self._step4_range.end()
         self.worker = CleanerWorker(
             folder, output, self._frame_limit.currentText(), self._mask_path,
             output_format=out_fmt,
-            jpeg_quality=self._jpeg_quality.value())
+            jpeg_quality=self._jpeg_quality.value(),
+            frame_start=frame_start,
+            trim_end=trim_end,
+            max_batch=getattr(self, "_max_batch", 20),
+            mem_note=getattr(self, "_mem_note", ""),
+            twin_prefer=getattr(self, "_twin_prefer", "raw"))
         self.worker.progress.connect(self._on_progress)
         self.worker.status.connect(self._on_status)
         self.worker.batch_info.connect(self._on_batch_info)
         self.worker.step_progress.connect(self._on_step_progress)
         self.worker.warmup_active.connect(self._on_warmup_active)
+        self.worker.device_in_use.connect(self._on_device_in_use)
         self.worker.frame_count.connect(self._on_frame_count)
         self.worker.stats_ready.connect(self._on_stats_ready)
         self.worker.timing_stats.connect(self._on_timing_stats)
         self.worker.initial_estimate.connect(self._on_initial_estimate)
+        self.worker.remaining_estimate.connect(self._on_remaining_estimate)
         self.worker.error.connect(self._on_error)
         self.worker.done.connect(self._on_done)
         self.worker.finished.connect(self._on_finished)
         self.worker.bad_file_prompt.connect(self._on_bad_file_prompt)
         self.worker.too_many_bad_files.connect(self._on_too_many_bad_files)
         self.worker.frames_filter_prompt.connect(self._on_frames_filter_prompt)
+        self.worker.trail_count_update.connect(self._on_trail_count_update)
+        self._trail_counter_label.setText("0 Trails Cleaned")
+        self._trail_counter_label.setStyleSheet(
+            "font-size: 22px; font-weight: bold; color: #5b9bd5;"
+        )
         self.worker.start()
+        # Hold the machine awake for the whole run so a laptop on battery can't
+        # idle-sleep mid-run and freeze the job (released in _on_finished).
+        self._keep_awake.acquire()
+        self._set_updates_run_state(True)
+        # Build the star trail / video stacks in parallel with the run (no-op if both
+        # checkboxes are off), so the results are ready the moment cleaning finishes.
+        self._start_share_stacker(folder, output)
 
     def _cancel_run(self):
+        """Cancel Cleaning button. Tell the worker to stop (which kills its
+        current subprocess), freeze the progress bar at "Cancelled", stop the
+        timers, wait briefly for the thread to exit (force-terminate if it
+        won't), then turn the button into "Back to Setup"."""
         if self.worker and self.worker.isRunning():
+            self._run_cancelled = True
             self.worker.cancel()
+            if getattr(self, "_share_stack_thread", None):
+                self._share_stack_thread.abort()       # stop the in-run stacker, no outputs
             self._cancel_btn.setEnabled(False)
             self._cancel_btn.setText("Cancelling\u2026")
             # Stop progress bar animation immediately
@@ -2756,22 +6630,44 @@ class MainWindow(QMainWindow):
             self._status_out.append("\nCleaning cancelled.")
 
     def _stop_elapsed_timer(self):
+        """Stop the spinner/elapsed and AI-warmup timers and drop the spinner
+        glyph from the "Star Log" heading. Called whenever a run ends (finish,
+        cancel, or error)."""
         if hasattr(self, '_spinner_timer') and self._spinner_timer.isActive():
             self._spinner_timer.stop()
         if hasattr(self, '_warmup_timer') and self._warmup_timer.isActive():
             self._warmup_timer.stop()
+        if hasattr(self, '_star_log_title'):
+            self._star_log_title.setText("Star Log")
+        if hasattr(self, '_header_spinner'):
+            self._header_spinner.setVisible(False)
 
     def _go_to_setup(self):
+        """Stop the timers and switch the Main tab back to the Setup page
+        (page 0). Wired to the "Back to Setup" button after a run ends."""
         self._stop_elapsed_timer()
         self._stack.setCurrentIndex(0)
 
     def _update_spinner(self):
+        """Fired every 250 ms during a run: advance the |/-\\ spinner glyph,
+        update the "Elapsed: ..." label and the spinner in the Star Log title,
+        and pulse "Estimating..." until the first real time estimate arrives."""
         self._spinner_idx += 1
         ch = self._spinner_chars[self._spinner_idx % len(self._spinner_chars)]
         start = getattr(self, '_run_start_time', None)
         elapsed = (time.time() - start.timestamp()) if start is not None else 0
-        m, s = divmod(int(elapsed), 60)
-        self._elapsed_label.setText(f"{ch}  Elapsed: {m}m {s:02d}s")
+        self._elapsed_label.setText(f"{ch}  Elapsed: {fmt_estimate(elapsed)}")
+        # Live "Updated Estimate" = elapsed + remaining (the realistic current
+        # total). Always >= remaining, so it never contradicts the live numbers
+        # the way the frozen Initial Estimate could.
+        rem = getattr(self, '_last_remaining_sec', None)
+        if getattr(self, '_has_estimate', False) and rem is not None:
+            self._updated_est_label.setText(
+                f"Updated Estimate: {fmt_estimate(elapsed + rem)}")
+        if hasattr(self, '_star_log_title'):
+            self._star_log_title.setText(f"Star Log  {ch}")
+        if hasattr(self, '_header_spinner'):
+            self._header_spinner.setText(ch)
 
 
         # Pulse "Estimating..." before real estimate arrives
@@ -2780,6 +6676,11 @@ class MainWindow(QMainWindow):
             self._time_label.setText(f"Estimating{dots}")
 
     def _on_progress(self, pct, total, remaining_str):
+        """Worker progress signal handler. Set the fat overall progress bar to
+        `pct` (0-100) and, when present, show "~<remaining_str> remaining".
+        Ignored after the user cancelled."""
+        if getattr(self, "_run_cancelled", False):
+            return
         self._progress_bar.setRange(0, 100)
         pct = max(0, min(100, pct))
         self._progress_bar.setValue(pct)
@@ -2789,6 +6690,13 @@ class MainWindow(QMainWindow):
             self._has_estimate = True
 
     def _on_batch_info(self, batch_num, n_batches):
+        """Worker signal at the start of each batch. Update the "Batch X of Y"
+        label and reset both per-step (Detecting / Repairing) bars back to
+        0% / "waiting" / blue for the new batch."""
+        # A new batch starting means the previous batch's cleaned frames are written;
+        # fold them into the in-run star-trail / video stacks (no-op if not enabled).
+        if getattr(self, "_share_stack_thread", None):
+            self._share_stack_thread.notify_batch_done()
         self._batch_text = f"Batch {batch_num} of {n_batches}"
         self._batch_label.setText(self._batch_text)
         # Reset step bars for new batch
@@ -2807,7 +6715,14 @@ class MainWindow(QMainWindow):
         self._step2_label.setText("Repairing\nwaiting")
         self._step2_bar.setStyleSheet(step1_style)
 
-    def _on_step_progress(self, step, current, total):
+    def _on_step_progress(self, step, current, total, global_current, global_total):
+        """Worker signal driving the two per-step bars. `step` is 1 (Detecting)
+        or 2 (Repairing); `current`/`total` are this batch's frame progress;
+        `global_current`/`global_total` place it in the whole job. Sets the
+        bar percent and a "Detecting/Repairing frames 21-40 (of 450)" style
+        label, turning the bar green at 100%. Ignored after cancellation."""
+        if getattr(self, "_run_cancelled", False):
+            return
         green_style = (
             f"QProgressBar {{ border: 1px solid {CARD_BORDER}; border-radius: 8px; "
             f"background: {CARD_BG}; text-align: center; font-weight: bold; font-size: 13px; color: {CARD_TEXT}; }}"
@@ -2815,6 +6730,18 @@ class MainWindow(QMainWindow):
             "x1:0, y1:0, x2:1, y2:0, stop:0 #34c759, stop:1 #5dd87a); border-radius: 7px; }"
         )
         pct = int(current / total * 100) if total > 0 else 0
+        # Name the frames this batch is actually working, as a global range with
+        # whole-job context, e.g. "frames 21-40 (of 450)". The bar % is progress
+        # through just those frames, so the label and the % refer to the same set.
+        range_start = global_current - current + 1
+        range_end = range_start + total - 1
+        # Action word + "frame(s)" on line 1, just the numbers on line 2. Keeps the
+        # number line short ("21-40 (of 450)") so it fits the fixed label column at
+        # any frame count; the bar never moves. Word-wrap on the label is the safety.
+        if range_start == range_end:
+            head, nums = "frame", f"{range_start} (of {global_total})"
+        else:
+            head, nums = "frames", f"{range_start}-{range_end} (of {global_total})"
         if step == 1:
             self._step1_bar.setValue(pct)
             if pct >= 100:
@@ -2823,7 +6750,7 @@ class MainWindow(QMainWindow):
                 self._step1_bar.setStyleSheet(green_style)
             else:
                 self._step1_bar.setFormat(f"{pct}%")
-                self._step1_label.setText(f"Detecting\nframe {current}/{total}")
+                self._step1_label.setText(f"Detecting {head}\n{nums}")
         elif step == 2:
             self._step2_bar.setValue(pct)
             if pct >= 100:
@@ -2832,20 +6759,30 @@ class MainWindow(QMainWindow):
                 self._step2_bar.setStyleSheet(green_style)
             else:
                 self._step2_bar.setFormat(f"{pct}%")
-                self._step2_label.setText(f"Repairing\nframe {current}/{total}")
+                self._step2_label.setText(f"Repairing {head}\n{nums}")
 
     def _on_warmup_active(self, active):
+        """Worker signal toggling the AI-warmup heartbeat. `active` True starts
+        the rotating "Studying your stars..." log messages that fill the silent
+        15-30 s while the model loads; False stops them once real per-frame
+        progress begins. Idempotent so a repeat True won't restart the rotation."""
         if active:
             # Idempotent: if the heartbeat is already running (because we triggered
             # it at "frames loaded"), don't reset the rotation when "Step 1" arrives.
             if not self._warmup_timer.isActive():
-                self._warmup_counter = 0
+                last_phrase = self._warmup_counter // 4
+                next_phrase = (last_phrase + 1) % len(self._warmup_phrases)
+                self._warmup_counter = next_phrase * 4 if self._warmup_counter > 0 else 0
                 self._warmup_tick()
                 self._warmup_timer.start(500)
         else:
             self._warmup_timer.stop()
 
     def _warmup_tick(self):
+        """Fired every 500 ms while the warmup heartbeat is active. Appends one
+        rotating astro-flavored phrase to the Star Log every 2 seconds (4 ticks)
+        so a long model-load never looks frozen; after the first cycle it
+        settles on a steady "Warming up the AI trail detector" line."""
         # Append once per phrase, no in-place dot animation. The previous
         # "append on tick 0, replace last block on ticks 1-3" approach
         # caused doubling when worker messages interleaved with warmup
@@ -2862,7 +6799,7 @@ class MainWindow(QMainWindow):
             # warm up): show a steady "still warming up" line so the
             # rotation doesn't loop back to "Studying your stars" looking
             # like the run restarted.
-            text = "Still warming up the AI trail detector"
+            text = "Warming up the AI trail detector"
         if sub_step == 0:
             self._status_out.append("  " + text + "...")
             sb = self._status_out.verticalScrollBar()
@@ -2870,27 +6807,95 @@ class MainWindow(QMainWindow):
         self._warmup_counter += 1
 
     def _on_frame_count(self, current, total):
+        """Worker signal updating the "Scrubbing the stars... N of M" line and
+        the frames-done counter used by the running per-frame averages."""
         self._frame_counter.setText(f"Scrubbing the stars\u2026 {current} of {total}")
+        self._stats_frames_done = current
 
     def _on_initial_estimate(self, seconds):
-        m, s = divmod(int(round(seconds)), 60)
-        if m:
-            self._initial_est_label.setText(f"Estimated Time: {m}m {s:02d}s")
+        """Worker signal carrying the up-front total-time estimate. Locks it
+        into the frozen "Initial Estimate: ..." label (the line-in-the-sand
+        opening guess, set once and never moved). The live "Updated Estimate"
+        below the bar tracks elapsed + remaining separately."""
+        secs = int(round(seconds))
+        if secs < 60:
+            self._initial_est_label.setText(f"Initial Estimate: {secs}s")
         else:
-            self._initial_est_label.setText(f"Estimated Time: {s}s")
+            # Hour-aware (1h 7m 50s, or 7m 50s under an hour) -- matches the
+            # live "remaining" line instead of running minutes past 60.
+            self._initial_est_label.setText(f"Initial Estimate: {fmt_estimate(secs)}")
+
+    def _on_remaining_estimate(self, seconds):
+        """Worker signal: live seconds-left. Stored so _update_spinner can show
+        a live 'Updated Estimate' = elapsed + remaining (the realistic current
+        total), distinct from the frozen up-front 'Initial Estimate'."""
+        self._last_remaining_sec = float(seconds)
 
     def _on_format_changed(self, text):
+        """Step 5 output-format change handler. Enable the JPEG-quality spinbox
+        only when the format is JPG (it's meaningless for TIFF output).
+
+        A change the USER made also retires any format we were holding for them
+        (see _sync_format_options). Without this, somebody moved off 16-bit by a
+        JPEG folder who then deliberately picks JPG would be dragged back to
+        16-bit by the next RAW folder, overriding the choice they just made."""
         is_jpg = text == "JPG"
         self._jpeg_quality.setEnabled(is_jpg)
         self._jpeg_quality_label.setEnabled(is_jpg)
+        if not getattr(self, "_format_auto_change", False):
+            self._format_user_choice = None
+
+    def _on_trail_count_update(self, count):
+        """Worker signal with the running total of trails cleaned so far.
+        Update the big "N Trails Cleaned" counter and the secondary
+        trails/frame and seconds/frame averages."""
+        self._stats_last_trail_count = count  # kept for cancelled-run summaries
+        self._trail_counter_label.setText(f"{count:,} Trails Cleaned")
+        # Running averages over the whole run so far. frame_count fires just
+        # before this on each frame, so _stats_frames_done is current.
+        frames = self._stats_frames_done
+        if frames > 0:
+            start = getattr(self, '_run_start_time', None)
+            elapsed = (time.time() - start.timestamp()) if start is not None else 0
+            tpf = count / frames
+            spf = elapsed / frames
+            self._run_stats_label.setText(
+                f"{tpf:.0f} trails/frame · {spf:.1f}s/frame"
+            )
 
     def _on_stats_ready(self, total_trails, total_frames):
-        # Capture for the run-summary file even on zero-trail runs.
+        """Worker signal at run end with the final totals. Stores them for the
+        log and builds the HTML summary line (self._stats_trail_line) shown in
+        the run-complete dialog: either a "sky was clean" message or a
+        "swept N trails ... TIME SAVED" message estimating time saved at 30 s
+        per manually-cleaned trail."""
+        # Capture for the run-summary file and the run-complete dialog.
         self._run_total_trails = total_trails
         self._run_total_frames = total_frames
+        # Which folder these stats describe. The creator window shows them only
+        # when it opens on this same folder (see _open_creator).
+        self._stats_folder = getattr(getattr(self, "worker", None),
+                                     "output_folder", None)
+        color = SUCCESS_TEXT if total_trails > 0 else MUTED_TEXT
+        self._trail_counter_label.setStyleSheet(
+            f"font-size: 22px; font-weight: bold; color: {color};"
+        )
+        # Shared call-to-action so both summary variants stay in step.
+        stack_cta = (
+            "<b>Ready for the fun part!</b><br>"
+            "Your star trail is already saved! Watch the before and after below, then "
+            "see your star trail on the next tab. Prefer to do it yourself? Load the "
+            "cleaned frames into your favorite stacker<br>"
+            "(StarStaX, Sequator, Photoshop, etc.)."
+        )
         if total_trails <= 0:
+            self._stats_trail_line = (
+                f"Sky was clean. No airplane or satellite trails found<br>"
+                f"in your <b>{total_frames:,}</b> frames.<br>{_SUMMARY_GAP}"
+                + stack_cta
+            )
             return
-        SECONDS_PER_MANUAL_TRAIL = 20
+        SECONDS_PER_MANUAL_TRAIL = 30
         saved_sec = total_trails * SECONDS_PER_MANUAL_TRAIL
         if saved_sec >= 60:
             rounded_min = int(round(saved_sec / 900.0) * 15)
@@ -2906,35 +6911,60 @@ class MainWindow(QMainWindow):
                 time_saved = f"~{m} minute{'s' if m != 1 else ''}"
         else:
             time_saved = f"~{saved_sec} second{'s' if saved_sec != 1 else ''}"
+        # What did the work. A user asked for this by name: the finished-run
+        # screen is where he wanted confirmation his graphics card had been
+        # used, rather than having to infer it from the log. Taken from the
+        # verdict the worker recorded at the START of this run, so it describes
+        # THIS run and not the machine's state afterwards.
+        _gpu_line = ""
+        try:
+            from modules.gpu_pack import summary_line as _gpu_summary
+            _code = getattr(getattr(self, "worker", None), "_gpu_status_code", None)
+            _txt = _gpu_summary(_code or "")
+            if _txt:
+                _gpu_line = f"<span style='font-size:15px;'>{_txt}</span><br>{_SUMMARY_GAP}"
+        except Exception:
+            pass
         self._stats_trail_line = (
             f"Swept <b>{total_trails:,}</b> airplane and satellite trails from your stars<br>"
             f"across <b>{total_frames:,}</b> twinkling frames.<br>"
-            f"<i>Based on manual cleanup at 20 seconds per trail.</i><br><br>"
+            f"<i>Based on manual cleanup at 30 seconds per trail.</i><br>{_SUMMARY_GAP}"
             f"<span style='font-size:20px; font-weight:bold;'>TIME SAVED: {time_saved}</span>"
-            f"<br><br><b>Time to stack!</b><br>"
-            f"Open the Cleaned Folder, then load the frames into your favorite "
-            f"stacker (StarStaX, Sequator, Photoshop, etc.) for the final composite."
+            f"<br>{_SUMMARY_GAP}"
+            + _gpu_line
+            + stack_cta
         )
         # Stats HTML stored on self; the modal dialog renders it on _on_done.
 
     def _on_timing_stats(self, initial_est_sec, actual_sec):
+        """Worker signal at run end comparing the original estimate to the
+        actual time. Builds the small "Thought it'd take X. Took Y." HTML line
+        (self._stats_timing_line) appended in the run-complete dialog, with a
+        cheeky "You're welcome." / "My apologies." depending on which was
+        faster."""
         self._run_initial_est_sec = initial_est_sec
         self._run_actual_sec = actual_sec
         tail = "You're welcome." if actual_sec <= initial_est_sec else "My apologies."
+        frames = getattr(self, '_run_total_frames', 0)
+        pf = f"  ({actual_sec / frames:.1f}s/frame)" if frames > 0 else ""
         self._stats_timing_line = (
-            f"<br><br><span style='font-size:14px; color:{MUTED_TEXT};'>"
+            f"<br>{_SUMMARY_GAP}<span style='font-size:14px; color:{MUTED_TEXT};'>"
             f"Thought it'd take <b>{fmt_hms(initial_est_sec)}</b>. "
-            f"Took <b>{fmt_hms(actual_sec)}</b>. {tail}"
+            f"Took <b>{fmt_hms(actual_sec)}</b>{pf}. {tail}"
             f"</span>"
         )
         # Modal dialog will read this on _on_done.
 
     def _on_status(self, text):
+        """Worker status signal: append `text` to the scrolling Star Log and
+        keep the view scrolled to the bottom."""
         self._status_out.append(text)
         sb = self._status_out.verticalScrollBar()
         sb.setValue(sb.maximum())
 
     def _switch_to_back_btn(self):
+        """Repurpose the Cancel button into "Back to Setup" once a run has
+        ended (rewires its click to _go_to_setup)."""
         self._cancel_btn.setText("Back to Setup")
         self._cancel_btn.setEnabled(True)
         try:
@@ -2942,10 +6972,20 @@ class MainWindow(QMainWindow):
         except RuntimeError:
             pass
         self._cancel_btn.clicked.connect(self._go_to_setup)
+        # Reveal the run-page "Create Timelapse" button when the cleaned output has
+        # frames to build from, so both blue buttons are available post-run.
+        self._run_timelapse_btn.setVisible(self._output_has_frames())
 
     def _on_error(self, msg):
+        """Worker error signal. Stop the timers, append the error plus an
+        app-version/OS line to the Star Log, and flip the button to "Back to
+        Setup". The run summary is still written by _on_finished afterward."""
+        import platform as _plat
         self._stop_elapsed_timer()
-        self._status_out.setText(f"ERROR: {msg}")
+        self._status_out.append(f"\nERROR: {msg}")
+        self._status_out.append(
+            f"App: Beta v{VERSION}  |  {_plat.system()} {_plat.machine()}"
+        )
         self._switch_to_back_btn()
 
     def _on_bad_file_prompt(self, path, diagnosis):
@@ -2973,15 +7013,39 @@ class MainWindow(QMainWindow):
             if diagnostic_sent
             else ""
         )
+        from modules.frame_list import RAW_EXTS as _RAW_EXTS
+        _is_raw = _Path(path).suffix.lower() in _RAW_EXTS if path else False
+        if _is_raw:
+            # RAW-specific: the file is a camera RAW we couldn't debayer (an
+            # unusual/newer RAW variant, or a corrupted file). Point the user at
+            # the reliable fix — export that sequence to TIFF or JPEG first.
+            _problem = (
+                "<p>This is a camera RAW file, and Star Trail CleanR couldn't "
+                "decode it. That usually means it's a newer or unusual RAW "
+                "variant, or the file is damaged.</p>"
+            )
+            _workaround = (
+                "<p><b>The fix:</b> export your sequence from Lightroom, Camera "
+                "Raw, DPP, or your editor to <b>16-bit TIFF</b> (keeps the full "
+                "quality) or <b>JPEG</b>, then run Star Trail CleanR on that "
+                "folder.</p>"
+            )
+        else:
+            _problem = (
+                "<p>We tried our image readers three times. None could read "
+                "the file. It may be damaged, or it may have a format our "
+                "readers can't handle.</p>"
+            )
+            _workaround = (
+                "<p><b>As a workaround:</b> export your entire sequence as "
+                "JPEGs and run Star Trail CleanR on the JPEG folder.</p>"
+            )
         msg.setInformativeText(
-            "<p>We tried our image readers three times. None could read "
-            "the file. It may be damaged, or it may have a format our "
-            "readers can't handle.</p>"
+            _problem +
             "<p>If you continue, Star Trail CleanR will skip this frame. "
             "There may be a small gap in your final star trail where this "
             "image would have been.</p>"
-            "<p><b>As a workaround:</b> export your entire sequence as "
-            "JPEGs and run Star Trail CleanR on the JPEG folder.</p>"
+            + _workaround +
             "<p>If you'd like to help us improve, please email this file to "
             "<a href='mailto:bruceherwig+startrailcleanr@gmail.com"
             "?subject=Star%20Trail%20CleanR%20unreadable%20file'>"
@@ -3019,11 +7083,14 @@ class MainWindow(QMainWindow):
         breakdown = info.get("breakdown", [])
         mismatched_sample = info.get("mismatched_sample", [])
         unreadable_sample = info.get("unreadable_sample", [])
+        orientation_skipped = info.get("orientation_skipped", 0)
+        dominant_orientation = info.get("dominant_orientation", "")
+        skipped_orientation = info.get("skipped_orientation", "")
 
         # Build the body in plain English.
         parts = [
             "<b>Some frames in this folder will be skipped.</b>",
-            f"<p>Star Trail CleanR found <b>{total_found}</b> image files "
+            f"<p>Star Trail CleanR found <b>{total_found}</b> frames "
             f"in this folder. Of those, <b>{matching}</b> will be processed "
             f"and <b>{n_mismatched + n_unreadable}</b> will be skipped.</p>",
         ]
@@ -3032,7 +7099,7 @@ class MainWindow(QMainWindow):
             for entry in breakdown:
                 marker = "  (will process)" if entry["is_dominant"] else "  (will skip)"
                 parts.append(
-                    f"<li>{entry['size']} &mdash; {entry['count']} frame(s){marker}</li>"
+                    f"<li>{entry['size']}: {entry['count']} frame(s){marker}</li>"
                 )
             parts.append("</ul>")
         if n_unreadable > 0:
@@ -3048,13 +7115,31 @@ class MainWindow(QMainWindow):
             parts.append("<p>Examples of skipped frames: " +
                          ", ".join(f"<code>{n}</code>" for n in mismatched_sample) +
                          "</p>")
-        parts.append(
-            "<p>Common causes: some frames are portrait-orientation "
-            "(rotated 90&deg;), some came from a different camera, or "
-            "the RAW converter produced different sizes. Cancel if you "
-            "want to check the folder first; Continue to process the "
-            f"{matching} matching frame(s) only.</p>"
-        )
+        if orientation_skipped > 0:
+            other_skipped = (n_mismatched + n_unreadable) - orientation_skipped
+            parts.append(
+                f"<p><b>Why:</b> {orientation_skipped} of the skipped frame(s) "
+                f"are <b>{skipped_orientation}</b> (shot sideways, rotated "
+                f"90&deg;). Portrait and landscape frames each need their own "
+                f"foreground mask, so they have to be cleaned as separate "
+                f"folders. Cancel to move the {skipped_orientation} frames into "
+                f"their own folder, or Continue to process the {matching} "
+                f"{dominant_orientation} frame(s) only.</p>"
+            )
+            if other_skipped > 0:
+                parts.append(
+                    f"<p>The other {other_skipped} skipped frame(s) are a "
+                    "different size, likely a different camera or RAW "
+                    "conversion.</p>"
+                )
+        else:
+            parts.append(
+                "<p>Common causes: some frames are portrait-orientation "
+                "(rotated 90&deg;), some came from a different camera, or "
+                "the RAW converter produced different sizes. Cancel if you "
+                "want to check the folder first; Continue to process the "
+                f"{matching} matching frame(s) only.</p>"
+            )
 
         msg = QMessageBox(self)
         msg.setIcon(QMessageBox.Warning)
@@ -3090,13 +7175,19 @@ class MainWindow(QMainWindow):
             "JPEGs and run Star Trail CleanR on the JPEG folder.</p>"
             "<p>If your input folder is on a USB or network drive, you "
             "can also try copying it to your main hard drive and running "
-            "again &mdash; external drives sometimes drop reads.</p>"
+            "again, external drives sometimes drop reads.</p>"
             "<p>The frames cleaned so far are preserved in the output "
             "folder.</p>"
         )
         msg.exec()
 
     def _on_done(self, output_folder):
+        """Worker done signal — a run finished successfully. `output_folder` is
+        the cleaned-frames folder. Marks the UI complete (green 100% bar,
+        "Cleaning Complete"), enables the Open-Folder buttons, flips to "Back
+        to Setup", and pops the run-complete summary dialog. The run-summary
+        text file is written later in _on_finished (which also covers
+        stop/error)."""
         # Bounce the Dock icon (Mac) or flash the taskbar button (Windows) to
         # get the user's attention if they've switched to another app. No-op
         # if the window is currently in focus.
@@ -3104,7 +7195,6 @@ class MainWindow(QMainWindow):
         self._stop_elapsed_timer()
         self._process_title.setText("Cleaning Complete")
         self._progress_bar.setValue(100)
-        self._progress_bar.setFormat("Complete!")
         self._progress_bar.setStyleSheet(
             f"QProgressBar {{ border: 1px solid {CARD_BORDER}; border-radius: 10px; "
             f"background: {CARD_BG}; text-align: center; font-weight: bold; font-size: 14px; color: {CARD_TEXT}; }}"
@@ -3112,15 +7202,291 @@ class MainWindow(QMainWindow):
             "x1:0, y1:0, x2:1, y2:0, stop:0 #34c759, stop:1 #5dd87a); border-radius: 9px; }"
         )
         self._time_label.setText("")
+        self._updated_est_label.setText("")
         self._batch_label.setText(getattr(self, '_batch_text', ''))
         self._done_output_folder = output_folder
         self._update_open_btn_state()
         self._switch_to_back_btn()
-        self._write_run_summary()
-        # Show the run-complete dialog if there's anything to celebrate
-        # (i.e. trails were swept). Zero-trail runs skip the popup.
-        if getattr(self, '_run_total_trails', 0) > 0:
-            self._show_run_complete_dialog()
+        # The Star Trail + Timelapse creator window opens later, in _finish_show,
+        # once the in-run stacker has the star trail ready (so its poster is there).
+        # Finalize the share outputs: the in-run stacker renders the star trail + video
+        # from the stacks it built DURING the run; the dev red map renders too.
+        self._maybe_start_share_render(output_folder)
+        # Hold the "all done" summary dialog until those outputs are actually ready, so
+        # the completion lands WITH the star trail and video, not before them. On a
+        # slower machine the finalize takes a few seconds, so show "Finishing..." until
+        # the stacker signals done (_finish_completion pops the dialog). With nothing to
+        # build (clean-only, or only the dev red map) there's nothing to wait for.
+        # The run log is written later in _on_finished (covers stop/error too).
+        if getattr(self, "_share_stack_thread", None) is not None:
+            self._complete_pending = True
+            self._progress_bar.setFormat("Finishing your star trail and video…")
+        else:
+            self._complete_pending = False
+            self._progress_bar.setFormat("Complete!")
+            self._finish_show()
+
+    def _finish_completion(self):
+        """Flip the bar to 'Complete!' and pop the run-complete summary dialog, once the
+        in-run stacker has the star trail and video ready -- or it failed, in which case
+        we still complete so the user is never stranded waiting. Fires once per run."""
+        if not getattr(self, "_complete_pending", False):
+            return
+        self._complete_pending = False
+        self._progress_bar.setFormat("Complete!")
+        self._finish_show()
+
+    def _finish_show(self):
+        """At run end, open the combined window on the SUMMARY tab (always first),
+        with Star Trail and Timelapse behind it. The star trail file is ready by now
+        (the in-run stacker just finished). Falls back to the old standalone summary
+        popup only if the creator window fails to open, so the user is never stranded."""
+        folder = getattr(self, "_done_output_folder", "") or self._output_input.text().strip()
+        star_path = (star_trail_in(folder, "STC_cleaned_star_trail") if folder else "")
+        try:
+            self._open_creator_window(folder, star_path, "summary")
+        except Exception as e:
+            # Log the real reason BEFORE falling back -- this exact swallow is how a
+            # Windows machine ended a run with no window and no trace (v2.76 report).
+            _log_app_error("auto-open Star Trail & Timelapse window at run end",
+                           exc=e, detail=f"folder: {folder}")
+            try:
+                self._show_run_complete_dialog()
+            except Exception as e2:
+                _log_app_error("fallback run-complete dialog also failed", exc=e2)
+
+    def _stop_share_threads(self):
+        """Stop and forget every share-stacker thread started this session -- the
+        current one AND any orphaned by a re-run. A share thread parks on its command
+        queue; abort() queues a stop so its blocked wait returns at once. Any left
+        running when the app exits would abort the process ("QThread destroyed while
+        running"), so this is called both when a new run starts and from closeEvent."""
+        for t in getattr(self, "_all_share_threads", None) or []:
+            try:
+                if t is not None and t.isRunning():
+                    t.abort()
+                    t.wait(5000)
+                    if t.isRunning():
+                        t.terminate()
+                        t.wait(1000)
+            except Exception:
+                pass
+        self._all_share_threads = []
+        self._share_stack_thread = None
+
+    def _start_share_stacker(self, original_dir, cleaned_dir):
+        """Called at the START of a run. Begins building the star trail + before-after
+        video lighten-max stacks NOW, on a background thread, in parallel with the
+        cleaning -- so they're ready the instant the run finishes instead of after a
+        second full pass over every frame. Both always build now (the per-output
+        checkboxes were removed): the star trail populates the Star Trail tab and the
+        video is offered on the Summary tab. The cleaning worker is untouched."""
+        # Stop any share thread left over from a previous run BEFORE starting a new
+        # one, so an orphaned (parked) thread can't survive to crash the app at quit.
+        self._stop_share_threads()
+        # Always build both -- they run in parallel with the cleaning (no added time).
+        want_star = True
+        want_video = True
+        if not (want_star or want_video) or not original_dir or not cleaned_dir:
+            return
+        # The in-run stack always builds a PLAIN star trail (instantaneous).
+        # Comet tail and thickness are applied on demand in the post-run Star
+        # Trail window, never during the run.
+        comet_tail = 0
+        thicken_px = 0
+        # A SECOND full-res star trail, built from the ORIGINAL frames, so the Star
+        # Trail tab offers the before picture beside the after one. The frames are
+        # already being read for the video, so this costs no extra reading -- but it
+        # holds one more full-resolution image in memory for the length of the run.
+        # A keepsake image must never squeeze the actual cleaning, so it is skipped
+        # when free memory is short (the run then behaves exactly as it did before).
+        want_original_star = True
+        try:
+            import psutil as _ps
+            from modules.io_safe import image_size as _isz
+            from modules.frame_list import glob_patterns as _gp
+            _first = sorted(f for e in _gp()
+                            for f in glob.glob(os.path.join(original_dir, e)))[:1]
+            _sz = _isz(_first[0]) if _first else None
+            _need = (_sz[0] * _sz[1] * 3) if _sz else (60 * 1000 * 1000 * 3)
+            _free = _ps.virtual_memory().available
+            if _free < _need * 8:          # keep a wide margin for the batch itself
+                want_original_star = False
+                print(f"[share] skipping the original-frames star trail: "
+                      f"{_free // (1024*1024)}MB free is tight for another "
+                      f"{_need // (1024*1024)}MB stack", flush=True)
+        except Exception:
+            pass
+        try:
+            ws_dir = output_workspace(cleaned_dir, create=True)
+            # How the video encode re-invokes make_share_clip in its OWN process
+            # (ffmpeg stalls inside a Qt thread), same pattern as the other share runs.
+            if getattr(sys, "frozen", False):
+                video_cmd = [sys.executable, "--cleanr-worker", SHARE_SCRIPT]
+            else:
+                video_cmd = [sys.executable, "-u", SHARE_SCRIPT]
+            t = ShareStackThread(original_dir, cleaned_dir, ws_dir,
+                                 want_star, want_video, video_cmd_prefix=video_cmd, parent=self,
+                                 comet_tail=comet_tail, thicken_px=thicken_px,
+                                 want_original_star=want_original_star,
+                                 output_format=self._current_output_format())
+            t.done.connect(self._on_share_stack_done)
+            t.failed.connect(self._on_share_stack_failed)
+            self._share_stack_thread = t
+            self._all_share_threads.append(t)
+            self._share_stack_ws = ws_dir
+            t.start()
+        except Exception:
+            self._share_stack_thread = None
+
+    def _on_share_stack_done(self, result):
+        """The in-run stacker finished. `result` is {"produced": {kind: path},
+        "timings": {kind: seconds}}. Note each output and how long it took, append that
+        to the saved Star Log, then land the held completion. The STC Extras folder is no
+        longer popped open in Finder -- the combined window opens instead, with the outputs
+        on its tabs and an Open Cleaned Folder button for anyone who wants the folder."""
+        produced = result.get("produced", {}) if isinstance(result, dict) else {}
+        timings = result.get("timings", {}) if isinstance(result, dict) else {}
+        skipped = result.get("skipped", {}) if isinstance(result, dict) else {}
+        lines = []
+        for kind, _path in produced.items():
+            label = _SHARE_KIND_LABELS.get(kind, "share output")
+            secs = timings.get(kind)
+            msg = f"Your {label} is ready" + (f" (took {secs:.1f}s)." if secs is not None else ".")
+            lines.append(msg)
+        # Every enabled output that DIDN'T build says so, with the reason -- a run
+        # must never again end "Complete!" with no video, no star trail, and no
+        # explanation in the log (the v2.76 Windows field report).
+        for kind, reason in skipped.items():
+            label = _SHARE_KIND_LABELS.get(kind, "share output")
+            msg = f"Couldn't build the {label}: {reason}"
+            lines.append(msg)
+            _log_app_error(f"share output skipped: {kind}", detail=reason)
+        if not produced and not skipped:
+            lines.append("The star trail and before/after video were not built "
+                         "this run (no reason was reported; this is a bug worth "
+                         "emailing about).")
+            _log_app_error("share stacker finished with nothing produced and "
+                           "nothing skipped")
+        for msg in lines:
+            try:
+                self._status_out.append(msg)
+            except Exception:
+                pass
+        self._append_share_log(lines)
+        # No longer pops open the STC Extras folder in Finder -- the combined Star Trail &
+        # Timelapse window opens instead, with the outputs on its tabs. "done" and the
+        # outputs land together.
+        self._finish_completion()
+
+    def _append_share_log(self, lines):
+        """Append the share-output results (and their timings) to the saved Star Log txt.
+        The run summary is written a beat before the stacker finishes, so the outcome of
+        the star trail / video is added here instead of being lost at 'Finishing...'."""
+        path = getattr(self, "_last_log_path", None)
+        if not path or not lines:
+            return
+        try:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write("\n" + "\n".join(lines) + "\n")
+        except Exception:
+            pass
+
+    def _on_share_stack_failed(self, msg):
+        """The in-run stacker hit an error rendering the star trail / video. Note it in
+        the status log (the cleaned frames themselves are fine and already saved) and
+        still complete the run so the user is never left stuck on 'Finishing...'."""
+        line = f"Could not finish the star trail / video: {msg}"
+        _log_app_error("share stacker failed", detail=msg)
+        try:
+            self._status_out.append(line)
+        except Exception:
+            pass
+        self._append_share_log([line])
+        # Don't strand the user on "Finishing..." if the render errored -- complete anyway.
+        self._finish_completion()
+
+    def _maybe_start_share_render(self, cleaned_folder):
+        """At run finish, finalize the share outputs. The star trail and video were
+        built DURING the run by the in-run ShareStackThread, so here we just tell it to
+        render them from the finished stacks. The dev Red Trail Map (if enabled) still
+        renders as its own process. No-op otherwise."""
+        stacker = getattr(self, "_share_stack_thread", None)
+        if stacker is not None:
+            try:
+                self._status_out.append(
+                    "\nFinishing your star trail and video from the stacks built during "
+                    "the run.")
+            except Exception:
+                pass
+            stacker.finish()
+
+        make_red = (_DEV_SWITCHER_ENABLED
+                    and getattr(self, "_red_map_chk", None) is not None
+                    and SETTINGS.value("red_trail_map_enabled", True, type=bool))
+        if not make_red:
+            return
+        original_dir = getattr(self.worker, "folder", None) if self.worker else None
+        if not original_dir or not os.path.isdir(original_dir) \
+                or not cleaned_folder or not os.path.isdir(cleaned_folder):
+            return
+        ws_dir = output_workspace(cleaned_folder, create=True)
+        red = os.path.join(ws_dir, "STC_red_trail_map.jpg")
+        red_args = ["--red-map", "--original", original_dir, "--out", red,
+                    "--masks-dir", os.path.join(ws_dir, "masks")]
+        fg = getattr(self, "_mask_path", None)
+        if fg and os.path.isfile(fg):
+            red_args += ["--foreground", fg]
+        self._share_threads = []
+        self._start_share_run("red", red_args, red)
+        self._share_pending = len(self._share_threads)
+        self._share_any_done = False
+        try:
+            self._status_out.append(
+                "\nCreating your Red Trail Map in the background.")
+        except Exception:
+            pass
+
+    def _start_share_run(self, kind, job_args, out_path):
+        """Launch one independent share render (its own process). Each output runs
+        and finishes on its own, so a problem with one never blocks the other."""
+        t = ShareRenderThread(kind, job_args, out_path, parent=self)
+        t.done.connect(self._on_share_render_done)
+        t.failed.connect(self._on_share_render_failed)
+        self._share_threads.append(t)
+        t.start()
+
+    def _on_share_render_done(self, kind, out_path):
+        """Tell the user, in the run log, that one of the extras finished.
+
+        After a clean the app also builds a star trail, a preview and a short
+        video from the stacks it made along the way. Each reports here as it
+        lands, so the log shows them arriving one by one instead of going quiet
+        after the frames are done.
+        """
+        label = _SHARE_KIND_LABELS.get(kind, "share output")
+        try:
+            self._status_out.append(f"Your {label} is ready.")
+        except Exception:
+            pass
+        self._share_any_done = True
+        self._share_job_finished()
+
+    def _on_share_render_failed(self, kind, msg):
+        label = _SHARE_KIND_LABELS.get(kind, "share output")
+        try:
+            self._status_out.append(f"Could not create the {label}: {msg}")
+        except Exception:
+            pass
+        self._share_job_finished()
+
+    def _share_job_finished(self):
+        """Called when any share render finishes (success or failure). No longer opens
+        the workspace folder in Finder -- the combined window is the post-run surface now.
+        Kept as the completion hook in case per-job bookkeeping is needed later."""
+        self._share_pending = getattr(self, "_share_pending", 1) - 1
+        if self._share_pending > 0:
+            return
 
     def _show_run_complete_dialog(self):
         """Centered modal showing run summary. Replaces the old inline card
@@ -3133,8 +7499,14 @@ class MainWindow(QMainWindow):
         from PySide6.QtWidgets import QDialog
         dlg = QDialog(self)
         dlg.setWindowTitle("Run Complete")
-        dlg.setModal(True)
+        # Non-modal: it no longer locks the app, so a timelapse window beside it
+        # stays usable while the summary is open.
+        dlg.setModal(False)
         dlg.setMinimumWidth(560)
+        self._run_complete_dlg = dlg
+        dlg.finished.connect(
+            lambda *_: (setattr(self, "_run_complete_dlg", None),
+                        self._arrange_post_run()))
         dlg.setStyleSheet(f"QDialog {{ background-color: {LIGHT_PANEL_BG}; }}")
 
         v = QVBoxLayout(dlg)
@@ -3166,7 +7538,7 @@ class MainWindow(QMainWindow):
         v.addSpacing(8)
         share = QLabel(
             "Help spread the word! When you share on social media, "
-            "tag your image with <b>#StarTrailCleanR</b>"
+            "tag <b>@bruceherwig #StarTrailCleanR</b>"
         )
         share.setTextFormat(Qt.RichText)
         share.setWordWrap(True)
@@ -3204,27 +7576,17 @@ class MainWindow(QMainWindow):
         btn_row.addWidget(close_btn)
         v.addLayout(btn_row)
 
-        # Center over the main window. The centering must run AFTER the
-        # dialog's layout has fully rendered — adjustSize() before exec()
-        # under-reports height when the body has wrapped text or a newly
-        # added section, so we use a deferred QTimer.singleShot(0, ...)
-        # which fires once the dialog is on screen and dlg.size() returns
-        # real values. frameGeometry() on the parent includes the title
-        # bar so the vertical math is what the user actually sees.
-        def _center_dialog():
-            parent_frame = self.frameGeometry()
-            if not (parent_frame.isValid() and parent_frame.width() > 0):
-                return
-            dx = parent_frame.x() + (parent_frame.width() - dlg.width()) // 2
-            dy = parent_frame.y() + (parent_frame.height() - dlg.height()) // 2
-            dlg.move(dx, dy)
-
-        QTimer.singleShot(0, _center_dialog)
-        dlg.exec()
+        # Show non-modal and place it: alone -> centered on the main window; with a
+        # timelapse window open -> side by side (summary left, timelapse right). The
+        # placement is deferred via QTimer so it runs once the dialog is on screen and
+        # reports its real size (adjustSize() under-reports a wrapped body before show).
+        dlg.show()
+        QTimer.singleShot(0, self._arrange_post_run)
 
     def _write_run_summary(self):
-        """Write a plain-text run summary into <input>/cleanr_workspace/."""
+        """Write a plain-text run summary into <output>/STC Extras/."""
         import datetime as _dt
+        self._last_log_path = None  # set on success; stays None if we can't write
         input_folder = self._folder_input.text().strip()
         if not input_folder or not os.path.isdir(input_folder):
             return
@@ -3239,8 +7601,20 @@ class MainWindow(QMainWindow):
         est_sec = getattr(self, '_run_initial_est_sec', 0)
         actual_sec = getattr(self, '_run_actual_sec', 0)
 
+        # A cancelled or errored run never emits its final stats, so the totals
+        # above stay 0. Fall back to the live running values (frames cleaned so
+        # far, the last trail count, wall-clock elapsed) and flag the summary as
+        # an incomplete run. A normal finish always has _run_total_frames > 0.
+        incomplete = getattr(self, '_run_cancelled', False) or frames == 0
+        if frames == 0:
+            frames = getattr(self, '_stats_frames_done', 0)
+        if trails == 0:
+            trails = getattr(self, '_stats_last_trail_count', 0)
+        if actual_sec == 0:
+            actual_sec = max(0.0, (end - start).total_seconds())
+
         # Mirror the on-screen "TIME SAVED" formatting.
-        SECONDS_PER_MANUAL_TRAIL = 20
+        SECONDS_PER_MANUAL_TRAIL = 30
         saved_sec = trails * SECONDS_PER_MANUAL_TRAIL
         if saved_sec >= 60:
             rounded_min = int(round(saved_sec / 900.0) * 15)
@@ -3308,6 +7682,61 @@ class MainWindow(QMainWindow):
         tile_val = 640
         overlap_val = 0.2
 
+        # Read EXIF from the first image in the input folder.
+        def _read_exif_summary(folder):
+            """Return a dict of camera/lens/date/f-stop/ISO read from the first
+            image's EXIF, for the "Camera Info" block of the run summary. Every
+            field defaults to "Unknown" and any read failure is swallowed."""
+            from modules.io_safe import exif_tags as _exif_tags
+            from modules.frame_list import IMAGE_EXTS as exts
+            first = next(
+                (p for p in sorted(os.listdir(folder))
+                 if os.path.splitext(p)[1].lower() in exts),
+                None
+            )
+            fields = {
+                "camera": "Unknown",
+                "lens":   "Unknown",
+                "taken":  "Unknown",
+                "fstop":  "Unknown",
+                "iso":    "Unknown",
+            }
+            if first is None:
+                return fields
+            try:
+                # One reader for every format. A RAW carries its tags in the
+                # small preview picture inside it, which is why opening the RAW
+                # itself used to return nothing and print "Unknown" five times.
+                tag_map = sub_map = _exif_tags(os.path.join(folder, first))
+                if not tag_map:
+                    return fields
+                make  = str(tag_map.get("Make",  "")).strip()
+                model = str(tag_map.get("Model", "")).strip()
+                if make or model:
+                    if make and model.startswith(make):
+                        fields["camera"] = model
+                    else:
+                        fields["camera"] = f"{make} {model}".strip() or "Unknown"
+                lens = str(sub_map.get("LensModel", "")).strip()
+                fields["lens"] = lens or "Unknown"
+                taken = (str(sub_map.get("DateTimeOriginal", "")).strip()
+                         or str(tag_map.get("DateTime", "")).strip())
+                fields["taken"] = taken or "Unknown"
+                fnum = sub_map.get("FNumber")
+                if fnum is not None:
+                    try:
+                        fields["fstop"] = f"f/{float(fnum):.1f}"
+                    except Exception:
+                        fields["fstop"] = str(fnum)
+                iso = sub_map.get("ISOSpeedRatings")
+                if iso is not None:
+                    fields["iso"] = str(iso)
+            except Exception:
+                pass
+            return fields
+
+        exif = _read_exif_summary(input_folder)
+
         lines = [
             "================================================",
             "  Star Trail CleanR",
@@ -3322,7 +7751,14 @@ class MainWindow(QMainWindow):
             f"Finished:              {end.strftime('%H:%M:%S')}",
             "",
             f"App version:           Beta v{VERSION}",
-            f"Trail Detector:        {detector}",
+            f"Trail DetectoR:        {detector}",
+            "",
+            "Camera Info",
+            f"  Camera:              {exif['camera']}",
+            f"  Lens:                {exif['lens']}",
+            f"  Date/Time taken:     {exif['taken']}",
+            f"  F-stop:              {exif['fstop']}",
+            f"  ISO:                 {exif['iso']}",
             "",
             "Input folder:",
             f"  {input_folder}",
@@ -3330,7 +7766,8 @@ class MainWindow(QMainWindow):
             "Output folder:",
             f"  {output_folder}",
             "",
-            f"Frames processed:      {frames:,}",
+            f"Frames processed:      {frames:,}"
+            + ("   (run cancelled before it finished)" if incomplete else ""),
             f"Trails found:          {trails:,}",
         ]
 
@@ -3357,15 +7794,28 @@ class MainWindow(QMainWindow):
                         f"resolution"
                     )
 
+        if incomplete:
+            lines += [
+                "",
+                f"Time before cancel:    {fmt_hms(actual_sec)}",
+                "",
+                "Run cancelled before completion. The numbers above are the "
+                "progress made so far, not a finished run.",
+                "",
+                f"Time saved so far (at ~30 sec per trail):  {time_saved}",
+            ]
+        else:
+            lines += [
+                "",
+                f"Estimated time:        {fmt_hms(est_sec)}",
+                f"Actual time:           {fmt_hms(actual_sec)}",
+                "",
+                f"Thought it'd take {fmt_hms(est_sec)}. "
+                f"Took {fmt_hms(actual_sec)}. {tail}",
+                "",
+                f"Time saved vs cleaning manually (at ~30 sec per trail):  {time_saved}",
+            ]
         lines += [
-            "",
-            f"Estimated time:        {fmt_hms(est_sec)}",
-            f"Actual time:           {fmt_hms(actual_sec)}",
-            "",
-            f"Thought it'd take {fmt_hms(est_sec)}. "
-            f"Took {fmt_hms(actual_sec)}. {tail}",
-            "",
-            f"Time saved vs cleaning manually (at ~20 sec per trail):  {time_saved}",
             "",
             "================================================",
             "",
@@ -3381,9 +7831,34 @@ class MainWindow(QMainWindow):
             f"Hardware:              {hw_line}",
             f"Compute device:        {compute_pretty}",
             f"Python:                {_platform.python_version()}",
+        ]
+        _libs = _library_versions()
+        if _libs:
+            lines.append(f"Libraries:             {_libs}")
+        lines += [
             "",
             "================================================",
         ]
+
+        # The run timing block: where the WHOLE run's time went, summed over every batch. It sits here,
+        # above the scroll, because the scroll below is cut to its first 50 and last 100 lines (for a
+        # 29-batch run that kept the timing of one batch). See modules/run_timing_report.py.
+        try:
+            from modules import run_timing_report as _rtr
+            _w = getattr(self, "worker", None)
+            _acc = getattr(_w, "run_timing", None)
+            try:
+                import psutil as _psu
+                _ram = _psu.virtual_memory().total / (1024 ** 3)
+            except Exception:
+                _ram = None
+            _tl = _rtr.render(
+                _acc, run_seconds=(end - start).total_seconds(), frames=frames,
+                machine=_rtr.machine_summary(getattr(_w, "_worker_device", None), os.cpu_count(), _ram))
+            if _tl:
+                lines += [""] + _tl + ["", "================================================"]
+        except Exception:
+            pass
 
         # Append the Star Log content (what scrolled in the run window) so
         # this single file is enough to diagnose any run issue without
@@ -3407,7 +7882,7 @@ class MainWindow(QMainWindow):
                 tail = log_lines[-TAIL_LINES:]
                 omitted = len(log_lines) - HEAD_LINES - TAIL_LINES
                 rendered_log = "\n".join(head) + (
-                    f"\n\n... ({omitted:,} lines elided — repetitive per-frame "
+                    f"\n\n... ({omitted:,} lines elided, repetitive per-frame "
                     f"progress; first {HEAD_LINES} and last {TAIL_LINES} lines kept) ...\n\n"
                 ) + "\n".join(tail)
             else:
@@ -3420,59 +7895,2408 @@ class MainWindow(QMainWindow):
                 "================================================",
             ]
 
-        workspace = os.path.join(input_folder, WORKSPACE_DIR)
+        # A hard-killed previous run's breadcrumbs are still preserved silently on disk
+        # (~/.star_trail_cleanr/last_run_progress.prev.log) for diagnostics, but are
+        # intentionally NOT surfaced in the user-facing Star Log (kept clean for testers).
+
+        ws_base = output_folder if output_folder else os.path.join(input_folder, "cleaned")
+        workspace = output_workspace(ws_base)
         try:
             os.makedirs(workspace, exist_ok=True)
-            fname = f"run_summary_{start.strftime('%Y-%m-%d_%H-%M-%S')}.txt"
-            with open(os.path.join(workspace, fname), 'w', encoding='utf-8') as f:
+            fname = f"star_log_{start.strftime('%Y-%m-%d_%H-%M-%S')}.txt"
+            _full = os.path.join(workspace, fname)
+            with open(_full, 'w', encoding='utf-8') as f:
                 f.write('\n'.join(lines) + '\n')
+            self._last_log_path = _full  # opened by the "View Star Log" link
+            _set_current_star_log(_full)  # caught errors mirror into this file
         except OSError:
             pass
 
+        # Keep the top of STC Extras tidy: tuck all but the newest of each run-log
+        # type into Archive/. Move-only (never deletes/overwrites); a sweep failure
+        # must never break the end of a run.
+        try:
+            archive_old_logs(workspace)
+        except Exception:
+            pass
+
     def _update_open_btn_state(self):
+        """Enable the Setup page's big "Open Cleaned Folder" button only when
+        the output folder exists and already contains at least one file."""
         folder = self._output_input.text().strip()
         has_files = False
         if folder and os.path.isdir(folder):
             has_files = any(os.scandir(folder))
         self._setup_open_btn.setEnabled(has_files)
+        # The Star Trail & Timelapse window can also run on the ORIGINAL frames
+        # before any cleaning, so it is available whenever either folder has images.
+        self._setup_timelapse_btn.setEnabled(
+            has_files or folder_has_image_frames(self._folder_input.text().strip()))
 
     def _open_output_from_setup(self):
+        """Setup page "Open Cleaned Folder" button. Open the output folder
+        (falling back to the last completed run's output) in the file manager,
+        with inline errors if it isn't set or doesn't exist yet."""
         folder = self._output_input.text().strip()
         if not folder:
             folder = getattr(self, '_done_output_folder', None)
         if not folder:
-            self._error_label.setText("No output folder set \u2014 select an input folder first.")
+            self._error_label.setText("No output folder set. Select an input folder first.")
             return
         if not os.path.isdir(folder):
-            self._error_label.setText(f"Output folder doesn\u2019t exist yet \u2014 run cleaning first.")
+            self._error_label.setText(f"Output folder doesn\u2019t exist yet. Run cleaning first.")
             return
         _open_folder_in_file_manager(folder)
 
-    def _open_output_folder(self):
+    def _open_timelapse_from_setup(self):
+        """Setup page "Star Trail & Timelapse" button. Open the combined window on the
+        output folder's cleaned frames (falling back to the last completed run), so it
+        can be built from any past run without re-cleaning. Opens the Star Trail tab."""
+        folder = self._output_input.text().strip()
+        if not folder:
+            folder = getattr(self, '_done_output_folder', None)
+        input_folder = self._folder_input.text().strip()
+        # No output folder chosen yet: use the default "cleaned" folder inside the
+        # originals, where the star trail workspace will live.
+        if not folder and folder_has_image_frames(input_folder):
+            folder = os.path.join(input_folder, "cleaned")
+        # Runs on the cleaned frames when a run has produced them, otherwise on the
+        # original frames alone (the window grays out "Cleaned" in that case).
+        if not folder or not (folder_has_image_frames(folder)
+                              or folder_has_image_frames(input_folder)):
+            self._error_label.setText(
+                "No frames yet. Choose a folder with your frames in Step 1.")
+            return
+        try:
+            star_path = star_trail_in(folder, "STC_cleaned_star_trail")
+            self._open_creator_window(folder, star_path, "star")
+        except Exception as e:
+            _log_app_error("open Star Trail & Timelapse window (setup page)",
+                           exc=e, detail=f"folder: {folder}")
+            _warn_user("Couldn't open the window",
+                       "Star Trail CleanR hit an error opening the Star Trail & "
+                       f"Timelapse window.\n\nReason: {e}\n\n"
+                       "Details were saved to the error log in your home folder "
+                       "(.star_trail_cleanr/app_errors.log).")
+
+    def _output_has_frames(self):
+        """True when this run's output folder holds at least one cleaned image
+        frame (so a timelapse can be built from it). Drives whether the run page's
+        Create Timelapse button is shown."""
         folder = getattr(self, '_done_output_folder', None)
-        if folder and os.path.isdir(folder):
-            _open_folder_in_file_manager(folder)
+        if not folder or not os.path.isdir(folder):
+            return False
+        try:
+            return any(e.is_file() and e.name.lower().endswith(
+                ('.jpg', '.jpeg', '.insp', '.png', '.tif', '.tiff'))
+                for e in os.scandir(folder))
+        except OSError:
+            return False
+
+    def _open_timelapse_from_run(self):
+        """Run page "Star Trail & Timelapse" button. Open the combined window on this
+        run's just-cleaned frames (Star Trail tab); it places itself beside the summary
+        if that is still open, otherwise centered (see _arrange_post_run). A failure
+        opening the window is reported to the user and logged, never swallowed: Qt
+        catches exceptions raised in button handlers and silently carries on, which
+        on a frozen Windows build (no console) reads as a dead button."""
+        folder = getattr(self, '_done_output_folder', None)
+        if not folder or not os.path.isdir(folder):
+            _log_app_error("Star Trail & Timelapse button: output folder missing",
+                           detail=f"path: {folder}")
+            _warn_user("Cleaned folder not found",
+                       "The cleaned-frames folder from this run can't be found "
+                       f"(it may have been moved, or the drive disconnected):\n\n{folder}")
+            return
+        try:
+            star_path = star_trail_in(folder, "STC_cleaned_star_trail")
+            self._open_creator_window(folder, star_path, "star")
+        except Exception as e:
+            _log_app_error("open Star Trail & Timelapse window (run page)",
+                           exc=e, detail=f"folder: {folder}")
+            _warn_user("Couldn't open the window",
+                       "Star Trail CleanR hit an error opening the Star Trail & "
+                       f"Timelapse window.\n\nReason: {e}\n\n"
+                       "Details were saved to the error log in your home folder "
+                       "(.star_trail_cleanr/app_errors.log).")
+
+    def _open_output_folder(self):
+        """Processing page / run-complete dialog "Open Cleaned Folder" button.
+        Open the just-finished run's output folder in the file manager. A missing
+        folder is reported (with the path), not silently ignored; the opener itself
+        reports and logs its own failures."""
+        folder = getattr(self, '_done_output_folder', None)
+        if not folder or not os.path.isdir(folder):
+            _log_app_error("Open Cleaned Folder button: output folder missing",
+                           detail=f"path: {folder}")
+            _warn_user("Cleaned folder not found",
+                       "The cleaned-frames folder from this run can't be found "
+                       f"(it may have been moved, or the drive disconnected):\n\n{folder}")
+            return
+        _open_folder_in_file_manager(folder)
 
     def _on_finished(self):
+        """QThread.finished handler — fires after every run end (clean finish,
+        cancel, or error). Stops timers, restores the Settings run-locked
+        controls, writes the run-summary text file, and reveals the "View Star
+        Log" link if that file was written."""
+        self._keep_awake.release()   # run is over -- let the machine sleep again
         self._stop_elapsed_timer()
         self._switch_to_back_btn()
+        self._set_updates_run_state(False)
+        # Write this run's log (covers a clean finish, a stop/cancel, and an
+        # error) and reveal the "View Star Log" link only if the file exists.
+        self._write_run_summary()
+        if getattr(self, "_last_log_path", None) and os.path.isfile(self._last_log_path):
+            self._view_log_link.setVisible(True)
+        # Stamp the crash breadcrumb log as cleanly ended. This handler runs on
+        # EVERY run end the app survives (finish, cancel, or error), so the only
+        # time this marker is absent is a hard kill of the app itself — exactly
+        # the silent crash the next run should surface.
+        try:
+            _cp = os.path.join(os.path.expanduser("~"),
+                               ".star_trail_cleanr", "last_run_progress.log")
+            if os.path.isfile(_cp):
+                with open(_cp, "a", encoding="utf-8") as _pf:
+                    _pf.write("=== RUN ENDED ===\n")
+        except Exception:
+            pass
+
+    def _view_star_log(self, *args):
+        """Open the FOLDER that holds this run's saved Star Log (not the log file
+        itself), so the log sits alongside the run's other files (masks, share
+        outputs) in the file manager."""
+        path = getattr(self, "_last_log_path", None)
+        if path and os.path.isfile(path):
+            _open_folder_in_file_manager(os.path.dirname(path))
 
     def closeEvent(self, event):
-        """Save window size and clean up worker thread before closing."""
+        """Save window size and stop EVERY background thread before closing.
+
+        Qt hard-aborts the process ("quit unexpectedly") if any QThread is still
+        running when the app tears down, so on quit we stop and wait for all of
+        them, not just the cleaner. The in-run share-stacker is the one that bit us
+        in v2.59: it parks on its command queue, and its abort() queues a stop so
+        the blocked wait returns at once.
+        """
         SETTINGS.setValue("window_geometry", self.saveGeometry())
+        if getattr(self, "_keep_awake", None) is not None:
+            self._keep_awake.release()   # never leave the machine pinned awake
+
+        # Main cleaning worker (unchanged: it responds to cancel()).
         if self.worker and self.worker.isRunning():
             self.worker.cancel()
             self.worker.wait(5000)
+
+        # In-run share-stackers: stop EVERY one started this session, the current
+        # one and any orphaned by a re-run (the orphan is what crashed v2.60).
+        self._stop_share_threads()
+
+        # Defensive: any other background thread still alive at quit would trigger
+        # the same Qt abort. Wait briefly, then force-stop as a last resort (safe
+        # here -- the process is exiting regardless).
+        others = [getattr(self, a, None) for a in (
+            "_update_thread", "_model_update_thread", "_model_download_thread",
+            "_nvidia_thread", "_best_device_thread", "_gpu_install_thread")]
+        others.extend(getattr(self, "_share_threads", []) or [])
+        for t in others:
+            if t is not None and t.isRunning():
+                t.wait(2000)
+                if t.isRunning():
+                    t.terminate()
+                    t.wait(500)
+
         event.accept()
 
 
+# Shared so the two creator tab pages have EXACTLY the same margins and spacing,
+# and the title (and everything below) sits at the same position on both tabs.
+_CREATOR_PANEL_MARGINS = (24, 20, 24, 20)   # left, top, right, bottom
+_CREATOR_PANEL_SPACING = 10
+# Fixed LANDSCAPE preview box for the Star Trail / Timelapse tabs. Images are scaled to
+# FIT inside it (KeepAspectRatio): a landscape shot fills the width, a portrait shot centers
+# with side margins. Fixed so a tall portrait can't balloon the window height (which spread
+# the Summary tab into a big empty gap). 3:2 lands exactly at 420x280.
+_PREVIEW_W, _PREVIEW_H = 420, 280
+
+
+def _make_preview_arrow(glyph, on_click):
+    """One of the ‹ › paging buttons that flank a preview when several built
+    files exist. Slim, dark, vertically centered against the preview box;
+    hidden by default -- the panel shows it only when there is something to
+    page through."""
+    b = QPushButton(glyph)
+    b.setFixedSize(30, 64)
+    b.setCursor(Qt.PointingHandCursor)
+    b.setStyleSheet(
+        "QPushButton { background: #2a2a2a; color: #dcdcdc; border: none;"
+        " border-radius: 8px; font-size: 22px; font-weight: bold; }"
+        "QPushButton:hover { background: #3d3d3d; }"
+        "QPushButton:disabled { background: #1c1c1c; color: #555; }")
+    b.clicked.connect(on_click)
+    b.setVisible(False)
+    return b
+
+
+class TimelapsePanel(QWidget):
+    """Timelapse Maker -- the Timelapse tab inside CreatorWindow (was its own
+    dialog). Pick source (cleaned/original) / size / fps / format, see an
+    estimated size and a free-space check, and render via the timelapse_maker.py
+    engine (a subprocess) with a live progress bar; the Render button doubles as
+    Stop while running. Shows a still poster of the result-to-be and a Play video
+    button that opens the finished mp4. Choices are remembered for next time."""
+
+    def __init__(self, cleaned_folder, original_folder=None, star_path=None, parent=None):
+        super().__init__(parent)
+        self._cleaned = cleaned_folder
+        self._original = original_folder
+        self._star_path = star_path        # star trail image, used as the poster when present
+        self._proc = None
+        self._out_path = None
+        self._play_path = None             # a rendered timelapse the Play button can open
+        self._render_cancelled = False
+
+        # Frames are loaded by _reload_frames() once the controls exist, so the
+        # source (Cleaned / Original) dropdown can swap them on the fly.
+        self._frames = []
+        self._n_frames = 0
+        self._nw = self._nh = 0
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(*_CREATOR_PANEL_MARGINS)
+        lay.setSpacing(_CREATOR_PANEL_SPACING)
+        # No heading here: the tab above already says "Timelapse", and the heading
+        # cost the window about 40 px of height (Bruce, 2026-09-30).
+
+        # Poster: the star trail image if we have one, otherwise the first frame
+        # of the selected source. Once a timelapse is rendered, a white play button
+        # is drawn on it and clicking the poster plays the video in the system player.
+        self._poster = QLabel()
+        self._poster.setAlignment(Qt.AlignCenter)
+        self._poster.setFixedSize(_PREVIEW_W, _PREVIEW_H)
+        self._poster.setStyleSheet("background: #141414; border-radius: 6px;")
+        self._poster.mousePressEvent = lambda e: self._play_video()
+        # Shown in the poster's place before any video is rendered. Real (selectable)
+        # text in a dark video-frame box, sized to match the poster so nothing jumps.
+        self._poster_placeholder = QLabel(
+            "Choose your options below, then click Render to create your timelapse.")
+        self._poster_placeholder.setAlignment(Qt.AlignCenter)
+        self._poster_placeholder.setWordWrap(True)
+        self._poster_placeholder.setFixedSize(_PREVIEW_W, _PREVIEW_H)
+        self._poster_placeholder.setStyleSheet(
+            "background: #141414; color: #dcdcdc; border-radius: 6px; padding: 16px; font-size: 19px;")
+        # Arrows flank the poster and appear only when several rendered videos
+        # exist; they choose which one Play/Open act on. Caption names the shown
+        # file, since different renders share one poster image.
+        self._tl_prev_btn = _make_preview_arrow("‹", lambda: self._step_video(+1))
+        self._tl_next_btn = _make_preview_arrow("›", lambda: self._step_video(-1))
+        _prow = QHBoxLayout()
+        _prow.addStretch(1)
+        _prow.addWidget(self._tl_prev_btn, 0, Qt.AlignVCenter)
+        _pstack = QVBoxLayout(); _pstack.setSpacing(0)
+        _pstack.addWidget(self._poster)
+        _pstack.addWidget(self._poster_placeholder)
+        _prow.addLayout(_pstack)
+        _prow.addWidget(self._tl_next_btn, 0, Qt.AlignVCenter)
+        _prow.addStretch(1)
+        lay.addLayout(_prow)
+        self._tl_caption = QLabel("")
+        self._tl_caption.setAlignment(Qt.AlignCenter)
+        self._tl_caption.setStyleSheet(f"color: {MUTED_TEXT};")
+        self._tl_caption.setVisible(False)
+        lay.addWidget(self._tl_caption)
+        self._tl_builds = []
+        self._tl_idx = 0
+
+        def _row(text, combo):
+            """One settings line: a right-aligned label of fixed width, then its
+            control. The fixed width is what makes every label in this panel end
+            at the same place, so the controls line up in a column instead of
+            stepping in and out with the length of each word."""
+            r = QHBoxLayout()
+            _l = QLabel(text)
+            _l.setFixedWidth(90)
+            _l.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            _lf = _l.font()
+            _lf.setBold(True)
+            _l.setFont(_lf)
+            r.addWidget(_l)
+            r.addWidget(combo, 1)
+            lay.addLayout(r)
+
+        # Source: the original, uncleaned frames (default when we have them) or the
+        # cleaned frames. "Original" is only offered when we actually have that
+        # folder; without it the only choice is Cleaned. Bruce's call, 2026-09-30:
+        # the originals carry the most movement, so a timelapse of them is the most
+        # interesting one. The Star Trail tab still opens on Cleaned.
+        self._source_cb = QComboBox()
+        self._source_cb.addItem("Cleaned", "cleaned")
+        if original_folder and os.path.isdir(original_folder):
+            self._source_cb.addItem("Original", "original")
+            self._source_cb.setCurrentIndex(self._source_cb.findData("original"))
+        # Until a cleaning run has written frames there is nothing to pick under
+        # "Cleaned", so it stays in the list but grayed out (Original is then the
+        # only usable choice).
+        if not folder_has_image_frames(cleaned_folder):
+            _gray_out_combo_item(self._source_cb, "cleaned",
+                                 "Available after a cleaning run finishes.")
+        _row("Source", self._source_cb)
+
+        # Frame Range: leave out frames at the start and/or the end. A timelapse has
+        # no automatic test-shot skip, so these numbers count from the very first and
+        # last frame. The row re-points at the new total whenever the Source changes
+        # (_reload_frames) and hides itself when there are too few frames to trim.
+        # Not remembered between sessions, like every other choice on this tab.
+        from modules.frame_list import MIN_FRAMES_SHOWN as _MIN_KEEP
+        self._frame_row = FrameRangeRow(90, 1, _MIN_KEEP)
+        self._frame_range = self._frame_row.slider
+        self._frame_range.changed.connect(lambda _s, _e: self._update_estimate())
+        lay.addWidget(self._frame_row)
+
+        # Style: what the finished video SHOWS, not how it is encoded.
+        # "Moving Stars" is the timelapse this window has always made -- one
+        # photo per movie frame, the sky drifting. "Building Trails" keeps every
+        # photo so far, so the trails draw themselves and the last frame is the
+        # finished star trail. Suggested by Jon Bertsch, 2026-08-27, who noticed
+        # the app already computes every intermediate stack during a run.
+        self._style_cb = QComboBox()
+        self._style_cb.addItem("Moving Stars (traditional timelapse)", "plain")
+        self._style_cb.addItem("Building Trails (star accumulation)", "accumulate")
+        # No explanatory line under this one: the option names say what each
+        # style does. Smoothing keeps its note because "3 frames" does not.
+        _row("Style", self._style_cb)
+
+        self._size_cb = QComboBox()
+        # No "Full resolution" option: H.264 (and QuickTime) won't play frames
+        # wider than ~4K, and full-frame sources (5000-6000px) are over that
+        # ceiling -- the file renders but the player shows one frame and freezes.
+        # Each preset is an UPPER bound; target_size() never upscales, so on a
+        # sub-4K source "4K" simply yields the native size, which plays fine.
+        # Listed largest first so the menu reads top to bottom, but 2K is the
+        # DEFAULT (Bruce, 2026-08-30): it is the size most people actually want
+        # to share, renders quicker and makes a far smaller file, and anyone who
+        # wants 4K can say so. The default is set explicitly rather than by
+        # ordering, so the menu can stay in size order.
+        for key, label in (("4k", "4K"), ("2k", "2K"), ("1080p", "1080p")):
+            self._size_cb.addItem(label, key)
+        self._size_cb.setCurrentIndex(self._size_cb.findData("2k"))
+        _row("Size", self._size_cb)
+
+        self._fps_cb = QComboBox()
+        for v in (6, 12, 15, 24, 30, 60):
+            self._fps_cb.addItem(f"{v} fps", v)
+        self._fps_cb.setCurrentIndex(self._fps_cb.findData(24))  # default 24; _restore_choices overrides if saved
+        _row("Frame rate", self._fps_cb)
+
+        # Smoothing: each movie frame is a Lighten (brightest-pixel) stack of
+        # the last N frames -- smooths flicker at the cost of the stars
+        # trailing slightly. None means one cleaned frame per movie frame (the
+        # engine's "plain" style; a window of 1 would be the same thing, so it
+        # isn't offered separately).
+        self._blend_cb = QComboBox()
+        self._blend_cb.addItem("None", 0)
+        for v in (2, 3, 4, 5):
+            self._blend_cb.addItem(f"{v} frames", v)
+        self._blend_cb.setCurrentIndex(self._blend_cb.findData(3))  # default 3; _restore_choices overrides if saved
+        _row("Smoothing", self._blend_cb)
+        self._blend_hint = QLabel("Smooth blends each movie frame with the previous ones. "
+                                  "Higher values smooth out flicker, but stretch "
+                                  "each star into a slightly longer streak.")
+        self._blend_hint.setStyleSheet(f"color: {MUTED_TEXT};")
+        self._blend_hint.setWordWrap(True)
+        lay.addWidget(self._blend_hint)
+
+        # Smoothing has no meaning in Building Trails: that style keeps EVERY
+        # earlier photo permanently, so a rolling window of 3 is neither more nor
+        # less than what it already does. Grey it out rather than leave a control
+        # that silently does nothing -- the same thing the Star Trail tab does
+        # with Length when Blending Mode is Normal.
+        self._style_cb.currentIndexChanged.connect(self._sync_style)
+        self._sync_style()
+
+        self._fmt_cb = QComboBox()
+        self._fmt_cb.addItem(".mp4", "mp4")
+        self._fmt_cb.addItem(".mov", "mov")
+        _row("Format", self._fmt_cb)
+
+        self._restore_choices()
+
+        self._estimate_lbl = QLabel("")
+        self._estimate_lbl.setStyleSheet(f"color: {MUTED_TEXT};")
+        lay.addWidget(self._estimate_lbl)
+        self._bar = QProgressBar()
+        self._bar.setRange(0, 100)
+        self._bar.setValue(0)
+        self._bar.setVisible(False)
+        lay.addWidget(self._bar)
+        self._status_lbl = _StatusLabel()
+        lay.addWidget(self._status_lbl)
+
+        # Absorb any leftover vertical space here so the controls above stay packed
+        # to the top identically to the Star Trail tab (the two tabs share a height).
+        lay.addStretch(1)
+        # Render first (full-width blue hero button), then the two grey Open buttons
+        # below it -- mirrors the Star Trail tab's Build + Open row.
+        self._render_btn = QPushButton("Create Timelapse")
+        self._render_btn.setFixedHeight(48)
+        self._render_btn.setStyleSheet(_hero_btn_css())
+        self._render_btn.clicked.connect(self._toggle_render)
+        lay.addWidget(self._render_btn)
+
+        _open_row = QHBoxLayout()
+        _open_row.addStretch(1)
+        self._open_vid_btn = QPushButton("Open Timelapse Video")
+        self._open_vid_btn.setEnabled(False)
+        self._open_vid_btn.clicked.connect(self._play_video)
+        self._open_dir_btn = QPushButton("Open Saved Folder")
+        self._open_dir_btn.clicked.connect(self._open_saved_folder)
+        for b in (self._open_vid_btn, self._open_dir_btn):
+            b.setFixedHeight(34)
+            b.setStyleSheet(_secondary_btn_css())
+        _open_row.addWidget(self._open_vid_btn)
+        _open_row.addWidget(self._open_dir_btn)
+        _open_row.addStretch(1)
+        lay.addLayout(_open_row)
+
+        for cb in (self._size_cb, self._fps_cb, self._blend_cb, self._fmt_cb):
+            cb.currentIndexChanged.connect(self._update_estimate)
+        self._source_cb.currentIndexChanged.connect(self._reload_frames)
+        self._reload_frames()   # load the default-source frames (Original when offered) + estimate + poster
+        self._refresh_play_state()   # enable Play video if a rendered timelapse already exists
+        _make_labels_selectable(self)   # house rule: all GUI text is copy/paste-able
+
+    def _set_poster(self):
+        """Before a video exists: show the instructional placeholder. Once one does:
+        show a still (star trail image, else first frame) with the white play button,
+        and clicking it plays the video."""
+        path = self._star_path if (self._star_path and os.path.isfile(self._star_path)) else \
+            (self._frames[0] if self._frames else None)
+        pm0 = QPixmap(path) if path else QPixmap()
+        has_video = bool(self._play_path and os.path.isfile(self._play_path))
+        if has_video and not pm0.isNull():
+            # Fit into the fixed landscape box; portrait centers with side margins.
+            pm = pm0.scaled(_PREVIEW_W, _PREVIEW_H, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self._draw_play_button(pm)
+            self._poster.setPixmap(pm)
+            self._poster.show()
+            self._poster_placeholder.hide()
+        else:
+            self._poster_placeholder.setFixedSize(_PREVIEW_W, _PREVIEW_H)
+            self._poster_placeholder.show()
+            self._poster.hide()
+
+    def _draw_play_button(self, pm):
+        """Draw a white play button -- circle outline with a filled triangle,
+        centered -- onto the poster. The white sibling of the share clip's grip."""
+        from PySide6.QtGui import QPainter, QPen, QColor, QPolygon, QBrush
+        from PySide6.QtCore import QPoint
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        cx, cy = pm.width() // 2, pm.height() // 2
+        r = max(18, int(min(pm.width(), pm.height()) * 0.14))
+        pen = QPen(QColor(255, 255, 255)); pen.setWidth(max(2, r // 11))
+        p.setPen(pen); p.setBrush(Qt.NoBrush)
+        p.drawEllipse(QPoint(cx, cy), r, r)
+        tw = int(r * 0.62); th = int(r * 0.74); dx = int(r * 0.10)  # nudge right = optically centered
+        tri = QPolygon([QPoint(cx - tw // 2 + dx, cy - th // 2),
+                        QPoint(cx - tw // 2 + dx, cy + th // 2),
+                        QPoint(cx + tw // 2 + dx, cy)])
+        p.setPen(Qt.NoPen); p.setBrush(QBrush(QColor(255, 255, 255)))
+        p.drawPolygon(tri)
+        p.end()
+
+    def _refresh_play_state(self):
+        """Find every rendered timelapse in the workspace (this render, or ones
+        from previous sessions), newest first, and show the selected one. The
+        ‹ › arrows page the selection when several exist; Play, the poster
+        click, and Open Video all act on the shown file. The caption names it,
+        since different renders share one poster image."""
+        import glob
+        ws = os.path.dirname(workspace_path(self._cleaned, "STC_timelapse.mp4"))
+        cands = []
+        for ext in ("mp4", "mov"):
+            cands += glob.glob(os.path.join(ws, "STC_timelapse_*." + ext))
+        cands.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+        self._tl_builds = cands
+        self._tl_idx = max(0, min(self._tl_idx, len(cands) - 1))
+        if cands:
+            self._play_path = cands[self._tl_idx]
+        many = len(cands) > 1
+        for b in (self._tl_prev_btn, self._tl_next_btn):
+            b.setVisible(many)
+        self._tl_prev_btn.setEnabled(self._tl_idx < len(cands) - 1)
+        self._tl_next_btn.setEnabled(self._tl_idx > 0)
+        has = bool(self._play_path and os.path.isfile(self._play_path))
+        if has:
+            # The filename (STC_timelapse_4k.mp4 ...) records the render settings,
+            # so it shows whenever a video exists, count appended when several do.
+            self._tl_caption.setText(
+                os.path.basename(self._play_path)
+                + (f" · {self._tl_idx + 1} of {len(cands)}" if many else ""))
+            self._tl_caption.setVisible(True)
+        else:
+            self._tl_caption.setVisible(False)
+        self._poster.setCursor(Qt.PointingHandCursor if has else Qt.ArrowCursor)
+        self._poster.setToolTip("Click to play the timelapse video" if has else "")
+        if getattr(self, "_open_vid_btn", None) is not None:
+            self._open_vid_btn.setEnabled(has)
+        self._set_poster()   # redraw with (or without) the play button overlay
+
+    def _step_video(self, delta):
+        """Arrow click: +1 pages to an older render, -1 back toward the newest."""
+        self._tl_idx += delta
+        self._refresh_play_state()
+
+    def _open_saved_folder(self):
+        """Open the STC Extras folder where timelapses are saved."""
+        ws = os.path.dirname(workspace_path(self._cleaned, "STC_timelapse.mp4"))
+        if os.path.isdir(ws):
+            _open_folder_in_file_manager(ws)
+
+    def _play_video(self):
+        from PySide6.QtGui import QDesktopServices
+        from PySide6.QtCore import QUrl
+        if self._play_path and os.path.isfile(self._play_path):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(self._play_path))
+
+    def _sync_style(self):
+        """Grey out Smoothing when Building Trails is chosen.
+
+        That style keeps EVERY earlier photo permanently, so a rolling window of
+        3 frames is neither more nor less than what it already does -- the
+        control would sit there looking adjustable while changing nothing. The
+        Star Trail tab does the same with Length when Blending Mode is Normal.
+        """
+        on = self._style_cb.currentData() == "plain"
+        self._blend_cb.setEnabled(on)
+        self._blend_hint.setEnabled(on)
+        if hasattr(self, "_blend_label"):
+            self._blend_label.setEnabled(on)
+
+    def _restore_choices(self):
+        """Deliberately does nothing. Both creator tabs open at their defaults.
+
+        These settings used to be remembered between sessions while the Star
+        Trail tab's did not, so the two tabs behaved differently for no reason a
+        user could see: pick Comet Mode and a thickness you like and you re-pick
+        them every time, but set 30 frames a second once and it stuck forever.
+        Bruce chose to make them match by having BOTH reset (2026-08-30) -- a
+        window that always opens the same way is predictable, and a remembered
+        setting you have forgotten choosing is the kind that quietly produces a
+        file you did not expect.
+
+        Kept as a method, called from the same place, so the shape of the window
+        setup does not change and there is one obvious spot to undo this."""
+        return
+
+    def _save_choices(self):
+        """Deliberately does nothing -- see _restore_choices. Any previously
+        saved values are simply never read again; they are left in place rather
+        than deleted, so undoing this restores the user's old choices intact."""
+        return
+
+    def _current_folder(self):
+        """The frame folder for the selected source (Original by default when offered)."""
+        if self._source_cb.currentData() == "original" and self._original:
+            return self._original
+        return self._cleaned
+
+    def _reload_frames(self):
+        """Load the frame list for the current source and refresh the estimate.
+        Called on open and whenever the Cleaned/Original choice changes."""
+        from modules.frame_list import gather_frames
+        from modules.io_safe import image_size
+        self._frames = gather_frames(self._current_folder())
+        self._n_frames = len(self._frames)
+        self._frame_row.set_total(self._n_frames)
+        self._nw = self._nh = 0
+        if self._frames:
+            sz = image_size(self._frames[0])
+            if sz:
+                self._nw, self._nh = sz
+        self._update_estimate()
+        self._set_poster()
+
+    def _frames_used(self):
+        """How many frames will really go into the video: every frame found, less
+        whatever the Frame Range slider leaves out."""
+        return max(0, self._n_frames - self._frame_range.start()
+                   - self._frame_range.end())
+
+    def _calc(self):
+        """Work out what the timelapse will be before rendering it: the finished
+        pixel size, the frame rate, the estimated file size, and how much disk
+        space is actually free.
+
+        Drives both the summary line the user reads and the low-disk warning, so
+        they learn a 12 GB render will not fit BEFORE waiting through it rather
+        than after. Returns those five values together.
+        """
+        from timelapse_maker import target_size, estimate_output_bytes
+        size_key = self._size_cb.currentData() or "4k"
+        fps = int(self._fps_cb.currentData() or 30)
+        if self._nw and self._nh:
+            tw, th = target_size(self._nw, self._nh, size_key)
+        else:
+            tw, th = 1920, 1080
+        est = estimate_output_bytes(self._frames_used(), fps, tw, th)
+        import shutil
+        try:
+            free = shutil.disk_usage(self._cleaned).free
+        except Exception:
+            free = 0
+        return size_key, fps, tw, th, est, free
+
+    def _update_estimate(self):
+        self._save_choices()
+        size_key, fps, tw, th, est, free = self._calc()
+        self._estimate_lbl.setText(
+            f"{self._frames_used()} frames → {tw} x {th} @ {fps}fps    |    "
+            f"estimated ~{est / 1e6:.0f} MB    |    free {free / 1e9:.1f} GB")
+
+    def _toggle_render(self):
+        """The Render button doubles as Stop while a render is running."""
+        if self._proc is not None and self._proc.state() != QProcess.NotRunning:
+            self._stop_render()
+        else:
+            self._start_render()
+
+    def _set_options_enabled(self, enabled):
+        """Grey out (or restore) every option control while a render runs, so the
+        settings can't change mid-encode. The Stop button stays live to cancel."""
+        for cb in (self._source_cb, self._size_cb, self._fps_cb,
+                   self._blend_cb, self._fmt_cb, self._frame_range):
+            cb.setEnabled(enabled)
+
+    def _stop_render(self):
+        """Cancel an in-progress render. Killing the encoder fires the finished
+        signal, where _on_proc_finished resets the UI and drops the partial file."""
+        if self._proc is not None and self._proc.state() != QProcess.NotRunning:
+            self._render_cancelled = True
+            self._phase_text = "Stopping…"   # spinner keeps rendering it
+            self._proc.kill()
+
+    def _start_render(self):
+        """Render the timelapse video, in the background, from the chosen frames.
+
+        WHAT THE USER GETS: a video that plays their whole night in a few
+        seconds, built from either the cleaned frames or the untouched originals,
+        at the size, frame rate and format they picked. Blending, when they ask
+        for it, carries each frame's trails a little way into the next so the
+        motion reads as smooth rather than as a flicker book.
+
+        Checks free disk space first and asks before starting if the estimate is
+        close to what is left, since running out partway through wastes the whole
+        render. The encoding runs as a SEPARATE PROGRAM so the window stays
+        responsive; this method only prepares the job and launches it.
+        """
+        if self._n_frames < 2:
+            self._status_lbl.setText("Need at least 2 frames.")
+            return
+        size_key, fps, tw, th, est, free = self._calc()
+        if free and free < est * 1.2:
+            if QMessageBox.warning(
+                    self, "Low disk space",
+                    f"This timelapse is estimated at about {est / 1e6:.0f} MB, but only "
+                    f"{free / 1e9:.1f} GB is free. Render anyway?",
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+                return
+        src = self._source_cb.currentData() or "cleaned"
+        frames_dir = self._current_folder()
+        ext = self._fmt_cb.currentData() or "mp4"
+        blend = int(self._blend_cb.currentData() or 0)
+        tag = f"{src}_"     # cleaned or original, always named in the file
+        # Option-named output in the cleaned folder's STC Extras workspace, so a
+        # re-render keeps its own file instead of overwriting; identical options get a
+        # _2, _3 counter. (source tag + size + fps + smoothing.)
+        # The style goes in the NAME so the two kinds never overwrite each other
+        # and a glance at the folder says which is which.
+        _style = self._style_cb.currentData() or "plain"
+        _style_tag = "accumulation" if _style == "accumulate" else "traditional"
+        _name = f"STC_timelapse_{tag}{_style_tag}_{size_key}_{fps}fps"
+        if blend >= 2 and _style == "plain":
+            _name += f"_blend{blend}"
+        self._out_path = _unique_path(workspace_path(self._cleaned, f"{_name}.{ext}"))
+        script = os.path.join(_base, "timelapse_maker.py")
+        args = [frames_dir, "-o", self._out_path, "--size", size_key,
+                "--fps", str(fps)]
+        # Building Trails ignores Smoothing on purpose: it already keeps every
+        # earlier photo, so a rolling window would be meaningless. The control is
+        # greyed out for the same reason (see _sync_style).
+        if _style == "accumulate":
+            args += ["--style", "accumulate"]
+        elif blend >= 2:
+            args += ["--style", "blended", "--blend-window", str(blend)]
+        else:
+            args += ["--style", "plain"]
+        if self._frame_range.start() or self._frame_range.end():
+            args += ["--trim-start", str(self._frame_range.start()),
+                     "--trim-end", str(self._frame_range.end())]
+        if getattr(sys, "frozen", False):
+            pargs = ["--cleanr-worker", script] + args
+        else:
+            pargs = ["-u", script] + args
+        # Anonymous usage facts for this render, sent only if it finishes and the
+        # user opted in (see _on_proc_finished). No paths, no file names.
+        self._render_facts = {
+            "type": "timelapse",
+            "app_version": VERSION,
+            "source": src,
+            "size": size_key,
+            "fps": fps,
+            "blend": blend,
+            "format": ext,
+            "frames": self._frames_used(),
+            "width": tw,
+            "height": th,
+        }
+        self._render_cancelled = False
+        self._render_btn.setText("Stop")
+        self._set_options_enabled(False)
+        self._bar.setVisible(True)
+        self._bar.setValue(0)
+        # Spinner + counting-up timer to the left of the phase text.
+        self._phase_text = "Rendering…"
+        self._out_tail = []          # fresh output tail for this render
+        self._render_started = time.time()
+        self._spin_idx = 0
+        if getattr(self, "_spin_timer", None) is None:
+            self._spin_timer = QTimer(self)
+            self._spin_timer.timeout.connect(self._tick_spinner)
+        self._spin_timer.start(200)
+        self._tick_spinner()
+        self._proc = QProcess(self)
+        self._proc.setProcessChannelMode(QProcess.MergedChannels)
+        self._proc.readyReadStandardOutput.connect(self._on_proc_output)
+        self._proc.finished.connect(self._on_proc_finished)
+        self._proc.start(sys.executable, pargs)
+
+    def _tick_spinner(self):
+        """Spinning glyph + counting-up elapsed timer to the left of the phase text."""
+        chars = "|/-\\"
+        self._spin_idx = (self._spin_idx + 1) % len(chars)
+        elapsed = int(time.time() - getattr(self, "_render_started", time.time()))
+        t = f"{elapsed // 60}m {elapsed % 60}s" if elapsed >= 60 else f"{elapsed}s"
+        self._status_lbl.setText(
+            f"{chars[self._spin_idx]}  {getattr(self, '_phase_text', 'Rendering…')}  {t}")
+
+    def _on_proc_output(self):
+        """Turn the video encoder's chatter into a moving progress bar, and keep
+        its last few lines.
+
+        Those kept lines are what let a failed render report the encoder's real
+        complaint in the Star Log instead of a bare "it did not finish".
+        """
+        data = bytes(self._proc.readAllStandardOutput()).decode("utf-8", "replace")
+        # Keep the tail of the renderer's output so a failure can put the real
+        # reason in the Star Log instead of a bare "didn't finish".
+        self._out_tail = (getattr(self, "_out_tail", [])
+                          + [l for l in data.splitlines() if l.strip()])[-15:]
+        for line in data.splitlines():
+            if line.startswith("TIMELAPSE_PROGRESS:"):
+                try:
+                    i, n = line.split(":", 1)[1].strip().split("/")
+                    self._bar.setValue(int(int(i) * 100 / max(1, int(n))))
+                except Exception:
+                    pass
+
+    def _on_proc_finished(self, code, _status):
+        """Put the window back in order when the timelapse render ends.
+
+        Re-enables the controls, then tells the user where they stand. A success
+        makes the new video the one the play button and Open Video point at. A
+        cancelled render deletes the half-written file, because a truncated video
+        left in their folder looks like a finished one until they try to play it.
+        A failure keeps the encoder's own last words for the Star Log.
+        """
+        if getattr(self, "_spin_timer", None) is not None:
+            self._spin_timer.stop()          # stop the spinner/timer before final status
+        self._render_btn.setText("Create Timelapse")
+        self._render_btn.setEnabled(True)
+        self._set_options_enabled(True)
+        if self._render_cancelled:
+            self._bar.setVisible(False)
+            self._status_lbl.setText("Render cancelled.")
+            self._remove_partial()
+            return
+        if code == 0 and self._out_path and os.path.exists(self._out_path):
+            self._bar.setVisible(False)
+            self._status_lbl.setText(f"Done: {os.path.basename(self._out_path)}")
+            self._play_path = self._out_path
+            self._tl_idx = 0                    # a fresh render is newest: show it
+            self._refresh_play_state()          # light up the play button + Open Video button
+            # No auto-open of the Finder folder -- the user opens the video or folder
+            # via the buttons / play overlay (one screen, on demand).
+            if SETTINGS.value("crash_reporting_enabled", False, type=bool):
+                try:
+                    from modules import usage_report
+                    usage_report.send(getattr(self, "_render_facts", {"type": "timelapse"}))
+                except Exception:
+                    pass
+        else:
+            self._bar.setVisible(False)
+            _log_app_error("timelapse render failed",
+                           detail=f"exit code {code}; last output:\n  "
+                                  + "\n  ".join(getattr(self, "_out_tail", ["(none)"])))
+            self._status_lbl.setText("The timelapse didn't finish. The Star Log has the detail.")
+
+    def _remove_partial(self):
+        """Delete a half-written output file left by a cancelled/failed render."""
+        try:
+            if self._out_path and os.path.exists(self._out_path):
+                os.remove(self._out_path)
+        except OSError:
+            pass
+
+    def shutdown(self):
+        """Stop a render in progress so closing the window never leaves an orphan
+        encoder running, and drop the half-written file. Called by CreatorWindow's
+        closeEvent (this is a tab page now, not a top-level window)."""
+        if self._proc is not None and self._proc.state() != QProcess.NotRunning:
+            self._render_cancelled = True
+            try:
+                self._proc.finished.disconnect(self._on_proc_finished)
+            except (TypeError, RuntimeError):
+                pass
+            self._proc.kill()
+            self._proc.waitForFinished(2000)
+            self._remove_partial()
+
+
+class _StatusLabel(QLabel):
+    """The one-line status under the options ("Done: file name", "Build
+    cancelled."). It used to sit there empty, holding a blank line open above the
+    big button on both maker tabs; now it takes no room until it has a message, and
+    gives it back when the message is cleared. The window therefore opens a line
+    shorter and grows by one line only while there is something to read."""
+
+    def __init__(self, parent=None):
+        super().__init__("", parent)
+        self.setVisible(False)
+
+    def setText(self, text):
+        super().setText(text)
+        self.setVisible(bool(text))
+
+
+class FrameRangeSlider(QWidget):
+    """One bar with two grips: how many frames to leave out at each end.
+
+    The left grip counts frames cut from the START, the right grip frames cut from
+    the END; both rest at 0 and move inward. The bar is the whole sequence, the
+    tinted part is what goes into the star trail, and the middle of the bar says
+    how many that is ("Using 536 of 572 frames").
+
+    `total` is every frame the person has -- the automatic test-shot skip is not
+    part of it and is never shown. `min_keep` is the fewest frames that may remain:
+    a grip stops when the other would be squeezed below it. `changed(start, end)`
+    fires whenever either number moves."""
+
+    changed = Signal(int, int)
+    _GRIP_W = 12
+    _BAR_INSET = 5      # how far each grip sticks out above and below the bar
+
+    def __init__(self, total, min_keep, parent=None):
+        super().__init__(parent)
+        self._total = max(1, int(total))
+        self._min_keep = int(min_keep)
+        self._start = 0
+        self._end = 0
+        self._slide = False        # Step 4: dragging the start grip slides the window
+        self._show_count = True    # the "Using N of M frames" box on the bar; Step 4 turns it off
+        self._drag = None          # "start" or "end" while a grip is held
+        self.setFixedHeight(36)
+        self.setMinimumWidth(160)
+        self.setCursor(Qt.SizeHorCursor)
+        self.setToolTip("Drag a grip inward to leave out frames at that end")
+
+    def start(self):
+        return self._start
+
+    def end(self):
+        return self._end
+
+    def used(self):
+        return self._total - self._start - self._end
+
+    def set_slide(self, on):
+        """Step 4 only. When on, dragging the START grip slides the whole window
+        (the number of frames kept stays the same and the end grip travels with it,
+        stopping at the end of the folder) instead of squeezing it. Off = the grips
+        move independently, as on the Star Trail and Timelapse tabs."""
+        self._slide = bool(on)
+
+    def _room(self):
+        """Most frames that can still be cut, in total, from both ends."""
+        return max(0, self._total - self._min_keep)
+
+    def _span(self):
+        return max(1, self.width() - self._GRIP_W)
+
+    def _x_of_start(self):
+        return self._start / self._total * self._span()
+
+    def _x_of_end(self):
+        return self._GRIP_W + (1 - self._end / self._total) * self._span() - self._GRIP_W
+
+    def _frames_at(self, x):
+        """Frames-from-the-edge a mouse x corresponds to (clamped, rounded)."""
+        return int(round(min(1.0, max(0.0, x / self._span())) * self._total))
+
+    def mousePressEvent(self, e):
+        x = e.position().x() - self._GRIP_W / 2
+        # Pick the nearer grip; when they sit on top of each other (both at 0 on a
+        # tiny bar) the side of the bar the click lands on decides.
+        d_start = abs(x - self._x_of_start())
+        d_end = abs(x - self._x_of_end())
+        self._drag = "start" if d_start < d_end or (
+            d_start == d_end and x < self.width() / 2) else "end"
+        self.mouseMoveEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if not self._drag:
+            return
+        x = e.position().x() - self._GRIP_W / 2
+        if self._drag == "start" and self._slide:
+            keep = self.used()
+            n = min(self._frames_at(x), self._total - keep)
+            self.set_range(n, self._total - n - keep)
+        elif self._drag == "start":
+            n = min(self._frames_at(x), self._room() - self._end)
+            self.set_range(n, self._end)
+        else:
+            n = min(self._total - self._frames_at(x), self._room() - self._start)
+            self.set_range(self._start, n)
+
+    def mouseReleaseEvent(self, e):
+        self._drag = None
+
+    def set_total(self, total, min_keep=None):
+        """Start over on a different sequence (the Source was switched): both
+        grips back to 0, the bar now standing for `total` frames. Does not emit
+        `changed` -- the caller is already refreshing everything that depends on it."""
+        self._total = max(1, int(total))
+        if min_keep is not None:
+            self._min_keep = int(min_keep)
+        self._start = self._end = 0
+        self.update()
+
+    def set_range(self, start, end):
+        start = max(0, min(int(start), self._room()))
+        end = max(0, min(int(end), self._room() - start))
+        if (start, end) == (self._start, self._end):
+            return
+        self._start, self._end = start, end
+        self.update()
+        self.changed.emit(start, end)
+
+    def paintEvent(self, _e):
+        from PySide6.QtCore import QRectF
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        pal = self.palette()
+        accent = QColor(BRAND_HEADING_BLUE)
+        h, gw, inset = self.height(), self._GRIP_W, self._BAR_INSET
+        bh = h - 2 * inset                  # the bar is shorter than the widget...
+        xs = self._x_of_start()
+        xe = self._x_of_end()
+        # whole sequence, then the part that is used
+        p.setPen(pal.color(QPalette.Mid))
+        p.setBrush(pal.color(QPalette.Base))
+        p.drawRoundedRect(QRectF(0.5, inset + 0.5, self.width() - 1, bh - 1), 6, 6)
+        tint = QColor(accent); tint.setAlpha(45)
+        p.setPen(Qt.NoPen)
+        p.setBrush(tint)
+        p.drawRoundedRect(QRectF(xs + gw / 2, inset + 1, max(0.0, xe - xs), bh - 2), 5, 5)
+        # ...and the grips are the full height, so they stand out above and below it
+        # and stay visible and easy to grab even when they pass under the count.
+        p.setPen(Qt.NoPen)
+        p.setBrush(accent)
+        for x in (xs, xe):
+            p.drawRoundedRect(QRectF(x, 0, gw, h), 5, 5)
+        # the count, in a small pill on top of everything else (inside the bar).
+        # Step 4 leaves it off: the box sat over the right grip, and that screen
+        # says the same thing on the line underneath the bar.
+        if not self._show_count:
+            p.end()
+            return
+        txt = f"Using {self.used()} of {self._total} frames"
+        fm = p.fontMetrics()
+        tw = fm.horizontalAdvance(txt) + 20
+        pill = QRectF((self.width() - tw) / 2, inset + 3, tw, bh - 6)
+        p.setPen(pal.color(QPalette.Mid))
+        p.setBrush(pal.color(QPalette.Window))
+        p.drawRoundedRect(pill, 5, 5)
+        p.setPen(pal.color(QPalette.WindowText))
+        p.drawText(pill, Qt.AlignCenter, txt)
+        p.end()
+
+
+class FrameRangeRow(QWidget):
+    """The whole Frame Range line, identical on the Star Trail and Timelapse tabs:
+    the label, the number for the start grip, the bar, the number for the end grip.
+
+    `slider` is the FrameRangeSlider inside it; read `slider.start()` and
+    `slider.end()` when the job starts. `set_total` re-points the row at a different
+    sequence, and hides it outright when there are too few frames to trim."""
+
+    def __init__(self, label_w, total, min_keep, parent=None, skip_words=False):
+        super().__init__(parent)
+        self._min_keep = int(min_keep)
+        # skip_words (Step 4): the two numbers read "Skip first 158" / "Skip last 0"
+        # instead of "-158" / "0", which looked like frame numbers on that screen.
+        self._skip_words = bool(skip_words)
+        self.slider = FrameRangeSlider(max(1, total), min_keep)
+        if self._skip_words:
+            self.slider._show_count = False  # Step 4 says the count under the bar instead
+        self._lo, self._hi = QLabel("0"), QLabel("0")
+        for n in (self._lo, self._hi):
+            n.setFixedWidth(112 if self._skip_words else 44)
+            n.setAlignment(Qt.AlignCenter)
+            n.setStyleSheet(f"color: {BRAND_HEADING_BLUE}; font-weight: bold;")
+        lab = QLabel("Frame Range")
+        lab.setFixedWidth(label_w)
+        lab.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        f = lab.font(); f.setBold(True); lab.setFont(f)
+        r = QHBoxLayout(self)
+        r.setContentsMargins(0, 0, 0, 0)
+        r.addWidget(lab)
+        r.addWidget(self._lo)
+        r.addWidget(self.slider, 1)
+        r.addWidget(self._hi)
+        self.slider.changed.connect(self._show)
+        self._show(0, 0)
+        self.setVisible(total > min_keep)
+
+    def _show(self, start, end):
+        if self._skip_words:
+            self._lo.setText(f"Skip first {start}")
+            self._hi.setText(f"Skip last {end}")
+            return
+        self._lo.setText(f"-{start}" if start else "0")
+        self._hi.setText(f"-{end}" if end else "0")
+
+    def set_total(self, total):
+        self.slider.set_total(total, self._min_keep)
+        self._show(0, 0)
+        self.setVisible(total > self._min_keep)
+
+
+class StarTrailPanel(QWidget):
+    """The Star Trail tab inside CreatorWindow, opened when a clean finishes.
+
+    WHAT A PERSON SEES. A star trail is already waiting: the run stacked one while
+    it cleaned, so the tab opens on a finished picture rather than a blank box.
+    The arrows page through every trail this folder holds, newest first.
+
+    WHAT THEY CAN CHANGE, and what each choice costs:
+      Source     -- the cleaned frames (default) or their untouched originals,
+                    which is how you get a before-and-after pair.
+      Style      -- plain trails, or Comet Mode where each trail fades out behind
+                    the star. Comet is order-dependent, so it cannot reuse the
+                    stack the run built and must re-read every frame.
+      Length     -- how far a comet tail reaches; meaningless without Comet Mode,
+                    so it greys out.
+      Thickness  -- widen the trails. The foreground is protected if a mask was
+                    painted, so the landscape does not fatten with the stars.
+      Format     -- JPG, 8-bit TIFF, or 16-bit TIFF. Offers only what the chosen
+                    frames can actually fill: you may always ask for LESS depth
+                    than they hold, never more (see _sync_format_choices).
+      Specks     -- remove hot pixels and coloured flecks from the sky. Re-reads
+                    every frame, so it is the slowest option here.
+
+    EVERY BUILD IS A NEW FILE. The settings are written into the filename, so a
+    second build never overwrites the first and the arrows let you compare them.
+
+    The stacking itself runs as a separate program (make_share_clip.py) so a build
+    that takes minutes cannot freeze the window; the button becomes Stop while it
+    works. Only the options that re-read frames cost real time -- a plain trail in
+    the frames' own format is already sitting on disk."""
+
+    def __init__(self, cleaned_folder, star_path, original_folder=None, parent=None):
+        super().__init__(parent)
+        self._cleaned = cleaned_folder
+        # The uncleaned input frames, for the Source choice (mirrors the
+        # Timelapse tab). None or missing on disk = the choice isn't offered.
+        self._original = original_folder if (original_folder and
+                                             os.path.isdir(original_folder)) else None
+        # Preview the MOST RECENT star trail: the run's instant baseline OR any Build
+        # output (STC_star_trail_*, either format). Since Build stopped overwriting the baseline
+        # (option-named files now), the newest existing file is the right preview.
+        # TWO POINTERS, ON PURPOSE, and they must not be confused again.
+        # _baseline_star is where the run's own trail lives and never moves; it
+        # only tells _star_trail_builds which workspace to look in. _star_path is
+        # whatever is on SCREEN right now, and the arrows move it as the user
+        # pages. Using the moving one to find the list is what made the cleaned
+        # trail vanish once you paged past it (2026-08-30).
+        self._baseline_star = star_path
+        self._star_path = _newest_star_trail(star_path, cleaned_folder)
+        self._proc = None
+        self._build_cancelled = False
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(*_CREATOR_PANEL_MARGINS)
+        lay.setSpacing(_CREATOR_PANEL_SPACING)
+        # No heading here: the tab above already says "Star Trail", and the heading
+        # cost the window about 40 px of height (Bruce, 2026-09-30).
+
+        # Preview: the newest star trail if one exists, else a placeholder telling
+        # the user how to make one (mirrors the Timelapse tab so the area is never
+        # blank). Thumb and placeholder BOTH always exist and swap visibility --
+        # the old build-on-demand thumb meant a window opened before any trail
+        # existed could never show the first build. Arrows flank the preview and
+        # appear only when more than one built trail exists.
+        self._thumb = QLabel()
+        self._thumb.setAlignment(Qt.AlignCenter)
+        # Fixed LANDSCAPE box: portrait images center inside it with side margins
+        # instead of ballooning the window height. Same box on both tabs.
+        self._thumb.setFixedSize(_PREVIEW_W, _PREVIEW_H)
+        self._thumb.setStyleSheet("background: #141414; border-radius: 6px;")
+        self._thumb.setCursor(Qt.PointingHandCursor)
+        self._thumb.setToolTip("Click to open the star trail image")
+        self._thumb.mousePressEvent = lambda e: self._open_star()
+        self._ph = QLabel("Your star trail will appear here. Choose your options below, "
+                          "then click Create Star Trail.")
+        self._ph.setAlignment(Qt.AlignCenter); self._ph.setWordWrap(True)
+        self._ph.setFixedSize(_PREVIEW_W, _PREVIEW_H)
+        self._ph.setStyleSheet("background: #141414; color: #dcdcdc; border-radius: 6px; "
+                               "padding: 16px; font-size: 19px;")
+        self._prev_btn = _make_preview_arrow("‹", lambda: self._step_build(+1))
+        self._next_btn = _make_preview_arrow("›", lambda: self._step_build(-1))
+        _prow = QHBoxLayout()
+        _prow.addStretch(1)
+        _prow.addWidget(self._prev_btn, 0, Qt.AlignVCenter)
+        _pstack = QVBoxLayout(); _pstack.setSpacing(0)
+        _pstack.addWidget(self._thumb)
+        _pstack.addWidget(self._ph)
+        _prow.addLayout(_pstack)
+        _prow.addWidget(self._next_btn, 0, Qt.AlignVCenter)
+        _prow.addStretch(1)
+        lay.addLayout(_prow)
+        # Filename caption: the option-named files (STC_star_trail_comet-long_
+        # thick2_despeck.jpg ...) are the record of the settings each build used,
+        # so the caption IS the settings readout for whichever build is shown.
+        self._name_lbl = QLabel("")
+        self._name_lbl.setAlignment(Qt.AlignCenter)
+        self._name_lbl.setStyleSheet(f"color: {MUTED_TEXT};")
+        self._name_lbl.setVisible(False)
+        lay.addWidget(self._name_lbl)
+        self._hint_open = QLabel("Click the image to open")
+        self._hint_open.setAlignment(Qt.AlignCenter)
+        self._hint_open.setStyleSheet(f"color: {MUTED_TEXT};")
+        lay.addWidget(self._hint_open)
+        self._builds = []
+        self._build_idx = 0
+        self._refresh_builds()
+
+        _LABEL_W = 112     # wide enough for "Trail Thickness"
+
+        def _row(text, w):
+            """One settings line: a right-aligned label of fixed width, then its
+            control. The fixed width is what makes every label in this panel end
+            at the same place, so the controls line up in a column instead of
+            stepping in and out with the length of each word."""
+            r = QHBoxLayout()
+            _l = QLabel(text)
+            _l.setFixedWidth(_LABEL_W)
+            _l.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            _lf = _l.font(); _lf.setBold(True); _l.setFont(_lf)
+            r.addWidget(_l)
+            r.addWidget(w, 1)
+            lay.addLayout(r)
+            return _l
+
+        # Source: cleaned frames (default) or the original, uncleaned frames --
+        # the same choice the Timelapse tab offers, only shown when the original
+        # folder is actually on disk. Remembered across sessions; no saved
+        # choice = Cleaned.
+        self._src_cb = QComboBox()
+        self._src_cb.addItem("Cleaned", "cleaned")
+        # True once a cleaning run has written frames to the output folder. Until
+        # then "Cleaned" is grayed out and the tab opens on Original, and a build
+        # must not try to match its shot list to cleaned frames that don't exist.
+        self._has_cleaned = folder_has_image_frames(cleaned_folder)
+        if self._original:
+            self._src_cb.addItem("Original", "original")
+        # Source is NOT remembered between sessions: this tab opens on Cleaned
+        # every time (Original when there are no cleaned frames yet), matching the
+        # Timelapse tab, which no longer remembers its own choices either (see
+        # _restore_choices there). Both windows opening the same way every time is
+        # the point. The row is always shown so the choice, and why Cleaned is
+        # unavailable, is visible.
+        if not self._has_cleaned:
+            _gray_out_combo_item(self._src_cb, "cleaned",
+                                 "Available after a cleaning run finishes.")
+            if self._original:
+                self._src_cb.setCurrentIndex(self._src_cb.findData("original"))
+        _row("Source", self._src_cb)
+
+        # Frame Range: leave out frames at the start and/or the end of the
+        # sequence. Counts are what the person sees -- every shot found, the
+        # automatic first-3-and-last-3 skip deliberately not mentioned -- and the
+        # bar never lets fewer than MIN_FRAMES_SHOWN remain. A sequence that short
+        # has nothing worth trimming, so the whole row is left out. Not remembered
+        # between sessions, like every other choice on this tab.
+        self._frame_range = None
+        try:
+            import make_share_clip as _msc
+            _total = (len(_msc._list_frames(self._selected_source_dir()))
+                      + _msc.SKIP_FIRST + _msc.SKIP_LAST)
+            _min_keep = _msc.MIN_FRAMES_SHOWN
+        except Exception:
+            _total, _min_keep = 0, 0
+        # Frames the stack really uses (the automatic skip taken off); 0 = unknown.
+        # Tapered Ends is switched off when this is known and too small to show it.
+        try:
+            self._seq_used = max(0, _total - _msc.SKIP_FIRST - _msc.SKIP_LAST) if _total else 0
+        except Exception:
+            self._seq_used = 0
+        if _total > _min_keep > 0:
+            _fr_row = FrameRangeRow(_LABEL_W, _total, _min_keep)
+            self._frame_range = _fr_row.slider
+            lay.addWidget(_fr_row)
+
+        # Star Trail Style: the three styles side by side on ONE row, and directly
+        # under them ONE options row that shows only the options of the style picked
+        # (Comet: Trail Length + reverse order; Tapered Ends: Taper Length; Normal:
+        # nothing). Two rows in all, where separate greyed-out rows for every style
+        # made this tab so tall that the window could not fit it on a laptop screen
+        # and its text drew on top of the picture (2026-11-10). The options row is a
+        # stack that keeps the height of its tallest page, so picking a style never
+        # changes the window's height.
+        from PySide6.QtWidgets import QRadioButton, QButtonGroup, QStackedWidget
+        _mode_w = QWidget()
+        _mv = QVBoxLayout(_mode_w); _mv.setContentsMargins(0, 0, 0, 0); _mv.setSpacing(6)
+        self._mode_normal = QRadioButton("Normal (Lighten)")
+        self._mode_comet = QRadioButton("Comet Mode")
+        self._mode_group = QButtonGroup(self)
+        self._mode_group.addButton(self._mode_normal)
+        self._mode_group.addButton(self._mode_comet)
+        # Tapered Ends: every trail fades in at its start and out at its end; the
+        # middle of the sequence stays full brightness (make_share_clip --taper).
+        self._mode_taper = QRadioButton("Tapered Ends")
+        self._mode_group.addButton(self._mode_taper)
+        self._mode_normal.setChecked(True)
+        _rb = QHBoxLayout(); _rb.setContentsMargins(0, 0, 0, 0); _rb.setSpacing(18)
+        _rb.addWidget(self._mode_normal)
+        _rb.addWidget(self._mode_comet)
+        _rb.addWidget(self._mode_taper)
+        _rb.addStretch(1)
+        _mv.addLayout(_rb)
+        _too_short = 0 < getattr(self, "_seq_used", 0) < _msc.TAPER_MIN_SEQUENCE if _total else False
+        if _too_short:
+            self._mode_taper.setEnabled(False)
+            self._mode_taper.setToolTip("Needs at least "
+                                        f"{_msc.TAPER_MIN_SEQUENCE} frames to show.")
+
+        # Comet's options. Trail Length is a fraction of the sequence
+        # (50/75/100/150/200%), so the tail scales to the frame count.
+        self._comet_len_cb = QComboBox()
+        for label, frac in (("Short (50%)", 0.5), ("Medium (75%)", 0.75), ("Long (100%)", 1.0),
+                            ("Extra Long (150%)", 1.5), ("Max (200%)", 2.0)):
+            self._comet_len_cb.addItem(label, frac)
+        self._comet_len_cb.setCurrentIndex(self._comet_len_cb.findData(1.0))   # default Long (100%)
+        self._len_label = QLabel("Trail Length")
+        # Reverse frame order (comet-only): flips which end of each trail fades, so the
+        # comet tails point the other way.
+        self._reverse_chk = QCheckBox("Reverse order")
+        self._reverse_chk.setToolTip("Process the frames in reverse order, so the comet "
+                                     "tails point the other way.")
+        _cpage = QWidget()
+        _ch = QHBoxLayout(_cpage); _ch.setContentsMargins(0, 0, 0, 0); _ch.setSpacing(8)
+        _ch.addWidget(self._len_label)
+        _ch.addWidget(self._comet_len_cb, 1)
+        _ch.addWidget(self._reverse_chk)
+
+        # Tapered Ends' option: the share of the frames at EACH end that fade, so it
+        # scales with the sequence.
+        self._taper_cb = QComboBox()
+        for label, frac in (("Short (10%)", 0.1), ("Medium (20%)", 0.2), ("Long (30%)", 0.3)):
+            self._taper_cb.addItem(label, frac)
+        self._taper_cb.setCurrentIndex(self._taper_cb.findData(0.2))   # default Medium (20%)
+        self._taper_label = QLabel("Taper Length")
+        _tpage = QWidget()
+        _th = QHBoxLayout(_tpage); _th.setContentsMargins(0, 0, 0, 0); _th.setSpacing(8)
+        _th.addWidget(self._taper_label)
+        _th.addWidget(self._taper_cb, 1)
+
+        self._style_opts = QStackedWidget()
+        self._style_opts.addWidget(QWidget())      # 0: Normal, no options
+        self._style_opts.addWidget(_cpage)         # 1: Comet Mode
+        self._style_opts.addWidget(_tpage)         # 2: Tapered Ends
+        _mv.addWidget(self._style_opts)
+        _row("Star Trail Style", _mode_w)
+
+        self._mode_taper.toggled.connect(self._sync_comet_len)
+        self._mode_comet.toggled.connect(self._sync_comet_len)
+        self._sync_comet_len()
+
+        # Trail thickness: widen the trails (thicken_px). 0 = leave as shot.
+        self._size_cb = QComboBox()
+        for label, v in (("Normal", 0), ("+1 px", 1), ("+2 px", 2),
+                         ("+3 px", 3), ("+4 px", 4), ("+5 px", 5)):
+            self._size_cb.addItem(label, v)
+        _row("Trail Thickness", self._size_cb)
+
+        # Brightness of the finished trail: a midtone curve that keeps black and white
+        # where they are (see make_share_clip.apply_brightness). The slider counts
+        # tenths, -2.0 to +2.0; the middle is "as stacked" and changes nothing. Like every choice on this tab
+        # it is not remembered between sessions.
+        self._bright_sl = QSlider(Qt.Horizontal)
+        self._bright_sl.setRange(-20, 20)
+        self._bright_sl.setValue(0)
+        self._bright_sl.setTickPosition(QSlider.NoTicks)
+        self._bright_val = QLabel("No change")
+        self._bright_val.setAlignment(Qt.AlignHCenter | Qt.AlignVCenter)
+        self._bright_sl.valueChanged.connect(self._on_bright_changed)
+        _bw = QWidget()
+        _bv = QVBoxLayout(_bw); _bv.setContentsMargins(0, 0, 0, 0); _bv.setSpacing(0)
+        _bh = QHBoxLayout(); _bh.setContentsMargins(0, 0, 0, 0)
+        _bh.addWidget(QLabel("Darker"))
+        _bh.addWidget(self._bright_sl, 1)
+        _bh.addWidget(QLabel("Lighter"))
+        _bv.addLayout(_bh)
+        _bv.addWidget(self._bright_val)
+        _row("Brightness", _bw)
+
+        # Output format. You may always go DOWN in quality from what the frames
+        # hold -- an 8-bit file from 16-bit frames is a perfectly reasonable ask.
+        # You may never go up: _sync_format_choices greys out any depth the
+        # chosen frames cannot supply, because scaling 8-bit values into a 16-bit
+        # file makes a much larger file holding exactly the same picture.
+        self._fmt_cb = QComboBox()
+        for _lab, _v in (("JPG", "jpg"), ("TIFF 8-bit", "tif8"),
+                         ("TIFF 16-bit", "tif16")):
+            self._fmt_cb.addItem(_lab, _v)
+        _row("Format", self._fmt_cb)
+        # Whichever frames are selected decide what is on offer, and Cleaned and
+        # Original can differ (JPEG originals cleaned out to TIFF, say), so this
+        # is re-checked whenever the Source changes -- not just once at startup.
+        # Once they pick a format themselves, stop re-defaulting it under them.
+        self._fmt_touched = False
+        self._fmt_cb.activated.connect(lambda _i: setattr(self, "_fmt_touched", True))
+        self._src_cb.currentIndexChanged.connect(self._sync_format_choices)
+        self._sync_format_choices()
+
+        # Hot-pixel / colored-speck removal. Composes with Comet mode (the backend runs
+        # speck removal on the comet result), so only grayed while a build is running.
+        self._hotpix_chk = QCheckBox("Remove hot pixels && colored specks (will take extra time)")
+        lay.addWidget(self._hotpix_chk)
+
+        self._bar = QProgressBar()
+        self._bar.setRange(0, 100)
+        self._bar.setValue(0)
+        self._bar.setVisible(False)
+        lay.addWidget(self._bar)
+        self._status_lbl = _StatusLabel()
+        lay.addWidget(self._status_lbl)
+
+        # Absorb any leftover vertical space here so the controls above stay packed
+        # to the top identically to the Timelapse tab (the two tabs share a height).
+        lay.addStretch(1)
+        # Open actions sit below the progress bar; grayed out while a build runs
+        # so you can't open a half-written file.
+        # Build first (the big blue action button, matching the app's hero button),
+        # then the grey Open buttons below it.
+        self._build_btn = QPushButton("Create Star Trail")
+        self._build_btn.setFixedHeight(48)
+        self._build_btn.setStyleSheet(_hero_btn_css())
+        self._build_btn.clicked.connect(self._toggle_build)
+        lay.addWidget(self._build_btn)
+
+        _open_row = QHBoxLayout()
+        _open_row.addStretch(1)
+        self._open_img_btn = QPushButton("Open Star Trail Image")
+        self._open_img_btn.clicked.connect(self._open_star)
+        self._open_dir_btn = QPushButton("Open Saved Folder")
+        self._open_dir_btn.clicked.connect(self._open_folder)
+        for b in (self._open_img_btn, self._open_dir_btn):
+            b.setFixedHeight(34)
+            b.setStyleSheet(_secondary_btn_css())
+        _open_row.addWidget(self._open_img_btn)
+        _open_row.addWidget(self._open_dir_btn)
+        _open_row.addStretch(1)
+        lay.addLayout(_open_row)
+
+        # There was a line here telling people to stack their frames themselves
+        # if they wanted more depth, because this tab only ever wrote a JPG. That
+        # stopped being true in 2.93: the star trail now follows whatever format
+        # the frames were cleaned in, so a 16-bit clean gives a 16-bit trail and
+        # there is nothing left to send anyone away for. Asked for by Kari Tuomi
+        # (2026-08-23) and by Jon Bertsch (2026-08-27); answered rather than
+        # explained away.
+
+        _make_labels_selectable(self)   # house rule: all GUI text is copy/paste-able
+
+    def _sync_comet_len(self, *_):
+        """Show the options of the picked style only (the stack under the style
+        radios: nothing for Normal, Comet's for Comet, Taper Length for Tapered
+        Ends), and keep each style's controls live only while that style is picked."""
+        self._style_opts.setCurrentIndex(
+            1 if self._mode_comet.isChecked() else 2 if self._mode_taper.isChecked() else 0)
+        on = self._mode_comet.isChecked()
+        self._comet_len_cb.setEnabled(on)
+        self._len_label.setEnabled(on)
+        self._reverse_chk.setEnabled(on)
+        # Tapered Ends' own length choice, same rule: live only while it is selected.
+        _t = self._mode_taper.isChecked()
+        self._taper_cb.setEnabled(_t)
+        self._taper_label.setEnabled(_t)
+
+    def _tick_spinner(self):
+        """Update the build status: a spinning glyph, the current phase, and a
+        counting-up elapsed timer to the left of the phase text."""
+        chars = "|/-\\"
+        self._spin_idx = (self._spin_idx + 1) % len(chars)
+        elapsed = int(time.time() - getattr(self, "_build_started", time.time()))
+        t = f"{elapsed // 60}m {elapsed % 60}s" if elapsed >= 60 else f"{elapsed}s"
+        self._status_lbl.setText(
+            f"{chars[self._spin_idx]}  {getattr(self, '_phase_text', 'Building…')}  {t}")
+
+    def _open_star(self):
+        from PySide6.QtGui import QDesktopServices
+        from PySide6.QtCore import QUrl
+        if self._star_path and os.path.isfile(self._star_path):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(self._star_path))
+
+    def _open_folder(self):
+        from PySide6.QtGui import QDesktopServices
+        from PySide6.QtCore import QUrl
+        folder = os.path.dirname(self._star_path) if self._star_path else self._cleaned
+        if folder and os.path.isdir(folder):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
+
+    def _on_bright_changed(self, v):
+        """Show the slider's setting: 'No change' in the middle, else the signed number."""
+        self._bright_val.setText("No change" if v == 0 else f"{v / 10:+.1f}")
+
+    def _toggle_build(self):
+        """Build doubles as Stop while a rebuild is running."""
+        if self._proc is not None and self._proc.state() != QProcess.NotRunning:
+            self._stop_build()
+        else:
+            self._start_build()
+
+    def _stop_build(self):
+        if self._proc is not None and self._proc.state() != QProcess.NotRunning:
+            self._build_cancelled = True
+            self._phase_text = "Stopping…"   # spinner keeps rendering it
+            self._proc.kill()
+
+    def _build_out_path(self):
+        """A new, option-named output file so each Build keeps its own version instead
+        of overwriting. The run's instant trail (STC_cleaned_star_trail) is left as
+        the plain baseline. A rebuild with the same options gets a _2, _3 counter.
+
+        The extension follows the CLEANED FRAMES, read off the files themselves --
+        somebody who cleaned to 16-bit TIFF and then builds a comet-mode version
+        wants that in TIFF too, and this window may be looking at a folder cleaned
+        long ago under a different setting."""
+        ws = os.path.dirname(self._star_path) if self._star_path else self._cleaned
+        tokens = []
+        if self._mode_comet.isChecked():
+            length = {0.5: "short", 0.75: "medium", 1.0: "long",
+                      1.5: "xlong", 2.0: "max"}.get(
+                float(self._comet_len_cb.currentData() or 1.0), "long")
+            tokens.append(f"comet-{length}")
+            if self._reverse_chk.isChecked():
+                tokens.append("reverse")
+        elif self._mode_taper.isChecked():
+            tokens.append(f"taper-{int(round(float(self._taper_cb.currentData() or 0.2) * 100))}")
+        else:
+            tokens.append("plain")
+        thick = int(self._size_cb.currentData() or 0)
+        if thick > 0:
+            tokens.append(f"thick{thick}")
+        _bright = self._bright_sl.value()
+        if _bright != 0:
+            tokens.append(f"bright{_bright / 10:+.1f}")
+        if self._hotpix_chk.isChecked():
+            tokens.append("despeck")
+        # The caption under the preview shows this filename as the record of the
+        # settings used, so the source is always named -- cleaned or original.
+        tokens.append(self._src_cb.currentData() or "cleaned")
+        # The chosen format is part of the name so a JPG build and a TIFF build of
+        # otherwise identical settings sit side by side instead of colliding on
+        # one name. Defaults to the frames' own format (see _sync_format_choices),
+        # so somebody who cleaned to TIFF still gets TIFF without touching this.
+        from make_share_clip import star_trail_ext
+        _fmt = self._fmt_cb.currentData() or "jpg"
+        if _fmt != "jpg":
+            tokens.append("16bit" if _fmt == "tif16" else "8bit")
+        base = os.path.join(ws, "STC_star_trail_" + "_".join(tokens)
+                            + star_trail_ext(_fmt))
+        return _unique_path(base)
+
+    def _selected_source_dir(self):
+        """The frames folder the Source dropdown currently points at."""
+        return (self._original
+                if self._src_cb.currentData() == "original" and self._original
+                else self._cleaned)
+
+    def _sync_format_choices(self):
+        """Offer only the formats the SELECTED frames can actually fill.
+
+        Going down is always allowed: 16-bit frames can be saved as an 8-bit TIFF
+        or a JPEG, and someone who wants a smaller file should be able to say so.
+        Going up is not, because it is not real -- 8-bit frames written into a
+        16-bit file give a file roughly thirty times larger holding exactly the
+        same 256 levels (measured on a real frame, 2026-08-30).
+
+        TIFF 8-bit is never greyed out. It is not an upgrade over JPEG, it is the
+        same depth without the compression, which is worth having.
+
+        When the frames cannot be read at all, everything stays enabled. Removing
+        a choice on a guess is worse than offering one that turns out oversized."""
+        bits = source_bitdepth(self._selected_source_dir() or "")
+        allow16 = bits is None or bits >= 16
+        idx = self._fmt_cb.findData("tif16")
+        item = self._fmt_cb.model().item(idx) if idx >= 0 else None
+        if item is not None:
+            f = item.flags()
+            item.setFlags((f | Qt.ItemIsEnabled) if allow16 else (f & ~Qt.ItemIsEnabled))
+            item.setToolTip("" if allow16 else
+                            "These frames are 8-bit, so a 16-bit file would be far "
+                            "larger without holding any more detail.")
+        # Default to the frames' own format, which is what this window has always
+        # produced -- nobody who ignores this dropdown sees any change.
+        if not getattr(self, "_fmt_touched", False):
+            self._fmt_cb.setCurrentIndex(self._fmt_cb.findData(
+                "tif16" if allow16 and (self._selected_source_ext() == ".tif")
+                else "tif8" if self._selected_source_ext() == ".tif" else "jpg"))
+        elif not allow16 and self._fmt_cb.currentData() == "tif16":
+            # Their choice cannot be honoured by these frames; keep them on a TIFF
+            # rather than dropping them all the way back to JPEG.
+            self._fmt_cb.setCurrentIndex(self._fmt_cb.findData("tif8"))
+
+    def _selected_source_ext(self):
+        """'.tif' when the selected frames are TIFFs, otherwise '.jpg'."""
+        return cleaned_star_ext(self._selected_source_dir() or "")
+
+    def _start_build(self):
+        """Build the finished star trail picture, in the background, from the
+        frames the user picked.
+
+        WHAT THE USER GETS: one image where every frame in the folder is laid on
+        top of the others so the stars draw continuous arcs across the sky.
+        Their choices decide the flavour: cleaned frames or their untouched
+        originals, plain trails or comet tails that fade out behind each star,
+        thicker lines for a bolder look, and whether to remove leftover coloured
+        specks first. The file is named after those choices, so a second build
+        with different settings never overwrites the first.
+
+        The stacking itself runs as a SEPARATE PROGRAM (make_share_clip.py) so a
+        build that takes minutes cannot freeze the window. This method only
+        assembles the job and launches it. Progress arrives in _on_proc_output
+        and the finished file is picked up in _on_proc_finished.
+        """
+        # Comet length is a FRACTION of the frame count (0.5/0.75/1.0); make_share_clip
+        # turns it into a real frame count. 0 = plain trail (Blending Mode = Normal).
+        comet = (float(self._comet_len_cb.currentData() or 0.5)
+                 if self._mode_comet.isChecked() else 0.0)
+        # Tapered Ends: FRACTION of the frames at each end that fade (0 = off).
+        taper = (float(self._taper_cb.currentData() or 0.2)
+                 if self._mode_taper.isChecked() else 0.0)
+        thick = int(self._size_cb.currentData() or 0)
+        self._pending_out = self._build_out_path()   # option-named, never overwrites
+        script = os.path.join(_base, "make_share_clip.py")
+        # Stack whichever frames the Source choice points at. The flag name
+        # stays --cleaned (it is just the frames folder to the script); output
+        # lands in the same STC Extras workspace either way.
+        _src = self._selected_source_dir()
+        # The format the user actually chose, not one inferred back out of the
+        # filename. The extension alone cannot tell 8-bit TIFF from 16-bit, so
+        # inferring it made "TIFF 8-bit" impossible to ask for.
+        args = ["--star-trail", "--cleaned", _src, "--out", self._pending_out,
+                "--comet-tail", str(comet), "--taper", str(taper),
+                "--thicken", str(thick),
+                "--out-format", (self._fmt_cb.currentData() or "jpg")]
+        if _src is not self._cleaned and self._has_cleaned:
+            # Building from originals: match the shot list to the cleaned build
+            # (same shots, same skip, one file per shot even with RAW+JPG twins)
+            # so before and after are comparable by construction.
+            args += ["--match-cleaned", self._cleaned]
+        if self._mode_comet.isChecked() and self._reverse_chk.isChecked():
+            args.append("--reverse")     # flip comet-tail direction (comet only)
+        if self._frame_range is not None and (self._frame_range.start()
+                                              or self._frame_range.end()):
+            args += ["--trim-start", str(self._frame_range.start()),
+                     "--trim-end", str(self._frame_range.end())]
+        if self._bright_sl.value() != 0:
+            args += ["--brightness", str(self._bright_sl.value() / 10)]
+        if self._hotpix_chk.isChecked():
+            args.append("--remove-hotpix")
+        self._skip_msg = ""     # set if the foreground guard bails (HOTPIX_SKIPPED)
+        self._ff_lines, self._ff_counts = [], None      # the flash finder's summary (FLASHFINDER: lines)
+        if getattr(sys, "frozen", False):
+            pargs = ["--cleanr-worker", script] + args
+        else:
+            pargs = ["-u", script] + args
+        # Time-weighted phase plan: each phase of the build owns a slice of the bar
+        # proportional to how long that phase took on THIS machine on the last build
+        # (saved at finish from the script's "<name> phase: Ns" lines). The bar
+        # tracks real elapsed work by definition, instead of read-counts -- which
+        # once left it sitting at 100% for 39 of a 46-second comet build while the
+        # finishing steps ran silently. First-ever build uses dev-measured defaults.
+        try:
+            saved_secs = json.loads(
+                SETTINGS.value("startrail_phase_secs", "", type=str) or "{}")
+        except Exception:
+            saved_secs = {}
+        plan = [("stack", float(saved_secs.get("stack", 7.0)))]
+        if self._hotpix_chk.isChecked():
+            plan.append(("hotpix", float(saved_secs.get("hotpix", 150.0))))
+        if thick > 0:
+            plan.append(("thicken", float(saved_secs.get("thicken", 1.5))))
+        total_secs = sum(s for _, s in plan) or 1.0
+        self._phase_bounds, acc = {}, 0.0
+        for name, secs in plan:
+            lo = acc
+            acc += 100.0 * secs / total_secs
+            self._phase_bounds[name] = (lo, acc)
+        self._measured = {}     # phase timings reported by this build, saved at finish
+        self._build_cancelled = False
+        self._out_tail = []          # fresh output tail for this build
+        self._build_btn.setText("Stop")
+        self._bar.setVisible(True)
+        self._bar.setValue(0)
+        # Spinner + counting-up timer to the left of the phase text.
+        self._phase_text = "Building…"
+        self._build_started = time.time()
+        self._spin_idx = 0
+        if getattr(self, "_spin_timer", None) is None:
+            self._spin_timer = QTimer(self)
+            self._spin_timer.timeout.connect(self._tick_spinner)
+        self._spin_timer.start(200)
+        self._tick_spinner()
+        for w in (self._hotpix_chk, self._mode_normal, self._mode_comet, self._mode_taper,
+                  self._comet_len_cb, self._taper_cb,
+                  self._reverse_chk, self._size_cb, self._bright_sl, self._src_cb, self._fmt_cb,
+                  self._open_img_btn, self._open_dir_btn, self._frame_range):
+            if w is not None:
+                w.setEnabled(False)
+        self._proc = QProcess(self)
+        self._proc.setProcessChannelMode(QProcess.MergedChannels)
+        self._proc.readyReadStandardOutput.connect(self._on_proc_output)
+        self._proc.finished.connect(self._on_proc_finished)
+        self._proc.start(sys.executable, pargs)
+
+    def _set_phase_frac(self, name, frac):
+        """Move the bar to `frac` (0..1) of phase `name`'s time-weighted segment
+        (see the plan built in _start_build). Never moves backward, so a phase the
+        plan didn't predict, or one the script skipped, can't make the bar jump
+        around -- worst case it waits, it never lies forward or retreats."""
+        lo_hi = getattr(self, "_phase_bounds", {}).get(name)
+        if lo_hi is None:
+            return
+        lo, hi = lo_hi
+        v = int(lo + max(0.0, min(1.0, frac)) * (hi - lo))
+        if v > self._bar.value():
+            self._bar.setValue(v)
+
+    def _on_proc_output(self):
+        """Turn the star trail builder's chatter into a moving progress bar.
+
+        The builder prints a line for each frame it stacks and each stage it
+        finishes. This reads those lines and advances the bar, so the user sees
+        steady movement through a build that can run for minutes, instead of a
+        bar that sits still and then jumps.
+
+        It also keeps the last few lines of output. If the build fails, that is
+        what puts the real reason in the Star Log rather than a bare "it did not
+        finish", and it records how long each stage took ON THIS COMPUTER so the
+        next build's bar is paced by measurement instead of assumption.
+        """
+        # Every phase of make_share_clip reports as it works: stacking prints
+        # "<label>: i/n" per frame, hot-pixel removal "finding specks: i/n",
+        # thickening a start marker, and the final save "wrote ...". Each
+        # line advances the bar inside that phase's time-weighted segment;
+        # "<name> phase: Ns" timing lines are collected so the next build's
+        # segments match this machine.
+        data = bytes(self._proc.readAllStandardOutput()).decode("utf-8", "replace")
+        # Keep the tail of the builder's output so a failure can put the real
+        # reason in the Star Log instead of a bare "didn't finish".
+        self._out_tail = (getattr(self, "_out_tail", [])
+                          + [l for l in data.splitlines() if l.strip()])[-15:]
+        for line in data.splitlines():
+            s = line.strip()
+            if s.startswith("HOTPIX_SKIPPED:"):
+                self._skip_msg = s.split(":", 1)[1].strip()
+                continue
+            if s.startswith("FLASHFINDER"):
+                from modules.flash_repair import parse_marker
+                got = parse_marker(s)
+                if got and got[0] == "line":
+                    self._ff_lines = getattr(self, "_ff_lines", []) + [got[1]]
+                elif got:
+                    self._ff_counts = got[1]
+                continue
+            low = s.lower()
+            m = re.match(r"(stack|hot-pixel|thicken) phase: (\d+)s$", low)
+            if m:
+                key = {"hot-pixel": "hotpix"}.get(m.group(1), m.group(1))
+                # Floor of 1s so a phase can never vanish from the next bar.
+                self._measured[key] = max(1.0, float(m.group(2)))
+                continue
+            tail = s.rsplit(":", 1)[-1].strip() if ":" in s else ""
+            frac = None
+            if "/" in tail:
+                a, b = tail.split("/", 1)
+                if a.strip().isdigit() and b.strip().isdigit():
+                    frac = int(a) / max(1, int(b))
+            if "finding specks" in low and frac is not None:
+                # Sampling frames IS this phase now. Painting the specks out
+                # afterwards happens on the finished stack in one pass instead of
+                # re-reading every frame, so it no longer reports per-frame and no
+                # longer deserves 70% of the segment (it used to, and it was the
+                # only reason this option had to read the whole sequence twice).
+                self._phase_text = "Finding hot pixels…"
+                self._set_phase_frac("hotpix", _HOTPIX_SHARES["specks"][0] + _HOTPIX_SHARES["specks"][1] * 0.9 * frac)
+            elif frac is not None and any(k in low for k in _HOTPIX_STAGES):
+                # The flash finder's stages each own a share of the hot-pixel slice of the bar.
+                key = next(k for k in _HOTPIX_STAGES if k in low)
+                share = _HOTPIX_SHARES[_HOTPIX_STAGES[key][0]]
+                self._phase_text = _HOTPIX_STAGES[key][1]
+                self._set_phase_frac("hotpix", share[0] + share[1] * frac)
+            elif low.startswith("removing ") or low.startswith("speck removal done"):
+                # Detection finished, painting now: the tail of the old step's share.
+                self._phase_text = "Removing hot pixels…"
+                self._set_phase_frac("hotpix", _HOTPIX_SHARES["specks"][0] + _HOTPIX_SHARES["specks"][1])
+            elif "finding hot pixels" in low:
+                self._phase_text = "Finding hot pixels…"
+                self._set_phase_frac("hotpix", 0.0)
+            elif low.startswith("thickening"):
+                self._phase_text = "Thickening trails…"
+                self._set_phase_frac("thicken", 0.0)
+            elif low.startswith("wrote "):
+                self._bar.setValue(100)
+            elif frac is not None:                # stacking pass (star trail / comet)
+                self._set_phase_frac("stack", frac)
+
+    def _refresh_builds(self, select_newest=False):
+        """Re-list the built star trails and show one. Newest is index 0; the
+        ‹ arrow pages to older builds, › back toward the newest. Arrows appear
+        only when there are at least two. With no builds at all, the placeholder
+        shows and the hint hides."""
+        # The fixed baseline, NOT the on-screen path -- see __init__. Listing from
+        # whatever is displayed shrinks the list as the user pages through it.
+        self._builds = _star_trail_builds(self._baseline_star, self._cleaned)
+        if select_newest:
+            self._build_idx = 0
+        self._build_idx = max(0, min(self._build_idx, len(self._builds) - 1))
+        many = len(self._builds) > 1
+        for b in (self._prev_btn, self._next_btn):
+            b.setVisible(many)
+        if not self._builds:
+            self._thumb.hide(); self._hint_open.hide(); self._name_lbl.hide()
+            self._ph.show()
+            return
+        self._ph.hide()
+        self._star_path = self._builds[self._build_idx]
+        pm = QPixmap(self._star_path)
+        if pm.isNull():
+            self._thumb.hide(); self._hint_open.hide(); self._name_lbl.hide()
+            self._ph.show()
+            return
+        self._thumb.setPixmap(pm.scaled(_PREVIEW_W, _PREVIEW_H,
+                                        Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        self._thumb.show()
+        # One line under the picture, not two (matches the Timelapse tab's height):
+        # the filename and position when there are several builds to page through,
+        # otherwise the click hint. The hover tip does not reliably show.
+        if many:
+            self._name_lbl.setText(
+                os.path.basename(self._star_path)
+                + f" · {self._build_idx + 1} of {len(self._builds)}")
+            self._name_lbl.show()
+            self._hint_open.hide()
+        else:
+            self._name_lbl.hide()
+            self._hint_open.setText("Click the image to open")
+            self._hint_open.show()
+        self._prev_btn.setEnabled(self._build_idx < len(self._builds) - 1)
+        self._next_btn.setEnabled(self._build_idx > 0)
+
+    def _step_build(self, delta):
+        """Arrow click: +1 pages to an older build, -1 back toward the newest."""
+        self._build_idx += delta
+        self._refresh_builds()
+
+    def _on_proc_finished(self, code, _status):
+        """Put the window back in order when the star trail build ends.
+
+        Re-enables every control the build had locked and stops the spinner, then
+        decides what the user is told. A success points the preview and the Open
+        buttons at the file just made, and saves how long each stage took so the
+        next build's bar is paced by this machine. A cancelled build says so
+        plainly. A failure surfaces the builder's own last words instead of a
+        generic message, because "it did not finish" tells a user nothing they
+        can act on.
+        """
+        if getattr(self, "_spin_timer", None) is not None:
+            self._spin_timer.stop()          # stop the spinner/timer before final status
+        self._build_btn.setText("Create Star Trail")
+        self._build_btn.setEnabled(True)
+        for w in (self._hotpix_chk, self._mode_normal, self._mode_comet, self._mode_taper,
+                  self._comet_len_cb, self._taper_cb,
+                  self._reverse_chk, self._size_cb, self._bright_sl, self._src_cb, self._fmt_cb,
+                  self._open_img_btn, self._open_dir_btn, self._frame_range):
+            if w is not None:
+                w.setEnabled(True)
+        # A sequence too short to taper keeps its radio off after a build too.
+        if 0 < getattr(self, "_seq_used", 0) < 10:
+            self._mode_taper.setEnabled(False)
+        self._sync_comet_len()   # re-gray Length if Blending Mode is Normal
+        if self._build_cancelled:
+            self._bar.setVisible(False)
+            self._status_lbl.setText("Build cancelled.")
+            return
+        _out = getattr(self, "_pending_out", self._star_path)
+        if code == 0 and _out and os.path.exists(_out):
+            # Remember how long each phase really took on this machine, so the next
+            # build's bar segments are sized by actual time (merged, not replaced:
+            # a plain build shouldn't erase the comet build's stack timing).
+            if getattr(self, "_measured", None):
+                try:
+                    saved_secs = json.loads(
+                        SETTINGS.value("startrail_phase_secs", "", type=str) or "{}")
+                except Exception:
+                    saved_secs = {}
+                saved_secs.update(self._measured)
+                SETTINGS.setValue("startrail_phase_secs", json.dumps(saved_secs))
+            self._bar.setVisible(False)     # hide the bar on finish, like the Timelapse window
+            self._star_path = _out          # preview + Open now point at the just-built file
+            self._refresh_builds(select_newest=True)   # ALWAYS shows the new build,
+            # including the first one in a window that opened before any trail existed
+            if getattr(self, "_skip_msg", ""):
+                self._status_lbl.setText("Kept the plain trail. " + self._skip_msg)
+                self._status_lbl.setWordWrap(True)
+            else:
+                self._status_lbl.setText("")   # no "done" text; the trail just updates
+            # The flash finder's plain-English summary goes into the Star Log (best effort).
+            try:
+                if getattr(self, "_ff_lines", None) and _CURRENT_STAR_LOG and os.path.isfile(_CURRENT_STAR_LOG):
+                    with open(_CURRENT_STAR_LOG, "a", encoding="utf-8") as _f:
+                        _f.write("\n" + "\n".join(self._ff_lines) + "\n")
+            except Exception:
+                pass
+            # Anonymous usage report for a DELIBERATE star trail render (this tab's
+            # Build button), mirroring the timelapse render report. The automatic
+            # trail built during every run is NOT counted -- that would just
+            # re-count runs. Settings only, per Bruce (no platform). Opt-in gated
+            # and wrapped so telemetry can never affect a build.
+            try:
+                if SETTINGS.value("crash_reporting_enabled", False, type=bool):
+                    from modules import usage_report
+                    _comet = self._mode_comet.isChecked()
+                    usage_report.send({
+                        "type": "startrail",
+                        "app_version": VERSION,
+                        "style": ("comet" if _comet else
+                                  "taper" if self._mode_taper.isChecked() else "normal"),
+                        "comet_length": (self._comet_len_cb.currentData()
+                                         if _comet else None),
+                        "taper_length": (self._taper_cb.currentData()
+                                         if self._mode_taper.isChecked() else None),
+                        "reversed": bool(_comet and self._reverse_chk.isChecked()),
+                        "thicken_px": self._size_cb.currentData(),                        "speck_cleanup": self._hotpix_chk.isChecked(),
+                        "flash_finder": getattr(self, "_ff_counts", None),
+                        "source": self._src_cb.currentData(),
+                    })
+            except Exception:
+                pass
+            self._open_star()               # auto-open the finished star trail
+        else:
+            self._bar.setVisible(False)
+            _log_app_error("star trail build failed",
+                           detail=f"exit code {code}; last output:\n  "
+                                  + "\n  ".join(getattr(self, "_out_tail", ["(none)"])))
+            self._status_lbl.setText("The star trail didn't finish. The Star Log has the detail.")
+
+    def shutdown(self):
+        """Stop an in-progress rebuild; called by CreatorWindow's closeEvent (this
+        is a tab page now, not a top-level window)."""
+        if self._proc is not None and self._proc.state() != QProcess.NotRunning:
+            self._build_cancelled = True
+            try:
+                self._proc.finished.disconnect(self._on_proc_finished)
+            except (TypeError, RuntimeError):
+                pass
+            self._proc.kill()
+            self._proc.waitForFinished(2000)
+
+
+def _video_poster(path, frac=0.4):
+    """One picture from a video, as a QImage, or None if it cannot be read.
+
+    Used as the Summary tab's thumbnail for the before-and-after clip. The clip is
+    a wipe from the original to the cleaned sky, so a frame about 40% of the way
+    through shows both halves -- more telling than frame 0, which is all "before".
+    OpenCV reads these H.264 files fine; anything it cannot open (a codec it lacks,
+    a half-written file) simply returns None and the caller draws a plain box."""
+    try:
+        import cv2
+        from PySide6.QtGui import QImage
+        cap = cv2.VideoCapture(path)
+        try:
+            if not cap.isOpened():
+                return None
+            n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+            if n > 1:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, int(n * frac))
+            ok, bgr = cap.read()
+        finally:
+            cap.release()
+        if not ok or bgr is None:
+            return None
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        h, w = rgb.shape[:2]
+        return QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888).copy()
+    except Exception:
+        return None
+
+
+class _VideoThumb(QWidget):
+    """The before-and-after clip as a picture with a play symbol on it. A click
+    anywhere on it emits `clicked` (the Summary tab opens the video in the system's
+    default player). `width_px` is the picture's width; the height follows the
+    clip's own shape, so a portrait clip is taller and narrower than a landscape one,
+    capped so a tall one cannot balloon the window."""
+
+    clicked = Signal()
+
+    def __init__(self, video_path, width_px=220, max_h=190, parent=None):
+        super().__init__(parent)
+        from PySide6.QtGui import QPixmap
+        img = _video_poster(video_path)
+        self._pm = None
+        w, h = width_px, int(width_px * 0.8)        # 5:4, the usual clip, if unreadable
+        if img is not None and not img.isNull():
+            pm = QPixmap.fromImage(img)
+            ratio = pm.height() / max(1, pm.width())
+            h = int(width_px * ratio)
+            if h > max_h:
+                h = max_h
+                w = int(max_h / max(ratio, 0.01))
+            self._pm = pm.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self.setFixedSize(w, h)
+        self._hover = False
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip("Play the before and after clip")
+
+    def enterEvent(self, e):
+        self._hover = True
+        self.update()
+
+    def leaveEvent(self, e):
+        self._hover = False
+        self.update()
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.LeftButton and self.rect().contains(e.position().toPoint()):
+            self.clicked.emit()
+
+    def paintEvent(self, _e):
+        from PySide6.QtCore import QRectF, QPointF
+        from PySide6.QtGui import QPainterPath, QPolygonF
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = QRectF(self.rect())
+        clip = QPainterPath()
+        clip.addRoundedRect(r, 8, 8)
+        p.setClipPath(clip)
+        if self._pm is not None:
+            p.drawPixmap(0, 0, self._pm)
+        else:
+            p.fillRect(r, QColor("#141414"))
+        # play symbol: a dark disc with a white triangle, brighter under the mouse
+        d = min(self.width(), self.height()) * 0.34
+        c = r.center()
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(0, 0, 0, 175 if self._hover else 135))
+        p.drawEllipse(c, d / 2, d / 2)
+        t = d * 0.30
+        p.setBrush(QColor("white"))
+        p.drawPolygon(QPolygonF([QPointF(c.x() - t * 0.6, c.y() - t),
+                                 QPointF(c.x() - t * 0.6, c.y() + t),
+                                 QPointF(c.x() + t * 1.1, c.y())]))
+        p.end()
+
+
+# A gap between blocks of the Summary text: a little under half a blank line. The
+# summary used to separate its blocks with a full blank line each (two <br>), which
+# spent about 40 px of window height on air; this keeps them visibly apart for less.
+_SUMMARY_GAP = "<div style='font-size:4px;'>&nbsp;</div>"
+
+def _tidy_summary_html(html):
+    """The summary text as the Summary tab shows it, whether it was just built or was
+    saved from an earlier run (the app keeps the last run's text so the tab still
+    has real numbers after a restart, and that saved copy predates any change made
+    to how the text is built).
+
+    Same words, two small changes of place:
+      * the gray "Thought it'd take X. Took Y." line moves from the very bottom to
+        just above "Ready for the fun part!", so the time figures read together
+        and the line is no longer stranded under everything else;
+      * blank-line gaps between blocks become the shorter _SUMMARY_GAP.
+    Text that does not have those pieces is returned unchanged, apart from the
+    gaps."""
+    import re
+    if not html:
+        return html
+    m = re.search(r"(?:<br>(?:<br>|<div style='font-size:\d+px;'>&nbsp;</div>))?"
+                  r"<span style='font-size:14px; color:[^']*;'>Thought it'd take.*?</span>\s*$",
+                  html, re.S)
+    ready = html.find("<b>Ready for the fun part!</b>")
+    if m and 0 <= ready < m.start():
+        timing = html[m.start():m.end()]
+        timing = re.sub(r"^(?:<br>(?:<br>|<div[^>]*>&nbsp;</div>))", "", timing)
+        html = (html[:ready] + timing.strip() + "<br>" + _SUMMARY_GAP
+                + html[ready:m.start()])
+    # A copy saved by an older version carries the old, taller gaps; shrink them too.
+    html = re.sub(r"<div style='font-size:\d+px;'>&nbsp;</div>", _SUMMARY_GAP, html)
+    return html.replace("<br><br>", "<br>" + _SUMMARY_GAP)
+
+
+# How big the before-and-after picture is on the Summary tab. Every pixel of height
+# here is a pixel of window height (this tab sets it), so it is one place to change.
+_SUMMARY_THUMB_W, _SUMMARY_THUMB_MAX_H = 240, 192
+
+
+class SummaryPanel(QWidget):
+    """Run Complete summary -- the first tab of CreatorWindow. Shows the run stats
+    (trails removed, time saved), a share nudge, and an Open Cleaned Folder button.
+    Replaces the old standalone Run Complete popup."""
+
+    def __init__(self, summary_html, on_open_folder, video_path="", parent=None,
+                 on_pick_tab=None):
+        super().__init__(parent)
+        self._video_path = video_path or ""
+        self._video_lbl = None
+        summary_html = _tidy_summary_html(summary_html)
+        lay = QVBoxLayout(self)
+        # Tighter than the two maker tabs (top 8, spacing 6): this tab holds the most,
+        # and every point here is window height.
+        lay.setContentsMargins(_CREATOR_PANEL_MARGINS[0], 8, _CREATOR_PANEL_MARGINS[2],
+                               _CREATOR_PANEL_MARGINS[3])
+        lay.setSpacing(6)
+
+        # The logo sits just left of the heading, the two centered together as one
+        # unit. (It is 44 px so the row is barely taller than the heading alone.)
+        header = QLabel("Your skies are scrubbed!")
+        hf = QFont(); hf.setPointSize(22); hf.setBold(True)
+        header.setFont(hf)
+        header.setStyleSheet(f"color: {BRAND_HEADING_BLUE};")
+        _head_row = QHBoxLayout()
+        _head_row.setSpacing(12)
+        _head_row.addStretch(1)
+        _logo_path = os.path.join(_base, "assets", "StarTrailCleanR.png")
+        if os.path.isfile(_logo_path):
+            _lpm = QPixmap(_logo_path)
+            if not _lpm.isNull():
+                _logo = QLabel()
+                _logo.setPixmap(_lpm.scaled(44, 44, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                _head_row.addWidget(_logo)
+        _head_row.addWidget(header)
+        _head_row.addStretch(1)
+        lay.addLayout(_head_row)
+
+        if summary_html and summary_html.strip():
+            body = QLabel(summary_html)
+            body.setTextFormat(Qt.RichText); body.setWordWrap(True)
+            body.setAlignment(Qt.AlignCenter)
+            body.setStyleSheet(f"color: {CARD_TEXT}; font-size: 17px;")
+            lay.addWidget(body)
+        else:
+            note = QLabel("Your run summary appears here after you clean a set.")
+            note.setWordWrap(True); note.setAlignment(Qt.AlignCenter)
+            note.setStyleSheet(f"color: {MUTED_TEXT}; font-size: 15px;")
+            lay.addWidget(note)
+
+        # Divider between the run summary and the brand block below.
+        _divider = QFrame()
+        _divider.setFrameShape(QFrame.HLine)
+        _divider.setFixedHeight(1)
+        _divider.setStyleSheet(f"color: {CARD_BORDER}; background: {CARD_BORDER}; border: none;")
+        lay.addWidget(_divider)
+
+        # The before-and-after clip, as a big picture with a play symbol, with a short
+        # block of words on each side so the picture says what it is and what to do:
+        # on the left what you are looking at (the sentence this tab has always used),
+        # on the right how to watch it and where it lives. The two sides share the
+        # leftover width equally, so the picture stays centered. A click on the
+        # picture plays the clip in the system's default player. Built automatically
+        # during the run and always on disk right after one (the completion is held
+        # until the in-run stacker finishes rendering it), so the whole block is
+        # simply left out when the clip is missing. Sits ABOVE the social-media nudge.
+        lay.addStretch(1)
+        if self._video_path and os.path.isfile(self._video_path):
+            _thumb = _VideoThumb(self._video_path, width_px=_SUMMARY_THUMB_W,
+                                 max_h=_SUMMARY_THUMB_MAX_H)
+            _thumb.clicked.connect(lambda: self._open_video_link("video"))
+
+            def _side(html, align):
+                lbl = QLabel(html)
+                lbl.setTextFormat(Qt.RichText)
+                lbl.setWordWrap(True)
+                lbl.setAlignment(align | Qt.AlignVCenter)
+                lbl.setStyleSheet(f"color: {CARD_TEXT}; font-size: 14px;")
+                lbl.setMinimumWidth(60)
+                return lbl
+            _what = _side("Check out this cool before and after clip", Qt.AlignRight)
+            # No "click the thumbnail" line: the play button on the picture says it
+            # (Bruce, 2026-11-18). Only the folder link sits beside it.
+            vid = _side(
+                f"<a href='folder' style='color:{BRAND_HEADING_BLUE};'>"
+                "Click here to open folder</a>", Qt.AlignLeft)
+            vid.setOpenExternalLinks(False)
+            vid.linkActivated.connect(self._open_video_link)
+            self._video_lbl = vid
+            _trow = QHBoxLayout()
+            _trow.setSpacing(14)
+            _trow.addWidget(_what, 1)
+            _trow.addWidget(_thumb, 0)
+            _trow.addWidget(vid, 1)
+            lay.addLayout(_trow)
+
+        # Two doorways to the other tabs. Bruce, 2026-10-19: this tab shows the video
+        # and people forget the window can also make a star trail or a timelapse.
+        # Each button only jumps to its tab; it never starts a build.
+        if on_pick_tab is not None:
+            _pick_row = QHBoxLayout()
+            _pick_row.setSpacing(12)
+            for _txt, _which in (("Create a Star Trail", "star"),
+                                 ("Create a Timelapse", "timelapse")):
+                _b = QPushButton(_txt)
+                _b.setFixedHeight(48)
+                _b.setStyleSheet(_hero_btn_css())
+                _b.clicked.connect(lambda *_, w=_which: on_pick_tab(w))
+                _pick_row.addWidget(_b, 1)
+            lay.addLayout(_pick_row)
+
+        share = QLabel("Help spread the word! When you share on social media, "
+                       "tag <b>@bruceherwig #StarTrailCleanR</b>")
+        share.setTextFormat(Qt.RichText); share.setWordWrap(True)
+        share.setAlignment(Qt.AlignCenter)
+        share.setStyleSheet(f"color: {CARD_TEXT}; font-size: 15px; padding: 2px 24px;")
+        lay.addWidget(share)
+
+        # Invitation to be featured on the website. First sentence blue + bold, then a
+        # soft return. The website is clickable but styled to look like plain text (no
+        # blue, no underline); the email stays a blue link.
+        self._feature_lbl = QLabel(
+            f"<span style='color:{BRAND_HEADING_BLUE}; font-weight:bold;'>"
+            "Do you have a star trail you're particularly proud of?</span><br>"
+            "For a chance to be featured on <a href='https://startrailcleanr.com' "
+            f"style='color:{CARD_TEXT}; text-decoration:none;'>"
+            f"<span style='color:{CARD_TEXT}; text-decoration:none;'>StarTrailCleanR.com</span></a>, "
+            "send your finished .jpg to <a href='mailto:bruceherwig+startrailcleanr@gmail.com"
+            "?subject=Star%20Trail%20CleanR%20feature' "
+            f"style='color:{BRAND_HEADING_BLUE};'>bruceherwig+startrailcleanr@gmail.com</a>")
+        self._feature_lbl.setTextFormat(Qt.RichText); self._feature_lbl.setWordWrap(True)
+        self._feature_lbl.setAlignment(Qt.AlignCenter)
+        self._feature_lbl.setOpenExternalLinks(True)
+        self._feature_lbl.setStyleSheet(f"color: {CARD_TEXT}; font-size: 15px; padding: 4px 24px;")
+        lay.addWidget(self._feature_lbl)
+        lay.addStretch(1)
+
+        self._open_btn = QPushButton("Open Cleaned Folder")
+        self._open_btn.setFixedHeight(48)
+        self._open_btn.setStyleSheet(_secondary_btn_css() if on_pick_tab is not None
+                                     else _hero_btn_css())
+        if on_open_folder is not None:
+            # clicked emits a `checked` bool; swallow it so on_open_folder runs with NO
+            # args and uses its real folder-path default (passing the bool as the path
+            # made os.path.isdir(False) fail silently -- the button did nothing).
+            self._open_btn.clicked.connect(lambda *_: on_open_folder())
+        lay.addWidget(self._open_btn)
+
+        _make_labels_selectable(self)
+        # Keep the website/email + video links clickable (the selectable pass drops link flags).
+        self._feature_lbl.setTextInteractionFlags(
+            Qt.TextSelectableByMouse | Qt.LinksAccessibleByMouse)
+        if self._video_lbl is not None:
+            self._video_lbl.setTextInteractionFlags(
+                Qt.TextSelectableByMouse | Qt.LinksAccessibleByMouse)
+
+    def _open_video_link(self, href):
+        """Open the before/after clip in the system's default player, or reveal the
+        folder it lives in. Driven by the 'video' / 'folder' hrefs in the label."""
+        path = getattr(self, "_video_path", "") or ""
+        if not path:
+            return
+        if href == "folder":
+            folder = os.path.dirname(path)
+            if folder and os.path.isdir(folder):
+                _open_folder_in_file_manager(folder)
+        elif os.path.isfile(path):
+            from PySide6.QtGui import QDesktopServices
+            from PySide6.QtCore import QUrl
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+    def shutdown(self):
+        """No background job on this tab; here so CreatorWindow can call it uniformly."""
+        pass
+
+
+class CreatorWindow(QDialog):
+    """One window holding the post-run summary and the two makers as tabs: Summary,
+    Star Trail, and Timelapse. Replaces the old separate popups. Each maker tab owns
+    its own build/render job; the red X in the top-right corner stops whichever runs."""
+
+    def __init__(self, cleaned_folder, star_path, original_folder=None,
+                 summary_html="", on_open_folder=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Star Trail CleanR  Star Trail & Timelapse")
+        # 520, not 480: the 420 px preview is centred, so at 480 it ends only 30 px from the
+        # right edge, which leaves no room for the 32 px red X plus a 12 px margin (44 px).
+        self.setMinimumWidth(520)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        self._tabs = QTabWidget()
+        # Match the main window's full-width blue/navy tab bar exactly (smaller
+        # min-width than the main window's since this window holds three narrow tabs).
+        self._tabs.tabBar().setExpanding(True)
+        self._tabs.tabBar().setDocumentMode(True)
+        self._tabs.setStyleSheet(
+            f"QTabWidget::pane {{ border: none; background: palette(window); }}"
+            "QTabBar { qproperty-drawBase: 0; }"
+            f"QTabBar::tab {{ background: {BRAND_TAB_INACTIVE_BG}; color: {BRAND_TAB_INACTIVE_FG}; padding: 14px 12px; "
+            "font-size: 19px; font-weight: bold; border: none; min-width: 120px; }}"
+            f"QTabBar::tab:selected {{ background: {BRAND_TAB_ACTIVE_BG}; color: {BRAND_TAB_ACTIVE_FG}; }}"
+            f"QTabBar::tab:hover:!selected {{ background: {BRAND_TAB_HOVER_BG}; color: {BRAND_TAB_ACTIVE_FG}; }}"
+        )
+        # The before/after clip lives in the run's workspace, next to the other share
+        # outputs. Compute its path so the Summary tab can offer Open video / Open folder.
+        _video_path = ""
+        try:
+            if cleaned_folder:
+                _video_path = workspace_path(cleaned_folder, "STC_share_video.mp4")
+        except Exception:
+            _video_path = ""
+        self._summary_panel = SummaryPanel(summary_html, on_open_folder, _video_path, self,
+                                           on_pick_tab=self.select_tab)
+        self._star_panel = StarTrailPanel(cleaned_folder, star_path,
+                                          original_folder=original_folder, parent=self)
+        self._tl_panel = TimelapsePanel(cleaned_folder, original_folder, star_path, self)
+        self._tabs.addTab(self._summary_panel, "Summary")
+        self._tabs.addTab(self._star_panel, "Star Trail")
+        self._tabs.addTab(self._tl_panel, "Timelapse")
+        lay.addWidget(self._tabs)
+
+        # Red X close in the top-right corner (same style as the main window's Quit
+        # button). A floating child of the window, so it stays put on both tabs.
+        self._close_x = _XCloseButton(self)
+        self._close_x.setFixedSize(32, 32)
+        self._close_x.setStyleSheet(
+            f"QPushButton {{ background-color: {BRAND_QUIT_RED}; "
+            f"border-radius: 4px; border: none; }}"
+            f"QPushButton:hover {{ background-color: {BRAND_QUIT_RED_HOVER}; }}"
+        )
+        self._close_x.setToolTip("Close")
+        self._close_x.clicked.connect(self.close)
+        self._position_close_x()
+
+    def _position_close_x(self):
+        """Park the red X in the top-right of the content area, just below the tab
+        bar, 12 px in from the right edge. Re-run on resize so it tracks the corner.
+
+        The 420 px preview is centred, so the window's minimum width (520) is what keeps
+        the 44 px the button needs (32 wide plus the 12 px margin) clear of the picture's
+        right edge. (In the tab bar it covered the end of the word "Timelapse", so it
+        stays below the bar.)"""
+        m = 12
+        y = self._tabs.tabBar().height() + 12
+        self._close_x.move(self.width() - self._close_x.width() - m, y)
+        self._close_x.raise_()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._position_close_x()
+        # Text wraps differently at a different width, so what the tabs need in height
+        # changes with it. Re-measure after the resize settles (not inside it).
+        if getattr(self, "_height_fitted", False) and event.oldSize().width() != event.size().width():
+            self._schedule_fit()
+
+    def _schedule_fit(self):
+        if getattr(self, "_fit_pending", False):
+            return
+        self._fit_pending = True
+        QTimer.singleShot(30, self._run_scheduled_fit)
+
+    def _run_scheduled_fit(self):
+        self._fit_pending = False
+        self._fit_height()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._position_close_x()
+        if not getattr(self, "_height_fitted", False):
+            self._height_fitted = True
+            QTimer.singleShot(0, self._fit_height)
+            # Again once the first paint has settled fonts and stylesheets.
+            QTimer.singleShot(250, self._fit_height)
+
+    def _fit_height(self):
+        """Make the window at least as tall as its tallest tab needs.
+
+        A window's own minimum comes from its layout's MINIMUM size, and a label
+        that wraps text can always claim to be able to squash into fewer lines than
+        it wants. So the Summary tab, whose text wraps, could open in a window too
+        short for it, with its text clipped under the divider -- which is exactly
+        what happened once the before-and-after picture made that tab the tallest
+        (2026-09-30). This asks each tab what height it really needs at this width
+        and holds the window to the largest, never taller than 90% of the screen."""
+        try:
+            w = self._tabs.currentWidget().width()
+            need = 0
+            for panel in (self._summary_panel, self._star_panel, self._tl_panel):
+                lay = panel.layout()
+                need = max(need, panel.sizeHint().height(),
+                           lay.totalHeightForWidth(w) if lay is not None else 0)
+            chrome = self.height() - self._tabs.currentWidget().height()
+            target = need + chrome
+            screen = QApplication.primaryScreen()
+            if screen:
+                target = min(target, int(screen.availableGeometry().height() * 0.9))
+            self.setMinimumHeight(target)
+            if self.height() < target:
+                self.resize(self.width(), target)
+        except Exception:
+            pass
+
+    def select_tab(self, which):
+        """Front the Summary ('summary'), Star Trail ('star'), or Timelapse
+        ('timelapse') tab."""
+        panel = {"summary": self._summary_panel, "star": self._star_panel,
+                 "timelapse": self._tl_panel}.get(which, self._summary_panel)
+        self._tabs.setCurrentWidget(panel)
+
+    def closeEvent(self, event):
+        # Stop any job running in a maker tab so closing never orphans a subprocess.
+        for panel in (self._summary_panel, self._star_panel, self._tl_panel):
+            try:
+                panel.shutdown()
+            except Exception:
+                pass
+        super().closeEvent(event)
+
+
 class MaskEditorWindow(QMainWindow):
-    """Separate window for mask painting — closes back to main setup."""
+    """Separate window for mask painting — closes back to main setup.
+
+    A thin host around MaskPainterWidget: it sizes itself to 90% of the screen,
+    forwards frame/mask loading to the painter, and re-emits the painter's
+    finished mask as the mask_saved signal (which MainWindow saves to disk).
+    """
     mask_saved = Signal(np.ndarray)
 
     def __init__(self, parent=None):
+        """Create the mask-editor window: embed a MaskPainterWidget, wire its
+        done/skip/back signals, and center it at 90% of the screen size."""
         super().__init__(parent)
-        self.setWindowTitle("Star Trail CleanR \u2014 Foreground Mask")
+        self.setWindowTitle("Star Trail CleanR: Foreground Mask")
         self._painter = MaskPainterWidget()
         self.setCentralWidget(self._painter)
 
@@ -3493,29 +10317,169 @@ class MaskEditorWindow(QMainWindow):
             self.move(x, y)
 
     def load_image(self, img_path: str):
+        """Show a single image in the painter as the mask backdrop."""
         self._painter.load_image(img_path)
 
+    def load_frames(self, paths, index=0):
+        """Load the full frame list into the painter (so the user can flip
+        between frames while masking) and show the one at `index`."""
+        self._painter.load_frames(paths, index)
+
     def load_existing_mask(self, mask_path: str):
+        """Load a previously saved mask PNG into the painter for editing."""
         self._painter.load_existing_mask(mask_path)
 
     def _on_done(self, mask_np):
+        """Painter finished. Re-emit the painted mask array via mask_saved
+        (MainWindow writes it to disk) and close this window."""
         self.mask_saved.emit(mask_np)
         self.close()
 
 
-if __name__ == '__main__':
-    # Cross-platform single-instance check (Mac, Windows, Linux)
+# ── Single instance ───────────────────────────────────────────────────────────
+# One copy of the app at a time, enforced by claiming a local port: the first
+# copy holds it, a second copy finds it taken.
+#
+# FIELD REPORT 2026-09-07 (Steve): "it says it is already running but I cannot
+# seem to use it", and reinstalling changed nothing. The old check claimed port
+# 49173 and treated ANY bind failure as proof that a second copy was running.
+# Two things were wrong with that:
+#
+#   1. 49173 sits INSIDE the operating system's dynamic port range (49152-65535
+#      on Windows, macOS and Linux alike). That is the pool the OS hands out at
+#      random for outgoing connections, so any program on the machine -- a
+#      browser tab, a mail client, a backup tool -- can be given 49173 by pure
+#      chance and lock the user out of Star Trail CleanR completely. Nothing the
+#      user can do about it, and reinstalling cannot help. Present since
+#      v1.0-beta, 2026-04-15.
+#   2. It only BOUND the port, never listened on it, so it could not tell our own
+#      second copy from a stranger. A guess, presented to the user as a fact.
+#
+# So: a fixed port BELOW the dynamic range, which the OS never assigns on its
+# own, and an actual handshake. The running copy listens and answers; a starting
+# copy that cannot bind asks who is there. A correct answer means a real second
+# copy, so refuse. Anything else means the port belongs to some other program,
+# so start normally WITHOUT the lock -- refusing to run is far worse than running
+# without single-instance protection.
+SINGLE_INSTANCE_PORT = 45173
+_SINGLE_INSTANCE_HELLO = b"STC?"
+_SINGLE_INSTANCE_REPLY = b"STC-RUNNING"
+
+
+def _serve_single_instance_probes(sock):
+    """Answer "are you Star Trail CleanR?" probes from copies trying to start.
+
+    Runs on a daemon thread so it can never hold up quitting. Every failure is
+    swallowed: this is a courtesy to the next launch, and must never be able to
+    disturb the running app."""
+    def _serve():
+        while True:
+            try:
+                conn, _ = sock.accept()
+            except OSError:
+                return                      # socket closed (quit or relaunch)
+            try:
+                conn.settimeout(1.0)
+                conn.recv(64)
+                conn.sendall(_SINGLE_INSTANCE_REPLY)
+            except Exception:
+                pass
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    threading.Thread(target=_serve, daemon=True).start()
+
+
+def release_single_instance(sock):
+    """Give the single-instance port back, immediately, on every platform.
+
+    A bare close() is not enough on Linux: the listener thread is blocked in
+    accept(), the kernel keeps the socket alive until that call returns, and the
+    port stays taken -- so a relaunch would find our own dying copy still
+    answering and refuse to start. shutdown() wakes the blocked accept() first.
+    macOS refuses shutdown() on a listening socket; that is harmless."""
+    if sock is None:
+        return
     import socket
-    _lock_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
-        _lock_socket.bind(('127.0.0.1', 49173))
+        sock.shutdown(socket.SHUT_RDWR)
+    except Exception:
+        pass
+    try:
+        sock.close()
+    except Exception:
+        pass
+
+
+def acquire_single_instance(port=SINGLE_INSTANCE_PORT):
+    """Claim the single-instance port.
+
+    Returns (lock_socket, another_copy_is_running):
+      (socket, False) -- we hold the lock and are answering probes.
+      (None,   True)  -- a real Star Trail CleanR answered; refuse to start.
+      (None,   False) -- the port belongs to something else, or the check could
+                         not complete. START ANYWAY, without a lock.
+
+    The last case is the whole point: an unanswered port is not evidence of a
+    second copy, and the user must never be locked out by a stranger's socket."""
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    if os.name != 'nt':
+        # Without this, on Linux a launch right after quitting can find the port
+        # still held by connections lingering from the last copy's handshakes, and
+        # start without the lock. Not set on Windows, where it would let a second
+        # copy bind the same port instead of being refused.
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        s.bind(('127.0.0.1', port))
+        s.listen(8)
+        _serve_single_instance_probes(s)
+        return s, False
     except OSError:
+        try:
+            s.close()
+        except Exception:
+            pass
+    # Someone holds the port. Ask whether it is us.
+    try:
+        probe = socket.create_connection(('127.0.0.1', port), timeout=1.0)
+        try:
+            probe.settimeout(1.0)
+            probe.sendall(_SINGLE_INSTANCE_HELLO)
+            if _SINGLE_INSTANCE_REPLY in probe.recv(64):
+                return None, True
+        finally:
+            probe.close()
+    except Exception:
+        pass                                # not us, or no answer -> start anyway
+    return None, False
+
+
+if __name__ == '__main__':
+    _lock_socket, _already_running = acquire_single_instance()
+    if _already_running:
         app = QApplication(sys.argv)
-        QMessageBox.warning(None, "Star Trail CleanR",
-                            "Star Trail CleanR is already running.")
+        QMessageBox.warning(
+            None, "Star Trail CleanR",
+            "Star Trail CleanR is already open.\n\n"
+            "Look for it in your other windows. If you can't find it, quit it "
+            "from Task Manager on Windows or Force Quit on a Mac, then open it "
+            "again. Restarting the computer also clears it.")
         sys.exit(1)
 
     app = QApplication(sys.argv)
+    # Qt refuses to load any image over 256 MB (about 67 megapixels) and returns
+    # nothing, silently. A full star trail from an 11,904 x 5,952 px camera is
+    # 283 MB, so the Star Trail preview and the Timelapse poster stayed blank even
+    # though the files were written (2026-11-08). 2 GB covers any camera made.
+    from PySide6.QtGui import QImageReader
+    QImageReader.setAllocationLimit(2048)
+    # May be None when the port belonged to another program: we started anyway,
+    # and _relaunch already tolerates a missing socket.
+    app._lock_socket = _lock_socket  # exposed so _relaunch can close it before spawning
 
     # Bundle our own font so widgets render at the same widths on every OS.
     # Without this, Mac uses San Francisco, Windows uses Segoe UI, Linux uses
@@ -3570,42 +10534,221 @@ if __name__ == '__main__':
 
     _apply_theme()
 
-    # First-run crash-reporting opt-in. Asked once; choice persists in
-    # QSettings. Only shown when a DSN is actually present (CI builds), so
-    # dev runs don't see the prompt at all.
-    if _SENTRY_DSN and not SETTINGS.contains("crash_reporting_choice_made"):
-        from PySide6.QtWidgets import QMessageBox
-        prompt = QMessageBox()
-        prompt.setWindowTitle("Star Trail CleanR")
-        prompt.setIcon(QMessageBox.Question)
-        prompt.setText("Help improve Star Trail CleanR by sending anonymous crash reports?")
-        prompt.setInformativeText(
-            "If the app ever crashes, an automatic error report is sent so the bug "
-            "can be fixed.\n\nThe report contains a stack trace, your operating "
-            "system, and the app version. No images, no folder paths, no personal "
-            "information."
-        )
-        prompt.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
-        prompt.setDefaultButton(QMessageBox.Yes)
-        choice = prompt.exec()
-        SETTINGS.setValue("crash_reporting_enabled", choice == QMessageBox.Yes)
-        SETTINGS.setValue("crash_reporting_choice_made", True)
+    # Startup splash: visible while the slow first-launch work runs (theme
+    # detection, Sentry/Sparkle init, MainWindow construction, font setup).
+    # Without this, users see a frozen-looking app for 1-3 seconds on first
+    # launch, since the GUI renders before the event loop is fully unblocked.
+    # Frameless+StaysOnTop combo per feedback_qt_splash_flags.md (Qt's
+    # SplashScreen flag is unreliable on macOS).
+    from PySide6.QtWidgets import QProgressBar
+    _splash = QWidget()
+    _splash.setWindowFlags(Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+    _splash.setAttribute(Qt.WA_TranslucentBackground)
+    _splash.setFixedSize(600, 338)
+    _splash_outer = QVBoxLayout(_splash)
+    _splash_outer.setContentsMargins(0, 0, 0, 0)
+    _splash_card = QFrame()
+    _splash_card.setStyleSheet(
+        "QFrame#stcSplashCard { background: #f4f6f9; border-radius: 12px; border: 1px solid #d6dde6; }"
+    )
+    _splash_card.setObjectName("stcSplashCard")
+    _splash_outer.addWidget(_splash_card)
 
+    # Card body: top bar, content row, bottom bar
+    _splash_body = QVBoxLayout(_splash_card)
+    _splash_body.setContentsMargins(0, 0, 0, 0)
+    _splash_body.setSpacing(0)
+
+    _splash_top_bar = QFrame()
+    _splash_top_bar.setFixedHeight(64)
+    _splash_top_bar.setStyleSheet(
+        f"QFrame {{ background: {BRAND_HEADER_BG}; border: none; "
+        "border-top-left-radius: 11px; border-top-right-radius: 11px; }"
+    )
+    _splash_body.addWidget(_splash_top_bar)
+
+    _splash_content = QWidget()
+    _splash_content.setStyleSheet("background: transparent;")
+    _splash_row = QHBoxLayout(_splash_content)
+    _splash_row.setContentsMargins(32, 20, 32, 20)
+    _splash_row.setSpacing(24)
+    _splash_body.addWidget(_splash_content, 1)
+
+    _splash_bottom_bar = QFrame()
+    _splash_bottom_bar.setFixedHeight(64)
+    _splash_bottom_bar.setStyleSheet(
+        f"QFrame {{ background: {BRAND_HEADER_BG}; border: none; "
+        "border-bottom-left-radius: 11px; border-bottom-right-radius: 11px; }"
+    )
+    _splash_body.addWidget(_splash_bottom_bar)
+    _splash_icon = QLabel()
+    if os.path.exists(_icon_path):
+        _splash_icon.setPixmap(QIcon(_icon_path).pixmap(140, 140))
+    _splash_icon.setFixedSize(140, 140)
+    # No frame around the icon graphic; the icon file already has its own
+    # rounded shape baked in.
+    _splash_icon.setStyleSheet("background: transparent; border: none;")
+    _splash_row.addWidget(_splash_icon, 0, Qt.AlignVCenter)
+    _splash_text_col = QVBoxLayout()
+    _splash_text_col.setContentsMargins(0, 0, 0, 0)
+    _splash_text_col.setSpacing(8)
+    _splash_text_col.addStretch(1)
+    _splash_title = QLabel("Star Trail CleanR")
+    _splash_title.setStyleSheet("font-size: 24pt; font-weight: bold; color: #1a1f2c; background: transparent; border: none;")
+    _splash_text_col.addWidget(_splash_title)
+    _splash_sub = QLabel("Remove the Trails. Keep the Stars.")
+    _splash_sub.setStyleSheet("font-size: 14pt; color: #4a5568; background: transparent; border: none;")
+    _splash_text_col.addWidget(_splash_sub)
+    _splash_hashtag = QLabel("#StarTrailCleanR")
+    _splash_hashtag.setStyleSheet("font-size: 12pt; color: #2d3748; background: transparent; border: none;")
+    _splash_text_col.addWidget(_splash_hashtag)
+    _splash_text_col.addSpacing(14)
+    _splash_bar = QProgressBar()
+    _splash_bar.setRange(0, 0)
+    _splash_bar.setTextVisible(False)
+    _splash_bar.setFixedHeight(8)
+    _splash_bar.setStyleSheet(
+        "QProgressBar { background: #e2e8f0; border: none; border-radius: 4px; }"
+        "QProgressBar::chunk { background: #4a9eff; border-radius: 4px; }"
+    )
+    _splash_text_col.addWidget(_splash_bar)
+    _splash_status = QLabel("Initializing…")
+    _splash_status.setStyleSheet("font-size: 18pt; color: #6b7280; background: transparent; border: none;")
+    _splash_text_col.addWidget(_splash_status)
+    _splash_text_col.addStretch(1)
+    _splash_row.addLayout(_splash_text_col, 1)
+    _screen = QApplication.primaryScreen()
+    if _screen:
+        _g = _screen.availableGeometry()
+        _splash.move(_g.x() + (_g.width() - 600) // 2, _g.y() + (_g.height() - 338) // 2)
     _maybe_init_sentry()
+
+    import time as _time
+    _cleanr_relaunch = '--cleanr-relaunch' in sys.argv
+    if _cleanr_relaunch:
+        _splash_shown_at = 0.0
+    else:
+        _splash.show()
+        app.processEvents()
+        _splash_shown_at = _time.monotonic()
 
     # Pre-window launch recovery (added v1.99-beta after v1.97-beta shipped a
     # NameError that crashed MainWindow.__init__ before the in-app update
     # banner could render — users had no signal that a fix existed). Two
     # safety nets, both running entirely outside MainWindow's setup code so
     # a future launch-class crash cannot block them:
-    #   (1) _pre_window_update_check: tight-budget GitHub poll. If a newer
-    #       release exists, offer to open the download page before
-    #       MainWindow tries to build.
+    #   (1) Sparkle (Mac) / WinSparkle (Windows) auto-update infrastructure.
+    #       Native popup appears IN-APP when an update is available; the
+    #       app downloads only the changed bytes and restarts itself.
+    #       Replaces the v1.x GitHub-Releases-API poll. Linux falls through
+    #       to a no-op for now; banner-style notification can be added
+    #       later if Linux usage warrants.
     #   (2) try/except around MainWindow construction + show, routed to
     #       _handle_launch_failure (defined at module scope so the test
     #       suite treats its imports as lazy). Sentry still gets the
     #       report; a fallback dialog points the user at the download page.
-    _pre_window_update_check()
+    _splash_status.setText("Checking for updates…")
+    app.processEvents()
+    if sys.platform == "darwin":
+        from modules.sparkle_updater import init_sparkle
+
+        def _dismiss_splash_for_update():
+            """Close the startup splash so Sparkle's update popup isn't hidden
+            behind it. Passed to init_sparkle as the on-update-found callback.
+            Also schedules a delayed re-activation: a beat after Sparkle's window
+            actually appears, pull the app to the front so the prompt lands on top
+            of the main window instead of behind it (the delegate hooks activate at
+            found/show time; this catches the window that materializes just after)."""
+            try:
+                _splash.close()
+            except Exception:
+                pass
+            try:
+                from modules.sparkle_updater import bring_app_to_front
+                QTimer.singleShot(600, bring_app_to_front)
+            except Exception:
+                pass
+
+        init_sparkle(on_update_found=_dismiss_splash_for_update)
+        # CI updater-alive gate: when launched with STC_UPDATER_SMOKE=1 the
+        # app exits immediately after starting the updater engine -- exit 0
+        # only if the engine actually came alive inside this frozen build.
+        # Exists because five versions shipped with a dead engine (a missing
+        # bundled module killed init_sparkle on every user's Mac) and nothing
+        # in CI ever started the engine to notice.
+        if os.environ.get("STC_UPDATER_SMOKE") == "1":
+            from modules.sparkle_updater import updater_alive
+            _alive = updater_alive()
+            print(f"UPDATER_SMOKE: controller_alive={_alive}", flush=True)
+            sys.exit(0 if _alive else 1)
+        # We deliberately DO NOT auto-pop Sparkle's update window on launch.
+        # That window is free-floating and could open BEHIND the Qt main window,
+        # where the user never saw it (the 2.51 build did exactly this on
+        # 2026-06-19 -- looked like the updater was dead). Instead the in-app amber
+        # banner is the launch notification: it lives inside the window and cannot
+        # hide. Its "Update" button still fires Sparkle's one-click install, and
+        # the engine stays started above so that button (and the Settings "Check
+        # for Updates" button) keeps working. See _start_update_check /
+        # _on_update_result for the banner.
+    elif sys.platform == "win32":
+        from modules.winsparkle_updater import init_winsparkle
+        # Feed served from OUR server (v2.80+), not GitHub Pages: machines that
+        # block GitHub (VPN/security software) can still check and download.
+        # gh-pages feeds remain published for pre-2.80 installs.
+        init_winsparkle(
+            appcast_url="https://api.startrailcleanr.com/appcast-windows.xml",
+            app_name="Star Trail CleanR",
+            app_version=VERSION,
+            company_name="Star Trail CleanR",
+        )
+        # CI updater-alive gate, Windows edition: same contract as the Mac
+        # gate above -- with STC_UPDATER_SMOKE=1 the app exits right after
+        # starting the updater engine, exit 0 only if the WinSparkle DLL
+        # actually loaded inside this frozen build. Added 2026-06-10 after the
+        # Mac engine was found dead in every shipped build with nothing in CI
+        # ever starting it; the Windows engine had the same zero-witness risk.
+        if os.environ.get("STC_UPDATER_SMOKE") == "1":
+            from modules.winsparkle_updater import updater_alive
+            _alive = updater_alive()
+            print(f"UPDATER_SMOKE: controller_alive={_alive}", flush=True)
+            sys.exit(0 if _alive else 1)
+        # CI live-check gate: with STC_UPDATER_CHECK=1 the built app performs a
+        # REAL update check against the live feed and reports what the engine
+        # said, then exits. "Engine loads" (the gate above) was never proof the
+        # check WORKS -- three Windows testers in a row got "An error occurred
+        # in retrieving update information", we blamed their security software
+        # each time, and no Windows install has ever been seen to update itself.
+        # A clean cloud Windows box with nothing blocking anything settles who
+        # is at fault: an error HERE means it has never worked for anybody.
+        if os.environ.get("STC_UPDATER_CHECK") == "1":
+            from modules.winsparkle_updater import (check_for_updates_quiet,
+                                                    set_error_handler,
+                                                    set_quiet_handlers)
+            _res = {"outcome": None}
+            # The engine calls these from its own thread; storing a string is
+            # all we do there, so no marshalling to the UI thread is needed.
+            set_quiet_handlers(found=lambda: _res.__setitem__("outcome", "found"),
+                               notfound=lambda: _res.__setitem__("outcome", "up-to-date"))
+            set_error_handler(lambda: _res.__setitem__("outcome", "error"))
+            if not check_for_updates_quiet():
+                print("UPDATER_CHECK: engine could not start a check", flush=True)
+                sys.exit(1)
+            _deadline = time.time() + 90
+            while _res["outcome"] is None and time.time() < _deadline:
+                app.processEvents()
+                time.sleep(0.1)
+            _outcome = _res["outcome"] or "timed out"
+            print(f"UPDATER_CHECK: {_outcome}", flush=True)
+            # A Windows GUI program detaches from the console, so the line above
+            # never reaches the CI log. The exit code carries the answer instead:
+            #   0 found or up-to-date  -- the feed was fetched and parsed
+            #   2 the engine reported an error fetching update information
+            #   3 nothing came back at all within the timeout
+            sys.exit({"found": 0, "up-to-date": 0, "error": 2}.get(_outcome, 3))
+        # As on Mac, no auto-popup on launch -- the amber banner is the launch
+        # notification and its Update button drives WinSparkle's one-click install.
+    _splash_status.setText("Warming up the trail detector…")
+    app.processEvents()
     try:
         window = MainWindow()
         window.show()
@@ -3613,12 +10756,72 @@ if __name__ == '__main__':
         _handle_launch_failure(_launch_exc)
         sys.exit(1)
 
+    # Windows: route a failed user-initiated WinSparkle update (its appcast fetch
+    # blocked by a security suite/proxy on this machine) to a helpful manual-
+    # download dialog. Additive -- the one-click install path is untouched; this
+    # only fires on the error callback. The signal marshals the WinSparkle-thread
+    # callback safely onto the UI thread.
+    if sys.platform == "win32" and getattr(sys, "frozen", False):
+        try:
+            from modules.winsparkle_updater import set_error_handler, set_quiet_handlers
+            window.update_failed.connect(window._on_update_failed)
+            set_error_handler(window.update_failed.emit)
+            # Quiet-check outcomes (see _win_check_for_updates): found opens the
+            # engine's install window; not-found shows our up-to-date note.
+            window.update_found_quiet.connect(window._on_quiet_update_found)
+            window.update_none_quiet.connect(window._on_quiet_update_none)
+            set_quiet_handlers(found=window.update_found_quiet.emit,
+                               notfound=window.update_none_quiet.emit)
+        except Exception:
+            pass
+
+    # Mac location guard: if the app is running off the mounted disk image or
+    # from the quarantine sandbox ("App Translocation"), macOS silently
+    # disables the built-in Sparkle updater -- the user sees "Checking for
+    # updates" at launch but no update ever arrives and the Check for Updates
+    # button stays mute. Stranded a real user on 2026-06-10 (they reinstalled
+    # from the website every release, never knowing why). Tell them how to fix
+    # it the moment the window is up.
+    if sys.platform == "darwin" and getattr(sys, "frozen", False):
+        _exe_path = sys.executable
+        if "/AppTranslocation/" in _exe_path or _exe_path.startswith("/Volumes/"):
+            _where = ("the downloaded disk image"
+                      if _exe_path.startswith("/Volumes/")
+                      else "a temporary location macOS uses for newly "
+                           "downloaded apps")
+            def _show_move_to_applications_notice():
+                """Deferred so the dialog appears over the main window, after
+                the splash is gone."""
+                QMessageBox.information(
+                    window, "Move Star Trail CleanR to Applications",
+                    f"Star Trail CleanR is running from {_where}, so macOS "
+                    "has turned off automatic updates for this session.\n\n"
+                    "To fix it: drag Star Trail CleanR into your Applications "
+                    "folder, then launch it from there. Updates will then "
+                    "install themselves with one click.")
+            QTimer.singleShot(3500, _show_move_to_applications_notice)
+
+    # Dismiss the startup splash. Minimum on-screen duration of 3000 ms (3
+    # seconds) so the user gets to see the title + tagline + progress bar even
+    # on a cached relaunch where the rest of startup is fast. On a true cold
+    # first launch, the slow imports keep the splash up longer than the
+    # minimum and this delay is effectively zero.
+    _elapsed_ms = int((_time.monotonic() - _splash_shown_at) * 1000)
+    _remaining_ms = max(0, 3000 - _elapsed_ms)
+    QTimer.singleShot(_remaining_ms, _splash.close)
+
     # Live OS appearance switching: when the user toggles macOS Light/Dark
     # mid-session, relaunch so every themed widget rebuilds with the new
     # palette. QSettings preserves folder selections and options, so the
     # user lands right back where they were.
     def _on_color_scheme_changed(_scheme):
+        """OS light/dark toggle handler. Relaunch the app so every themed
+        widget rebuilds with the new palette (QSettings preserves the user's
+        in-progress choices). Skipped while a run is active to avoid
+        interrupting it."""
         try:
+            if window.worker and window.worker.isRunning():
+                return
             window._relaunch()
         except Exception:
             pass

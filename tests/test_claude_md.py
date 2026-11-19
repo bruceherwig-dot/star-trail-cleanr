@@ -10,7 +10,7 @@ CLAUDE_MD = Path(__file__).parent.parent / "CLAUDE.md"
 
 def _read():
     assert CLAUDE_MD.exists(), f"CLAUDE.md missing at {CLAUDE_MD}"
-    return CLAUDE_MD.read_text()
+    return CLAUDE_MD.read_text(encoding="utf-8")
 
 
 def test_sacred_data_rule_present():

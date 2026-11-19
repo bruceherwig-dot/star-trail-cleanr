@@ -11,8 +11,13 @@ datasets/
 v5_star_bridge_backup_*/
 claude-skills-video/
 
-# Internal / diagnostic scripts (not shipped)
-tools/
+# Internal / diagnostic scripts (not shipped). The four internal review apps
+# ARE tracked (version-controlled / backed up); everything else in tools/ is ignored.
+tools/*
+!tools/mask_checkr.py
+!tools/tile_fixr.py
+!tools/trail_fixr.py
+!tools/mask_viewr.py
 
 # Generic pretrained models (we only ship trail_detector.pt)
 yolov8n-seg.pt
@@ -27,6 +32,10 @@ astro_clean_v3.py
 # Absent in dev so Sentry stays inactive when running from source.
 _sentry_config.py
 
+# Usage-report shared secret (baked in by CI from GitHub Secret STC_COLLECT_SECRET).
+# Absent in dev, where modules/usage_report falls back to the local secret file.
+_collect_config.py
+
 # Python / PyInstaller
 __pycache__/
 *.pyc
@@ -36,3 +45,10 @@ venv/
 build/
 dist/
 *.spec
+
+# Scratch / backups (kept on disk, not committed)
+archive/
+ci_watch_*.log
+viz_*_out.txt
+*_backup*.pt
+*_backup*.py

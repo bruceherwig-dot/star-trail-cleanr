@@ -94,7 +94,7 @@ def test_tif16_output_carries_dpi():
 def test_production_code_uses_tifffile_for_tif16():
     """Sanity: the production astro_clean_v5._write_output tif16 branch
     must not regress back to the broken Image.fromarray(mode='RGB;16') call."""
-    text = (REPO / "astro_clean_v5.py").read_text()
+    text = (REPO / "astro_clean_v5.py").read_text(encoding="utf-8")
     # Find the tif16 elif block content. Crude check: the broken pattern must
     # not appear, and tifffile must be referenced.
     assert 'mode="RGB;16"' not in text, \

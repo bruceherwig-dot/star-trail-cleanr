@@ -1,0 +1,278 @@
+"""
+Timelapse Maker -- a Star Trail CleanR companion module with its OWN version.
+
+Like the Foreground Mask editor, this is a self-contained piece that consumes
+STC's output (a folder of cleaned frames) and is driven by its own window in
+the app. THIS file is the render ENGINE; it runs as a subprocess because video
+encoding must happen out of the app's own process (encoding in-process
+truncates the file -- the same reason the share video runs separately).
+
+Versioned independently of the app: bump TIMELAPSE_VERSION as this tool grows
+(future styles like the growing star trail and comet view).
+
+Styles
+------
+plain    -- one cleaned frame per movie frame (a straight timelapse).
+accumulate -- each movie frame is a Lighten stack of EVERY photo so far, so the
+            trails draw themselves as the video plays and the last frame is the
+            finished star trail. Suggested by a user, 2026-08-27.
+blended  -- each movie frame is a Lighten (brightest-pixel) stack of the last
+            N frames, the same blend used stacking a star-trail still. Smooths
+            per-frame artifacts and flicker at the cost of the stars trailing
+            slightly. N comes from --blend-window (default 3) and is exposed
+            in the app's Blend pulldown (None / 2 / 3 / 4 / 5, where None
+            means the plain style).
+
+Frames always play in TRUE capture order (EXIF time, with filename fallback),
+matching the cleaning pipeline, so a camera file-number rollover can't scramble
+the movie.
+
+CLI
+---
+    python3 timelapse_maker.py "<cleaned folder>" -o out.mp4 \
+        --size 4k --fps 30 --style plain
+"""
+import argparse
+import os
+import sys
+
+import numpy as np
+
+# Source runs need this folder on the import path to find modules/. NEVER do it
+# in the frozen app: there this script sits in the same folder as the collected
+# cv2/ package directory, and putting that folder FIRST on the path makes
+# `import cv2` load through the wrong door -- on macOS bundles that trips
+# OpenCV's "recursion detected loading cv2" guard and killed the timelapse
+# (caught by the CI bundle smoke, 2026-07-22). PyInstaller already has every
+# bundled module on the path.
+if not getattr(sys, "frozen", False):
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from modules.io_safe import robust_imread, image_size, capture_time
+from modules.frame_list import (IMAGE_EXTS, order_by_capture_time, natural_key,
+                                is_image_name, apply_trim)
+
+TIMELAPSE_VERSION = "1.2"   # 1.2: encoder fallback (missing bundled ffmpeg can no longer crash)
+
+# Target LONG-EDGE pixel counts for each preset. "full" keeps the native size.
+# We never upscale: a preset bigger than the source falls back to full.
+SIZE_PRESETS = {"1080p": 1920, "2k": 2560, "4k": 3840}
+
+# Encoder settings mirror the before/after share clip (make_share_clip.py) so a
+# timelapse uploaded to Facebook/YouTube survives their re-encode of near-black
+# skies: constant 15 Mbps, dark-scene adaptive quantization (aq-mode=3), and fine
+# grain that dithers away banding in smooth sky gradients. Because it is constant
+# bitrate, output size tracks DURATION, not resolution.
+VIDEO_BITRATE_BPS = 15_000_000
+VIDEO_FFMPEG_PARAMS = [
+    "-b:v", "15M", "-maxrate", "15M", "-bufsize", "30M",
+    "-preset", "medium",
+    "-pix_fmt", "yuv420p", "-profile:v", "high",
+    "-x264-params", "aq-mode=3",
+    "-vf", "noise=alls=6:allf=u",
+]
+
+
+def ordered_frames(frames_dir):
+    """Every image in the folder, in true capture order (EXIF time, filename
+    fallback) -- the same ordering rule the cleaning pipeline uses."""
+    # is_image_name, not a bare extension test: on a drive that cannot hold
+    # extended attributes, macOS writes a hidden "._name" companion beside every
+    # file with the SAME extension. Counting those doubled a user's 399-frame
+    # sequence and crashed this renderer on the first one (2026-08-30).
+    files = [os.path.join(frames_dir, n) for n in os.listdir(frames_dir)
+             if is_image_name(n)
+             and os.path.isfile(os.path.join(frames_dir, n))]
+    files = sorted(files, key=natural_key)
+    times = {f: capture_time(f) for f in files}
+    return order_by_capture_time(files, times)
+
+
+def target_size(native_w, native_h, size_key):
+    """Output (width, height) for a size preset, preserving aspect, never
+    upscaling, and forced to even numbers (H.264 needs even dimensions)."""
+    if size_key == "full" or size_key not in SIZE_PRESETS:
+        return (native_w // 2 * 2, native_h // 2 * 2)
+    long_edge = SIZE_PRESETS[size_key]
+    longest = max(native_w, native_h)
+    if long_edge >= longest:
+        return (native_w // 2 * 2, native_h // 2 * 2)
+    scale = long_edge / longest
+    return (int(round(native_w * scale)) // 2 * 2,
+            int(round(native_h * scale)) // 2 * 2)
+
+
+def estimate_output_bytes(n_frames, fps, width, height):
+    """Output-size estimate for the space check. The encoder is constant bitrate
+    (VIDEO_BITRATE_BPS), so size tracks DURATION, not resolution: a 1080p and a 4K
+    clip of the same length come out about the same size. width/height stay in the
+    signature for callers but no longer change the estimate. +5% for container
+    and grain overhead."""
+    duration_s = max(1.0, n_frames / max(1, fps))
+    return int(VIDEO_BITRATE_BPS / 8 * duration_s * 1.05)
+
+
+def _open_writer(out_path, fps, tw, th):
+    """Return a frame writer that takes BGR frames. Uses imageio/libx264 at
+    constant 15 Mbps with the dark-sky settings when the bundled ffmpeg is
+    present; falls back to the OpenCV writer otherwise, so a missing encoder
+    degrades to a working (lower-grade) movie instead of a crash dialog. That
+    crash shipped: frozen builds never actually contained imageio-ffmpeg (it
+    was missing from the CI installs) and this file had no net, so the first
+    Windows user to render a timelapse got an unhandled-exception box
+    (field report, 2026-07-20). Same pattern as make_share_clip._open_writer.
+    Prints the encoder in use so the window's log and the CI bundle smoke test
+    can see which path ran."""
+    import cv2
+    try:
+        import imageio_ffmpeg  # noqa: F401  (ensures the bundled ffmpeg is present)
+        import imageio
+        w = imageio.get_writer(
+            out_path, format="FFMPEG", mode="I", fps=fps, codec="libx264",
+            macro_block_size=None, ffmpeg_params=VIDEO_FFMPEG_PARAMS)
+
+        class _W:
+            backend = "imageio/libx264 CBR-15M aq-mode=3 +grain"
+
+            def write(self, bgr):
+                w.append_data(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+
+            def close(self):
+                w.close()
+        return _W()
+    except Exception as e:
+        print(f"  (bundled ffmpeg unavailable: {e}; using OpenCV writer)", flush=True)
+        vw = cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*"avc1"), fps, (tw, th))
+        if not vw.isOpened():
+            vw = cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (tw, th))
+
+        class _W:
+            backend = "opencv (low bitrate fallback)"
+
+            def write(self, bgr):
+                vw.write(bgr)
+
+            def close(self):
+                vw.release()
+        return _W()
+
+
+def render(frames_dir, out_path, size_key="4k", fps=30, style="plain",
+           blend_window=3, limit=0, trim_start=0, trim_end=0):
+    """Encode the timelapse. Prints TIMELAPSE_PROGRESS lines the window reads to
+    drive its progress bar. Returns 0 on success.
+
+    `trim_start` / `trim_end`: frames to leave out of the front / back of the
+    sequence (the Timelapse tab's Frame Range slider). Unlike the star trail, a
+    timelapse has no automatic test-shot skip, so these count from the very first
+    and last frame. Never fewer than MIN_FRAMES_SHOWN remain."""
+    frames = ordered_frames(frames_dir)
+    frames = apply_trim(frames, trim_start, trim_end)
+    if limit and limit > 0:
+        frames = frames[:limit]
+    if len(frames) < 2:
+        print("ERROR: need at least 2 frames to build a timelapse", flush=True)
+        return 2
+
+    # The video's size comes from the frames, so SOME frame has to give up its
+    # dimensions. Ask the first one that will, rather than the first one in the
+    # list: a single unreadable file used to end the whole render with a bare
+    # "cannot unpack non-iterable NoneType object" and no hint of which file or
+    # why (Jon B, 2026-08-30 -- a macOS companion file that ordered_frames now
+    # filters out, but the next unreadable thing should not cost him a run
+    # either). If NONE of them will, say so in words a person can act on.
+    nw = nh = None
+    for _i, _f in enumerate(frames):
+        _sz = image_size(_f)
+        if _sz is not None:
+            nw, nh = _sz
+            if _i:
+                print(f"  note: skipped {_i} unreadable file(s) while looking for "
+                      f"the frame size; using {os.path.basename(_f)}", flush=True)
+            break
+    if nw is None:
+        print(f"ERROR: none of the {len(frames)} files in {frames_dir} could be "
+              f"read as an image, so there is no frame size to build a video from",
+              flush=True)
+        return 2
+    tw, th = target_size(nw, nh, size_key)
+    print(f"Timelapse Maker v{TIMELAPSE_VERSION}: {len(frames)} frames -> "
+          f"{tw}x{th} @ {fps}fps, style={style}", flush=True)
+
+    import cv2
+    writer = _open_writer(out_path, fps, tw, th)
+    print(f"  encoder: {writer.backend}", flush=True)
+
+    buf = []
+    acc = None          # the running star-accumulation stack
+    n = len(frames)
+    written = 0
+    for i, f in enumerate(frames):
+        img = robust_imread(f)  # BGR uint8/uint16
+        if img is None:
+            continue
+        if img.dtype != np.uint8:
+            img = np.clip(img / 256.0, 0, 255).astype(np.uint8) if img.max() > 255 else img.astype(np.uint8)
+        if style == "accumulate":
+            # STAR ACCUMULATION: keep the brightest value each pixel has ever
+            # had, so the trails DRAW THEMSELVES as the video plays -- one photo
+            # added per frame, nothing ever forgotten. It is the same arithmetic
+            # as the finished star trail still, shown one step at a time, and the
+            # final video frame IS that still.
+            #
+            # Suggested by Jon Bertsch, 2026-08-27. There is no rolling window
+            # here on purpose: "blended" forgets frames older than blend_window,
+            # which is what makes it a smoother rather than an accumulator.
+            if acc is None:
+                acc = img.copy()
+            else:
+                if img.shape != acc.shape:
+                    img = cv2.resize(img, (acc.shape[1], acc.shape[0]),
+                                     interpolation=cv2.INTER_AREA)
+                np.maximum(acc, img, out=acc)
+            frame = acc
+        elif style == "blended":
+            buf.append(img)
+            if len(buf) > max(1, blend_window):
+                buf.pop(0)
+            frame = buf[0]
+            for b in buf[1:]:
+                frame = np.maximum(frame, b)
+        else:
+            frame = img
+        if (frame.shape[1], frame.shape[0]) != (tw, th):
+            frame = cv2.resize(frame, (tw, th), interpolation=cv2.INTER_AREA)
+        writer.write(frame)
+        written += 1
+        if i % 5 == 0 or i == n - 1:
+            print(f"TIMELAPSE_PROGRESS: {i + 1}/{n}", flush=True)
+    writer.close()
+    if written < 2:
+        print("ERROR: too few readable frames to build a timelapse", flush=True)
+        return 2
+    print(f"TIMELAPSE_DONE: {out_path}", flush=True)
+    return 0
+
+
+def main():
+    ap = argparse.ArgumentParser(description=f"Timelapse Maker v{TIMELAPSE_VERSION}")
+    ap.add_argument("frames_dir", help="Folder of cleaned frames")
+    ap.add_argument("-o", "--out", required=True, help="Output video path (.mp4 or .mov)")
+    ap.add_argument("--size", default="4k", help="full | 4k | 2k | 1080p")
+    ap.add_argument("--fps", type=int, default=30)
+    ap.add_argument("--style", choices=["plain", "blended", "accumulate"],
+                    default="plain")
+    ap.add_argument("--blend-window", type=int, default=3)
+    ap.add_argument("--limit", type=int, default=0, help="Only render the first N frames (0 = all)")
+    ap.add_argument("--trim-start", type=int, default=0,
+                    help="Leave out this many frames from the start (never fewer "
+                         "than 20 frames remain)")
+    ap.add_argument("--trim-end", type=int, default=0,
+                    help="Leave out this many frames from the end")
+    args = ap.parse_args()
+    sys.exit(render(args.frames_dir, args.out, args.size, args.fps,
+                    args.style, args.blend_window, args.limit,
+                    args.trim_start, args.trim_end))
+
+
+if __name__ == "__main__":
+    main()

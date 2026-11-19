@@ -27,6 +27,8 @@ REPO = Path(__file__).parent.parent
 # the worker entrypoint, and every modules/*.py the worker can import.
 WORKER_FILES = [
     REPO / "astro_clean_v5.py",
+    REPO / "make_share_clip.py",
+    REPO / "timelapse_maker.py",
     REPO / "star_trail_cleanr.py",
     REPO / "mask_painter.py",
     REPO / "modules" / "detect_trails.py",

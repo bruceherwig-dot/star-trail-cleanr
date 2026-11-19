@@ -23,3 +23,24 @@ jobs:
       - name: Run diagnosis
         run: python scripts/diagnose_winsparkle.py
         shell: pwsh
+      - name: C host (the way every other app drives the engine)
+        # Compiles scripts/winsparkle_c_host.c on the runner and runs the same
+        # check from a plain compiled program, passing the URL narrow per the
+        # header. Expected: WORKS, confirming the wide-URL declaration in our
+        # app as the whole cause.
+        run: |
+          if (Get-Command gcc -ErrorAction SilentlyContinue) {
+            gcc scripts/winsparkle_c_host.c -municode -o c_host.exe
+          } else {
+            $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+            Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+            Enter-VsDevShell -VsInstallPath $vs -DevCmdArguments '-arch=x64' -SkipAutomaticLocation
+            cl /nologo scripts\winsparkle_c_host.c /Fe:c_host.exe
+          }
+          foreach ($url in @("https://winsparkle.org/example/appcast.xml",
+                             "https://api.startrailcleanr.com/appcast-windows.xml")) {
+            $p = Start-Process -FilePath ".\c_host.exe" -ArgumentList "vendored\winsparkle\WinSparkle.dll", $url -Wait -PassThru -NoNewWindow
+            $verdict = switch ($p.ExitCode) { 0 {"WORKS"} 2 {"ERROR"} 3 {"TIMED OUT"} default {"exit $($p.ExitCode)"} }
+            Write-Host "  C host vs $url -> $verdict"
+          }
+        shell: pwsh
