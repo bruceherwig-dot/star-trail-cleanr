@@ -1065,11 +1065,197 @@ def apply_brightness(img, amount):
     return lut.astype(img.dtype)[img]
 
 
+# ── TRAIL SMOOTHING ─────────────────────────────────────────────────────────
+# Each frame's stars are softened into small round blobs BEFORE the frames are
+# stacked, so the dots of a trail overlap into one continuous soft line (the look
+# of a slightly out-of-focus lens). It has to happen per frame: closing, widening
+# or direction-filling the finished stack fused neighbouring trails and left
+# blocky seams (tried and rejected, see the project notes). The recipe, as
+# approved on the Joshua Tree 700-frame set (2026-11-19):
+#   1. brightness curve up (gamma 2.2), so the blur mixes light, not stored values
+#   2. near-white stars boosted a little first, so they bloom like out of focus
+#   3. round disc blur, radius 1 to 5 (3 is the look that was picked)
+#   4. curve back down
+#   5. each frame averaged with the frames either side of it
+# The sharp original is NEVER put back on top: that made beads and a thin core.
+SMOOTH_GAMMA = 2.2
+SMOOTH_HIGHLIGHT_START = 0.70      # stored value (0..1) above which stars are boosted
+SMOOTH_HIGHLIGHT_GAIN = 4.0        # up to 5x the light at pure white
+SMOOTH_MAX_RADIUS = 5
+_SMOOTH_KERNELS = {}
+
+
+def _smooth_kernel(radius):
+    """Soft-edged round disc, normalised to add up to 1."""
+    k = _SMOOTH_KERNELS.get(radius)
+    if k is None:
+        yy, xx = np.mgrid[:2 * radius + 3, :2 * radius + 3]
+        d = np.hypot(yy - (radius + 1), xx - (radius + 1))
+        k = np.clip(radius + 0.5 - d, 0, 1).astype(np.float32)
+        k /= k.sum()
+        _SMOOTH_KERNELS[radius] = k
+    return k
+
+
+def smooth_frame(im, radius):
+    """One frame softened (steps 1 to 4 above). Takes an 8-bit or 16-bit BGR frame
+    and returns float32 in that frame's own number range (0..255 or 0..65535), so
+    a 16-bit trail stays 16-bit. Never changes `im`. Each step is timed under the
+    permanent "smooth.*" timers (modules/step_timer)."""
+    from modules import step_timer
+    top = 65535.0 if im.dtype == np.uint16 else 255.0
+    with step_timer.step("smooth.to_float"):
+        x = im.astype(np.float32)
+        x *= np.float32(1.0 / top)
+    with step_timer.step("smooth.gamma_up"):
+        lin = np.power(x, np.float32(SMOOTH_GAMMA))
+    with step_timer.step("smooth.boost"):
+        hl = x - np.float32(SMOOTH_HIGHLIGHT_START)
+        hl *= np.float32(1.0 / (1.0 - SMOOTH_HIGHLIGHT_START))
+        np.clip(hl, 0.0, 1.0, out=hl)
+        hl *= np.float32(SMOOTH_HIGHLIGHT_GAIN)
+        hl += np.float32(1.0)
+        lin *= hl
+        del hl, x
+    with step_timer.step("smooth.blur"):
+        blurred = cv2.filter2D(lin, -1, _smooth_kernel(int(radius)),
+                               borderType=cv2.BORDER_REFLECT)
+        del lin
+    with step_timer.step("smooth.gamma_down"):
+        np.clip(blurred, 0.0, 1.0, out=blurred)
+        np.power(blurred, np.float32(1.0 / SMOOTH_GAMMA), out=blurred)
+        blurred *= np.float32(top)
+    return blurred
+
+
+def _mean_of(frames):
+    """Average of up to three float frames in ONE new array (no stacked copy)."""
+    out = frames[0] + frames[1] if len(frames) > 1 else frames[0].copy()
+    for f in frames[2:]:
+        out += f
+    if len(frames) > 1:
+        out *= np.float32(1.0 / len(frames))
+    return out
+
+
+def _smooth_stack_fullres(dirpath, names, radius, taper=0.0, comet_tail_frames=0,
+                          fg=None):
+    """Lighten-max stack in which every frame is smoothed first (see above). Works
+    with all three styles: plain, Fading Ends (`taper`, a fraction of the sequence)
+    and Comet (`comet_tail_frames`). `names` arrives in capture order, reversed
+    already for a reversed comet. `fg` is the ground mask (255 = ground) or None:
+    the ground is put back from the same stack built WITHOUT smoothing, so rocks
+    and trees stay sharp. Full depth is kept: 16-bit frames give a 16-bit stack.
+    Returns the stack, or None if no frame could be read."""
+    from modules import step_timer
+    n = len(names)
+    ramp = taper_ramp_frames(n, taper) if taper else 0
+    fade = 0.04 ** (1.0 / max(int(comet_tail_frames), 1)) if comet_tail_frames else None
+    dtype = None
+    top = 255.0
+    B = None          # the smoothed stack
+    A = None          # the same stack without smoothing, kept only to restore the ground
+    buf = []          # the last three smoothed frames
+    used = 0
+    missing, unreadable, resized = [], [], []
+    for i, nm in enumerate(names):
+        p = os.path.join(dirpath, nm)
+        if not os.path.exists(p):
+            missing.append(nm)
+            continue
+        with step_timer.step("smooth.read"):
+            im = _to_bgr(robust_imread(p, cv2.IMREAD_UNCHANGED))
+        if im is None:
+            unreadable.append(nm)
+            continue
+        if dtype is None:
+            dtype = im.dtype if im.dtype in (np.uint8, np.uint16) else np.dtype(np.uint8)
+            top = 65535.0 if dtype == np.uint16 else 255.0
+        if im.dtype != dtype:
+            # 257 maps 255 exactly onto 65535, the cleaning engine's own convention.
+            if dtype == np.uint16 and im.dtype == np.uint8:
+                im = im.astype(np.uint16) * 257
+            elif dtype == np.uint8 and im.dtype == np.uint16:
+                im = (im >> 8).astype(np.uint8)
+            else:
+                im = np.clip(im, 0, top).astype(dtype)
+        if B is not None and im.shape != B.shape:
+            im = cv2.resize(im, (B.shape[1], B.shape[0]), interpolation=cv2.INTER_AREA)
+            resized.append(nm)
+        if taper:
+            w = taper_weight(i, n, ramp)
+            mul = np.float32(w ** (1.0 / TAPER_GAMMA))
+        else:
+            mul = None
+        sm = smooth_frame(im, radius)
+        buf.append(sm)
+        buf = buf[-3:]
+        with step_timer.step("smooth.average_stack"):
+            fb = _mean_of(buf)
+            if mul is not None:
+                fb *= mul
+            if B is None:
+                B = fb
+            else:
+                if fade is not None:
+                    B *= np.float32(fade)
+                np.maximum(B, fb, out=B)
+            if fg is not None:
+                fa = im.astype(np.float32)
+                if mul is not None:
+                    fa *= mul
+                if A is None:
+                    A = fa
+                else:
+                    if fade is not None:
+                        A *= np.float32(fade)
+                    np.maximum(A, fa, out=A)
+        used += 1
+        print(f"  smooth star trail: {i + 1}/{n}", flush=True)
+    if B is None:
+        return None
+    print(f"  smooth star trail: stacked {used} of {n} frames "
+          f"(smoothing {int(radius)})", flush=True)
+    dropped = missing + unreadable
+    if dropped:
+        print("  " + "!" * 60, flush=True)
+        print(f"  WARNING [smooth star trail]: {len(dropped)} frame(s) NOT stacked "
+              f"({len(missing)} missing, {len(unreadable)} unreadable) -- the "
+              f"stack is INCOMPLETE.", flush=True)
+        print(f"    skipped: {', '.join(dropped[:20])}"
+              + (f" ... (+{len(dropped) - 20} more)" if len(dropped) > 20 else ""),
+              flush=True)
+        print("  " + "!" * 60, flush=True)
+    if fg is not None and A is not None:
+        g = fg
+        if g.shape[:2] != B.shape[:2]:
+            g = cv2.resize(g, (B.shape[1], B.shape[0]), interpolation=cv2.INTER_NEAREST)
+        g = g > 127
+        B[g] = A[g]
+    # Truncate, exactly as the plain, Fading Ends and Comet stackers do, so the ground
+    # restored above matches what those styles give today, to the last level.
+    out = np.clip(B, 0, top).astype(dtype)
+    # Where the time went, from the permanent timers (never lost in a scratch script).
+    snap = step_timer.snapshot()["steps"]
+    parts = [(k, v) for k, v in snap.items() if k.startswith("smooth.")]
+    if parts and used:
+        print("  smoothing time per frame: " + ", ".join(
+            f"{k.split('.', 1)[1]} {v[1] / used:.2f}s"
+            for k, v in sorted(parts, key=lambda kv: -kv[1][1])), flush=True)
+    return out
+
+
 def make_star_trail(cleaned_dir, out_path=None, stack=None, comet_tail=0,
                     thicken_px=0, remove_hotpix=False, reverse=False,
                     match_cleaned=None, out_format="jpg",
-                    trim_start=0, trim_end=0, brightness_stops=0.0, taper=0.0):
+                    trim_start=0, trim_end=0, brightness_stops=0.0, taper=0.0,
+                    smooth_px=0):
     """OUTPUT 1 — the quick-and-dirty full-resolution STAR TRAIL (`--star-trail`).
+
+    `smooth_px`: Trail Smoothing, 0 (off) to 5. Every frame is softened with a round
+    blur of that radius before stacking, so a trail becomes one continuous soft line
+    (see smooth_frame). Works with plain, Fading Ends and Comet. It re-reads every
+    frame, like those two styles do, and costs about 1.4 s a frame on 20 MP.
 
     `trim_start` / `trim_end`: extra frames to leave out of the front / back of the
     sequence, on top of the automatic first-3-and-last-3 skip (the Star Trail tab's
@@ -1110,7 +1296,47 @@ def make_star_trail(cleaned_dir, out_path=None, stack=None, comet_tail=0,
     _t_stack = time.time()
     names = None   # set by the stacking branch below; reused by the hot-pixel re-stack
     _taper_on = bool(taper) and float(taper) > 0
-    if _taper_on or (comet_tail and float(comet_tail) > 0):
+    _smooth = max(0, min(int(smooth_px or 0), SMOOTH_MAX_RADIUS))
+    if _smooth > 0:
+        # Smoothing has to touch every frame before stacking, so it cannot reuse the
+        # stack the run already built: rebuild from the frames in capture order.
+        if not os.path.isdir(cleaned_dir):
+            raise SystemExit(f"cleaned folder not found: {cleaned_dir}")
+        names = (_list_frames_matched(cleaned_dir, match_cleaned)
+                 if match_cleaned else _list_frames(cleaned_dir))
+        if not names:
+            raise SystemExit(f"no cleaned frames found in {cleaned_dir}")
+        names = _apply_trim(names, trim_start, trim_end)
+        _is_comet = (not _taper_on) and bool(comet_tail) and float(comet_tail) > 0
+        if _is_comet and reverse:
+            names = names[::-1]
+            print("  comet: processing frames in reverse order", flush=True)
+        _tail_frames = (max(1, int(round(float(comet_tail) * len(names))))
+                        if _is_comet else 0)
+        # The ground mask keeps the foreground sharp, found the same way thickening
+        # finds it. Without one the whole frame is smoothed.
+        _fg_s = None
+        try:
+            from modules.workspace import find_workspace
+            # Its own import name: later branches of this function import
+            # robust_imread locally, which makes the bare name unusable up here.
+            from modules.io_safe import robust_imread as _read_mask
+            _ws_s = find_workspace(cleaned_dir)
+            if _ws_s:
+                _fgp_s = os.path.join(_ws_s, "foreground_mask.png")
+                if os.path.isfile(_fgp_s):
+                    _fg_s = _read_mask(_fgp_s, cv2.IMREAD_GRAYSCALE)
+        except Exception:
+            _fg_s = None
+        print(f"{len(names)} frames -> smoothed star trail (smoothing {_smooth}"
+              + ("" if _fg_s is not None else ", no foreground mask: whole frame smoothed")
+              + ")", flush=True)
+        stack = _smooth_stack_fullres(cleaned_dir, names, _smooth,
+                                      taper=float(taper) if _taper_on else 0.0,
+                                      comet_tail_frames=_tail_frames, fg=_fg_s)
+        if stack is None:
+            raise SystemExit(f"smoothed stacking failed (cleaned dir = {cleaned_dir})")
+    elif _taper_on or (comet_tail and float(comet_tail) > 0):
         # Tapered Ends (taper = fraction of the sequence at each end) and Comet mode
         # are both order-dependent, so neither can reuse the order-independent
         # lighten-max stack the run already built. Rebuild from the cleaned folder
@@ -1285,6 +1511,10 @@ if __name__ == "__main__":
                     help="star trail: Tapered Ends -- trails fade in and out over this "
                          "FRACTION of the sequence at each end (e.g. 0.1/0.2/0.3; "
                          "0 = off). The middle stays at full brightness")
+    ap.add_argument("--smooth", type=int, default=0, choices=range(0, SMOOTH_MAX_RADIUS + 1),
+                    help="star trail: Trail Smoothing -- soften every frame with a round blur "
+                         "of this radius (1 to 5; 3 is the picked look) so the trails become "
+                         "continuous soft lines. 0 = off. Slow: re-reads and blurs every frame")
     ap.add_argument("--thicken", type=int, default=0,
                     help="star trail: widen the trails by this many pixels (0 = leave as shot)")
     ap.add_argument("--brightness", type=float, default=0.0,
@@ -1326,7 +1556,8 @@ if __name__ == "__main__":
         make_star_trail(st_cleaned, args.out, out_format=args.out_format,
                         comet_tail=args.comet_tail, taper=args.taper,
                         match_cleaned=args.match_cleaned,
-                        thicken_px=args.thicken, remove_hotpix=args.remove_hotpix,
+                        thicken_px=args.thicken, smooth_px=args.smooth,
+                        remove_hotpix=args.remove_hotpix,
                         reverse=args.reverse,
                         trim_start=args.trim_start, trim_end=args.trim_end,
                         brightness_stops=args.brightness)

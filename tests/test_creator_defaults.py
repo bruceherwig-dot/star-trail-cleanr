@@ -111,10 +111,11 @@ def test_the_star_trail_tabs_other_choices_are_at_their_defaults():
     cleaned, original = _frames()
     p = S.StarTrailPanel(cleaned, "", original_folder=original)
     assert p._mode_normal.isChecked(), "should open on Normal (Lighten), not Comet"
-    assert p._size_cb.currentData() == 0, "trail thickness should open at Normal"
+    assert p._size_cb.currentData() == 0, "trail smoothing should open at Off"
     assert not p._hotpix_chk.isChecked(), "speck removal should open unticked"
     assert not p._reverse_chk.isChecked(), "reverse order should open unticked"
-    assert float(p._comet_len_cb.currentData()) == 1.0, "trail length should open at Long"
+    p._mode_comet.setChecked(True)
+    assert p._comet_fraction() == 2.0, "Comet's Length should open at Long"
 
 
 def test_nothing_writes_the_remembered_keys_any_more():

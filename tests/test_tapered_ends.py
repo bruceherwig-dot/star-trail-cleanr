@@ -79,12 +79,13 @@ def test_the_tab_opens_on_normal_and_offers_the_twenty_percent_default():
         cv2.imwrite(str(cleaned / f"IMG_{i}.jpg"), img)
     p = S.StarTrailPanel(str(cleaned), "", original_folder=str(d))
     assert p._mode_normal.isChecked(), "must still open on Normal"
-    assert float(p._taper_cb.currentData()) == 0.2, "taper length opens at Medium (20%)"
-    assert not p._taper_cb.isEnabled(), "taper length is grayed until Tapered Ends is picked"
+    assert not p._len_cb.isEnabled(), "Length is grayed until Comet or Fading Ends is picked"
     assert p._mode_taper.text() == "Fading Ends", "the style's on-screen name"
-    assert p._taper_label.text() == "Fade Length", "its length label"
+    assert p._len_label.text() == "Length", "one shared length label"
     p._mode_taper.setChecked(True)
-    assert p._taper_cb.isEnabled() and not p._comet_len_cb.isEnabled()
+    assert p._len_cb.isEnabled() and not p._reverse_chk.isEnabled(), \
+        "Fading Ends has Length but no Reverse order"
+    assert p._taper_fraction() == 0.2, "Fading Ends opens at Medium (20% at each end)"
     assert "taper-20" in os.path.basename(p._build_out_path())
 
 
@@ -106,9 +107,11 @@ def test_style_options_sit_under_the_style_and_the_tab_never_changes_height():
         cv2.imwrite(str(cleaned / f"IMG_{i}.jpg"), img)
     p = S.StarTrailPanel(str(cleaned), "", original_folder=str(d))
     heights = {}
-    for btn, page in ((p._mode_normal, 0), (p._mode_comet, 1), (p._mode_taper, 2)):
+    # Comet and Fading Ends share one Length row (page 1); Normal shows nothing (page 0).
+    for name, btn, page in (("normal", p._mode_normal, 0), ("comet", p._mode_comet, 1),
+                            ("fading", p._mode_taper, 1)):
         btn.setChecked(True)
         assert p._style_opts.currentIndex() == page, "options row must follow the style"
-        heights[page] = p.layout().totalHeightForWidth(560)
+        heights[name] = p.layout().totalHeightForWidth(560)
     assert len(set(heights.values())) == 1, f"height changed with the style: {heights}"
-    assert heights[0] <= 760, f"tab needs {heights[0]} px; it must stay compact"
+    assert heights["normal"] <= 760, f"tab needs {heights['normal']} px; it must stay compact"
