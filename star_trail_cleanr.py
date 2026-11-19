@@ -9208,7 +9208,7 @@ class StarTrailPanel(QWidget):
         except Exception:
             _total, _min_keep = 0, 0
         # Frames the stack really uses (the automatic skip taken off); 0 = unknown.
-        # Tapered Ends is switched off when this is known and too small to show it.
+        # Fading Ends is switched off when this is known and too small to show it.
         try:
             self._seq_used = max(0, _total - _msc.SKIP_FIRST - _msc.SKIP_LAST) if _total else 0
         except Exception:
@@ -9220,7 +9220,7 @@ class StarTrailPanel(QWidget):
 
         # Star Trail Style: the three styles side by side on ONE row, and directly
         # under them ONE options row that shows only the options of the style picked
-        # (Comet: Trail Length + reverse order; Tapered Ends: Taper Length; Normal:
+        # (Comet: Trail Length + reverse order; Fading Ends: Fade Length; Normal:
         # nothing). Two rows in all, where separate greyed-out rows for every style
         # made this tab so tall that the window could not fit it on a laptop screen
         # and its text drew on top of the picture (2026-11-10). The options row is a
@@ -9234,9 +9234,9 @@ class StarTrailPanel(QWidget):
         self._mode_group = QButtonGroup(self)
         self._mode_group.addButton(self._mode_normal)
         self._mode_group.addButton(self._mode_comet)
-        # Tapered Ends: every trail fades in at its start and out at its end; the
+        # Fading Ends: every trail fades in at its start and out at its end; the
         # middle of the sequence stays full brightness (make_share_clip --taper).
-        self._mode_taper = QRadioButton("Tapered Ends")
+        self._mode_taper = QRadioButton("Fading Ends")
         self._mode_group.addButton(self._mode_taper)
         self._mode_normal.setChecked(True)
         _rb = QHBoxLayout(); _rb.setContentsMargins(0, 0, 0, 0); _rb.setSpacing(18)
@@ -9270,13 +9270,13 @@ class StarTrailPanel(QWidget):
         _ch.addWidget(self._comet_len_cb, 1)
         _ch.addWidget(self._reverse_chk)
 
-        # Tapered Ends' option: the share of the frames at EACH end that fade, so it
+        # Fading Ends' option: the share of the frames at EACH end that fade, so it
         # scales with the sequence.
         self._taper_cb = QComboBox()
         for label, frac in (("Short (10%)", 0.1), ("Medium (20%)", 0.2), ("Long (30%)", 0.3)):
             self._taper_cb.addItem(label, frac)
         self._taper_cb.setCurrentIndex(self._taper_cb.findData(0.2))   # default Medium (20%)
-        self._taper_label = QLabel("Taper Length")
+        self._taper_label = QLabel("Fade Length")
         _tpage = QWidget()
         _th = QHBoxLayout(_tpage); _th.setContentsMargins(0, 0, 0, 0); _th.setSpacing(8)
         _th.addWidget(self._taper_label)
@@ -9285,7 +9285,7 @@ class StarTrailPanel(QWidget):
         self._style_opts = QStackedWidget()
         self._style_opts.addWidget(QWidget())      # 0: Normal, no options
         self._style_opts.addWidget(_cpage)         # 1: Comet Mode
-        self._style_opts.addWidget(_tpage)         # 2: Tapered Ends
+        self._style_opts.addWidget(_tpage)         # 2: Fading Ends
         _mv.addWidget(self._style_opts)
         _row("Star Trail Style", _mode_w)
 
@@ -9392,7 +9392,7 @@ class StarTrailPanel(QWidget):
 
     def _sync_comet_len(self, *_):
         """Show the options of the picked style only (the stack under the style
-        radios: nothing for Normal, Comet's for Comet, Taper Length for Tapered
+        radios: nothing for Normal, Comet's for Comet, Fade Length for Tapered
         Ends), and keep each style's controls live only while that style is picked."""
         self._style_opts.setCurrentIndex(
             1 if self._mode_comet.isChecked() else 2 if self._mode_taper.isChecked() else 0)
@@ -9400,7 +9400,7 @@ class StarTrailPanel(QWidget):
         self._comet_len_cb.setEnabled(on)
         self._len_label.setEnabled(on)
         self._reverse_chk.setEnabled(on)
-        # Tapered Ends' own length choice, same rule: live only while it is selected.
+        # Fading Ends' own length choice, same rule: live only while it is selected.
         _t = self._mode_taper.isChecked()
         self._taper_cb.setEnabled(_t)
         self._taper_label.setEnabled(_t)
@@ -9556,7 +9556,7 @@ class StarTrailPanel(QWidget):
         # turns it into a real frame count. 0 = plain trail (Blending Mode = Normal).
         comet = (float(self._comet_len_cb.currentData() or 0.5)
                  if self._mode_comet.isChecked() else 0.0)
-        # Tapered Ends: FRACTION of the frames at each end that fade (0 = off).
+        # Fading Ends: FRACTION of the frames at each end that fade (0 = off).
         taper = (float(self._taper_cb.currentData() or 0.2)
                  if self._mode_taper.isChecked() else 0.0)
         thick = int(self._size_cb.currentData() or 0)

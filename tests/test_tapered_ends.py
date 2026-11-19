@@ -81,6 +81,8 @@ def test_the_tab_opens_on_normal_and_offers_the_twenty_percent_default():
     assert p._mode_normal.isChecked(), "must still open on Normal"
     assert float(p._taper_cb.currentData()) == 0.2, "taper length opens at Medium (20%)"
     assert not p._taper_cb.isEnabled(), "taper length is grayed until Tapered Ends is picked"
+    assert p._mode_taper.text() == "Fading Ends", "the style's on-screen name"
+    assert p._taper_label.text() == "Fade Length", "its length label"
     p._mode_taper.setChecked(True)
     assert p._taper_cb.isEnabled() and not p._comet_len_cb.isEnabled()
     assert "taper-20" in os.path.basename(p._build_out_path())
