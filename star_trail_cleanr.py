@@ -9238,12 +9238,20 @@ class StarTrailPanel(QWidget):
         _mv = QVBoxLayout(_mode_w); _mv.setContentsMargins(0, 0, 0, 0); _mv.setSpacing(6)
         self._mode_normal = QRadioButton("Normal (Lighten)")
         self._mode_comet = QRadioButton("Comet Mode")
+        self._mode_comet.setToolTip(
+            "Each star leaves a fading tail. Anything that moves on the ground leaves a "
+            "tail too. The normal star trail saved next to the result has the untouched "
+            "ground, for replacing it.")
         self._mode_group = QButtonGroup(self)
         self._mode_group.addButton(self._mode_normal)
         self._mode_group.addButton(self._mode_comet)
         # Fading Ends: every trail fades in at its start and out at its end; the
         # middle of the sequence stays full brightness (make_share_clip --taper).
         self._mode_taper = QRadioButton("Fading Ends")
+        self._mode_taper.setToolTip(
+            "Trails fade in at the start and fade out at the end. Anything that moves on "
+            "the ground fades too. The normal star trail saved next to the result has the "
+            "untouched ground, for replacing it.")
         self._mode_group.addButton(self._mode_taper)
         self._mode_normal.setChecked(True)
         _rb = QHBoxLayout(); _rb.setContentsMargins(0, 0, 0, 0); _rb.setSpacing(18)
@@ -9312,7 +9320,10 @@ class StarTrailPanel(QWidget):
         self._size_cb.setToolTip(
             "Softens every frame so the dots of each trail join into one continuous, "
             "soft line. Medium is a good start.\n"
-            "Takes longer: about 1 to 2 seconds per frame.")
+            "Smoothing every frame adds to the time it takes to render.\n"
+            "Keeps the ground from the normal star trail where a ground mask was painted. "
+            "Without a mask, or where the mask misses, the ground softens too. The normal "
+            "star trail saved next to the result has the untouched ground, for replacing it.")
         # A plain note to the right of the dropdown, so nobody is surprised by the
         # wait (Bruce's wording, 2026-11-19). Always shown, even at Off, so it is
         # read before a size is picked.
@@ -9641,7 +9652,7 @@ class StarTrailPanel(QWidget):
         # Smoothing makes the stack phase far longer, so it keeps its own measured time
         # (and a frame-count based first guess), or one number would pace both.
         self._stack_key = "stack_smooth" if smooth > 0 else "stack"
-        _first_guess = (1.4 * max(1, getattr(self, "_seq_used", 0)) if smooth > 0 else 7.0)
+        _first_guess = (0.5 * max(1, getattr(self, "_seq_used", 0)) if smooth > 0 else 7.0)
         plan = [("stack", float(saved_secs.get(self._stack_key, _first_guess)))]
         if self._hotpix_chk.isChecked():
             plan.append(("hotpix", float(saved_secs.get("hotpix", 150.0))))

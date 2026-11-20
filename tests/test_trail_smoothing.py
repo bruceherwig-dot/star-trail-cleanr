@@ -27,14 +27,14 @@ def _msc():
     return m
 
 
-def _star_frames(td, n=30, dtype=np.uint8, step=6, ground=False):
+def _star_frames(td, n=30, dtype=np.uint8, step=6, ground=False, width=220):
     """A star moving `step` px per frame along row 40, saved as PNGs. Optionally a
     bright static 'ground' block in the bottom rows, the same in every frame."""
     import cv2
     top = 255 if dtype == np.uint8 else 65535
     names = []
     for i in range(n):
-        img = np.zeros((80, 220, 3), dtype)
+        img = np.zeros((80, width, 3), dtype)
         img[40, 10 + step * i] = (top, top, top)
         if ground:
             img[65:80, :] = (top // 3, top // 3, top // 3)
@@ -129,7 +129,7 @@ def test_the_whole_command_runs_end_to_end():
     m = _msc()
     import cv2
     with tempfile.TemporaryDirectory() as td:
-        _star_frames(td, n=30)
+        _star_frames(td, n=30, width=5472)       # the reference width: radius used as given
         with tempfile.TemporaryDirectory() as od:
             out = os.path.join(od, "smooth.tif")
             m.make_star_trail(td, out, out_format="tif8", smooth_px=3)
@@ -143,7 +143,14 @@ def test_the_timers_record_where_the_time_goes():
     step_timer.reset()
     m.smooth_frame(np.zeros((40, 60, 3), np.uint8), 3)
     names = set(step_timer.snapshot()["steps"])
-    assert {"smooth.blur", "smooth.gamma_up", "smooth.gamma_down", "smooth.boost"} <= names
+    assert {"smooth.bands"} <= names, "the smoothing is timed as one wall-clock step"
+    # the stack loop records the wait for each frame to be read and the averaging
+    import tempfile as _tf
+    with _tf.TemporaryDirectory() as td:
+        step_timer.reset()
+        m._smooth_stack_fullres(td, _star_frames(td, n=6), 2)
+    names = set(step_timer.snapshot()["steps"])
+    assert {"smooth.read_wait", "smooth.average_stack"} <= names
 
 
 def test_the_tab_has_the_smoothing_row_and_three_comet_lengths():
@@ -220,3 +227,104 @@ def test_the_real_command_finds_the_ground_mask_in_the_workspace():
             m.make_star_trail(td, soft, out_format="tif8", smooth_px=3)
             p, s = cv2.imread(plain), cv2.imread(soft)
     assert (p[60:] == s[60:]).all(), "the ground came out exactly as the normal stack"
+
+
+def test_the_radius_scales_with_the_pictures_width():
+    m = _msc()
+    assert m.smooth_radius_for_width(3, 5472) == 3.0, "the reference width is unchanged"
+    assert abs(m.smooth_radius_for_width(3, 8256) - 3 * 8256 / 5472) < 1e-9
+    assert m.smooth_radius_for_width(3, 2736) == 1.5, "a narrower frame gets a smaller blur"
+    assert m.smooth_radius_for_width(3, 5472, reference=None) == 3.0, "no reference: as given"
+
+
+def test_a_fractional_radius_gives_a_proper_disc_and_whole_ones_are_unchanged():
+    m = _msc()
+    k = m._smooth_kernel(4.5)
+    assert abs(float(k.sum()) - 1.0) < 1e-5 and k.shape[0] == 2 * 5 + 3
+    k3 = m._smooth_kernel(3)
+    assert k3.shape == (9, 9), "a whole radius is the same disc as before"
+
+
+def test_a_wider_frame_gets_a_proportionally_wider_blur():
+    m = _msc()
+    def spread(width):
+        with tempfile.TemporaryDirectory() as td:
+            names = _star_frames(td, n=12, step=width // 40, width=width)
+            out = m._smooth_stack_fullres(td, names, 3, reference_width=2000)
+        col = 10 + (width // 40) * 5
+        return int((out[:, col, 0] > 15).sum())
+    # twice the width: the blur grows by the same factor, so the vertical spread grows
+    assert spread(4000) > spread(2000)
+
+
+def test_the_command_scales_by_default_and_reports_it():
+    src = (REPO / "make_share_clip.py").read_text(encoding="utf-8")
+    assert "reference_width=SMOOTH_REFERENCE_WIDTH" in src
+
+
+def _reference_smooth(im, radius):
+    """The plain, one-piece way: what the speed-up must still give."""
+    m = _msc()
+    top = 65535.0 if im.dtype == np.uint16 else 255.0
+    x = im.astype(np.float32) * np.float32(1.0 / top)
+    lin = np.power(x, np.float32(2.2))
+    hl = np.clip((x - np.float32(0.70)) / np.float32(0.30), 0, 1)
+    lin = lin * (np.float32(1.0) + np.float32(4.0) * hl)
+    import cv2
+    b = cv2.filter2D(lin, -1, m._smooth_kernel(radius), borderType=cv2.BORDER_REFLECT)
+    return np.power(np.clip(b, 0, 1), np.float32(1 / 2.2)) * np.float32(top)
+
+
+def _noisy(h, w, dtype, seed):
+    rng = np.random.default_rng(seed)
+    top = 65535 if dtype == np.uint16 else 255
+    im = (rng.random((h, w, 3)) ** 6 * top).astype(dtype)      # mostly dark, a few bright
+    im[h // 2, w // 2] = top
+    return im
+
+
+def test_the_speed_up_gives_the_same_picture_as_the_plain_way():
+    m = _msc()
+    for dtype in (np.uint8, np.uint16):
+        im = _noisy(300, 500, dtype, 1)
+        top = 65535.0 if dtype == np.uint16 else 255.0
+        ref = _reference_smooth(im, 3)
+        one = m.smooth_frame(im, 3, bands=1, workers=1)
+        many = m.smooth_frame(im, 3, bands=8, workers=4)
+        tol = top * 2e-5
+        assert np.abs(one - ref).max() < tol, "lookup table matches the per-pixel maths"
+        assert np.abs(many - one).max() < tol, "bands and threads match the one-piece result"
+
+
+def test_bands_agree_at_the_seams_and_at_the_edges():
+    m = _msc()
+    im = np.zeros((200, 120, 3), np.uint8)
+    for y in (0, 24, 25, 99, 100, 101, 199):               # bright rows on and around the seams
+        im[y, :, :] = 255
+    one = m.smooth_frame(im, 4.5, bands=1, workers=1)
+    for nb in (2, 5, 8):
+        many = m.smooth_frame(im, 4.5, bands=nb, workers=nb)
+        assert np.abs(many - one).max() < 255 * 2e-5, f"{nb} bands differ from the whole frame"
+
+
+def test_thread_count_leaves_cores_free_and_has_a_ceiling():
+    m = _msc()
+    assert 1 <= m.smooth_threads() <= m.SMOOTH_MAX_THREADS
+
+
+def test_the_options_explain_what_happens_to_the_ground():
+    from PySide6.QtWidgets import QApplication
+    QApplication.instance() or QApplication([])
+    import cv2
+    import star_trail_cleanr as S
+    d = Path(tempfile.mkdtemp())
+    cleaned = d / "cleaned"
+    cleaned.mkdir()
+    for i in range(30):
+        img = np.full((40, 60, 3), 30, np.uint8)
+        cv2.imwrite(str(d / f"IMG_{i}.jpg"), img)
+        cv2.imwrite(str(cleaned / f"IMG_{i}.jpg"), img)
+    p = S.StarTrailPanel(str(cleaned), "", original_folder=str(d))
+    for tip in (p._size_cb.toolTip(), p._mode_comet.toolTip(), p._mode_taper.toolTip()):
+        assert "ground" in tip and "normal star trail" in tip
+    assert "ground mask" in p._size_cb.toolTip(), "smoothing says it uses the mask where there is one"

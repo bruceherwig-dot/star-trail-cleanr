@@ -1082,50 +1082,120 @@ SMOOTH_GAMMA = 2.2
 SMOOTH_HIGHLIGHT_START = 0.70      # stored value (0..1) above which stars are boosted
 SMOOTH_HIGHLIGHT_GAIN = 4.0        # up to 5x the light at pure white
 SMOOTH_MAX_RADIUS = 5
+# The radius is in pixels, but a trail looks thinner on a higher-megapixel frame, so
+# the radius is scaled by the picture's width against this reference (5472 px, the
+# 20 MP frames Medium was picked on). Medium then looks the same on every camera.
+SMOOTH_REFERENCE_WIDTH = 5472
 _SMOOTH_KERNELS = {}
 
 
+def smooth_radius_for_width(radius, width, reference=SMOOTH_REFERENCE_WIDTH):
+    """The blur radius to use on a frame `width` pixels wide. With no reference
+    the radius is used as given."""
+    if not reference or width <= 0:
+        return float(radius)
+    return float(radius) * float(width) / float(reference)
+
+
 def _smooth_kernel(radius):
-    """Soft-edged round disc, normalised to add up to 1."""
+    """Soft-edged round disc, normalised to add up to 1. `radius` may be a
+    fraction (scaled radii are); a whole number gives the same disc as always."""
+    radius = round(float(radius), 2)
     k = _SMOOTH_KERNELS.get(radius)
     if k is None:
-        yy, xx = np.mgrid[:2 * radius + 3, :2 * radius + 3]
-        d = np.hypot(yy - (radius + 1), xx - (radius + 1))
+        n = int(np.ceil(radius))
+        yy, xx = np.mgrid[:2 * n + 3, :2 * n + 3]
+        d = np.hypot(yy - (n + 1), xx - (n + 1))
         k = np.clip(radius + 0.5 - d, 0, 1).astype(np.float32)
         k /= k.sum()
         _SMOOTH_KERNELS[radius] = k
     return k
 
 
-def smooth_frame(im, radius):
-    """One frame softened (steps 1 to 4 above). Takes an 8-bit or 16-bit BGR frame
-    and returns float32 in that frame's own number range (0..255 or 0..65535), so
-    a 16-bit trail stays 16-bit. Never changes `im`. Each step is timed under the
-    permanent "smooth.*" timers (modules/step_timer)."""
-    from modules import step_timer
-    top = 65535.0 if im.dtype == np.uint16 else 255.0
-    with step_timer.step("smooth.to_float"):
-        x = im.astype(np.float32)
-        x *= np.float32(1.0 / top)
-    with step_timer.step("smooth.gamma_up"):
+_SMOOTH_LUTS = {}
+SMOOTH_MAX_THREADS = 8      # measured 2026-11-19: 8 threads gave the best time, 12 no better
+SMOOTH_SPARE_CORES = 2      # left free for the window and the rest of the machine
+
+
+def _smooth_lut(top):
+    """What the brightness curve up (gamma) AND the near-white boost do to every
+    possible stored value, worked out once: 256 entries for 8-bit, 65536 for 16-bit.
+    Both steps depend only on a pixel's own value, so a table lookup gives exactly
+    what computing them per pixel does, at a fraction of the cost."""
+    lut = _SMOOTH_LUTS.get(top)
+    if lut is None:
+        n = int(top) + 1
+        x = np.arange(n, dtype=np.float32) * np.float32(1.0 / top)
         lin = np.power(x, np.float32(SMOOTH_GAMMA))
-    with step_timer.step("smooth.boost"):
         hl = x - np.float32(SMOOTH_HIGHLIGHT_START)
         hl *= np.float32(1.0 / (1.0 - SMOOTH_HIGHLIGHT_START))
         np.clip(hl, 0.0, 1.0, out=hl)
         hl *= np.float32(SMOOTH_HIGHLIGHT_GAIN)
         hl += np.float32(1.0)
         lin *= hl
-        del hl, x
-    with step_timer.step("smooth.blur"):
-        blurred = cv2.filter2D(lin, -1, _smooth_kernel(int(radius)),
-                               borderType=cv2.BORDER_REFLECT)
-        del lin
-    with step_timer.step("smooth.gamma_down"):
-        np.clip(blurred, 0.0, 1.0, out=blurred)
-        np.power(blurred, np.float32(1.0 / SMOOTH_GAMMA), out=blurred)
-        blurred *= np.float32(top)
-    return blurred
+        _SMOOTH_LUTS[top] = lut = lin
+    return lut
+
+
+def smooth_threads():
+    """Worker threads for the smoothing bands: the machine's cores less a couple
+    left free, never more than SMOOTH_MAX_THREADS, never fewer than 1."""
+    n = int(cv2.getNumberOfCPUs()) if hasattr(cv2, "getNumberOfCPUs") else (os.cpu_count() or 1)
+    return max(1, min(SMOOTH_MAX_THREADS, n - SMOOTH_SPARE_CORES))
+
+
+def _smooth_band(im, y0, y1, kernel, lut, top):
+    """Rows y0..y1 of the smoothed frame. Reads a few rows either side of the band
+    (half the blur's width) so the blur is the same at the seams as on the whole
+    frame; the real top and bottom of the picture reflect, as before."""
+    H = im.shape[0]
+    pad = kernel.shape[0] // 2 + 1
+    a, b = max(0, y0 - pad), min(H, y1 + pad)
+    lin = lut[im[a:b]]
+    out = cv2.filter2D(lin, -1, kernel, borderType=cv2.BORDER_REFLECT)
+    out = out[y0 - a:y0 - a + (y1 - y0)]
+    np.clip(out, 0.0, 1.0, out=out)
+    np.power(out, np.float32(1.0 / SMOOTH_GAMMA), out=out)
+    out *= np.float32(top)
+    return out
+
+
+def smooth_frame(im, radius, bands=None, workers=None):
+    """One frame softened (steps 1 to 4 above). Takes an 8-bit or 16-bit BGR frame
+    and returns float32 in that frame's own number range (0..255 or 0..65535), so
+    a 16-bit trail stays 16-bit. Never changes `im`.
+
+    SPEED (2026-11-19, measured on 20 MP: 1.1 s a frame became 0.17 s). The curve
+    and boost are one table lookup (_smooth_lut), and the picture is cut into
+    horizontal bands worked on by several threads at once (most of these steps
+    cannot use more than one core on their own). With one band the result is the
+    old one exactly; with several, a value can differ in the last digit of float
+    arithmetic (at most about 1e-5 on a 0-255 scale). Timed as one wall-clock step
+    under the permanent "smooth.*" timers (modules/step_timer)."""
+    from modules import step_timer
+    top = 65535 if im.dtype == np.uint16 else 255
+    kernel = _smooth_kernel(radius)
+    lut = _smooth_lut(top)
+    H = im.shape[0]
+    workers = smooth_threads() if workers is None else max(1, int(workers))
+    pad = kernel.shape[0] // 2 + 1
+    if bands is None:
+        bands = max(1, min(workers, H // max(1, 4 * pad)))
+    bands = max(1, int(bands))
+    with step_timer.step("smooth.bands"):
+        if bands == 1:
+            return _smooth_band(im, 0, H, kernel, lut, top)
+        edges = np.linspace(0, H, bands + 1).astype(int)
+        result = np.empty(im.shape, np.float32)
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=min(workers, bands)) as ex:
+            futs = [(int(edges[i]), ex.submit(_smooth_band, im, int(edges[i]),
+                                              int(edges[i + 1]), kernel, lut, top))
+                    for i in range(bands)]
+            for y0, f in futs:
+                part = f.result()
+                result[y0:y0 + part.shape[0]] = part
+        return result
 
 
 def _mean_of(frames):
@@ -1139,16 +1209,19 @@ def _mean_of(frames):
 
 
 def _smooth_stack_fullres(dirpath, names, radius, taper=0.0, comet_tail_frames=0,
-                          fg=None):
+                          fg=None, reference_width=None):
     """Lighten-max stack in which every frame is smoothed first (see above). Works
     with all three styles: plain, Fading Ends (`taper`, a fraction of the sequence)
     and Comet (`comet_tail_frames`). `names` arrives in capture order, reversed
     already for a reversed comet. `fg` is the ground mask (255 = ground) or None:
     the ground is put back from the same stack built WITHOUT smoothing, so rocks
     and trees stay sharp. Full depth is kept: 16-bit frames give a 16-bit stack.
+    `reference_width`: when given, `radius` is scaled by the first frame's width
+    against it (see SMOOTH_REFERENCE_WIDTH); None uses the radius as given.
     Returns the stack, or None if no frame could be read."""
     from modules import step_timer
     n = len(names)
+    eff_radius = float(radius)
     ramp = taper_ramp_frames(n, taper) if taper else 0
     fade = 0.04 ** (1.0 / max(int(comet_tail_frames), 1)) if comet_tail_frames else None
     dtype = None
@@ -1158,13 +1231,25 @@ def _smooth_stack_fullres(dirpath, names, radius, taper=0.0, comet_tail_frames=0
     buf = []          # the last three smoothed frames
     used = 0
     missing, unreadable, resized = [], [], []
-    for i, nm in enumerate(names):
+
+    def _read(nm):
         p = os.path.join(dirpath, nm)
         if not os.path.exists(p):
+            return nm, "missing"
+        return nm, _to_bgr(robust_imread(p, cv2.IMREAD_UNCHANGED))
+
+    # Read the NEXT frame while this one is smoothed: reading a big TIFF takes
+    # about as long as the smoothing itself, and the two need different resources.
+    from concurrent.futures import ThreadPoolExecutor
+    reader = ThreadPoolExecutor(max_workers=1)
+    pending = reader.submit(_read, names[0]) if names else None
+    for i, nm in enumerate(names):
+        with step_timer.step("smooth.read_wait"):
+            _nm, im = pending.result()
+        pending = reader.submit(_read, names[i + 1]) if i + 1 < n else None
+        if isinstance(im, str):          # the file is not there
             missing.append(nm)
             continue
-        with step_timer.step("smooth.read"):
-            im = _to_bgr(robust_imread(p, cv2.IMREAD_UNCHANGED))
         if im is None:
             unreadable.append(nm)
             continue
@@ -1187,7 +1272,12 @@ def _smooth_stack_fullres(dirpath, names, radius, taper=0.0, comet_tail_frames=0
             mul = np.float32(w ** (1.0 / TAPER_GAMMA))
         else:
             mul = None
-        sm = smooth_frame(im, radius)
+        if B is None:
+            eff_radius = smooth_radius_for_width(radius, im.shape[1], reference_width)
+            if reference_width:
+                print(f"  smoothing radius {eff_radius:.1f} px for a frame {im.shape[1]} px wide",
+                      flush=True)
+        sm = smooth_frame(im, eff_radius)
         buf.append(sm)
         buf = buf[-3:]
         with step_timer.step("smooth.average_stack"):
@@ -1212,10 +1302,11 @@ def _smooth_stack_fullres(dirpath, names, radius, taper=0.0, comet_tail_frames=0
                     np.maximum(A, fa, out=A)
         used += 1
         print(f"  smooth star trail: {i + 1}/{n}", flush=True)
+    reader.shutdown(wait=True)
     if B is None:
         return None
     print(f"  smooth star trail: stacked {used} of {n} frames "
-          f"(smoothing {int(radius)})", flush=True)
+          f"(smoothing {int(radius)}, radius {eff_radius:.1f} px)", flush=True)
     dropped = missing + unreadable
     if dropped:
         print("  " + "!" * 60, flush=True)
@@ -1255,7 +1346,8 @@ def make_star_trail(cleaned_dir, out_path=None, stack=None, comet_tail=0,
     `smooth_px`: Trail Smoothing, 0 (off) to 5. Every frame is softened with a round
     blur of that radius before stacking, so a trail becomes one continuous soft line
     (see smooth_frame). Works with plain, Fading Ends and Comet. It re-reads every
-    frame, like those two styles do, and costs about 1.4 s a frame on 20 MP.
+    frame, like those two styles do, and costs about 0.25 s a frame on 20 MP JPEGs
+    (it was 1.2 s before the lookup-table / bands / threads speed-up).
 
     `trim_start` / `trim_end`: extra frames to leave out of the front / back of the
     sequence, on top of the automatic first-3-and-last-3 skip (the Star Trail tab's
@@ -1333,7 +1425,8 @@ def make_star_trail(cleaned_dir, out_path=None, stack=None, comet_tail=0,
               + ")", flush=True)
         stack = _smooth_stack_fullres(cleaned_dir, names, _smooth,
                                       taper=float(taper) if _taper_on else 0.0,
-                                      comet_tail_frames=_tail_frames, fg=_fg_s)
+                                      comet_tail_frames=_tail_frames, fg=_fg_s,
+                                      reference_width=SMOOTH_REFERENCE_WIDTH)
         if stack is None:
             raise SystemExit(f"smoothed stacking failed (cleaned dir = {cleaned_dir})")
     elif _taper_on or (comet_tail and float(comet_tail) > 0):
