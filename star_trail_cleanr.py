@@ -9292,6 +9292,10 @@ class StarTrailPanel(QWidget):
         # Fading Ends: Medium); it can be changed afterwards.
         self._mode_comet.toggled.connect(lambda on: on and self._len_cb.setCurrentIndex(2))
         self._mode_taper.toggled.connect(lambda on: on and self._len_cb.setCurrentIndex(1))
+        # Fading Ends opens with the look that was picked on Joshua Tree: Length
+        # Medium and Trail Smoothing Medium. Both can be changed afterwards. Picking
+        # another style leaves Trail Smoothing as it is.
+        self._mode_taper.toggled.connect(self._smooth_default_for_fading_ends)
         self._sync_comet_len()
 
         # Trail Smoothing (replaced Trail Thickness 2026-11-19; the old widening code
@@ -9300,13 +9304,28 @@ class StarTrailPanel(QWidget):
         # trail join into one continuous soft line. 0 = off. The attribute keeps the
         # name _size_cb so the lock-while-building lists below still cover it.
         self._size_cb = QComboBox()
-        for label, v in (("Off", 0), ("1", 1), ("2", 2), ("3", 3), ("4", 4), ("5", 5)):
+        # Words, not numbers (2026-11-19: the numbers meant nothing to anyone). The
+        # value behind each word is the blur radius: Light 2, Medium 3 (the picked
+        # look), Strong 5. Radius 1 and 4 sat too close to their neighbours to tell apart.
+        for label, v in (("Off", 0), ("Light", 2), ("Medium", 3), ("Strong", 5)):
             self._size_cb.addItem(label, v)
         self._size_cb.setToolTip(
             "Softens every frame so the dots of each trail join into one continuous, "
-            "soft line. Bigger numbers are softer. 3 is a good start.\n"
+            "soft line. Medium is a good start.\n"
             "Takes longer: about 1 to 2 seconds per frame.")
-        _row("Trail Smoothing", self._size_cb)
+        # A plain note to the right of the dropdown, so nobody is surprised by the
+        # wait (Bruce's wording, 2026-11-19). Always shown, even at Off, so it is
+        # read before a size is picked.
+        self._smooth_note = QLabel("Will take longer to render")
+        self._smooth_note.setStyleSheet(f"font-size: 13px; color: {MUTED_TEXT};")
+        _smooth_w = QWidget()
+        _sm = QHBoxLayout(_smooth_w); _sm.setContentsMargins(0, 0, 0, 0); _sm.setSpacing(10)
+        # Let the dropdown shrink so the note fits inside the row's right edge.
+        self._size_cb.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self._size_cb.setMinimumContentsLength(8)
+        _sm.addWidget(self._size_cb, 1)
+        _sm.addWidget(self._smooth_note)
+        _row("Trail Smoothing", _smooth_w)
 
         # Brightness of the finished trail: a midtone curve that keeps black and white
         # where they are (see make_share_clip.apply_brightness). The slider counts
@@ -9350,7 +9369,7 @@ class StarTrailPanel(QWidget):
 
         # Hot-pixel / colored-speck removal. Composes with Comet mode (the backend runs
         # speck removal on the comet result), so only grayed while a build is running.
-        self._hotpix_chk = QCheckBox("Remove hot pixels && colored specks (will take extra time)")
+        self._hotpix_chk = QCheckBox("Remove hot pixels && colored specks (will take longer to render)")
         lay.addWidget(self._hotpix_chk)
 
         self._bar = QProgressBar()
@@ -9409,6 +9428,11 @@ class StarTrailPanel(QWidget):
         self._len_label.setEnabled(_c or _t)
         self._reverse_chk.setVisible(_c)       # Reverse order means nothing for a fade
         self._reverse_chk.setEnabled(_c)
+
+    def _smooth_default_for_fading_ends(self, on):
+        """Picking Fading Ends sets Trail Smoothing to Medium (the Joshua Tree look)."""
+        if on:
+            self._size_cb.setCurrentIndex(self._size_cb.findData(3))
 
     def _comet_fraction(self):
         """Comet tail length as a share of the sequence, from the Length choice."""

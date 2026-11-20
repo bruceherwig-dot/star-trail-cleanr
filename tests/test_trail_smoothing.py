@@ -160,8 +160,11 @@ def test_the_tab_has_the_smoothing_row_and_three_comet_lengths():
         cv2.imwrite(str(cleaned / f"IMG_{i}.jpg"), img)
     p = S.StarTrailPanel(str(cleaned), "", original_folder=str(d))
     assert [p._size_cb.itemText(i) for i in range(p._size_cb.count())] == \
-        ["Off", "1", "2", "3", "4", "5"]
+        ["Off", "Light", "Medium", "Strong"], "words, not numbers"
+    assert [p._size_cb.itemData(i) for i in range(p._size_cb.count())] == [0, 2, 3, 5]
     assert p._size_cb.currentData() == 0, "smoothing opens Off"
+    assert p._smooth_note.text() == "Will take longer to render", "the slowness note beside the dropdown"
+    assert p._smooth_note.parentWidget() is p._size_cb.parentWidget(), "on the same row as the dropdown"
     assert [p._len_cb.itemText(i) for i in range(p._len_cb.count())] == \
         ["Short", "Medium", "Long"], "one Length choice, no percentages"
     p._mode_comet.setChecked(True)
@@ -178,6 +181,17 @@ def test_the_tab_has_the_smoothing_row_and_three_comet_lengths():
     assert p._len_cb.currentData() == 2, "picking Comet resets Length to Long"
     p._size_cb.setCurrentIndex(p._size_cb.findData(3))
     assert "smooth3" in os.path.basename(p._build_out_path())
+    p._size_cb.setCurrentIndex(p._size_cb.findData(0))
+    p._mode_taper.setChecked(True)
+    assert p._size_cb.currentData() == 3, "picking Fading Ends sets Smoothing to Medium"
+    assert p._taper_fraction() == 0.2, "and Length to Medium"
+    p._size_cb.setCurrentIndex(0)
+    p._mode_normal.setChecked(True)
+    assert p._size_cb.currentData() == 0, "another style leaves Smoothing as it is"
+    p._size_cb.setCurrentIndex(p._size_cb.findData(5))
+    p._mode_comet.setChecked(True)
+    assert p._size_cb.currentData() == 5, "Comet leaves Smoothing as it is"
+    p._size_cb.setCurrentIndex(0)
     p._mode_comet.setChecked(True)
     assert "comet-long" in os.path.basename(p._build_out_path())
 
