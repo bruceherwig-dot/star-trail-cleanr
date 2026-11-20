@@ -153,7 +153,7 @@
 </figure>
 
 <p>There's a second, bigger speed-up for many people: a graphics chip doing the AI work. On one Mac it's about 12 times faster for that step alone. This note covers the graphics chip and everything we did around it. Most of it is about how we found the fixes, because that part works on any slow program.</p>
-<p>A few of the newest changes described here (the crossing-check reuse, the rejected-outline step, the hot-pixel speed-up and Trail Smoothing) will ship in the next release.</p>
+<p>The crossing-check reuse and the rejected-outline step shipped in version 3.11. The hot-pixel speed-up and Trail Smoothing shipped in version 3.12.</p>
 
 <h2>Why a run takes so long</h2>
 <p>For every photo, Star Trail CleanR does three things. It finds the trails with an AI model. It repairs each trail with Star Bridge, which borrows the sky from the photos on either side. Then it fixes stuck pixels. Do that for hundreds of photos, each 20 megapixels or more, and you get a long run.</p>
@@ -181,7 +181,7 @@
 <h2>Rule one: the photos can't change</h2>
 <p>Before any speed work, we set one rule. A faster version has to give exactly the same output as the old one.</p>
 <p>We check it the direct way. We run the old code and the new code on the same photos, then compare every output file. If a single pixel is different, the change doesn't ship until we know why.</p>
-<p>That rule threw out some good ideas. One was skipping tiles or photos the AI probably doesn't need, for the reason above. Another was finding a blob's bounding box from its outline points. It was 14 times faster, but 3 of 1,800 test blobs came out slightly different, in the fifth decimal place. Nobody would see that in a photo. We still left it out, because we promised the same output, and "almost the same" breaks that promise.</p>
+<p>That rule threw out some good ideas. One was skipping tiles or photos the AI probably doesn't need, for the reason above. Another was finding a blob's bounding box from its outline points. It was 14 times faster at that one calculation, but 3 of 1,800 test blobs came out slightly different, in the fifth decimal place, and it would have saved only about 1.5% of a busy batch. We couldn't prove the differences were harmless on every sky, so for 1.5% we didn't take the chance.</p>
 
 <h2>Rule two: measure first</h2>
 <p>Four times, measuring told us something our guesses got wrong.</p>
