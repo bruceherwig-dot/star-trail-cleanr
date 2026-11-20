@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How We Made Star Trail CleanR Even Faster</title>
+<style>
+  :root{
+    --ground:#0B1220; --panel:#111A2C; --line:#1E2A3E;
+    --ink:#E8ECF4; --muted:#93A0B4; --amber:#E0A458; --warn:#E4573D;
+  }
+  html{background:var(--ground);}
+  body{
+    background:var(--ground); color:var(--ink);
+    font-family:Charter,'Iowan Old Style',Georgia,'Times New Roman',serif;
+    font-size:18px; line-height:1.65; margin:0; padding:0 20px 96px;
+  }
+  .wrap{max-width:960px; margin:0 auto;}
+  .prose{max-width:68ch; margin-left:auto; margin-right:auto;}
+  header.tt{padding:72px 0 8px; text-align:left; max-width:68ch; margin:0 auto;}
+  .eyebrow{
+    font-family:ui-sans-serif,system-ui,'Helvetica Neue',sans-serif;
+    font-size:12px; letter-spacing:.18em; text-transform:uppercase;
+    color:var(--amber); margin-bottom:18px;
+  }
+  h1{
+    font-size:clamp(30px,4.4vw,44px); line-height:1.14; font-weight:700;
+    margin:0 0 14px; text-wrap:balance;
+  }
+  .subtitle{font-size:20px; color:var(--muted); font-style:italic; margin:0 0 26px; text-wrap:balance;}
+  .byline{
+    font-family:ui-sans-serif,system-ui,sans-serif; font-size:13.5px; color:var(--muted);
+    border-top:1px solid var(--line); border-bottom:1px solid var(--line);
+    padding:10px 0; display:flex; gap:18px; flex-wrap:wrap;
+  }
+  .byline b{color:var(--ink); font-weight:600;}
+  h2{
+    font-size:25px; line-height:1.25; margin:64px 0 14px; text-wrap:balance;
+  }
+  h2 .no{color:var(--amber); font-variant-numeric:tabular-nums; margin-right:10px; font-weight:400;}
+  h3{font-size:19px; margin:34px 0 8px;}
+  p{margin:0 0 18px;}
+  a{color:var(--amber); text-decoration:underline; text-decoration-color:rgba(224,164,88,.4); text-underline-offset:3px;}
+  .abstract{
+    background:var(--panel); border:1px solid var(--line); border-radius:6px;
+    padding:22px 26px; margin:34px auto 0; max-width:68ch;
+  }
+  .abstract .lab{
+    font-family:ui-sans-serif,system-ui,sans-serif; font-size:11.5px; letter-spacing:.16em;
+    text-transform:uppercase; color:var(--amber); margin-bottom:8px;
+  }
+  .abstract p{margin:0; font-size:16.5px;}
+  figure{margin:34px auto; max-width:900px;}
+  figure img{width:100%; height:auto; display:block; border:1px solid var(--line); border-radius:4px;}
+  figure.pair{display:grid; grid-template-columns:1fr 1fr; gap:10px;}
+  figure.pair img{margin:0;}
+  figure.pair figcaption{grid-column:1/-1;}
+  figcaption{
+    font-family:ui-sans-serif,system-ui,sans-serif; font-size:13.5px; line-height:1.55;
+    color:var(--muted); padding-top:10px;
+  }
+  figcaption b{color:var(--ink); font-weight:600;}
+  figcaption .fno{color:var(--amber); font-weight:600;}
+  .callout{
+    border-left:3px solid var(--amber); padding:4px 0 4px 20px; margin:26px 0;
+    color:var(--ink); font-style:italic;
+  }
+  .refs{font-size:15.5px;}
+  .refs li{margin-bottom:12px; color:var(--muted);}
+  .refs li b{color:var(--ink); font-weight:600;}
+  ol,ul{padding-left:26px;}
+  li{margin-bottom:8px;}
+  .figstub{
+    font-family:ui-sans-serif,system-ui,sans-serif; font-size:13px; color:var(--muted);
+    border:1px dashed var(--line); border-radius:6px; padding:16px 18px; margin:34px auto;
+    max-width:900px; background:rgba(224,164,88,.04);
+  }
+  .figstub b{color:var(--amber);}
+  @media (max-width:640px){ figure.pair{grid-template-columns:1fr;} body{font-size:17px;} }
+  /* --- site menu (shared with home / research pages) --- */
+  :root{--navy:#0a1e3f;--sub:#a8c0e0;--blue:#1a6fc4;--blue-h:#1580e0;}
+  header.sitenav{position:sticky;top:0;z-index:50;background:var(--navy);border-bottom:1px solid rgba(255,255,255,.08);margin:0 -20px;}
+  header.sitenav nav{max-width:1080px;margin:0 auto;padding:0 24px;height:66px;display:flex;align-items:center;justify-content:space-between;}
+  header.sitenav .brand{display:flex;align-items:center;gap:11px;font-weight:600;font-size:18px;color:#fff;letter-spacing:.2px;text-decoration:none;font-family:ui-sans-serif,system-ui,sans-serif;}
+  header.sitenav .brand .logotile{width:40px;height:40px;border-radius:10px;background:#fff;display:flex;align-items:center;justify-content:center;flex:none;}
+  header.sitenav .brand .logotile img{width:34px;height:34px;border-radius:7px;display:block;}
+  header.sitenav .navlinks{display:flex;gap:26px;align-items:center;font-size:15px;font-family:ui-sans-serif,system-ui,sans-serif;}
+  header.sitenav .navlinks a{color:var(--sub);text-decoration:none;white-space:nowrap;}
+  header.sitenav .navlinks a:hover,header.sitenav .navlinks a.on{color:#fff;}
+  header.sitenav .btn{display:inline-block;background:var(--blue);color:#fff;font-weight:600;padding:11px 20px;border-radius:8px;font-size:15px;text-decoration:none;font-family:ui-sans-serif,system-ui,sans-serif;}
+  header.sitenav .btn:hover{background:var(--blue-h);}
+  @media(max-width:720px){header.sitenav .navlinks{display:none;}}
+
+  /* --- mobile hamburger menu --- */
+  header.sitenav .navtoggle{display:none;background:none;border:0;color:#fff;font-size:26px;line-height:1;cursor:pointer;padding:4px 8px}
+  @media(max-width:720px){
+    header.sitenav nav{flex-wrap:wrap;height:auto;min-height:66px}
+    header.sitenav .navtoggle{display:block;order:2}
+    header.sitenav .brand{order:1}
+    header.sitenav nav .btn{display:none}
+    header.sitenav .navlinks{order:3}
+    header.sitenav.open .navlinks{display:flex;flex-direction:column;flex-basis:100%;width:100%;padding:4px 0 14px;gap:0}
+    header.sitenav.open .navlinks a{padding:11px 2px;font-size:17px}
+  }
+</style>
+</head>
+<body>
+<header class="sitenav">
+  <nav>
+    <a class="brand" href="index.html"><span class="logotile"><img src="logo.png" alt="Star Trail CleanR logo"></span> Star Trail CleanR</a>
+    <div class="navlinks">
+      <a href="index.html#how">How it works</a>
+      <a href="index.html#gallery">Gallery</a>
+      <a href="index.html#download">Download</a>
+      <a class="on" href="research.html">Research</a>
+      <a href="how-to-photograph-star-trails.html">Star Trail Basics</a>
+      <a href="index.html#thanks">Thanks</a>
+      <a href="index.html#about">About</a>
+    </div>
+    <a class="btn" href="index.html#download">Download free</a>
+    <button class="navtoggle" aria-label="Menu" aria-expanded="false">&#9776;</button>
+</nav>
+</header>
+
+
+<header class="tt">
+  <div class="eyebrow">Star Trail CleanR &middot; Technical Notes &middot; No. 4</div>
+  <h1>How we made Star Trail CleanR even faster</h1>
+  <p class="subtitle">We got the app stable and added the features first. Then we spent a round of work on speed. A full run now takes 39% less time, and the photos come out identical. This note covers the graphics chip, and what we learned about finding slowdowns in any program.</p>
+  <div class="byline">
+    <span><b>The Star Trail CleanR project</b> &middot; startrailcleanr.com</span>
+    <span>Published November 2026</span>
+  </div>
+</header>
+
+<div class="wrap">
+
+<div class="abstract">
+  <div class="lab">Summary</div>
+  <p>A full run on a 1,524-photo Joshua Tree set went from 1h 49m 53s to 1h 07m 02s, with identical photos. Most of the time is the AI looking at small tiles, and a graphics chip is the biggest speed-up. Everything else came from measuring first, keeping the output identical, and fixing one slowdown at a time. Each round saves less than the one before it, but there are always easy savings left in an area we haven't measured yet.</p>
+</div>
+
+<div class="prose">
+
+<h2>Stable first, then fast</h2>
+<p>For a long time, speed wasn't our priority. First we wanted Star Trail CleanR to work, then to work reliably on all kinds of photos, and then to have the features photographers asked for. Speed was the next step, and it only made sense once those were done. You can't safely tune a program that's still changing underneath you.</p>
+<p>The app is stable and has its features now, so we spent a round of work on speed. A full run on a 1,524-photo Joshua Tree set used to take 1h 49m 53s. After the speed work, the same run takes 1h 07m 02s. That's 39% less time, and the finished photos are identical, pixel for pixel.</p>
+<p>A test batch of 20 aurora photos, on a Mac with a graphics chip, went from 3m 06s to 1m 37s. That's 48% less time.</p>
+
+<figure>
+  <img src="speed-hero.png" alt="Two bars comparing a 1,524-photo run before and after the speed work: 1h 49m 53s and 1h 07m 02s">
+  <figcaption><b>Figure 1.</b> The same 1,524-photo Joshua Tree run before and after the speed work. The finished photos are identical.</figcaption>
+</figure>
+
+<p>There's a second, bigger speed-up for many people: a graphics chip doing the AI work. On one Mac it's about 12 times faster for that step alone. This note covers the graphics chip and everything we did around it. Most of it is about how we found the fixes, because that part works on any slow program.</p>
+<p>A few of the newest changes described here (the crossing-check reuse, the rejected-outline step, the hot-pixel speed-up and Trail Smoothing) will ship in the next release.</p>
+
+<h2>Why a run takes so long</h2>
+<p>For every photo, Star Trail CleanR does three things. It finds the trails with an AI model. It repairs each trail with Star Bridge, which borrows the sky from the photos on either side. Then it fixes stuck pixels. Do that for hundreds of photos, each 20 megapixels or more, and you get a long run.</p>
+<p>Most of the time goes to the first step. The AI doesn't look at a whole photo at once. It looks at 72 to 96 small tiles per photo, because it was trained on small tiles and small tiles are best for finding thin trails. In a typical batch, that step took 85 to 89% of the detection time.</p>
+<p>We couldn't make that step faster by skipping tiles. To decide which tiles are safe to skip, we'd need something that finds trails, and that is the AI's own job. A weaker check would miss some trails, and a missed trail is the worst thing this app can do. So we left that step alone and went after everything around it.</p>
+
+<figure>
+  <img src="speed-where.png" alt="One bar showing the AI step takes about 87 percent of detection time">
+  <figcaption><b>Figure 2.</b> In a typical 20-photo batch, the AI looking at tiles takes about 87% of the detection time.</figcaption>
+</figure>
+
+<h2>The biggest speed-up: the graphics chip</h2>
+<p>A graphics chip (a GPU) is built to do the same small job on many pieces of data at once. The AI step is exactly that: the same model, run on 72 to 96 tiles, over and over.</p>
+<p>On one Mac, a tile takes 17 milliseconds on the graphics chip and about 205 milliseconds on the same Mac's processor with six threads. That's 92% less time, or about 12 times faster, for the AI step.</p>
+<p>A whole run gets a smaller boost than that, because the AI step is only part of a run. In the anonymous usage numbers photographers have shared with us, runs on a graphics chip are roughly two to three times faster than runs on the processor alone.</p>
+<p>On Windows with an NVIDIA card, the app can install GPU support in one click. It's a 3 to 4 GB download and takes 5 to 15 minutes. If anything goes wrong, the <a href="https://github.com/bruceherwig-dot/star-trail-cleanr/blob/main/docs/nvidia_gpu_setup.md">NVIDIA setup guide</a> walks through it.</p>
+<p>We also tried three things on the AI step that didn't help. Half-precision math gave no gain, and it was slower on the Mac. Asking the model to batch tiles changed nothing, because the tiles already run as one batch. Changing the number of threads made no difference we could measure. We're listing them because they're useful to know. On this step, the easy gain was already in place.</p>
+<p>With the graphics chip doing the heavy work, the rest of the run is what's left: repair, stuck pixels, and the new smoothing. Those steps still run on the processor. We haven't tried moving them to the graphics chip. The rest of this note is about those steps.</p>
+
+<figure>
+  <img src="speed-tile.png" alt="Bars comparing 17 milliseconds per tile on a graphics chip with 205 on the processor">
+  <figcaption><b>Figure 3.</b> Time for the AI to look at one tile, on the same Mac.</figcaption>
+</figure>
+
+<h2>Rule one: the photos can't change</h2>
+<p>Before any speed work, we set one rule. A faster version has to give exactly the same output as the old one.</p>
+<p>We check it the direct way. We run the old code and the new code on the same photos, then compare every output file. If a single pixel is different, the change doesn't ship until we know why.</p>
+<p>That rule threw out some good ideas. One was skipping tiles or photos the AI probably doesn't need, for the reason above. Another was finding a blob's bounding box from its outline points. It was 14 times faster, but 3 of 1,800 test blobs came out slightly different, in the fifth decimal place. Nobody would see that in a photo. We still left it out, because we promised the same output, and "almost the same" breaks that promise.</p>
+
+<h2>Rule two: measure first</h2>
+<p>Four times, measuring told us something our guesses got wrong.</p>
+<p>A line profiler (a tool that reports where a program spends its time) said one step took 3.7 of its 5.0 seconds in the angle-clustering code. We rewrote that code. The real saving was 0.2 to 0.4 seconds, which is 4 to 8% of the step, not the 74% the profiler suggested. Profilers add their own overhead to small steps that repeat many times, which makes those steps look bigger than they are. A stopwatch on the whole step, old version against new, doesn't have that problem.</p>
+<p>We expected a polygon-merging fix to save about 6 seconds (15.7 down to 9.5, which is 39% less). It saved about 2 (16.0 down to 14.1, which is 12% less).</p>
+<p>One speed-up looked obvious and made its step twice as slow. It was supposed to work inside a small box around each detection, but that box wasn't available there, so it fell back to working on the whole photo, on one thread. Only the before-and-after timing caught it.</p>
+<p>And the app's own time estimate was off both ways. For the Joshua Tree set it predicted 1h 46m, and the run took 1h 07m, 37% less than predicted. For a 572-photo aurora set it predicted 33 minutes, and the run took 41, which is 23% more than predicted.</p>
+<p>In each case we only found the real answer by timing it.</p>
+
+<figure>
+  <img src="speed-expect.png" alt="Bars comparing the expected saving with the measured saving for two fixes">
+  <figcaption><b>Figure 4.</b> What we expected two fixes to save, and what they saved.</figcaption>
+</figure>
+
+<figure>
+  <img src="speed-estimate.png" alt="Bars comparing the app's estimated run time with the actual run time on two sets">
+  <figcaption><b>Figure 5.</b> The app's time estimate against what the run took, for two sets.</figcaption>
+</figure>
+
+<h2>Seven kinds of fix</h2>
+<p>Every change that paid off fits one of seven patterns.</p>
+<ol>
+<li><b>Look only where the object is, not at the whole photo.</b> The star-finding step compared the whole picture once for every star. Now it looks only inside each star's box, and the answers are the same. On the Joshua Tree set that step went from 17.4 to 1.9 seconds (89% less), which cut the whole batch by 35%. A step that drops rejected outlines went from 1.3 seconds to 27 milliseconds (98% less).</li>
+<li><b>Stop doing the same work twice.</b> The crossing check answered the same question two times. Reusing the first answer took that step from 0.72 seconds to 0.13, which is 82% less. The hot-pixel step (see "A recent example" below) read each photo from disk about five times.</li>
+<li><b>Put every part of the processor to work.</b> A library the app loads told the image library to use only one thread. Fixing that took one line, and we found it by measuring. Finding the separate objects in a picture went from 120 milliseconds to 4.7, which is 96% less time, or 26 times faster. A blur went from 25.8 to 3.9 (85% less). On a computer without a graphics chip, the AI step now uses up to six processor threads, and Mac processor-only runs got about 3.2 to 3.4 times faster overall (measured on small 3-photo sets, version 3.06 against 3.05).</li>
+<li><b>Rule out the easy parts first.</b> The stuck-pixel search used to run a slow, careful check on every part of the photo. Now a quick color check runs first and clears almost all of it, and the careful check runs only in the small patches the quick check flagged. The result is exactly the same map. On the Joshua Tree set that step went from 2.8 seconds to 0.74 (74% less).</li>
+<li><b>Look up answers instead of working them out again.</b> A pixel stored in 8 or 16 bits can only have so many values. The smoothing step works out the answer for every possible value once, then looks each pixel up.</li>
+<li><b>Swap in a faster method for the same job.</b> The repair code finds the brightest of three color channels in 13 places. A faster built-in method did it 13.5 times faster per call (93% less time), with identical results.</li>
+<li><b>Give the work to the chip built for it.</b> See the graphics chip section above: 17 milliseconds a tile against 205, which is 92% less.</li>
+</ol>
+
+<figure>
+  <img src="speed-seven.png" alt="Seven tiles, one for each kind of fix, each with its biggest measured gain">
+  <figcaption><b>Figure 6.</b> The seven kinds of fix, each with its biggest measured gain.</figcaption>
+</figure>
+
+<figure>
+  <img src="speed-steps.png" alt="Paired bars on a log scale showing before and after times for seven steps">
+  <figcaption><b>Figure 7.</b> Before and after times for the biggest single fixes. Each gridline is ten times the last.</figcaption>
+</figure>
+
+<h2>Diminishing returns</h2>
+<p>On the same Mac and the same 20-photo batch, we ended 48% below where we started. Three other test sets went from 1m 47s to 59 seconds, 1m 10s to 32 seconds, and 1m 00s to 25 seconds. That's 45%, 54%, and 58% less.</p>
+<p>Speed work has diminishing returns. That means the average round of work saves less than the one before it. The early rounds found big savings, because the biggest slowdowns were easy to see once we measured. The later rounds on the same steps found 1 to 4% each.</p>
+<p>That's not the whole story, because there are always easy savings left somewhere. Our recent hot-pixel work took off 43%, long after the early rounds, because nobody had timed that step closely before. Each new area we measure has easy savings in it. Once those are taken, the same area gives only a few percent.</p>
+<p>A big percentage also isn't always a big saving. The step that drops rejected outlines got 98% faster, but it only had 1.3 seconds to give. The star-finding step got 89% faster and saved about 15 seconds, which was 35% of the whole batch. The little ones still matter. The app works through photos in batches of 20, so a 1,524-photo run has about 76 batches. If a step gets just one second faster per batch, that's about 1m 16s off the whole run. Many small savings add up to a big one.</p>
+<p>The effort doesn't shrink the same way. A 2% saving can take as much testing as a 20% one, because it has to clear the same test: the photos must come out identical.</p>
+<p>We're still testing different approaches. Some will save a few percent, and some won't work at all. We'll keep going while a saving is worth the care it takes to prove it changes nothing.</p>
+
+<h2>A recent example</h2>
+<p>The newest work follows the same steps, so here it is start to finish.</p>
+<p>Hot-pixel removal on 200 photos took 1m 35s. We wanted to know why.</p>
+<p>First we put permanent timers on every sub-step, and made them print in the Star Log.</p>
+<p>The timers showed something odd. One step, the flash finder, took 57 seconds. With the photos already in memory, it took 23. So about 60% of its time went to waiting for the disk.</p>
+<p>Next we counted reads. The flash finder opened each photo about five times. The ground check was worse. It read photos one at a time, which took 22 seconds for about 4 seconds of real work.</p>
+<p>The fix was to read a few photos ahead on several threads, so the next photo is already loading while the computer works on the current one. We also judge several photos at once, where the counts add up the same in any order. The whole step went from 1m 35s to 54 seconds, which is 43% less, and the output is identical.</p>
+<p>The new Trail Smoothing step got the same treatment before it shipped. It took about 1.2 seconds per photo on a 20-megapixel JPEG. Now it takes about 0.25, which is 79% less, or about five times faster, with identical results on real photos. Three changes did it: a lookup table for the brightness curve, cutting each photo into bands that several threads work on at once, and reading the next photo while the current one is being smoothed.</p>
+
+<figure>
+  <img src="speed-hot.png" alt="Stacked bars of the hot-pixel steps before and after: 1m 35s and 54 seconds">
+  <figcaption><b>Figure 8.</b> Hot-pixel removal on 200 photos, step by step. The output is identical.</figcaption>
+</figure>
+
+<figure>
+  <img src="speed-reads.png" alt="Two bars: the flash finder takes 57 seconds reading from disk and 23 seconds with photos in memory">
+  <figcaption><b>Figure 9.</b> The same step with real disk reads and with the photos already in memory.</figcaption>
+</figure>
+
+<h2>Keep the timers</h2>
+<p>We now follow one rule: every step that can take real time records when it ran, what it did, and how long it took. Those numbers go into the Star Log.</p>
+<p>Before we added timers, 11 to 12% of the time inside one stage wasn't accounted for. Afterward it was 2 to 3%. The same timers found the recent hot-pixel problem within minutes.</p>
+<p>If you have a slow program of your own, put a stopwatch around the slow part before you change anything. For us, the slow part was somewhere we didn't expect.</p>
+
+<h2>What to take from this</h2>
+<ol>
+<li>Get it working and stable first, add the features, and then optimize for speed.</li>
+<li>If you have a graphics chip, use it. It won't speed up every step, though.</li>
+<li>Use a stopwatch before you change anything.</li>
+<li>Decide that the output must stay identical, and test it every time.</li>
+<li>Most of the slow parts we found were waiting: on the disk, on processor cores sitting unused, or on repeated work.</li>
+<li>Keep the timers in the program.</li>
+<li>Expect diminishing returns in each area, and expect easy savings in the next area you measure. Keep testing approaches while the savings are worth the care.</li>
+<li>Judge a saving by the time it saves, not only by the percent. Small savings repeat on every batch and add up.</li>
+</ol>
+<p>To see your own numbers, open the Star Log after a run. The timing block shows how long each step took on your computer.</p>
+
+</div><!-- .prose -->
+</div><!-- .wrap -->
+<script>(function(){var h=document.querySelector("header"),t=h&&h.querySelector(".navtoggle");if(t){t.addEventListener("click",function(){var o=h.classList.toggle("open");t.setAttribute("aria-expanded",o?"true":"false");});}})();</script>
+</body>
+</html>
