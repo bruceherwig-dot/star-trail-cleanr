@@ -21,8 +21,47 @@ Thresholds derived from 100-frame measurements at 10 ground-truth
 hot-pixel coordinates across two Canon datasets (JT, MW101) on 2026-04-14.
 See runs/experiments/2026_04_14_chromatic_purity/README.md.
 """
+import os
+
 import cv2
 import numpy as np
+
+# Frames are judged one at a time and independently (each gives a yes/no mask, and the
+# masks are added up), so several can be judged at once. The sum of whole numbers does not
+# depend on the order, so the answer is exactly the same; only the time changes (measured
+# 2026-11-19 on 40 full 20 MP frames: the coloured map alone took 14 s of a 64 s step).
+_MAX_THREADS = 4
+_SPARE_CORES = 2
+_BYTES_PER_WORKER_PIXEL = 36     # float32 working copies of one frame, about 3 per colour channel
+
+
+def _workers_for(h, w):
+    """How many frames to judge at once: the cores less a couple, at most 4, and no more
+    than the free memory allows (one worker holds a few float32 copies of a frame)."""
+    n = max(1, min(_MAX_THREADS, (os.cpu_count() or 1) - _SPARE_CORES))
+    try:
+        import psutil
+        n = min(n, int(psutil.virtual_memory().available // max(1, h * w * _BYTES_PER_WORKER_PIXEL * 2)))
+    except Exception:
+        pass
+    return max(1, n)
+
+
+def _count_hits(frames, hit_of, shape):
+    """Add up hit_of(frame) over all frames into a uint16 count, judging several frames at
+    once when there is room. hit_of returns a bool mask for one frame."""
+    count = np.zeros(shape, np.uint16)
+    workers = _workers_for(*shape)
+    if workers <= 1 or len(frames) < 2:
+        for frame in frames:
+            count += hit_of(frame).astype(np.uint16)
+        return count
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for i in range(0, len(frames), workers):
+            for hit in ex.map(hit_of, frames[i:i + workers]):
+                count += hit.astype(np.uint16)
+    return count
 
 
 def build_hot_pixel_map_chromatic(
@@ -105,12 +144,10 @@ def build_hot_pixel_map_chromatic(
         )
         return (outer * outer_area - inner * inner_area) / ring_area
 
-    hit_count = np.zeros((h, w), np.uint16)
-
     # (dom, o1, o2) in BGR channel-index order
     hypotheses = [(2, 1, 0), (1, 2, 0), (0, 2, 1)]
 
-    for frame in frames:
+    def frame_hits(frame):
         f = frame.astype(np.float32)
         frame_hit = np.zeros((h, w), bool)
 
@@ -136,7 +173,9 @@ def build_hot_pixel_map_chromatic(
             )
             frame_hit |= cond
 
-        hit_count += frame_hit.astype(np.uint16)
+        return frame_hit
+
+    hit_count = _count_hits(frames, frame_hits, (h, w))
 
     n = len(frames)
     thresh = int(np.ceil(min_fraction * n))
@@ -220,9 +259,7 @@ def build_hot_pixel_map_white(
         )
         return (outer * outer_area - inner * inner_area) / ring_area
 
-    hit_count = np.zeros((h, w), np.uint16)
-
-    for frame in frames:
+    def frame_hits(frame):
         f = frame.astype(np.float32)
         luma = (f[:, :, 0] + f[:, :, 1] + f[:, :, 2]) / 3.0
 
@@ -243,7 +280,9 @@ def build_hot_pixel_map_white(
             (np.abs(delta_i) >= inner_threshold) &
             (delta_c * delta_i > 0)
         )
-        hit_count += cond.astype(np.uint16)
+        return cond
+
+    hit_count = _count_hits(frames, frame_hits, (h, w))
 
     n = len(frames)
     thresh = int(np.ceil(min_fraction * n))

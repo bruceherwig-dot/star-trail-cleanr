@@ -31,6 +31,8 @@ Proven over six shots / five cameras (2026-07-13/14). Opt-in only -- it re-reads
 every frame, so it is the slow path. A foreground guard (below) refuses to run on
 an unmasked landscape so it can never eat the ground.
 """
+import time
+
 import cv2
 import numpy as np
 
@@ -253,10 +255,13 @@ def _detect_map(big, sample_frames, run_map=None, cand=None, fleck_ids=None):
     rest need evidence the finished stack does not contain."""
     H, W = big.shape[:2]
 
-    ch = build_hot_pixel_map_chromatic(
-        sample_frames, center_threshold=22, inner_threshold=11, min_fraction=0.6)
-    wh = build_hot_pixel_map_white(
-        sample_frames, center_threshold=18, inner_threshold=9, min_fraction=0.6)
+    from modules import step_timer
+    with step_timer.step("dots.map_chromatic"):
+        ch = build_hot_pixel_map_chromatic(
+            sample_frames, center_threshold=22, inner_threshold=11, min_fraction=0.6)
+    with step_timer.step("dots.map_white"):
+        wh = build_hot_pixel_map_white(
+            sample_frames, center_threshold=18, inner_threshold=9, min_fraction=0.6)
     # Either detector answers None when it was given no frames; that means "found
     # nothing", not "fail".
     zero = np.zeros((H, W), np.uint8)
@@ -268,9 +273,10 @@ def _detect_map(big, sample_frames, run_map=None, cand=None, fleck_ids=None):
     # defect is. Nothing about a dot's size, shape, colour or brightness in the
     # finished stack can stand in for it -- every substitute has been measured
     # against ground truth and failed (see above).
-    stuck = [k + 1 for k, (cx, cy) in enumerate(pts)
-             if sample_frames and _persistence_count(sample_frames, cx, cy)
-             >= max(3, int(0.6 * len(sample_frames)))]
+    with step_timer.step("dots.persistence"):
+        stuck = [k + 1 for k, (cx, cy) in enumerate(pts)
+                 if sample_frames and _persistence_count(sample_frames, cx, cy)
+                 >= max(3, int(0.6 * len(sample_frames)))]
     cr = _paint(cand_lab, stuck, len(pts))
 
     out = cv2.bitwise_or(hot, cr)
@@ -418,8 +424,8 @@ def _scan_frames(paths, read_frame, hw, want_sample=40, pts=None, build_map=True
         prev_pred = np.zeros(len(pts), np.int16)
         just_peaked = np.zeros(len(pts), bool)
 
-    for k, p in enumerate(paths):
-        f = read_frame(p)
+    from modules.read_ahead import read_ahead
+    for k, (p, f) in enumerate(read_ahead(read_frame, paths)):
         if f is not None:
             if f.shape[:2] != (H, W):
                 f = cv2.resize(f, (W, H), interpolation=cv2.INTER_AREA)
@@ -731,17 +737,21 @@ def remove_specks(cleaned_dir, names, big, fg_mask, read_frame, comet_tail=0,
         pass
 
     # Every dot that will be judged, found once and reused by both tests.
-    cand = _blob_candidates(big)
+    from modules import step_timer
+    with step_timer.step("dots.blob_candidates"):
+        cand = _blob_candidates(big)
     pts = cand[1]
-    motion = _sky_motion(paths, read_frame, (H, W))
+    with step_timer.step("dots.sky_motion"):
+        motion = _sky_motion(paths, read_frame, (H, W))
 
     if run_map is not None:
         print(f"  using the run's own hot-pixel map "
               f"({int((run_map > 0).sum())} px marked while cleaning), and reading "
               f"the frames to sort flecks from stars", flush=True)
-        _, sample, peak, evidence = _scan_frames(
-            paths, read_frame, (H, W), want_sample, pts=pts, build_map=False,
-            motion=motion)
+        with step_timer.step("dots.scan"):
+            _, sample, peak, evidence = _scan_frames(
+                paths, read_frame, (H, W), want_sample, pts=pts, build_map=False,
+                motion=motion)
     else:
         # No saved map -- the run that cleaned these frames predates keeping it,
         # or had no foreground mask to build one. Rebuild it the same way the
@@ -750,16 +760,18 @@ def remove_specks(cleaned_dir, names, big, fg_mask, read_frame, comet_tail=0,
         # on the same pass.
         print("  no saved hot-pixel map for this folder; rebuilding it from the "
               "frames, 20 at a time", flush=True)
-        run_map, sample, peak, evidence = _scan_frames(
-            paths, read_frame, (H, W), want_sample, pts=pts, motion=motion)
+        with step_timer.step("dots.scan"):
+            run_map, sample, peak, evidence = _scan_frames(
+                paths, read_frame, (H, W), want_sample, pts=pts, motion=motion)
         print(f"  rebuilt hot-pixel map: {int((run_map > 0).sum())} px marked",
               flush=True)
 
     fleck_ids = _flecks(pts, peak, evidence, big)
     print(f"  {len(pts)} dots judged: {len(fleck_ids)} are strongly coloured one-off "
           f"flecks (the sky's rotation does not account for them)", flush=True)
-    allmap = _detect_map(big, sample, run_map=run_map, cand=cand,
-                         fleck_ids=fleck_ids)
+    with step_timer.step("dots.judge"):
+        allmap = _detect_map(big, sample, run_map=run_map, cand=cand,
+                             fleck_ids=fleck_ids)
     allmap = _foreground_guard(allmap, fg_mask, H, W)
     # First, clumps: pieces that the 1px growth below will merge into one big shape
     # are scenery, and are left alone WHOLE (see _drop_oversize, grown=True).
@@ -778,7 +790,8 @@ def remove_specks(cleaned_dir, names, big, fg_mask, read_frame, comet_tail=0,
     allmap = cv2.dilate(allmap, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
     allmap = _drop_oversize(allmap)
     allmap = _drop_not_brighter(big, allmap)
-    out, n_specks, n_lifted = _fill_specks(big, allmap)
+    with step_timer.step("dots.fill"):
+        out, n_specks, n_lifted = _fill_specks(big, allmap)
     print(f"  removing {n_specks} specks ({n_lifted} needed lifting to sky level)",
           flush=True)
 
@@ -794,6 +807,7 @@ def remove_specks(cleaned_dir, names, big, fg_mask, read_frame, comet_tail=0,
     # trails. Reading that pixel reported holes that did not exist (4 of 1,927 on
     # Bruce's 6D sequence) while a genuinely dim filled pixel elsewhere in the same
     # blob would have gone unnoticed. This looks at every filled pixel instead.
+    _t_check = time.perf_counter()
     nn, ll, ss, cc = cv2.connectedComponentsWithStats((allmap > 0).astype(np.uint8), 8)
     holes = 0
     for i in range(1, nn):
@@ -809,6 +823,7 @@ def remove_specks(cleaned_dir, names, big, fg_mask, read_frame, comet_tail=0,
         judged = vals[vals >= _FG_FRAC * float(sky.max())]
         if judged.size and int(judged.min()) < int(sky.max()) - 8:
             holes += 1
+    step_timer.add("dots.self_check", time.perf_counter() - _t_check)
     print(f"  speck removal done (spots left darker than their surroundings, "
           f"must be 0: {holes})", flush=True)
     return out

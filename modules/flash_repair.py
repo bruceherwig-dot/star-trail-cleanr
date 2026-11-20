@@ -106,9 +106,10 @@ def usual_colour(n_frames, read_frame, size):
     """Each pixel's usual colour split: the MINIMUM over a spread of frames. A defect is
     on in a few percent of frames, so the minimum stays low where the pixel is neutral;
     streaming the minimum keeps memory at one frame (a median would need them all)."""
+    from modules.read_ahead import read_ahead
     base = None
-    for i in np.unique(np.linspace(0, n_frames - 1, min(BASELINE_SAMPLES, n_frames)).astype(int)):
-        img = read_frame(int(i))
+    ids = [int(i) for i in np.unique(np.linspace(0, n_frames - 1, min(BASELINE_SAMPLES, n_frames)).astype(int))]
+    for _i, img in read_ahead(read_frame, ids):
         if img is None or img.shape[:2] != size:
             continue
         c = _chroma(img)
@@ -660,8 +661,8 @@ def repair_stack(stack, n_frames, read_frame, flags, defects, threads=4, progres
         # each defect pixel's usual value: 40th percentile over a spread of frames
         samp = np.unique(np.linspace(0, n_frames - 1, min(60, n_frames)).astype(int))
         crops = []
-        for i in samp:
-            img = read_frame(int(i))
+        from modules.read_ahead import read_ahead
+        for _i, img in read_ahead(read_frame, [int(i) for i in samp], threads):
             if img is not None and img.shape[:2] == (H, W):
                 crops.append(img[dyy, dxx])
         base = (np.percentile(np.stack(crops), 40, axis=0).astype(np.uint8)
@@ -772,7 +773,7 @@ class GroundResult:
         self.bail = None
 
 
-def find_ground_specks(n_frames, read_frame, fg_mask, progress=None):
+def find_ground_specks(n_frames, read_frame, fg_mask, progress=None, threads=4):
     """Find strongly coloured specks under the foreground mask.
 
     Guards, each from a real failure on a photographer's set:
@@ -797,9 +798,22 @@ def find_ground_specks(n_frames, read_frame, fg_mask, progress=None):
     y0 = max(0, int(np.where(fg.any(1))[0].min()) - 8)
     fgd = cv2.dilate(fg[y0:].astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool)
 
+    # Frames are read a few ahead on several threads, as the other passes do: this one
+    # used to read them one at a time and, measured on 200 frames, spent 22 s on a job
+    # that takes 4 s once the reads are free (2026-11-19). Same frames, same order,
+    # same answer; only the waiting changes.
+    pool = ThreadPoolExecutor(max_workers=threads)
+    ahead = 4 * max(1, int(threads))
+
     samples = []
-    for i in np.unique(np.linspace(0, n_frames - 1, min(GROUND_BASELINE_SAMPLES, n_frames)).astype(int)):
-        img = read_frame(int(i))
+    sample_ids = [int(i) for i in np.unique(
+        np.linspace(0, n_frames - 1, min(GROUND_BASELINE_SAMPLES, n_frames)).astype(int))]
+    sfuts = {}
+    for pos, i in enumerate(sample_ids):
+        for j in range(pos, min(len(sample_ids), pos + ahead)):
+            if j not in sfuts:
+                sfuts[j] = pool.submit(read_frame, sample_ids[j])
+        img = sfuts.pop(pos).result()
         if img is not None and img.shape[:2] == (H, W):
             samples.append(_chroma(img[y0:]))
     if len(samples) < 3:
@@ -810,10 +824,14 @@ def find_ground_specks(n_frames, read_frame, fg_mask, progress=None):
 
     cand = []
     counts = collections.Counter()
+    futs = {}
     for k in range(n_frames):
         if progress is not None and k % 10 == 0:
             progress(k, n_frames)
-        img = read_frame(k)
+        for j in range(k, min(n_frames, k + ahead)):
+            if j not in futs:
+                futs[j] = pool.submit(read_frame, j)
+        img = futs.pop(k).result()
         if img is None or img.shape[:2] != (H, W):
             continue
         c = _chroma(img[y0:])
@@ -823,6 +841,7 @@ def find_ground_specks(n_frames, read_frame, fg_mask, progress=None):
             if st[i, cv2.CC_STAT_AREA] <= MAX_BLOB_AREA:
                 cand.append((k, int(cen[i][0]), int(cen[i][1]) + y0))
                 counts[k] += 1
+    pool.shutdown(wait=False)
     res.candidates = len(cand)
     typical = float(np.median([counts.get(k, 0) for k in range(n_frames)]))
     res.burst_frames = {k for k, v in counts.items() if v > max(BURST_MIN, BURST_FACTOR * typical)}
@@ -1009,14 +1028,21 @@ def run_on_folder(cleaned_dir, names, stack, fg_mask, read_path, say=print, thre
     `read_path(path)` reads one frame as BGR uint8. Never raises: a pass that hits an
     error leaves the stack as it was and says so in the summary."""
     import os
+    import time
+    from modules import step_timer
     paths = [os.path.join(cleaned_dir, n) for n in names]
     n = len(paths)
 
     def rd(i):
+        # Timed and counted (permanent, 2026-11-19): reads run on several threads, so
+        # "flashes.read" is the seconds summed over all of them, not wall-clock time.
+        t0 = time.perf_counter()
         try:
             return read_path(paths[i])
         except Exception:
             return None
+        finally:
+            step_timer.add("flashes.read", time.perf_counter() - t0)
 
     fg = None
     if fg_mask is not None and fg_mask.shape[:2] == stack.shape[:2]:
@@ -1025,21 +1051,26 @@ def run_on_folder(cleaned_dir, names, stack, fg_mask, read_path, say=print, thre
     sky, rstats, ground, gstats = None, None, None, None
 
     try:
-        sky = find_flashes(n, rd, fg, progress=lambda k, t: say("  finding flashes: %d/%d" % (k, t)))
+        with step_timer.step("flashes.find"):
+            sky = find_flashes(n, rd, fg, progress=lambda k, t: say("  finding flashes: %d/%d" % (k, t)))
         if not sky.bail:
             defects = find_blinking_defects(sky.defect_candidates, n)
-            out, rstats = repair_stack(out, n, rd, sky.flags, defects, threads,
-                                       progress=lambda k, t: say("  repairing flashes: %d/%d" % (k, t)))
+            with step_timer.step("flashes.repair"):
+                out, rstats = repair_stack(out, n, rd, sky.flags, defects, threads,
+                                           progress=lambda k, t: say("  repairing flashes: %d/%d" % (k, t)))
     except Exception as e:
         sky = FlashResult()
         sky.bail = "of an unexpected error (%s)" % type(e).__name__
         out = stack
 
     try:
-        ground = find_ground_specks(n, rd, fg, progress=lambda k, t: say("  checking the ground: %d/%d" % (k, t)))
+        with step_timer.step("ground.find"):
+            ground = find_ground_specks(n, rd, fg, progress=lambda k, t: say("  checking the ground: %d/%d" % (k, t)),
+                                        threads=threads)
         if not ground.bail:
-            out, gstats = repair_ground(out, n, rd, ground, threads=threads,
-                                        progress=lambda k, t: say("  repairing the ground: %d/%d" % (k, t)))
+            with step_timer.step("ground.repair"):
+                out, gstats = repair_ground(out, n, rd, ground, threads=threads,
+                                            progress=lambda k, t: say("  repairing the ground: %d/%d" % (k, t)))
     except Exception as e:
         ground = GroundResult()
         ground.bail = "of an unexpected error (%s)" % type(e).__name__

@@ -1336,6 +1336,41 @@ def _smooth_stack_fullres(dirpath, names, radius, taper=0.0, comet_tail_frames=0
     return out
 
 
+def _dots_read(path):
+    """The speck stage's frame reader, timed and counted under "dots.read" (seconds
+    summed over every thread that reads, so it can exceed the wall-clock time)."""
+    from modules import step_timer
+    t0 = time.perf_counter()
+    try:
+        return robust_imread(path, cv2.IMREAD_COLOR)
+    finally:
+        step_timer.add("dots.read", time.perf_counter() - t0)
+
+
+def _print_hotpix_times(n_frames):
+    """Where the hot-pixel phase went, from the permanent timers, for the Star Log:
+    wall-clock seconds for each step and how many times each frame was read. Observes
+    only; changes nothing. (Not a slash or a count-of line, so the progress bar's
+    parser ignores it.)"""
+    from modules import step_timer
+    snap = step_timer.snapshot()["steps"]
+    wall = [("dots.blob_candidates", "listing dots"), ("dots.sky_motion", "measuring sky motion"),
+            ("dots.scan", "scanning for specks"), ("dots.judge", "judging dots"),
+            ("dots.map_chromatic", "  of which coloured-dot map"), ("dots.map_white", "  white-dot map"),
+            ("dots.persistence", "  persistence check"),
+            ("dots.fill", "filling specks"), ("dots.self_check", "self-check"),
+            ("flashes.find", "finding flashes"), ("flashes.repair", "repairing flashes"),
+            ("ground.find", "checking the ground"), ("ground.repair", "repairing the ground")]
+    parts = [f"{label} {snap[k][1]:.0f}s" for k, label in wall if k in snap]
+    if parts:
+        print("  hot-pixel time by step: " + ", ".join(parts), flush=True)
+    reads = {k: snap[k] for k in ("dots.read", "flashes.read") if k in snap}
+    if reads and n_frames:
+        print("  frame reads per frame (and seconds summed over threads): " + ", ".join(
+            f"{k.split('.')[0]} {v[0] / n_frames:.1f} ({v[1]:.0f}s)" for k, v in reads.items()),
+            flush=True)
+
+
 def make_star_trail(cleaned_dir, out_path=None, stack=None, comet_tail=0,
                     thicken_px=0, remove_hotpix=False, reverse=False,
                     match_cleaned=None, out_format="jpg",
@@ -1501,8 +1536,7 @@ def make_star_trail(cleaned_dir, out_path=None, stack=None, comet_tail=0,
                     run_map = robust_imread(hmp, cv2.IMREAD_GRAYSCALE)
             try:
                 _t_hp = time.time()
-                stack = remove_specks(cleaned_dir, names, stack, fg,
-                                      lambda p: robust_imread(p, cv2.IMREAD_COLOR),
+                stack = remove_specks(cleaned_dir, names, stack, fg, _dots_read,
                                       comet_tail=comet_tail, run_map=run_map)
                 print(f"  hot-pixel phase: {time.time() - _t_hp:.0f}s", flush=True)
                 # The flash finder (modules/flash_repair.py): single-frame flashes and blinking
@@ -1515,6 +1549,7 @@ def make_star_trail(cleaned_dir, out_path=None, stack=None, comet_tail=0,
                                           lambda p: robust_imread(p, cv2.IMREAD_COLOR))
                     print(f"  flash finder: {time.time() - _t_ff:.0f}s", flush=True)
                     print(f"  hot-pixel phase: {time.time() - _t_hp:.0f}s", flush=True)
+                    _print_hotpix_times(len(names))
                 except Exception as e:
                     print(f"  flash finder skipped ({type(e).__name__})", flush=True)
             except SkyDotsBail as b:
