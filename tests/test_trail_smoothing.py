@@ -328,3 +328,96 @@ def test_the_options_explain_what_happens_to_the_ground():
     for tip in (p._size_cb.toolTip(), p._mode_comet.toolTip(), p._mode_taper.toolTip()):
         assert "ground" in tip and "normal star trail" in tip
     assert "ground mask" in p._size_cb.toolTip(), "smoothing says it uses the mask where there is one"
+
+
+# ---- memory safeguard (2026-11-20) ---------------------------------------------------
+# A 45 MP 16-bit sequence peaked at about 6.8 GB. The stack now trims its extra copies
+# and, when the computer cannot hold the working copies of a huge frame, is built in
+# horizontal strips. The picture must be the same either way.
+
+def _frames_for_strips(td, n=8, h=200, w=260, dtype=np.uint16):
+    import cv2
+    top = 65535 if dtype == np.uint16 else 255
+    rng = np.random.default_rng(11)
+    names = []
+    for i in range(n):
+        img = (rng.integers(0, top // 12, (h, w, 3))).astype(dtype)
+        img[(17 * i) % (h - 3):(17 * i) % (h - 3) + 3, (31 * i) % (w - 5):(31 * i) % (w - 5) + 5] = top
+        nm = f"IMG_{i:04d}.png"
+        cv2.imwrite(os.path.join(td, nm), img)
+        names.append(nm)
+    return names
+
+
+def test_the_memory_plan_uses_one_piece_when_there_is_room():
+    m = _msc()
+    gb = 2 ** 30
+    assert m.smooth_memory_plan(4000, 6000, 1, False, available=64 * gb)[0] == 1
+    assert m.smooth_memory_plan(6000, 7500, 2, True, available=64 * gb)[0] == 1
+    assert m.smooth_memory_plan(6000, 7500, 2, True, available=None)[0] in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16)
+
+
+def test_the_memory_plan_cuts_a_huge_frame_into_strips_when_memory_is_short():
+    m = _msc()
+    gb = 2 ** 30
+    one = m.smooth_memory_plan(6000, 7500, 2, True, available=8 * gb)      # 45 MP, 16-bit, 8 GB free
+    assert 2 <= one[0] <= m.SMOOTH_MAX_STRIPS
+    assert one[1] > 5 * gb, "the whole frame at once needs several GB"
+    tight = m.smooth_memory_plan(6000, 7500, 2, True, available=4 * gb)[0]
+    assert tight >= one[0], "less free memory never means fewer strips"
+    assert m.smooth_memory_plan(6000, 7500, 2, True, available=1 * gb)[0] == m.SMOOTH_MAX_STRIPS
+    assert m.smooth_memory_plan(60, 80, 2, True, available=1000)[0] == 1, "a tiny frame is never cut up"
+
+
+def test_smoothing_only_some_rows_matches_those_rows_of_the_whole_frame():
+    m = _msc()
+    for dtype in (np.uint8, np.uint16):
+        im = _noisy(300, 400, dtype, 5)
+        top = 65535.0 if dtype == np.uint16 else 255.0
+        whole = m.smooth_frame(im, 3, bands=1, workers=1)
+        for y0, y1 in ((0, 90), (90, 210), (210, 300)):
+            part = m.smooth_frame(im, 3, rows=(y0, y1))
+            assert part.shape[0] == y1 - y0
+            assert np.abs(part - whole[y0:y1]).max() < top * 2e-5, f"rows {y0}-{y1} differ"
+
+
+def test_the_stack_built_in_strips_is_the_same_picture_as_the_whole_frame():
+    import contextlib
+    import io
+    m = _msc()
+    for dtype, kw, use_ground in ((np.uint8, {}, False), (np.uint16, {"taper": 0.25}, True),
+                                  (np.uint8, {"comet_tail_frames": 3}, True)):
+        with tempfile.TemporaryDirectory() as td:
+            names = _frames_for_strips(td, dtype=dtype)
+            fg = np.zeros((200, 260), np.uint8)
+            fg[150:, :] = 255
+            args = dict(fg=fg if use_ground else None, reference_width=260, **kw)
+            m._available_bytes = lambda: None
+            whole = m._smooth_stack_fullres(td, names, 3, **args)
+            m._available_bytes = lambda: 4_000_000          # far too little for one piece
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                strips = m._smooth_stack_fullres(td, names, 3, **args)
+        assert "strips" in out.getvalue(), "it should say it is working in strips"
+        assert whole.dtype == strips.dtype and whole.shape == strips.shape
+        assert np.array_equal(whole, strips), f"strips changed the picture ({dtype.__name__}, {kw})"
+
+
+def test_progress_lines_keep_climbing_when_the_stack_is_built_in_strips():
+    import contextlib
+    import io
+    import re
+    m = _msc()
+    with tempfile.TemporaryDirectory() as td:
+        names = _frames_for_strips(td, n=6, dtype=np.uint8)
+        m._available_bytes = lambda: 3_000_000
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            m._smooth_stack_fullres(td, names, 3, reference_width=260)
+    lines = [tuple(int(x) for x in mo.groups()) for mo in
+             re.finditer(r"smooth star trail: (\d+)/(\d+)", out.getvalue())]
+    assert lines, "no progress lines"
+    totals = {t for _, t in lines}
+    assert len(totals) == 1 and totals.pop() > 6, "the total counts every strip's pass"
+    done = [d for d, _ in lines]
+    assert done == sorted(done) and done[-1] == lines[-1][1], "the count only climbs and ends at the total"

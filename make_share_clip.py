@@ -1144,6 +1144,56 @@ def smooth_threads():
     return max(1, min(SMOOTH_MAX_THREADS, n - SMOOTH_SPARE_CORES))
 
 
+# Memory safeguard (2026-11-20). A 45 MP 16-bit TIFF sequence peaked at about 6.8 GB.
+# Before the run starts we work out how much memory the whole frame needs at once; if
+# that is more than the share of the free memory we allow, the picture is stacked in
+# horizontal strips instead (every frame is read once per strip). The stack works one
+# pixel at a time and the blur reads a few rows either side of a strip, so the result
+# is the same; only the time grows.
+SMOOTH_MEM_BUDGET = 0.70      # share of the memory free right now that smoothing may use
+SMOOTH_MEM_OVERHEAD = 1.4     # measured: the real peak (6.8 GB) was about 1.3x the arrays added up
+SMOOTH_MAX_STRIPS = 16
+SMOOTH_MIN_STRIP_ROWS = 64
+
+
+def _available_bytes():
+    """Memory free right now, or None when it cannot be read."""
+    try:
+        import psutil
+        return int(psutil.virtual_memory().available)
+    except Exception:
+        return None
+
+
+def smooth_memory_plan(h, w, bytes_per_sample, with_ground, available=None):
+    """(strips, bytes_needed_whole) for stacking an h-by-w colour frame.
+
+    Bytes needed per sample at once: three smoothed frames kept for the average (12),
+    the stack (4), the unsmoothed ground stack when there is a ground mask (4), thread
+    scratch while the blur runs (8), and this frame and the next one read ahead
+    (2 x the file's bytes per sample). The first four shrink with the strip height; the
+    last does not. `strips` is 1 when everything fits in the allowed share of the free
+    memory."""
+    n = float(h) * float(w) * 3.0
+    per_strip = 12.0 + 4.0 + (4.0 if with_ground else 0.0) + 8.0
+    fixed = 2.0 * float(bytes_per_sample)
+    whole = SMOOTH_MEM_OVERHEAD * n * (per_strip + fixed)
+    if available is None:
+        available = _available_bytes()
+    if not available:
+        return 1, whole
+    budget = SMOOTH_MEM_BUDGET * float(available)
+    if whole <= budget:
+        return 1, whole
+    room = budget - SMOOTH_MEM_OVERHEAD * n * fixed
+    if room <= 0:
+        strips = SMOOTH_MAX_STRIPS
+    else:
+        strips = int(np.ceil(SMOOTH_MEM_OVERHEAD * n * per_strip / room))
+    strips = min(max(strips, 2), SMOOTH_MAX_STRIPS, max(1, int(h) // SMOOTH_MIN_STRIP_ROWS))
+    return int(strips), whole
+
+
 def _smooth_band(im, y0, y1, kernel, lut, top):
     """Rows y0..y1 of the smoothed frame. Reads a few rows either side of the band
     (half the blur's width) so the blur is the same at the seams as on the whole
@@ -1160,10 +1210,12 @@ def _smooth_band(im, y0, y1, kernel, lut, top):
     return out
 
 
-def smooth_frame(im, radius, bands=None, workers=None):
+def smooth_frame(im, radius, bands=None, workers=None, rows=None):
     """One frame softened (steps 1 to 4 above). Takes an 8-bit or 16-bit BGR frame
     and returns float32 in that frame's own number range (0..255 or 0..65535), so
-    a 16-bit trail stays 16-bit. Never changes `im`.
+    a 16-bit trail stays 16-bit. Never changes `im`. `rows=(y0, y1)` softens only
+    those rows of the frame (reading the rows around them as the blur needs) and
+    returns just that strip.
 
     SPEED (2026-11-19, measured on 20 MP: 1.1 s a frame became 0.17 s). The curve
     and boost are one table lookup (_smooth_lut), and the picture is cut into
@@ -1176,7 +1228,8 @@ def smooth_frame(im, radius, bands=None, workers=None):
     top = 65535 if im.dtype == np.uint16 else 255
     kernel = _smooth_kernel(radius)
     lut = _smooth_lut(top)
-    H = im.shape[0]
+    y_lo, y_hi = (0, im.shape[0]) if rows is None else (int(rows[0]), int(rows[1]))
+    H = y_hi - y_lo
     workers = smooth_threads() if workers is None else max(1, int(workers))
     pad = kernel.shape[0] // 2 + 1
     if bands is None:
@@ -1184,9 +1237,9 @@ def smooth_frame(im, radius, bands=None, workers=None):
     bands = max(1, int(bands))
     with step_timer.step("smooth.bands"):
         if bands == 1:
-            return _smooth_band(im, 0, H, kernel, lut, top)
-        edges = np.linspace(0, H, bands + 1).astype(int)
-        result = np.empty(im.shape, np.float32)
+            return _smooth_band(im, y_lo, y_hi, kernel, lut, top)
+        edges = (y_lo + np.linspace(0, H, bands + 1)).astype(int)
+        result = np.empty((H,) + tuple(im.shape[1:]), np.float32)
         from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=min(workers, bands)) as ex:
             futs = [(int(edges[i]), ex.submit(_smooth_band, im, int(edges[i]),
@@ -1194,7 +1247,7 @@ def smooth_frame(im, radius, bands=None, workers=None):
                     for i in range(bands)]
             for y0, f in futs:
                 part = f.result()
-                result[y0:y0 + part.shape[0]] = part
+                result[y0 - y_lo:y0 - y_lo + part.shape[0]] = part
         return result
 
 
@@ -1210,6 +1263,47 @@ def _mean_of(frames):
 
 def _smooth_stack_fullres(dirpath, names, radius, taper=0.0, comet_tail_frames=0,
                           fg=None, reference_width=None):
+    """The smoothed stack (see _smooth_stack_rows), made in as few strips as the free
+    memory allows: usually one (the whole frame at once, as before); on a computer
+    that cannot hold a huge frame's working copies it is built strip by strip, each
+    strip reading every frame again, and put together (see smooth_memory_plan)."""
+    probe = None
+    for nm in names:
+        p = os.path.join(dirpath, nm)
+        if os.path.exists(p):
+            probe = _to_bgr(robust_imread(p, cv2.IMREAD_UNCHANGED))
+            if probe is not None:
+                break
+    if probe is None:
+        return None
+    h, w = probe.shape[:2]
+    bps = 2 if probe.dtype == np.uint16 else 1
+    del probe
+    avail = _available_bytes()
+    strips, whole = smooth_memory_plan(h, w, bps, fg is not None, avail)
+    if strips <= 1:
+        return _smooth_stack_rows(dirpath, names, radius, taper, comet_tail_frames,
+                                  fg, reference_width)
+    print(f"  smoothing: a {w} x {h} frame needs about {whole / 2 ** 30:.1f} GB at once "
+          f"and about {(avail or 0) / 2 ** 30:.1f} GB is free, so the stack is built in "
+          f"{strips} strips. It takes longer and the picture is the same.", flush=True)
+    edges = np.linspace(0, h, strips + 1).astype(int)
+    out = None
+    for k in range(strips):
+        part = _smooth_stack_rows(dirpath, names, radius, taper, comet_tail_frames, fg,
+                                  reference_width, rows=(int(edges[k]), int(edges[k + 1])),
+                                  pass_index=k, pass_count=strips)
+        if part is None:
+            return None
+        if out is None:
+            out = np.empty((h,) + tuple(part.shape[1:]), part.dtype)
+        out[int(edges[k]):int(edges[k + 1])] = part
+    return out
+
+
+def _smooth_stack_rows(dirpath, names, radius, taper=0.0, comet_tail_frames=0,
+                       fg=None, reference_width=None, rows=None, pass_index=0,
+                       pass_count=1):
     """Lighten-max stack in which every frame is smoothed first (see above). Works
     with all three styles: plain, Fading Ends (`taper`, a fraction of the sequence)
     and Comet (`comet_tail_frames`). `names` arrives in capture order, reversed
@@ -1231,6 +1325,15 @@ def _smooth_stack_fullres(dirpath, names, radius, taper=0.0, comet_tail_frames=0
     buf = []          # the last three smoothed frames
     used = 0
     missing, unreadable, resized = [], [], []
+    full_shape = None         # the first frame's shape; every other frame is resized to it
+    y_lo = y_hi = None        # the rows this pass makes (the whole frame unless `rows` is given)
+
+    def _chunks():
+        """Row ranges inside the stack, about 16 MB of float32 each: the stack is
+        updated a chunk at a time so no second full-size array is needed."""
+        hs = y_hi - y_lo
+        ch = max(16, 4000000 // max(1, full_shape[1] * 3))
+        return [(r0, min(hs, r0 + ch)) for r0 in range(0, hs, ch)]
 
     def _read(nm):
         p = os.path.join(dirpath, nm)
@@ -1264,8 +1367,8 @@ def _smooth_stack_fullres(dirpath, names, radius, taper=0.0, comet_tail_frames=0
                 im = (im >> 8).astype(np.uint8)
             else:
                 im = np.clip(im, 0, top).astype(dtype)
-        if B is not None and im.shape != B.shape:
-            im = cv2.resize(im, (B.shape[1], B.shape[0]), interpolation=cv2.INTER_AREA)
+        if full_shape is not None and im.shape != full_shape:
+            im = cv2.resize(im, (full_shape[1], full_shape[0]), interpolation=cv2.INTER_AREA)
             resized.append(nm)
         if taper:
             w = taper_weight(i, n, ramp)
@@ -1273,42 +1376,52 @@ def _smooth_stack_fullres(dirpath, names, radius, taper=0.0, comet_tail_frames=0
         else:
             mul = None
         if B is None:
+            full_shape = im.shape
+            y_lo, y_hi = (0, im.shape[0]) if rows is None else (int(rows[0]), int(rows[1]))
             eff_radius = smooth_radius_for_width(radius, im.shape[1], reference_width)
-            if reference_width:
+            if reference_width and pass_index == 0:
                 print(f"  smoothing radius {eff_radius:.1f} px for a frame {im.shape[1]} px wide",
                       flush=True)
-        sm = smooth_frame(im, eff_radius)
+        sm = smooth_frame(im, eff_radius, rows=(y_lo, y_hi))
         buf.append(sm)
         buf = buf[-3:]
         with step_timer.step("smooth.average_stack"):
-            fb = _mean_of(buf)
-            if mul is not None:
-                fb *= mul
             if B is None:
-                B = fb
+                B = _mean_of(buf)
+                if mul is not None:
+                    B *= mul
             else:
                 if fade is not None:
                     B *= np.float32(fade)
-                np.maximum(B, fb, out=B)
+                for r0, r1 in _chunks():
+                    m = _mean_of([b[r0:r1] for b in buf])
+                    if mul is not None:
+                        m *= mul
+                    np.maximum(B[r0:r1], m, out=B[r0:r1])
             if fg is not None:
-                fa = im.astype(np.float32)
-                if mul is not None:
-                    fa *= mul
                 if A is None:
-                    A = fa
+                    A = im[y_lo:y_hi].astype(np.float32)
+                    if mul is not None:
+                        A *= mul
                 else:
                     if fade is not None:
                         A *= np.float32(fade)
-                    np.maximum(A, fa, out=A)
+                    for r0, r1 in _chunks():
+                        fa = im[y_lo + r0:y_lo + r1].astype(np.float32)
+                        if mul is not None:
+                            fa *= mul
+                        np.maximum(A[r0:r1], fa, out=A[r0:r1])
         used += 1
-        print(f"  smooth star trail: {i + 1}/{n}", flush=True)
+        print(f"  smooth star trail: {pass_index * n + i + 1}/{n * pass_count}", flush=True)
     reader.shutdown(wait=True)
+    buf = None            # the last smoothed frames are no longer needed
     if B is None:
         return None
-    print(f"  smooth star trail: stacked {used} of {n} frames "
-          f"(smoothing {int(radius)}, radius {eff_radius:.1f} px)", flush=True)
+    if pass_index == pass_count - 1:
+        print(f"  smooth star trail: stacked {used} of {n} frames "
+              f"(smoothing {int(radius)}, radius {eff_radius:.1f} px)", flush=True)
     dropped = missing + unreadable
-    if dropped:
+    if dropped and pass_index == 0:
         print("  " + "!" * 60, flush=True)
         print(f"  WARNING [smooth star trail]: {len(dropped)} frame(s) NOT stacked "
               f"({len(missing)} missing, {len(unreadable)} unreadable) -- the "
@@ -1319,17 +1432,20 @@ def _smooth_stack_fullres(dirpath, names, radius, taper=0.0, comet_tail_frames=0
         print("  " + "!" * 60, flush=True)
     if fg is not None and A is not None:
         g = fg
-        if g.shape[:2] != B.shape[:2]:
-            g = cv2.resize(g, (B.shape[1], B.shape[0]), interpolation=cv2.INTER_NEAREST)
-        g = g > 127
+        if g.shape[:2] != full_shape[:2]:
+            g = cv2.resize(g, (full_shape[1], full_shape[0]), interpolation=cv2.INTER_NEAREST)
+        g = g[y_lo:y_hi] > 127
         B[g] = A[g]
     # Truncate, exactly as the plain, Fading Ends and Comet stackers do, so the ground
-    # restored above matches what those styles give today, to the last level.
-    out = np.clip(B, 0, top).astype(dtype)
+    # restored above matches what those styles give today, to the last level. A chunk
+    # at a time, so the clipped copy is never a whole extra frame.
+    out = np.empty(B.shape, dtype)
+    for r0, r1 in _chunks():
+        out[r0:r1] = np.clip(B[r0:r1], 0, top).astype(dtype)
     # Where the time went, from the permanent timers (never lost in a scratch script).
     snap = step_timer.snapshot()["steps"]
     parts = [(k, v) for k, v in snap.items() if k.startswith("smooth.")]
-    if parts and used:
+    if parts and used and pass_index == pass_count - 1:
         print("  smoothing time per frame: " + ", ".join(
             f"{k.split('.', 1)[1]} {v[1] / used:.2f}s"
             for k, v in sorted(parts, key=lambda kv: -kv[1][1])), flush=True)

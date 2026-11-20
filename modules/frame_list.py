@@ -386,6 +386,44 @@ def gap_notice(frames, gaps):
     return lines
 
 
+# A file name that looks like an accident: a double extension (IMG_6616.jpg.jpg) or a
+# name ending in "copy", "(1)" or "edited". Such a file goes into the stack like any
+# other, and one stray or edited frame can mark the whole picture (2026-11-19: a hand-made
+# IMG_6616.jpg.jpg left rectangles and dots in a smoothed trail). The app only TELLS the
+# person, before the run: it never skips, renames or moves anything.
+_IMG_EXT = r"(?:jpe?g|tiff?|png|cr2|cr3|nef|arw|dng|raf|orf|rw2|heic|webp)"
+_DOUBLE_EXT = re.compile(r"\." + _IMG_EXT + r"\." + _IMG_EXT + r"$", re.IGNORECASE)
+_ACCIDENT_STEM = re.compile(r"(?:\bcopy(?:\s*\d+)?|\(\d+\)|[ _-]edited)$", re.IGNORECASE)
+ODD_MAX_NAMED = 3
+
+
+def odd_file_names(frames):
+    """Base names of the files in `frames` whose names look like an accident, in
+    the order they appear. Only reads names; never changes the list."""
+    odd = []
+    for f in frames:
+        base = os.path.basename(str(f))
+        stem = os.path.splitext(base)[0]
+        if _DOUBLE_EXT.search(base) or _ACCIDENT_STEM.search(stem):
+            odd.append(base)
+    return odd
+
+
+def odd_name_notice(odd):
+    """One plain line telling the person about the unusual names, before the run."""
+    if not odd:
+        return ""
+    named = ", ".join(odd[:ODD_MAX_NAMED])
+    more = len(odd) - ODD_MAX_NAMED
+    if more > 0:
+        named += f" and {more} more"
+    if len(odd) == 1:
+        return (f"1 file has an unusual name and will be included: {named}. If it isn't a "
+                "normal frame, take it out of the folder first.")
+    return (f"{len(odd)} files have unusual names and will be included: {named}. If they "
+            "aren't normal frames, take them out of the folder first.")
+
+
 def ordered_frame_list_and_gaps(folder, prefer_raw=True):
     """ordered_frame_list plus the unusual time gaps in it: (frames, gaps). The
     capture times are read once and used for both the ordering and the gap check."""
