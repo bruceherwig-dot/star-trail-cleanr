@@ -421,3 +421,26 @@ def test_progress_lines_keep_climbing_when_the_stack_is_built_in_strips():
     assert len(totals) == 1 and totals.pop() > 6, "the total counts every strip's pass"
     done = [d for d, _ in lines]
     assert done == sorted(done) and done[-1] == lines[-1][1], "the count only climbs and ends at the total"
+
+
+def test_the_row_is_called_smooth_and_thicken_and_says_it_thickens():
+    """The blur also makes trails wider, which "Trail Smoothing" did not say (Bruce,
+    2026-11-21). The row reads Smooth & Thicken and the hover text says so."""
+    from PySide6.QtWidgets import QApplication, QLabel
+    QApplication.instance() or QApplication([])
+    import cv2
+    import star_trail_cleanr as S
+    d = Path(tempfile.mkdtemp())
+    cleaned = d / "cleaned"
+    cleaned.mkdir()
+    for i in range(30):
+        img = np.full((40, 60, 3), 30, np.uint8)
+        cv2.imwrite(str(d / f"IMG_{i}.jpg"), img)
+        cv2.imwrite(str(cleaned / f"IMG_{i}.jpg"), img)
+    p = S.StarTrailPanel(str(cleaned), "", original_folder=str(d))
+    labels = [lab.text() for lab in p.findChildren(QLabel)]
+    assert "Smooth & Thicken" in labels, "the row label"
+    assert "Trail Smoothing" not in labels, "the old row label is gone"
+    assert "thickens" in p._size_cb.toolTip(), "the hover text says it thickens the trails"
+    assert [p._size_cb.itemText(i) for i in range(p._size_cb.count())] == ["Off", "Light", "Medium", "Strong"]
+    assert p._smooth_note.text() == "Will take longer to render", "the render-time note is unchanged"

@@ -9329,8 +9329,9 @@ class StarTrailPanel(QWidget):
         for label, v in (("Off", 0), ("Light", 2), ("Medium", 3), ("Strong", 5)):
             self._size_cb.addItem(label, v)
         self._size_cb.setToolTip(
-            "Softens every frame so the dots of each trail join into one continuous, "
-            "soft line. Medium is a good start.\n"
+            "Smooths and thickens the trails. Every frame is blurred a little before "
+            "stacking, so the dots of each trail join into one continuous, soft line. "
+            "Medium is a good start.\n"
             "Smoothing every frame adds to the time it takes to render.\n"
             "Keeps the ground from the normal star trail where a ground mask was painted. "
             "Without a mask, or where the mask misses, the ground softens too. The normal "
@@ -9347,7 +9348,9 @@ class StarTrailPanel(QWidget):
         self._size_cb.setMinimumContentsLength(8)
         _sm.addWidget(self._size_cb, 1)
         _sm.addWidget(self._smooth_note)
-        _row("Trail Smoothing", _smooth_w)
+        # Named "Smooth & Thicken" on screen (Bruce, 2026-11-21): the blur also makes the
+        # trails wider, which "Trail Smoothing" did not say. Internal names are unchanged.
+        _row("Smooth & Thicken", _smooth_w)
 
         # Brightness of the finished trail: a midtone curve that keeps black and white
         # where they are (see make_share_clip.apply_brightness). The slider counts
