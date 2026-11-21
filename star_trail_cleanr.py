@@ -9250,9 +9250,9 @@ class StarTrailPanel(QWidget):
         self._mode_normal = QRadioButton("Normal (Lighten)")
         self._mode_comet = QRadioButton("Comet Mode")
         self._mode_comet.setToolTip(
-            "Each star leaves a fading tail. Anything that moves on the ground leaves a "
-            "tail too. The normal star trail saved next to the result has the untouched "
-            "ground, for replacing it.")
+            "Each star leaves a fading tail. Anything that moves on the\n"
+            "ground leaves a tail too. The normal star trail saved next to\n"
+            "the result has the untouched ground, for replacing it.")
         self._mode_group = QButtonGroup(self)
         self._mode_group.addButton(self._mode_normal)
         self._mode_group.addButton(self._mode_comet)
@@ -9260,9 +9260,9 @@ class StarTrailPanel(QWidget):
         # middle of the sequence stays full brightness (make_share_clip --taper).
         self._mode_taper = QRadioButton("Fading Ends")
         self._mode_taper.setToolTip(
-            "Trails fade in at the start and fade out at the end. Anything that moves on "
-            "the ground fades too. The normal star trail saved next to the result has the "
-            "untouched ground, for replacing it.")
+            "Trails fade in at the start and fade out at the end. Anything\n"
+            "that moves on the ground fades too. The normal star trail saved\n"
+            "next to the result has the untouched ground, for replacing it.")
         self._mode_group.addButton(self._mode_taper)
         self._mode_normal.setChecked(True)
         _rb = QHBoxLayout(); _rb.setContentsMargins(0, 0, 0, 0); _rb.setSpacing(18)
@@ -9329,13 +9329,13 @@ class StarTrailPanel(QWidget):
         for label, v in (("Off", 0), ("Light", 2), ("Medium", 3), ("Strong", 5)):
             self._size_cb.addItem(label, v)
         self._size_cb.setToolTip(
-            "Smooths and thickens the trails. Every frame is blurred a little before "
-            "stacking, so the dots of each trail join into one continuous, soft line. "
-            "Medium is a good start.\n"
-            "Smoothing every frame adds to the time it takes to render.\n"
-            "Keeps the ground from the normal star trail where a ground mask was painted. "
-            "Without a mask, or where the mask misses, the ground softens too. The normal "
-            "star trail saved next to the result has the untouched ground, for replacing it.")
+            "Smooths and thickens the trails. Every frame is blurred a little\n"
+            "before stacking, so the dots of each trail join into one soft line.\n"
+            "Medium is a good start. Takes longer to render.\n"
+            "\n"
+            "Where you painted a ground mask, the ground stays sharp, as in your\n"
+            "normal star trail. Without a mask, the ground goes soft too. The normal\n"
+            "star trail saved next to this one has the untouched ground.")
         # A plain note to the right of the dropdown, so nobody is surprised by the
         # wait (Bruce's wording, 2026-11-19). Always shown, even at Off, so it is
         # read before a size is picked.

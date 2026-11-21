@@ -444,3 +444,27 @@ def test_the_row_is_called_smooth_and_thicken_and_says_it_thickens():
     assert "thickens" in p._size_cb.toolTip(), "the hover text says it thickens the trails"
     assert [p._size_cb.itemText(i) for i in range(p._size_cb.count())] == ["Off", "Light", "Medium", "Strong"]
     assert p._smooth_note.text() == "Will take longer to render", "the render-time note is unchanged"
+
+
+def test_the_hover_texts_are_short_lines_not_one_screen_wide_line():
+    """Qt does not wrap plain-text hover text, so one long line made a tooltip about
+    1,240 points wide on a 1,496 point screen (2026-11-21). Each line stays short, and
+    the facts the older tests look for are still there."""
+    from PySide6.QtWidgets import QApplication
+    QApplication.instance() or QApplication([])
+    import cv2
+    import star_trail_cleanr as S
+    d = Path(tempfile.mkdtemp())
+    cleaned = d / "cleaned"
+    cleaned.mkdir()
+    for i in range(30):
+        img = np.full((40, 60, 3), 30, np.uint8)
+        cv2.imwrite(str(d / f"IMG_{i}.jpg"), img)
+        cv2.imwrite(str(cleaned / f"IMG_{i}.jpg"), img)
+    p = S.StarTrailPanel(str(cleaned), "", original_folder=str(d))
+    for name, tip in (("smooth", p._size_cb.toolTip()), ("comet", p._mode_comet.toolTip()),
+                      ("fading", p._mode_taper.toolTip())):
+        longest = max(len(line) for line in tip.split("\n"))
+        assert longest <= 75, f"{name} hover text has a {longest} character line"
+        assert "ground" in tip and "normal star trail" in tip, f"{name} hover text lost its facts"
+    assert "thickens" in p._size_cb.toolTip() and "ground mask" in p._size_cb.toolTip()
