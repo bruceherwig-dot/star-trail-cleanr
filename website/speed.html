@@ -126,7 +126,7 @@
 <header class="tt">
   <div class="eyebrow">Star Trail CleanR &middot; Technical Notes &middot; No. 4</div>
   <h1>How we made Star Trail CleanR even faster</h1>
-  <p class="subtitle">We got the app stable and added the features first. Then we spent a round of work on speed. A full run now takes 39% less time, and the photos come out identical. This note covers the graphics chip, and what we learned about finding slowdowns in any program.</p>
+  <p class="subtitle">We got the app stable and added the features first. Then we spent a round of work on speed. A full run now takes 56% less time on a Mac with a graphics chip and about 76% less on the processor alone, and the photos come out identical. This note covers the graphics chip, and what we learned about finding slowdowns in any program.</p>
   <div class="byline">
     <span><b>The Star Trail CleanR project</b> &middot; startrailcleanr.com</span>
     <span>Published November 2026</span>
@@ -137,19 +137,27 @@
 
 <div class="abstract">
   <div class="lab">Summary</div>
-  <p>A full run on a 1,524-photo Joshua Tree set went from 1h 49m 53s to 1h 07m 02s, with identical photos. Most of the time is the AI looking at small tiles, and a graphics chip is the biggest speed-up. Everything else came from measuring first, keeping the output identical, and fixing one slowdown at a time. Each round saves less than the one before it, but there are always easy savings left in an area we haven't measured yet.</p>
+  <p>A full run on a 1,524-photo Joshua Tree set went from 1h 49m 53s to 48m 43s on a Mac with a graphics chip (56% less time, or 126% faster), with identical photos. On the processor alone it is about 4 times as fast (315% faster). Most of the time is the AI looking at small tiles, and a graphics chip is the biggest speed-up. Everything else came from measuring first, keeping the output identical, and fixing one slowdown at a time. Each round saves less than the one before it, but there are always easy savings left in an area we haven't measured yet.</p>
 </div>
 
 <div class="prose">
 
 <h2>Stable first, then fast</h2>
 <p>For a long time, speed wasn't our priority. First we wanted Star Trail CleanR to work, then to work reliably on all kinds of photos, and then to have the features photographers asked for. Speed was the next step, and it only made sense once those were done. You can't safely tune a program that's still changing underneath you.</p>
-<p>The app is stable and has its features now, so we spent a round of work on speed. A full run on a 1,524-photo Joshua Tree set used to take 1h 49m 53s. After the speed work, the same run takes 1h 07m 02s. That's 39% less time, and the finished photos are identical, pixel for pixel.</p>
+<p>The app is stable and has its features now, so we spent a round of work on speed. A full run on a 1,524-photo Joshua Tree set used to take 1h 49m 53s. After the speed work, the same run takes 48m 43s. That's 56% less time, or 126% faster, on a Mac with a graphics chip. The finished photos are identical: we compared 61 photos spread across the set, pixel for pixel.</p>
+<p>Most runs are smaller than that. The average in our usage numbers is about 336 photos. On the first 340 photos of this set, the same Mac went from 33m 48s to 12m 56s, which is 62% less time, or 161% faster.</p>
 <p>A test batch of 20 aurora photos, on a Mac with a graphics chip, went from 3m 06s to 1m 37s. That's 48% less time.</p>
 
 <figure>
   <img src="speed-hero.png" alt="Two bars comparing a 1,524-photo run before and after the speed work: 1h 49m 53s and 1h 07m 02s">
-  <figcaption><b>Figure 1.</b> The same 1,524-photo Joshua Tree run before and after the speed work. The finished photos are identical.</figcaption>
+  <figcaption><b>Figure 1.</b> The same 1,524-photo Joshua Tree run before the speed work, part way through it, and now, on the same Mac with a graphics chip. The finished photos are identical.</figcaption>
+</figure>
+
+<p>On a computer with no graphics chip, the gain is bigger. We timed four batches of 20 photos, spread across the same set, on the processor alone, with version 3.05 and with version 3.12. The four batches took 65m 45s with version 3.05 and 15m 50s with version 3.12. That's 75.9% less time, about 4 times as fast, or 315% faster, and the photos are identical. About 40% of the runs in our usage numbers are on the processor, so this matters to a lot of people.</p>
+
+<figure>
+  <img src="speed-cpu.png" alt="Paired bars for four batches of 20 photos on the processor only: version 3.05 took about 16 minutes each and version 3.12 about 4 minutes each">
+  <figcaption><b>Figure 2.</b> Four batches of 20 photos on the processor alone. Grey is version 3.05 and blue is version 3.12. Every batch is about 75% faster.</figcaption>
 </figure>
 
 <p>There's a second, bigger speed-up for many people: a graphics chip doing the AI work. On one Mac it's about 12 times faster for that step alone. This note covers the graphics chip and everything we did around it. Most of it is about how we found the fixes, because that part works on any slow program.</p>
@@ -162,7 +170,7 @@
 
 <figure>
   <img src="speed-where.png" alt="One bar showing the AI step takes about 87 percent of detection time">
-  <figcaption><b>Figure 2.</b> In a typical 20-photo batch, the AI looking at tiles takes about 87% of the detection time.</figcaption>
+  <figcaption><b>Figure 3.</b> In a typical 20-photo batch, the AI looking at tiles takes about 87% of the detection time.</figcaption>
 </figure>
 
 <h2>The biggest speed-up: the graphics chip</h2>
@@ -175,7 +183,7 @@
 
 <figure>
   <img src="speed-tile.png" alt="Bars comparing 17 milliseconds per tile on a graphics chip with 205 on the processor">
-  <figcaption><b>Figure 3.</b> Time for the AI to look at one tile, on the same Mac.</figcaption>
+  <figcaption><b>Figure 4.</b> Time for the AI to look at one tile, on the same Mac.</figcaption>
 </figure>
 
 <h2>Rule one: the photos can't change</h2>
@@ -193,12 +201,12 @@
 
 <figure>
   <img src="speed-expect.png" alt="Bars comparing the expected saving with the measured saving for two fixes">
-  <figcaption><b>Figure 4.</b> What we expected two fixes to save, and what they saved.</figcaption>
+  <figcaption><b>Figure 5.</b> What we expected two fixes to save, and what they saved.</figcaption>
 </figure>
 
 <figure>
   <img src="speed-estimate.png" alt="Bars comparing the app's estimated run time with the actual run time on two sets">
-  <figcaption><b>Figure 5.</b> The app's time estimate against what the run took, for two sets.</figcaption>
+  <figcaption><b>Figure 6.</b> The app's time estimate against what the run took, for two sets.</figcaption>
 </figure>
 
 <h2>Seven kinds of fix</h2>
@@ -215,12 +223,12 @@
 
 <figure>
   <img src="speed-seven.png" alt="Seven tiles, one for each kind of fix, each with its biggest measured gain">
-  <figcaption><b>Figure 6.</b> The seven kinds of fix, each with its biggest measured gain.</figcaption>
+  <figcaption><b>Figure 7.</b> The seven kinds of fix, each with its biggest measured gain.</figcaption>
 </figure>
 
 <figure>
   <img src="speed-steps.png" alt="Paired bars on a log scale showing before and after times for seven steps">
-  <figcaption><b>Figure 7.</b> Before and after times for the biggest single fixes. Each gridline is ten times the last.</figcaption>
+  <figcaption><b>Figure 8.</b> Before and after times for the biggest single fixes. Each gridline is ten times the last.</figcaption>
 </figure>
 
 <h2>Diminishing returns</h2>
@@ -242,12 +250,12 @@
 
 <figure>
   <img src="speed-hot.png" alt="Stacked bars of the hot-pixel steps before and after: 1m 35s and 54 seconds">
-  <figcaption><b>Figure 8.</b> Hot-pixel removal on 200 photos, step by step. The output is identical.</figcaption>
+  <figcaption><b>Figure 9.</b> Hot-pixel removal on 200 photos, step by step. The output is identical.</figcaption>
 </figure>
 
 <figure>
   <img src="speed-reads.png" alt="Two bars: the flash finder takes 57 seconds reading from disk and 23 seconds with photos in memory">
-  <figcaption><b>Figure 9.</b> The same step with real disk reads and with the photos already in memory.</figcaption>
+  <figcaption><b>Figure 10.</b> The same step with real disk reads and with the photos already in memory.</figcaption>
 </figure>
 
 <h2>Keep the timers</h2>
