@@ -468,3 +468,35 @@ def test_the_hover_texts_are_short_lines_not_one_screen_wide_line():
         assert longest <= 75, f"{name} hover text has a {longest} character line"
         assert "ground" in tip and "normal star trail" in tip, f"{name} hover text lost its facts"
     assert "thickens" in p._size_cb.toolTip() and "ground mask" in p._size_cb.toolTip()
+
+
+def test_the_label_column_is_wide_enough_for_the_longest_label_in_any_font():
+    """A fixed 112 point column cut "Smooth & Thicken" off on Bruce's screen
+    (2026-11-21). The column follows the real font, so every label fits, also in a
+    bigger font, and the Frame Range row uses the same width."""
+    from PySide6.QtGui import QFontMetrics
+    from PySide6.QtWidgets import QApplication, QLabel
+    app = QApplication.instance() or QApplication([])
+    import cv2
+    import star_trail_cleanr as S
+    d = Path(tempfile.mkdtemp())
+    cleaned = d / "cleaned"
+    cleaned.mkdir()
+    for i in range(30):
+        img = np.full((40, 60, 3), 30, np.uint8)
+        cv2.imwrite(str(d / f"IMG_{i}.jpg"), img)
+        cv2.imwrite(str(cleaned / f"IMG_{i}.jpg"), img)
+    original = app.font()
+    try:
+        for size in (original.pointSizeF() or 13.0, 17.0, 21.0):
+            f = app.font()
+            f.setPointSizeF(size)
+            app.setFont(f)
+            p = S.StarTrailPanel(str(cleaned), "", original_folder=str(d))
+            for lab in p.findChildren(QLabel):
+                if lab.text() in ("Smooth & Thicken", "Star Trail Style", "Brightness", "Format", "Source"):
+                    need = QFontMetrics(lab.font()).horizontalAdvance(lab.text())
+                    assert lab.width() >= need or lab.maximumWidth() >= need, \
+                        f"'{lab.text()}' needs {need} points but its column is {lab.maximumWidth()} at {size} pt"
+    finally:
+        app.setFont(original)

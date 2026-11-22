@@ -9169,7 +9169,14 @@ class StarTrailPanel(QWidget):
         self._build_idx = 0
         self._refresh_builds()
 
-        _LABEL_W = 112     # wide enough for "Trail Thickness"
+        # The label column is as wide as its longest label needs in THIS computer's font
+        # (112 at least). A fixed 112 cut "Smooth & Thicken" to "Smooth & Thicke" on
+        # Bruce's screen (2026-11-21). The Frame Range row takes the same width, so every
+        # row still lines up in one column.
+        from PySide6.QtGui import QFontMetrics
+        _lab_font = QLabel().font()
+        _lab_font.setBold(True)
+        _LABEL_W = max(112, QFontMetrics(_lab_font).horizontalAdvance("Smooth & Thicken") + 14)
 
         def _row(text, w):
             """One settings line: a right-aligned label of fixed width, then its
