@@ -2,6 +2,16 @@
 
 ---
 
+## v3.13-beta
+This release makes the Mac app tell an older Mac why it cannot open, renames Trail Smoothing so its name says what it does, and tidies the hover text on the Star Trail tab. Thank you to the user whose Mac would not open the app; that report is why the Mac message is here. Cleaned frames are unchanged: every cleaned photo of a full 1,524-photo run came out identical to the version before.
+
+- **Fixed: on an older Mac the app did nothing when you opened it.** A user on macOS Catalina (10.15) double-clicked the app and nothing happened, with no message. The Mac app now says which macOS it needs: macOS 15 (Sequoia) or newer. On an older Mac, macOS itself shows "You can't use this version of the application with this version of macOS" when you open it. The Mac download buttons on the website and the "Open Me First" note in the download say the same. (A Mac on macOS 12 to 14 might have worked; if you are on one of those and it runs, please tell us so the number can come down.)
+- **Changed: Trail Smoothing is now called Smooth & Thicken.** The blur that joins the dots of a trail also makes the trail wider, which "Trail Smoothing" did not say. Only the name on screen changed: the choices (Off, Light, Medium, Strong), what they do, the "Will take longer to render" note and your saved settings are all as they were.
+- **Improved: the hover text on the Star Trail tab is short.** The hover text on Smooth & Thicken was one line about 1,240 points wide on a 1,496 point screen, and the Comet Mode and Fading Ends ones about 900. They now wrap into short lines, 314 to 378 points wide, and say the same things about the ground and the normal star trail saved next to the result.
+- **Fixed: the label column on the Star Trail tab cut off "Smooth & Thicken".** The column is now as wide as its longest label needs in your computer's own font, also at larger font sizes, and every row still lines up.
+- **Faster: the crossing-trail steps measure each shape from its outline.** The steps that decide whether a blob is two trails crossing used to fit the tightest rotated rectangle to every pixel of the blob. They now fit it to the blob's outline, which gives the same rectangle and is 14 to 17 times faster at that one measurement. That is about 0.7 percent of a full run, so it is a small gain. We checked it against the old way on 6,491 real and synthetic shapes (no decision changed at either threshold), on every cleaned photo of a 1,524-photo run, and on 69 crossing frames from three sets (Alabama Hills, Spain and Lake Mead): all identical.
+- **Smoke tests:** 883 passing.
+
 ## v3.12-beta
 This release adds Trail Smoothing to the Star Trail tab, a gentler way to get a smooth, continuous star trail, and it makes the hot-pixel option on that tab about 40 percent faster. It also warns you before a run if your photos have a long pause in the middle or a file name that looks like an accident. The cleaning engine is untouched, so cleaned frames are exactly as they were in v3.11.
 
