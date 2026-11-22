@@ -550,6 +550,11 @@ if sys.platform == 'win32':
 # than v2.80, whose baked-in URL points there.
 APPCAST_BASE = 'https://api.startrailcleanr.com'
 
+# The oldest macOS the Mac app can run on at all (its main program is built for
+# 11.0, checked on the published v3.12 Apple Silicon app). Written into the
+# bundle as LSMinimumSystemVersion so an older Mac is told why it cannot open.
+MAC_MINIMUM_MACOS = '11.0'
+
 sparkle_pubkey_path = os.path.join(os.path.dirname(__file__), 'assets', 'sparkle_public_key.txt')
 sparkle_pubkey = None
 if os.path.isfile(sparkle_pubkey_path):
@@ -613,6 +618,25 @@ if sys.platform == 'darwin':
                 print(f'  WARNING: failed to set {key}: {r.stderr.decode().strip()}')
     elif not sparkle_pubkey:
         print('\nWARNING: no Sparkle public key — skipping Info.plist injection')
+
+    # Minimum macOS (2026-11-21). The app's main program is built for macOS 11.0
+    # and newer, and a Qt library inside it needs more than that. On an older Mac
+    # (a user on Catalina reported "it never opens") the app failed silently.
+    # With LSMinimumSystemVersion macOS itself shows "You can't use this version
+    # of the application with this version of macOS", which says why. 11.0 is the
+    # lowest the program can possibly run on; the install note and the website
+    # say what has actually been seen working (macOS 15 and newer).
+    if os.path.isfile(info_plist):
+        r = subprocess.run([pb, '-c', f'Set :LSMinimumSystemVersion {MAC_MINIMUM_MACOS}', info_plist],
+                           capture_output=True)
+        if r.returncode != 0:
+            r = subprocess.run([pb, '-c', f'Add :LSMinimumSystemVersion string {MAC_MINIMUM_MACOS}', info_plist],
+                               capture_output=True)
+        if r.returncode == 0:
+            print(f'\nMinimum macOS set to {MAC_MINIMUM_MACOS} (LSMinimumSystemVersion)')
+        else:
+            print(f'\nBUILD STOPPED: could not set the minimum macOS: {r.stderr.decode().strip()}')
+            sys.exit(1)
 
     # Step 3: re-sign the outer .app with an ad-hoc signature. Both copying
     # Sparkle.framework into Contents/Frameworks and patching Info.plist

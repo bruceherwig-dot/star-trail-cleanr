@@ -1,5 +1,9 @@
 Opening Star Trail CleanR on Mac
 
+Star Trail CleanR is tested on macOS 15 (Sequoia) and newer. It may not open on
+macOS 11 to 14, and it cannot open on anything older than macOS 11. If your Mac is
+too old, macOS tells you so when you double-click it.
+
 Star Trail CleanR is free and not yet notarized by Apple, so macOS shows a
 security warning the first time. This is normal and safe. To open it:
 
