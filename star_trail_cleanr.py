@@ -8353,10 +8353,26 @@ class TimelapsePanel(QWidget):
         for key, label in (("4k", "4K"), ("2k", "2K"), ("1080p", "1080p")):
             self._size_cb.addItem(label, key)
         self._size_cb.setCurrentIndex(self._size_cb.findData("2k"))
-        self._size_cb.setToolTip(
-            "The video's picture size. The file is made at a high quality so dark\n"
-            "sky and clouds stay clean, which makes it larger than a low-quality video.")
+        self._size_cb.setToolTip("The video's picture size.")
         _row("Size", self._size_cb)
+
+        # Quality (added 2026-11-24, a professional timelapse user asked for higher
+        # bitrates to edit with). The number is in the menu so nobody has to guess
+        # what each word means (Bruce). Standard is the default; every level holds
+        # a fixed quality and the number is its usual rate on noisy night frames;
+        # a short clip can run higher (see timelapse_maker.py).
+        self._quality_cb = QComboBox()
+        for key, label in (("standard", "Standard (about 30 Mbps)"),
+                           ("high", "High (about 60 Mbps)"),
+                           ("maximum", "Maximum (about 100 Mbps)")):
+            self._quality_cb.addItem(label, key)
+        self._quality_cb.setCurrentIndex(self._quality_cb.findData("standard"))
+        self._quality_cb.setToolTip(
+            "Standard keeps dark sky and clouds clean and suits sharing.\n"
+            "High and Maximum keep more detail for editing the video further,\n"
+            "but make much bigger files. Facebook, YouTube and Instagram\n"
+            "re-compress uploads, so the extra is lost there.")
+        _row("Quality", self._quality_cb)
 
         self._fps_cb = QComboBox()
         for v in (6, 12, 15, 24, 30, 60):
@@ -8434,7 +8450,8 @@ class TimelapsePanel(QWidget):
         _open_row.addStretch(1)
         lay.addLayout(_open_row)
 
-        for cb in (self._size_cb, self._fps_cb, self._blend_cb, self._fmt_cb):
+        for cb in (self._size_cb, self._quality_cb, self._fps_cb, self._blend_cb,
+                   self._fmt_cb):
             cb.currentIndexChanged.connect(self._update_estimate)
         self._source_cb.currentIndexChanged.connect(self._reload_frames)
         self._reload_frames()   # load the default-source frames (Original when offered) + estimate + poster
@@ -8615,7 +8632,8 @@ class TimelapsePanel(QWidget):
             tw, th = target_size(self._nw, self._nh, size_key)
         else:
             tw, th = 1920, 1080
-        est = estimate_output_bytes(self._frames_used(), fps, tw, th)
+        est = estimate_output_bytes(self._frames_used(), fps, tw, th,
+                                    self._quality_cb.currentData() or "standard")
         import shutil
         try:
             free = shutil.disk_usage(self._cleaned).free
@@ -8640,7 +8658,7 @@ class TimelapsePanel(QWidget):
     def _set_options_enabled(self, enabled):
         """Grey out (or restore) every option control while a render runs, so the
         settings can't change mid-encode. The Stop button stays live to cancel."""
-        for cb in (self._source_cb, self._size_cb, self._fps_cb,
+        for cb in (self._source_cb, self._size_cb, self._quality_cb, self._fps_cb,
                    self._blend_cb, self._fmt_cb, self._frame_range):
             cb.setEnabled(enabled)
 
@@ -8692,10 +8710,13 @@ class TimelapsePanel(QWidget):
         _name = f"STC_timelapse_{tag}{_style_tag}_{size_key}_{fps}fps"
         if blend >= 2 and _style == "plain":
             _name += f"_blend{blend}"
+        quality = self._quality_cb.currentData() or "standard"
+        if quality != "standard":
+            _name += f"_{quality}"   # Standard keeps the old file name
         self._out_path = _unique_path(workspace_path(self._cleaned, f"{_name}.{ext}"))
         script = os.path.join(_base, "timelapse_maker.py")
         args = [frames_dir, "-o", self._out_path, "--size", size_key,
-                "--fps", str(fps)]
+                "--fps", str(fps), "--quality", quality]
         # Building Trails ignores Smoothing on purpose: it already keeps every
         # earlier photo, so a rolling window would be meaningless. The control is
         # greyed out for the same reason (see _sync_style).
@@ -8719,6 +8740,7 @@ class TimelapsePanel(QWidget):
             "app_version": VERSION,
             "source": src,
             "size": size_key,
+            "quality": quality,
             "fps": fps,
             "blend": blend,
             "format": ext,

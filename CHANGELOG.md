@@ -2,6 +2,11 @@
 
 ---
 
+## v3.15-beta
+This release adds a Quality choice to the Timelapse tab, for anyone who wants a bigger, more detailed video to edit further.
+
+- **New: a Quality choice on the Timelapse tab.** Standard (about 30 Mbps) stays the default and keeps dark sky and clouds clean for sharing. High (about 60 Mbps) and Maximum (about 100 Mbps) keep more detail for anyone who edits the video further, at a much bigger file: on 3 seconds of 4K night frames, 9.9 MB, 27 MB and 46 MB. A short clip can run a little above its number. Facebook, YouTube and Instagram re-compress uploads, so the extra is lost there. Thank you to the timelapse photographer who asked for it.
+
 ## v3.14-beta
 This release fixes blotchy dark sky and blocky clouds in timelapse videos, and makes Smooth & Thicken cleaner: no bright dots at the start of a trail, and no beads when the stars move far between frames. Thank you to the workshop attendee whose timelapse showed the spotting; that report is why the video fix is here.
 

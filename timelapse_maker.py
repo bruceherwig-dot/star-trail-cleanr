@@ -68,13 +68,32 @@ SIZE_PRESETS = {"1080p": 1920, "2k": 2560, "4k": 3840}
 # quantization (aq-mode=3) stays. Output size no longer depends only on duration,
 # but VIDEO_BITRATE_BPS (the cap) is still the safe upper bound used for the space
 # check.
-VIDEO_BITRATE_BPS = 30_000_000
-VIDEO_FFMPEG_PARAMS = [
-    "-crf", "22", "-maxrate", "30M", "-bufsize", "60M",
-    "-preset", "slow",
-    "-pix_fmt", "yuv420p", "-profile:v", "high",
-    "-x264-params", "aq-mode=3",
-]
+# Quality menu (added 2026-11-24 at a professional timelapse user's request for
+# higher bitrates to edit with): each level is (CRF, bitrate cap). Standard is the
+# setting above. Higher levels keep more fine sky texture for editing, at a much
+# bigger file; Facebook, YouTube and Instagram re-compress uploads anyway.
+QUALITY_PRESETS = {
+    "standard": (22, 30_000_000),
+    "high": (18, 60_000_000),
+    "maximum": (16, 100_000_000),
+}
+DEFAULT_QUALITY = "standard"
+
+
+def video_params(quality=DEFAULT_QUALITY):
+    """ffmpeg/libx264 settings for a quality level (unknown names fall back to
+    Standard): a fixed quality (CRF) with a bitrate cap, dark-scene adaptive
+    quantization, and the widely playable 8-bit 4:2:0 High profile."""
+    crf, cap = QUALITY_PRESETS.get(quality, QUALITY_PRESETS[DEFAULT_QUALITY])
+    mbps = cap // 1_000_000
+    return ["-crf", str(crf), "-maxrate", f"{mbps}M", "-bufsize", f"{2 * mbps}M",
+            "-preset", "slow",
+            "-pix_fmt", "yuv420p", "-profile:v", "high",
+            "-x264-params", "aq-mode=3"]
+
+
+VIDEO_BITRATE_BPS = QUALITY_PRESETS[DEFAULT_QUALITY][1]
+VIDEO_FFMPEG_PARAMS = video_params(DEFAULT_QUALITY)
 
 
 def ordered_frames(frames_dir):
@@ -106,20 +125,25 @@ def target_size(native_w, native_h, size_key):
             int(round(native_h * scale)) // 2 * 2)
 
 
-def estimate_output_bytes(n_frames, fps, width, height):
+def estimate_output_bytes(n_frames, fps, width, height, quality=DEFAULT_QUALITY):
     """Output-size estimate for the space check. The encoder is quality-based with a bitrate cap
-    (VIDEO_BITRATE_BPS), so size tracks DURATION, not resolution: a 1080p and a 4K
+    (the chosen level's cap), so size tracks DURATION, not resolution: a 1080p and a 4K
     clip of the same length are both estimated at the cap. width/height stay in the
     signature for callers but no longer change the estimate. The encoder holds a
     quality level and only reaches the cap on noisy night frames, so this is a safe
     upper bound. +5% for container overhead."""
     duration_s = max(1.0, n_frames / max(1, fps))
-    return int(VIDEO_BITRATE_BPS / 8 * duration_s * 1.05)
+    cap = QUALITY_PRESETS.get(quality, QUALITY_PRESETS[DEFAULT_QUALITY])[1]
+    # The encoder may spend its whole spare buffer (2x the cap, see video_params)
+    # on top of the cap, mostly in the opening seconds. Measured on a 3 s 4K clip
+    # of noisy night frames: High averaged 72 Mbps against its 60 cap, Maximum
+    # 123 against 100. Counting the buffer keeps the space check a safe bound.
+    return int((cap * duration_s + 2 * cap) / 8 * 1.05)
 
 
-def _open_writer(out_path, fps, tw, th):
+def _open_writer(out_path, fps, tw, th, quality=DEFAULT_QUALITY):
     """Return a frame writer that takes BGR frames. Uses imageio/libx264 at
-    a quality level (CRF 22) capped at 30 Mbps with the dark-sky settings when the bundled ffmpeg is
+    the chosen quality level (Standard: CRF 22 capped at 30 Mbps) with the dark-sky settings when the bundled ffmpeg is
     present; falls back to the OpenCV writer otherwise, so a missing encoder
     degrades to a working (lower-grade) movie instead of a crash dialog. That
     crash shipped: frozen builds never actually contained imageio-ffmpeg (it
@@ -134,10 +158,11 @@ def _open_writer(out_path, fps, tw, th):
         import imageio
         w = imageio.get_writer(
             out_path, format="FFMPEG", mode="I", fps=fps, codec="libx264",
-            macro_block_size=None, ffmpeg_params=VIDEO_FFMPEG_PARAMS)
+            macro_block_size=None, ffmpeg_params=video_params(quality))
+        _crf, _cap = QUALITY_PRESETS.get(quality, QUALITY_PRESETS[DEFAULT_QUALITY])
 
         class _W:
-            backend = "imageio/libx264 CRF22 cap-30M aq-mode=3"
+            backend = f"imageio/libx264 {quality} CRF{_crf} cap-{_cap // 1_000_000}M aq-mode=3"
 
             def write(self, bgr):
                 w.append_data(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
@@ -163,7 +188,8 @@ def _open_writer(out_path, fps, tw, th):
 
 
 def render(frames_dir, out_path, size_key="4k", fps=30, style="plain",
-           blend_window=3, limit=0, trim_start=0, trim_end=0):
+           blend_window=3, limit=0, trim_start=0, trim_end=0,
+           quality=DEFAULT_QUALITY):
     """Encode the timelapse. Prints TIMELAPSE_PROGRESS lines the window reads to
     drive its progress bar. Returns 0 on success.
 
@@ -205,7 +231,7 @@ def render(frames_dir, out_path, size_key="4k", fps=30, style="plain",
           f"{tw}x{th} @ {fps}fps, style={style}", flush=True)
 
     import cv2
-    writer = _open_writer(out_path, fps, tw, th)
+    writer = _open_writer(out_path, fps, tw, th, quality)
     print(f"  encoder: {writer.backend}", flush=True)
 
     buf = []
@@ -274,10 +300,12 @@ def main():
                          "than 20 frames remain)")
     ap.add_argument("--trim-end", type=int, default=0,
                     help="Leave out this many frames from the end")
+    ap.add_argument("--quality", choices=list(QUALITY_PRESETS), default=DEFAULT_QUALITY,
+                    help="standard (about 30 Mbps) | high (about 60) | maximum (about 100)")
     args = ap.parse_args()
     sys.exit(render(args.frames_dir, args.out, args.size, args.fps,
                     args.style, args.blend_window, args.limit,
-                    args.trim_start, args.trim_end))
+                    args.trim_start, args.trim_end, args.quality))
 
 
 if __name__ == "__main__":
