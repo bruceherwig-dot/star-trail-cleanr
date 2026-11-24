@@ -8353,6 +8353,9 @@ class TimelapsePanel(QWidget):
         for key, label in (("4k", "4K"), ("2k", "2K"), ("1080p", "1080p")):
             self._size_cb.addItem(label, key)
         self._size_cb.setCurrentIndex(self._size_cb.findData("2k"))
+        self._size_cb.setToolTip(
+            "The video's picture size. The file is made at a high quality so dark\n"
+            "sky and clouds stay clean, which makes it larger than a low-quality video.")
         _row("Size", self._size_cb)
 
         self._fps_cb = QComboBox()

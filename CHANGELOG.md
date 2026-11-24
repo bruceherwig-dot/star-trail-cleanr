@@ -2,6 +2,13 @@
 
 ---
 
+## v3.14-beta
+This release fixes blotchy dark sky and blocky clouds in timelapse videos, and makes Smooth & Thicken cleaner: no bright dots at the start of a trail, and no beads when the stars move far between frames. Thank you to the workshop attendee whose timelapse showed the spotting; that report is why the video fix is here.
+
+- **Fixed: timelapse videos had blotchy dark sky and blocky clouds.** A user saw dark gray spotting in a timelapse. On dark night sky the old fixed 15 Mbps setting smoothed the sky's natural fine texture into soft patches and showed square blocks in moving clouds and dark ground. The Timelapse tab now holds a steady high quality and is only capped at 30 Mbps, and the extra grain it used to add is gone because it only wasted space. Files are larger, about 2.5 times in our test on a noisy night sequence (9.9 MB against 3.9 MB for 3 seconds of 4K), and rendering takes about 40% longer. To get the clean look in an older timelapse, render it again from the original photos.
+- **Fixed: Smooth & Thicken left a bright dot at the start of each trail.** The first two frames entered the stack as a one-frame and a two-frame average, which are brighter than every three-frame average after them. The stack now begins at the first full three-frame average. The first frames still count inside it.
+- **Improved: Smooth & Thicken closes the beads between widely spaced frames.** When the stars move further between frames than the blur can bridge, each frame used to leave its own faint bump along the trail. Smooth now checks how far the stars move and, only when the gap is too wide, builds in-between frames from the real frames so the trail is continuous. When the gap is small nothing changes. This takes noticeably longer on those sequences (about 19 minutes for 350 frames on a 12-core Mac instead of about 1 minute); the hover text says so.
+
 ## v3.13-beta
 This release makes the Mac app tell an older Mac why it cannot open, renames Trail Smoothing so its name says what it does, and tidies the hover text on the Star Trail tab. Thank you to the user whose Mac would not open the app; that report is why the Mac message is here. Cleaned frames are unchanged: every cleaned photo of a full 1,524-photo run came out identical to the version before.
 

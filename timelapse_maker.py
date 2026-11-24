@@ -57,18 +57,23 @@ TIMELAPSE_VERSION = "1.2"   # 1.2: encoder fallback (missing bundled ffmpeg can 
 # We never upscale: a preset bigger than the source falls back to full.
 SIZE_PRESETS = {"1080p": 1920, "2k": 2560, "4k": 3840}
 
-# Encoder settings mirror the before/after share clip (make_share_clip.py) so a
-# timelapse uploaded to Facebook/YouTube survives their re-encode of near-black
-# skies: constant 15 Mbps, dark-scene adaptive quantization (aq-mode=3), and fine
-# grain that dithers away banding in smooth sky gradients. Because it is constant
-# bitrate, output size tracks DURATION, not resolution.
-VIDEO_BITRATE_BPS = 15_000_000
+# Encoder settings (changed 2026-11-24, field report from a workshop attendee:
+# "dark gray spotting"). The old fixed 15 Mbps starved dark sky, moving clouds and
+# dark ground: the sky's natural fine noise was smoothed into blotchy patches and
+# the ground showed square blocks (measured on Bruce's Joshua Tree frames). Now the
+# encoder holds a fixed QUALITY (CRF 22) and is only capped at 30 Mbps so a file can
+# never balloon. That came out near 26 Mbps on noisy night frames, about 1.7x the old
+# size, with the natural sky texture kept. The added grain was removed: it forced
+# 50 to 60 Mbps at any quality and showed no benefit. Dark-scene adaptive
+# quantization (aq-mode=3) stays. Output size no longer depends only on duration,
+# but VIDEO_BITRATE_BPS (the cap) is still the safe upper bound used for the space
+# check.
+VIDEO_BITRATE_BPS = 30_000_000
 VIDEO_FFMPEG_PARAMS = [
-    "-b:v", "15M", "-maxrate", "15M", "-bufsize", "30M",
-    "-preset", "medium",
+    "-crf", "22", "-maxrate", "30M", "-bufsize", "60M",
+    "-preset", "slow",
     "-pix_fmt", "yuv420p", "-profile:v", "high",
     "-x264-params", "aq-mode=3",
-    "-vf", "noise=alls=6:allf=u",
 ]
 
 
@@ -102,18 +107,19 @@ def target_size(native_w, native_h, size_key):
 
 
 def estimate_output_bytes(n_frames, fps, width, height):
-    """Output-size estimate for the space check. The encoder is constant bitrate
+    """Output-size estimate for the space check. The encoder is quality-based with a bitrate cap
     (VIDEO_BITRATE_BPS), so size tracks DURATION, not resolution: a 1080p and a 4K
-    clip of the same length come out about the same size. width/height stay in the
-    signature for callers but no longer change the estimate. +5% for container
-    and grain overhead."""
+    clip of the same length are both estimated at the cap. width/height stay in the
+    signature for callers but no longer change the estimate. The encoder holds a
+    quality level and only reaches the cap on noisy night frames, so this is a safe
+    upper bound. +5% for container overhead."""
     duration_s = max(1.0, n_frames / max(1, fps))
     return int(VIDEO_BITRATE_BPS / 8 * duration_s * 1.05)
 
 
 def _open_writer(out_path, fps, tw, th):
     """Return a frame writer that takes BGR frames. Uses imageio/libx264 at
-    constant 15 Mbps with the dark-sky settings when the bundled ffmpeg is
+    a quality level (CRF 22) capped at 30 Mbps with the dark-sky settings when the bundled ffmpeg is
     present; falls back to the OpenCV writer otherwise, so a missing encoder
     degrades to a working (lower-grade) movie instead of a crash dialog. That
     crash shipped: frozen builds never actually contained imageio-ffmpeg (it
@@ -131,7 +137,7 @@ def _open_writer(out_path, fps, tw, th):
             macro_block_size=None, ffmpeg_params=VIDEO_FFMPEG_PARAMS)
 
         class _W:
-            backend = "imageio/libx264 CBR-15M aq-mode=3 +grain"
+            backend = "imageio/libx264 CRF22 cap-30M aq-mode=3"
 
             def write(self, bgr):
                 w.append_data(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
