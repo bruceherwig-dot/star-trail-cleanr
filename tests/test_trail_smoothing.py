@@ -405,7 +405,9 @@ def test_the_stack_built_in_strips_is_the_same_picture_as_the_whole_frame():
             names = _frames_for_strips(td, dtype=dtype)
             fg = np.zeros((200, 260), np.uint8)
             fg[150:, :] = 255
-            args = dict(fg=fg if use_ground else None, reference_width=260, **kw)
+            # exact match is about the strip mechanics; the gap-filler has its own
+            # tolerance test (a strip seam can differ by one level there)
+            args = dict(fg=fg if use_ground else None, reference_width=260, gap_fill=False, **kw)
             m._available_bytes = lambda: None
             whole = m._smooth_stack_fullres(td, names, 3, **args)
             m._available_bytes = lambda: 4_000_000          # far too little for one piece
@@ -514,3 +516,137 @@ def test_the_label_column_is_wide_enough_for_the_longest_label_in_any_font():
                         f"'{lab.text()}' needs {need} points but its column is {lab.maximumWidth()} at {size} pt"
     finally:
         app.setFont(original)
+
+
+# ── gap-filler: in-between frames for Smooth ────────────────────────────────
+
+def _blob_frames(td, n=30, step=6, dtype=np.uint8, rows=(15, 40, 65), h=120, w=420):
+    """Several bright 5x5 stars that move `step` px a frame along their rows (large
+    enough for the motion tracker, unlike the one-pixel stars above)."""
+    import cv2
+    top = 255 if dtype == np.uint8 else 65535
+    names = []
+    for i in range(n):
+        img = np.zeros((h, w, 3), dtype)
+        for r in rows:
+            x = 20 + step * i
+            img[r - 2:r + 3, x - 2:x + 3] = top
+        nm = f"IMG_{i:04d}.png"
+        cv2.imwrite(os.path.join(td, nm), img)
+        names.append(nm)
+    return names
+
+
+def _ripple(stack, row=40, step=6, lo_frame=6, hi_frame=24):
+    seg = stack[row, 20 + step * lo_frame:20 + step * hi_frame, 1].astype(float)
+    return (seg.max() - seg.min()) / max(seg.max(), 1.0)
+
+
+def test_how_many_in_between_frames_follows_the_star_step():
+    m = _msc()
+    assert m.gapfill_between_count(0.0, 3.0) == 0, "no measurement, nothing added"
+    assert m.gapfill_between_count(1.7, 3.0) == 0, "the blur already bridges a small step"
+    assert m.gapfill_between_count(3.6, 3.0) == 2, "the Borrego case gets two"
+    assert m.gapfill_between_count(100.0, 3.0) == m.GAPFILL_MAX_BETWEEN, "never more than four"
+    assert m.gapfill_between_count(3.6, 0.0) == 0
+
+
+def test_the_gap_filler_closes_the_dips_between_widely_spaced_frames():
+    m = _msc()
+    with tempfile.TemporaryDirectory() as td:
+        names = _blob_frames(td)
+        plain = m._smooth_stack_fullres(td, names, 3, gap_fill=False)
+        filled = m._smooth_stack_fullres(td, names, 3, gap_fill=True)
+    assert _ripple(plain) > 0.25, "the test needs a trail that dips between frames"
+    assert _ripple(filled) < _ripple(plain) / 3, "in-between frames close the dips"
+    # and the trail keeps its length: the ends do not shrink or run on
+    assert filled[40, 20 + 6 * 29 + 12:, 1].max() < 10, "nothing runs past the last frame"
+
+
+def test_a_small_step_gets_no_in_between_frames_and_the_same_picture():
+    m = _msc()
+    with tempfile.TemporaryDirectory() as td:
+        names = _blob_frames(td, step=1, n=30)
+        a = m._smooth_stack_fullres(td, names, 3, gap_fill=False)
+        b = m._smooth_stack_fullres(td, names, 3, gap_fill=True)
+    assert np.array_equal(a, b), "a step the blur already bridges is left exactly as before"
+
+
+def test_the_gap_filler_keeps_sixteen_bit_and_the_trail_brightness():
+    m = _msc()
+    with tempfile.TemporaryDirectory() as td:
+        names = _blob_frames(td, dtype=np.uint16)
+        plain = m._smooth_stack_fullres(td, names, 3, gap_fill=False)
+        filled = m._smooth_stack_fullres(td, names, 3, gap_fill=True)
+    assert filled.dtype == np.uint16
+    mid = slice(20 + 6 * 8, 20 + 6 * 22)
+    assert filled[40, mid, 1].max() <= plain[40, mid, 1].max() * 1.15, \
+        "the look that was picked: in-between frames do not make the trail brighter"
+    assert filled[40, mid, 1].max() >= plain[40, mid, 1].max() * 0.85
+
+
+def test_the_ground_stays_sharp_with_the_gap_filler():
+    m = _msc()
+    import cv2
+    with tempfile.TemporaryDirectory() as td:
+        names = _blob_frames(td)
+        for i, nm in enumerate(names):          # a sharp static detail in the lower rows
+            img = cv2.imread(os.path.join(td, nm))
+            img[100:116, :] = 80
+            img[108, 30 + 2 * i] = 255
+            cv2.imwrite(os.path.join(td, nm), img)
+        fg = np.zeros((120, 420), np.uint8)
+        fg[96:, :] = 255
+        a = m._smooth_stack_fullres(td, names, 3, fg=fg, gap_fill=False)
+        b = m._smooth_stack_fullres(td, names, 3, fg=fg, gap_fill=True)
+    assert np.array_equal(a[96:], b[96:]), "the ground comes from the unsmoothed stack either way"
+
+
+def test_the_gap_filler_works_with_fading_ends_and_comet():
+    m = _msc()
+    with tempfile.TemporaryDirectory() as td:
+        names = _blob_frames(td)
+        flat = m._smooth_stack_fullres(td, names, 3)
+        fade = m._smooth_stack_fullres(td, names, 3, taper=0.2)
+        comet = m._smooth_stack_fullres(td, names, 3, comet_tail_frames=10)
+    assert fade.shape == flat.shape == comet.shape
+    first, last = 20 + 6 * 0, 20 + 6 * 29
+    assert fade[40, first - 2:first + 3, 1].max() < flat[40, first - 2:first + 3, 1].max(), \
+        "Fading Ends still fades the start"
+    assert comet[40, first - 2:first + 3, 1].max() < comet[40, last - 2:last + 3, 1].max(), \
+        "Comet still has a faint tail and a bright head"
+
+
+def test_the_gap_filler_in_strips_matches_the_whole_frame():
+    import contextlib
+    import io
+    m = _msc()
+    with tempfile.TemporaryDirectory() as td:
+        names = _blob_frames(td, dtype=np.uint16, h=200)
+        m._available_bytes = lambda: None
+        whole = m._smooth_stack_fullres(td, names, 3)
+        m._available_bytes = lambda: 4_000_000
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            strips = m._smooth_stack_fullres(td, names, 3)
+    assert "strips" in out.getvalue(), "it should say it is working in strips"
+    assert whole.shape == strips.shape and whole.dtype == strips.dtype
+    diff = np.abs(whole.astype(float) - strips.astype(float))
+    assert diff.max() < 0.02 * 65535, f"strips changed the picture by up to {diff.max():.0f}"
+
+
+def test_the_gap_filler_is_timed_and_says_what_it_did():
+    import contextlib
+    import io
+    from modules import step_timer
+    m = _msc()
+    step_timer.reset()
+    with tempfile.TemporaryDirectory() as td:
+        names = _blob_frames(td)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            m._smooth_stack_fullres(td, names, 3)
+    steps = set(step_timer.snapshot()["steps"])
+    assert {"smooth.probe", "smooth.flow", "smooth.between"} <= steps, steps
+    assert "in-between frame" in out.getvalue(), "the run says it added in-between frames"
+

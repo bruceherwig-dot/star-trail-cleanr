@@ -9340,6 +9340,9 @@ class StarTrailPanel(QWidget):
             "before stacking, so the dots of each trail join into one soft line.\n"
             "Medium is a good start. Takes longer to render.\n"
             "\n"
+            "When the stars jump far between frames, extra in-between frames\n"
+            "are made so the trails stay continuous. That takes noticeably longer.\n"
+            "\n"
             "Where you painted a ground mask, the ground stays sharp, as in your\n"
             "normal star trail. Without a mask, the ground goes soft too. The normal\n"
             "star trail saved next to this one has the untouched ground.")

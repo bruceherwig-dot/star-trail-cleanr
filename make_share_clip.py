@@ -1165,7 +1165,7 @@ def _available_bytes():
         return None
 
 
-def smooth_memory_plan(h, w, bytes_per_sample, with_ground, available=None):
+def smooth_memory_plan(h, w, bytes_per_sample, with_ground, available=None, between=0):
     """(strips, bytes_needed_whole) for stacking an h-by-w colour frame.
 
     Bytes needed per sample at once: three smoothed frames kept for the average (12),
@@ -1175,7 +1175,14 @@ def smooth_memory_plan(h, w, bytes_per_sample, with_ground, available=None):
     last does not. `strips` is 1 when everything fits in the allowed share of the free
     memory."""
     n = float(h) * float(w) * 3.0
-    per_strip = 12.0 + 4.0 + (4.0 if with_ground else 0.0) + 8.0
+    # With in-between frames (`between` per pair) the average reaches one real step
+    # either side, so 2*(between+1)+1 smoothed frames are kept, not three; the motion
+    # field (8 bytes a pixel, a third of that per sample) and the in-between frame
+    # being made add about 3 + 2 x the file's bytes per sample.
+    kept = 2 * (int(between) + 1) + 1
+    per_strip = 4.0 * kept + 4.0 + (4.0 if with_ground else 0.0) + 8.0
+    if between:
+        per_strip += 3.0 + 2.0 * float(bytes_per_sample)
     fixed = 2.0 * float(bytes_per_sample)
     whole = SMOOTH_MEM_OVERHEAD * n * (per_strip + fixed)
     if available is None:
@@ -1261,8 +1268,106 @@ def _mean_of(frames):
     return out
 
 
+# ── GAP-FILLER (in-between frames for Smooth) ───────────────────────────────
+# When the stars move further between two frames than the blur can bridge, each
+# frame leaves its own faint bump along the trail (beads). Blur strength cannot fix
+# that without thickening the trail, so Smooth makes IN-BETWEEN frames instead: for
+# each pair of real frames the motion of every star is tracked on the full-size
+# frames, and one to four extra frames are built from the earlier real frame,
+# moved part of the way along that motion. They go through the same blur and the
+# same three-frame averaging as real frames, one real step either side, so the look
+# of the trail is the one that was picked; the gaps are simply closed.
+# Approved on the Borrego Springs set (2026-11-23): 3.3 s per real frame on a
+# 12-core Mac with full-size tracking; the tracking is the slow part.
+GAPFILL_SKIP_BELOW = 0.6          # star step / blur radius at or below which no in-between frames are made
+GAPFILL_TARGET_SPACING = 0.4      # wanted spacing of stars after filling, as a share of the blur radius
+GAPFILL_MAX_BETWEEN = 4           # most in-between frames made per pair of real frames
+GAPFILL_MARGIN = 128              # rows read beyond a strip so tracking and blur agree at its seams
+GAPFILL_PROBE_PAIRS = 5           # frame pairs spread through the sequence that are measured first
+_GAPFILL_GRIDS = {}
+
+
+def _flow_gray(im):
+    """8-bit picture the motion tracker works on: the frame softened a little, with
+    faint stars lifted so they have an edge to follow. Only used to FIND motion."""
+    if im.dtype == np.uint16:
+        im = (im >> 8).astype(np.uint8)
+    g = cv2.GaussianBlur(cv2.cvtColor(im, cv2.COLOR_BGR2GRAY), (0, 0), 2.5).astype(np.float32)
+    return np.clip(255.0 * np.sqrt(np.clip(g - 8.0, 0, None) / 60.0), 0, 255).astype(np.uint8)
+
+
+def _pair_flow(prev, cur):
+    """(h, w, 2) float32: how far each pixel's content moved from `prev` to `cur`,
+    tracked on the full-size frames (never a shrunken copy)."""
+    return cv2.calcOpticalFlowFarneback(_flow_gray(prev), _flow_gray(cur), None,
+                                        0.5, 4, 21, 5, 7, 1.5, 0)
+
+
+def _probe_star_step(dirpath, names):
+    """How far the stars move between two real frames, in pixels: the typical
+    motion of the stars in a few frame pairs spread through the sequence, measured
+    on the sky half of the frame's middle band (cheap: about 0.4 s a pair). 0.0 when
+    it cannot be measured (too few frames, no stars found)."""
+    if len(names) < 3:
+        return 0.0
+    picks = sorted({int(round(f * (len(names) - 2))) for f in np.linspace(0.1, 0.9, GAPFILL_PROBE_PAIRS)})
+    steps = []
+    for i in picks:
+        pair = []
+        for nm in (names[i], names[i + 1]):
+            p = os.path.join(dirpath, nm)
+            im = _to_bgr(robust_imread(p, cv2.IMREAD_UNCHANGED)) if os.path.exists(p) else None
+            if im is None:
+                break
+            pair.append(im)
+        if len(pair) < 2 or pair[0].shape != pair[1].shape:
+            continue
+        h, w = pair[0].shape[:2]
+        x0 = max(0, w // 2 - 800)
+        a, b = (q[:int(h * 0.6), x0:x0 + 1600] for q in pair)
+        D = _pair_flow(a, b)
+        mag = np.hypot(D[..., 0], D[..., 1])
+        sel = (_flow_gray(b) >= 90) & (mag > 0.5)
+        if int(sel.sum()) >= 50:
+            steps.append(float(np.median(mag[sel])))
+    return float(np.median(steps)) if steps else 0.0
+
+
+def gapfill_between_count(step_px, radius_px):
+    """In-between frames to make per pair of real frames: none when the blur already
+    bridges the gap (step at most GAPFILL_SKIP_BELOW of the radius), otherwise enough
+    to bring the spacing down to GAPFILL_TARGET_SPACING of the radius, one to four."""
+    if step_px <= 0 or radius_px <= 0 or step_px <= GAPFILL_SKIP_BELOW * radius_px:
+        return 0
+    n = int(np.ceil(step_px / (GAPFILL_TARGET_SPACING * radius_px))) - 1
+    return int(min(max(n, 1), GAPFILL_MAX_BETWEEN))
+
+
+def _between_frames(prev, flow, count, cap):
+    """`count` frames between `prev` and the frame after it: `prev` moved q/(count+1)
+    of the way along `flow`. A motion bigger than `cap` pixels (something that is not
+    a star, or a failed track) is shortened to it, so a bad track cannot smear."""
+    mag = np.hypot(flow[..., 0], flow[..., 1])
+    if cap > 0 and float(mag.max()) > cap:
+        scale = np.minimum(1.0, cap / np.maximum(mag, 1e-6)).astype(np.float32)
+        flow = flow * scale[..., None]
+    h, w = prev.shape[:2]
+    grid = _GAPFILL_GRIDS.get((h, w))
+    if grid is None:
+        _GAPFILL_GRIDS.clear()
+        grid = _GAPFILL_GRIDS[(h, w)] = np.meshgrid(np.arange(w, dtype=np.float32),
+                                                    np.arange(h, dtype=np.float32))
+    gx, gy = grid
+    out = []
+    for q in range(1, count + 1):
+        t = q / float(count + 1)
+        out.append(cv2.remap(prev, gx - t * flow[..., 0], gy - t * flow[..., 1],
+                             cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE))
+    return out
+
+
 def _smooth_stack_fullres(dirpath, names, radius, taper=0.0, comet_tail_frames=0,
-                          fg=None, reference_width=None):
+                          fg=None, reference_width=None, gap_fill=True):
     """The smoothed stack (see _smooth_stack_rows), made in as few strips as the free
     memory allows: usually one (the whole frame at once, as before); on a computer
     that cannot hold a huge frame's working copies it is built strip by strip, each
@@ -1279,11 +1384,27 @@ def _smooth_stack_fullres(dirpath, names, radius, taper=0.0, comet_tail_frames=0
     h, w = probe.shape[:2]
     bps = 2 if probe.dtype == np.uint16 else 1
     del probe
+    # In-between frames (the gap-filler): measure how far the stars move between
+    # frames; when that is more than the blur bridges, each pair gets extra frames.
+    between, step_px = 0, 0.0
+    if gap_fill and radius:
+        from modules import step_timer
+        eff = smooth_radius_for_width(radius, w, reference_width)
+        with step_timer.step("smooth.probe"):
+            step_px = _probe_star_step(dirpath, names)
+        between = gapfill_between_count(step_px, eff)
+        if between:
+            print(f"  smoothing: the stars move {step_px:.1f} px between frames, more than the "
+                  f"blur ({eff:.1f} px) bridges, so {between} in-between frame(s) are added "
+                  f"per pair to keep the trails continuous. This takes longer.", flush=True)
+        elif step_px > 0:
+            print(f"  smoothing: the stars move {step_px:.1f} px between frames and the blur "
+                  f"({eff:.1f} px) bridges that; no in-between frames needed.", flush=True)
     avail = _available_bytes()
-    strips, whole = smooth_memory_plan(h, w, bps, fg is not None, avail)
+    strips, whole = smooth_memory_plan(h, w, bps, fg is not None, avail, between)
     if strips <= 1:
         return _smooth_stack_rows(dirpath, names, radius, taper, comet_tail_frames,
-                                  fg, reference_width)
+                                  fg, reference_width, between=between, step_px=step_px)
     print(f"  smoothing: a {w} x {h} frame needs about {whole / 2 ** 30:.1f} GB at once "
           f"and about {(avail or 0) / 2 ** 30:.1f} GB is free, so the stack is built in "
           f"{strips} strips. It takes longer and the picture is the same.", flush=True)
@@ -1292,7 +1413,8 @@ def _smooth_stack_fullres(dirpath, names, radius, taper=0.0, comet_tail_frames=0
     for k in range(strips):
         part = _smooth_stack_rows(dirpath, names, radius, taper, comet_tail_frames, fg,
                                   reference_width, rows=(int(edges[k]), int(edges[k + 1])),
-                                  pass_index=k, pass_count=strips)
+                                  pass_index=k, pass_count=strips,
+                                  between=between, step_px=step_px)
         if part is None:
             return None
         if out is None:
@@ -1303,7 +1425,7 @@ def _smooth_stack_fullres(dirpath, names, radius, taper=0.0, comet_tail_frames=0
 
 def _smooth_stack_rows(dirpath, names, radius, taper=0.0, comet_tail_frames=0,
                        fg=None, reference_width=None, rows=None, pass_index=0,
-                       pass_count=1):
+                       pass_count=1, between=0, step_px=0.0):
     """Lighten-max stack in which every frame is smoothed first (see above). Works
     with all three styles: plain, Fading Ends (`taper`, a fraction of the sequence)
     and Comet (`comet_tail_frames`). `names` arrives in capture order, reversed
@@ -1312,17 +1434,24 @@ def _smooth_stack_rows(dirpath, names, radius, taper=0.0, comet_tail_frames=0,
     and trees stay sharp. Full depth is kept: 16-bit frames give a 16-bit stack.
     `reference_width`: when given, `radius` is scaled by the first frame's width
     against it (see SMOOTH_REFERENCE_WIDTH); None uses the radius as given.
+    `between`: in-between frames made per pair of real frames (the gap-filler, see
+    above); 0 = none, the stack is then exactly the plain three-frame one. `step_px`
+    is the measured star step, used only to cap a bad motion track.
     Returns the stack, or None if no frame could be read."""
     from modules import step_timer
     n = len(names)
+    P = int(between) + 1                      # sub-frames per real step
+    keep = 2 * P + 1                          # smoothed sub-frames kept: one real step either side
+    flow_cap = max(8.0, 3.0 * float(step_px))
     eff_radius = float(radius)
     ramp = taper_ramp_frames(n, taper) if taper else 0
-    fade = 0.04 ** (1.0 / max(int(comet_tail_frames), 1)) if comet_tail_frames else None
+    fade = 0.04 ** (1.0 / (max(int(comet_tail_frames), 1) * P)) if comet_tail_frames else None
     dtype = None
     top = 255.0
     B = None          # the smoothed stack
     A = None          # the same stack without smoothing, kept only to restore the ground
-    buf = []          # the last three smoothed frames
+    buf = []          # the last `keep` smoothed sub-frames (three real frames when nothing is added between)
+    prev_im = None    # the previous real frame, the source of the in-between frames
     used = 0
     missing, unreadable, resized = [], [], []
     full_shape = None         # the first frame's shape; every other frame is resized to it
@@ -1340,6 +1469,40 @@ def _smooth_stack_rows(dirpath, names, radius, taper=0.0, comet_tail_frames=0,
         if not os.path.exists(p):
             return nm, "missing"
         return nm, _to_bgr(robust_imread(p, cv2.IMREAD_UNCHANGED))
+
+    def _add_sub(smx, mulx):
+        """Put one smoothed (sub-)frame into the stack. The stack starts at the first
+        FULL average: the first two frames would otherwise enter as a one- and a
+        two-frame average, brighter than every later one (a bright dot at the start of
+        each trail); they still count, inside the first full average. The average is
+        over the last two real steps: every sub-frame in them, so three real frames
+        when nothing is added in between (as always) and 2*(between+1)+1 sub-frames
+        when it is. The same span, so the same brightness and softness, but sampled
+        closely enough that no bump is left between frames (tested 2026-11-23: three
+        frames a whole step apart, with in-between frames only at the same phase,
+        left the beads in place)."""
+        nonlocal B
+        buf.append(smx)
+        del buf[:-keep]
+        with step_timer.step("smooth.average_stack"):
+            if len(buf) >= keep:
+                sel = list(buf)
+            elif n < 3:
+                sel = buf[-3:]
+            else:
+                return
+            if B is None:
+                B = _mean_of(sel)
+                if mulx is not None:
+                    B *= mulx
+            else:
+                if fade is not None:
+                    B *= np.float32(fade)
+                for r0, r1 in _chunks():
+                    m = _mean_of([b[r0:r1] for b in sel])
+                    if mulx is not None:
+                        m *= mulx
+                    np.maximum(B[r0:r1], m, out=B[r0:r1])
 
     # Read the NEXT frame while this one is smoothed: reading a big TIFF takes
     # about as long as the smoothing itself, and the two need different resources.
@@ -1382,46 +1545,48 @@ def _smooth_stack_rows(dirpath, names, radius, taper=0.0, comet_tail_frames=0,
             if reference_width and pass_index == 0:
                 print(f"  smoothing radius {eff_radius:.1f} px for a frame {im.shape[1]} px wide",
                       flush=True)
-        sm = smooth_frame(im, eff_radius, rows=(y_lo, y_hi))
-        buf.append(sm)
-        buf = buf[-3:]
-        with step_timer.step("smooth.average_stack"):
-            # The stack starts at the first FULL three-frame average. The first two
-            # frames would otherwise enter as a one- and a two-frame average, which
-            # are brighter than every later three-frame one and left a bright dot at
-            # the start of each trail. Those two frames still count: they sit inside
-            # the first full average.
-            if len(buf) == 3 or n < 3:
-                if B is None:
-                    B = _mean_of(buf)
-                    if mul is not None:
-                        B *= mul
-                else:
-                    if fade is not None:
-                        B *= np.float32(fade)
-                    for r0, r1 in _chunks():
-                        m = _mean_of([b[r0:r1] for b in buf])
-                        if mul is not None:
-                            m *= mul
-                        np.maximum(B[r0:r1], m, out=B[r0:r1])
-            if fg is not None:
+        # In-between frames come first (they sit between the previous real frame and
+        # this one), then the real frame itself, each through the same blur and stack.
+        pushes = []
+        if between and prev_im is not None:
+            e0 = max(0, y_lo - GAPFILL_MARGIN)
+            e1 = min(full_shape[0], y_hi + GAPFILL_MARGIN)
+            with step_timer.step("smooth.flow"):
+                D = _pair_flow(prev_im[e0:e1], im[e0:e1])
+            with step_timer.step("smooth.between"):
+                mids = _between_frames(prev_im[e0:e1], D, between, flow_cap)
+                del D
+                for q, mid in enumerate(mids, 1):
+                    smq = smooth_frame(mid, eff_radius, rows=(y_lo - e0, y_hi - e0))
+                    mq = None
+                    if taper:
+                        mq = np.float32(taper_weight(i - 1 + q / float(P), n, ramp) ** (1.0 / TAPER_GAMMA))
+                    pushes.append((smq, mq))
+                del mids
+        pushes.append((smooth_frame(im, eff_radius, rows=(y_lo, y_hi)), mul))
+        for smx, mulx in pushes:
+            _add_sub(smx, mulx)
+        pushes = None
+        if fg is not None:
+            with step_timer.step("smooth.average_stack"):
                 if A is None:
                     A = im[y_lo:y_hi].astype(np.float32)
                     if mul is not None:
                         A *= mul
                 else:
                     if fade is not None:
-                        A *= np.float32(fade)
+                        A *= np.float32(fade ** P)       # one real step of fade
                     for r0, r1 in _chunks():
                         fa = im[y_lo + r0:y_lo + r1].astype(np.float32)
                         if mul is not None:
                             fa *= mul
                         np.maximum(A[r0:r1], fa, out=A[r0:r1])
+        prev_im = im if between else None
         used += 1
         print(f"  smooth star trail: {pass_index * n + i + 1}/{n * pass_count}", flush=True)
     reader.shutdown(wait=True)
     if B is None and buf:     # fewer than three frames could be read
-        B = _mean_of(buf)
+        B = _mean_of(buf[-3:])
     buf = None            # the last smoothed frames are no longer needed
     if B is None:
         return None
