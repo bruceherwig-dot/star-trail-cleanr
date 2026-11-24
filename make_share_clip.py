@@ -1375,7 +1375,7 @@ def _smooth_stack_rows(dirpath, names, radius, taper=0.0, comet_tail_frames=0,
             mul = np.float32(w ** (1.0 / TAPER_GAMMA))
         else:
             mul = None
-        if B is None:
+        if full_shape is None:
             full_shape = im.shape
             y_lo, y_hi = (0, im.shape[0]) if rows is None else (int(rows[0]), int(rows[1]))
             eff_radius = smooth_radius_for_width(radius, im.shape[1], reference_width)
@@ -1386,18 +1386,24 @@ def _smooth_stack_rows(dirpath, names, radius, taper=0.0, comet_tail_frames=0,
         buf.append(sm)
         buf = buf[-3:]
         with step_timer.step("smooth.average_stack"):
-            if B is None:
-                B = _mean_of(buf)
-                if mul is not None:
-                    B *= mul
-            else:
-                if fade is not None:
-                    B *= np.float32(fade)
-                for r0, r1 in _chunks():
-                    m = _mean_of([b[r0:r1] for b in buf])
+            # The stack starts at the first FULL three-frame average. The first two
+            # frames would otherwise enter as a one- and a two-frame average, which
+            # are brighter than every later three-frame one and left a bright dot at
+            # the start of each trail. Those two frames still count: they sit inside
+            # the first full average.
+            if len(buf) == 3 or n < 3:
+                if B is None:
+                    B = _mean_of(buf)
                     if mul is not None:
-                        m *= mul
-                    np.maximum(B[r0:r1], m, out=B[r0:r1])
+                        B *= mul
+                else:
+                    if fade is not None:
+                        B *= np.float32(fade)
+                    for r0, r1 in _chunks():
+                        m = _mean_of([b[r0:r1] for b in buf])
+                        if mul is not None:
+                            m *= mul
+                        np.maximum(B[r0:r1], m, out=B[r0:r1])
             if fg is not None:
                 if A is None:
                     A = im[y_lo:y_hi].astype(np.float32)
@@ -1414,6 +1420,8 @@ def _smooth_stack_rows(dirpath, names, radius, taper=0.0, comet_tail_frames=0,
         used += 1
         print(f"  smooth star trail: {pass_index * n + i + 1}/{n * pass_count}", flush=True)
     reader.shutdown(wait=True)
+    if B is None and buf:     # fewer than three frames could be read
+        B = _mean_of(buf)
     buf = None            # the last smoothed frames are no longer needed
     if B is None:
         return None

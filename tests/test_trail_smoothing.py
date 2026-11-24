@@ -56,6 +56,18 @@ def test_a_dotted_trail_becomes_one_continuous_line():
     assert soft[40, path, 0].min() > 30, "the smoothed trail has no gaps"
 
 
+def test_the_start_of_a_trail_is_not_brighter_than_its_middle():
+    """The first two frames used to enter the stack as a one- and a two-frame average,
+    brighter than every three-frame one: a bright dot at the start of each trail."""
+    m = _msc()
+    with tempfile.TemporaryDirectory() as td:
+        names = _star_frames(td)
+        soft = m._smooth_stack_fullres(td, names, 3)
+    start = int(soft[38:43, 10:16, 0].max())          # where the star was in frame 1
+    middle = int(soft[38:43, 10 + 6 * 12:10 + 6 * 13, 0].max())
+    assert start <= middle, f"the trail starts brighter ({start}) than its middle ({middle})"
+
+
 def test_bigger_numbers_are_softer_and_wider():
     m = _msc()
     with tempfile.TemporaryDirectory() as td:
@@ -97,7 +109,9 @@ def test_sixteen_bit_frames_give_a_sixteen_bit_trail():
         names = _star_frames(td, dtype=np.uint16)
         soft = m._smooth_stack_fullres(td, names, 3)
     assert soft.dtype == np.uint16
-    assert soft.max() > 255 * 100, "values use the 16-bit range, not 8-bit"
+    # A one-pixel test star, blurred and averaged three ways, peaks near 14,000 of
+    # 65,535. The old bar (25,500) was only cleared by the over-bright first frame.
+    assert soft.max() > 255 * 20, "values use the 16-bit range, not 8-bit"
 
 
 def test_it_works_with_fading_ends_and_with_comet():
